@@ -18,6 +18,7 @@ use std::thread;
 
 use globset::{Glob, GlobSetBuilder};
 use serde::Deserialize;
+use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -685,12 +686,12 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
     let project = root.join(DEFAULT_CONFIG);
     let runner_mode = fs::read_to_string(&project)
         .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                line.strip_prefix("runners = \"")
-                    .and_then(|value| value.strip_suffix('\"'))
-                    .map(ToOwned::to_owned)
-            })
+        .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
+        .and_then(|config| {
+            config
+                .get("runners")
+                .and_then(toml::Value::as_str)
+                .map(ToOwned::to_owned)
         })
         .unwrap_or_default();
     let entries = fs::read_dir(&workflows)
@@ -710,50 +711,18 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
         }
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
-        let trusted_gate = content.contains("github.event_name == 'push'")
-            && content.contains("github.event_name == 'schedule'")
-            && content.contains("github.event_name == 'workflow_dispatch'")
-            && content.contains("github.ref == 'refs/heads/");
-        for line in content.lines() {
-            let body = line.trim().trim_start_matches('-').trim();
-            if body.starts_with("pull_request_target:") {
-                eprintln!("{}: pull_request_target is forbidden", path.display());
-                failures += 1;
-            }
-            if let Some(value) = body.strip_prefix("uses:") {
-                let action = value.split_whitespace().next().unwrap_or_default();
-                let local = action.starts_with("./.github/workflows/ci-")
-                    && Path::new(action)
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"));
-                let pinned = action.split_once('@').is_some_and(|(_, reference)| {
-                    reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
-                });
-                if action.contains("/.github/workflows/") && !local {
-                    eprintln!(
-                        "{}: reusable workflow must be an approved local generated workflow: {action}",
-                        path.display()
-                    );
-                    failures += 1;
-                } else if !local && !pinned {
-                    eprintln!("{}: action is not a full SHA pin: {action}", path.display());
-                    failures += 1;
-                }
-            }
-        }
-        if content.lines().any(|line| {
-            line.trim_start().starts_with("runs-on:")
-                && (line.contains("self-hosted") || line.contains("velnor"))
-        }) && runner_mode != "velnor"
-            && runner_mode != "both"
-            && !trusted_gate
-        {
-            eprintln!(
-                "{}: self-hosted jobs require a default-branch trusted-event gate",
-                path.display()
+        let document: Value = serde_yaml::from_str(&content).map_err(|error| {
+            GeneratorError::usage(format!("parse workflow {}: {error}", path.display()))
+        })?;
+        let Some(workflow) = document.as_mapping() else {
+            policy_failure(
+                &path,
+                "workflow document must be a YAML mapping",
+                &mut failures,
             );
-            failures += 1;
-        }
+            continue;
+        };
+        inspect_workflow(workflow, &path, &runner_mode, &mut failures);
     }
     if failures > 0 {
         return Err(GeneratorError::usage(format!(
@@ -761,6 +730,326 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
         )));
     }
     Ok(())
+}
+
+fn inspect_workflow(workflow: &Mapping, path: &Path, runner_mode: &str, failures: &mut usize) {
+    for (key, value) in workflow {
+        let key = key.as_str();
+        match key {
+            "on" => {
+                if contains_exact_yaml_value(value, "pull_request_target") {
+                    policy_failure(path, "pull_request_target is forbidden", failures);
+                }
+            }
+            "jobs" => inspect_jobs(value, path, runner_mode, failures),
+            _ => inspect_yaml_value(value, path, runner_mode, None, false, failures),
+        }
+    }
+}
+
+fn inspect_jobs(value: &Value, path: &Path, runner_mode: &str, failures: &mut usize) {
+    let Some(jobs) = value.as_mapping() else {
+        policy_failure(path, "jobs must be a YAML mapping", failures);
+        return;
+    };
+    for (job_id, job) in jobs {
+        let Some(job) = job.as_mapping() else {
+            let name = job_id.as_str();
+            policy_failure(
+                path,
+                &format!("job {name} must be a YAML mapping"),
+                failures,
+            );
+            continue;
+        };
+        let trusted_gate = mapping_value(job, "if")
+            .and_then(Value::as_str)
+            .is_some_and(has_trusted_runner_gate);
+        let matrix = mapping_value(job, "strategy")
+            .and_then(Value::as_mapping)
+            .and_then(|strategy| mapping_value(strategy, "matrix"))
+            .and_then(Value::as_mapping);
+        inspect_mapping(job, path, runner_mode, matrix, trusted_gate, failures);
+    }
+}
+
+fn inspect_yaml_value(
+    value: &Value,
+    path: &Path,
+    runner_mode: &str,
+    matrix: Option<&Mapping>,
+    trusted_gate: bool,
+    failures: &mut usize,
+) {
+    match value {
+        Value::Mapping(mapping) => {
+            inspect_mapping(mapping, path, runner_mode, matrix, trusted_gate, failures);
+        }
+        Value::Sequence(sequence) => {
+            for item in sequence {
+                inspect_yaml_value(item, path, runner_mode, matrix, trusted_gate, failures);
+            }
+        }
+        Value::Tagged(tagged) => inspect_yaml_value(
+            tagged.value(),
+            path,
+            runner_mode,
+            matrix,
+            trusted_gate,
+            failures,
+        ),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn inspect_mapping(
+    mapping: &Mapping,
+    path: &Path,
+    runner_mode: &str,
+    matrix: Option<&Mapping>,
+    trusted_gate: bool,
+    failures: &mut usize,
+) {
+    for (key, value) in mapping {
+        let key = key.as_str();
+        match key {
+            "pull_request_target" => {
+                policy_failure(path, "pull_request_target is forbidden", failures);
+            }
+            "uses" => inspect_uses(value, path, failures),
+            "runs-on" => inspect_runner(value, path, runner_mode, matrix, trusted_gate, failures),
+            _ => inspect_yaml_value(value, path, runner_mode, matrix, trusted_gate, failures),
+        }
+    }
+}
+
+fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
+    let Some(action) = value.as_str() else {
+        policy_failure(path, "uses must be a scalar reference", failures);
+        return;
+    };
+    if is_approved_local_reusable(action) {
+        return;
+    }
+    let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
+    if reference_path.contains("/.github/workflows/") {
+        policy_failure(
+            path,
+            &format!("reusable workflow must be an approved local generated workflow: {action}"),
+            failures,
+        );
+    } else if !is_full_sha_reference(action) {
+        policy_failure(
+            path,
+            &format!("action is not a full SHA pin: {action}"),
+            failures,
+        );
+    }
+}
+
+fn is_approved_local_reusable(value: &str) -> bool {
+    let Some(name) = value.strip_prefix("./.github/workflows/ci-") else {
+        return false;
+    };
+    !name.is_empty()
+        && Path::new(name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && !name.contains('@')
+}
+
+fn is_full_sha_reference(value: &str) -> bool {
+    value.split_once('@').is_some_and(|(action, reference)| {
+        !action.is_empty()
+            && reference.len() == 40
+            && reference
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RunnerAnalysis {
+    self_hosted: bool,
+    dynamic: bool,
+    invalid: bool,
+}
+
+impl RunnerAnalysis {
+    fn merge(&mut self, other: Self) {
+        self.self_hosted |= other.self_hosted;
+        self.dynamic |= other.dynamic;
+        self.invalid |= other.invalid;
+    }
+}
+
+fn inspect_runner(
+    value: &Value,
+    path: &Path,
+    runner_mode: &str,
+    matrix: Option<&Mapping>,
+    trusted_gate: bool,
+    failures: &mut usize,
+) {
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(value, matrix, &mut resolving);
+    if analysis.invalid {
+        policy_failure(path, "runs-on must contain only string labels", failures);
+    }
+    if analysis.dynamic {
+        policy_failure(
+            path,
+            "runs-on contains an unresolved or dynamic runner label",
+            failures,
+        );
+    }
+    if analysis.self_hosted && runner_mode != "velnor" && runner_mode != "both" && !trusted_gate {
+        policy_failure(
+            path,
+            "self-hosted jobs require a default-branch trusted-event gate",
+            failures,
+        );
+    }
+}
+
+fn analyze_runner(
+    value: &Value,
+    matrix: Option<&Mapping>,
+    resolving: &mut BTreeSet<String>,
+) -> RunnerAnalysis {
+    match value {
+        Value::String(label) => {
+            if let Some(field) = matrix_field_reference(label) {
+                if !resolving.insert(field.to_owned()) {
+                    return RunnerAnalysis {
+                        dynamic: true,
+                        ..RunnerAnalysis::default()
+                    };
+                }
+                let Some(values) = matrix_values(matrix, field) else {
+                    resolving.remove(field);
+                    return RunnerAnalysis {
+                        dynamic: true,
+                        ..RunnerAnalysis::default()
+                    };
+                };
+                let mut result = RunnerAnalysis::default();
+                for value in values {
+                    result.merge(analyze_runner(value, matrix, resolving));
+                }
+                resolving.remove(field);
+                result
+            } else if label.contains("${{") {
+                RunnerAnalysis {
+                    dynamic: true,
+                    ..RunnerAnalysis::default()
+                }
+            } else if contains_self_hosted_label(label) {
+                RunnerAnalysis {
+                    self_hosted: true,
+                    ..RunnerAnalysis::default()
+                }
+            } else {
+                RunnerAnalysis::default()
+            }
+        }
+        Value::Sequence(sequence) => {
+            let mut result = RunnerAnalysis::default();
+            for value in sequence {
+                result.merge(analyze_runner(value, matrix, resolving));
+            }
+            result
+        }
+        Value::Mapping(mapping) => {
+            let mut result = RunnerAnalysis {
+                dynamic: true,
+                ..RunnerAnalysis::default()
+            };
+            if let Some(labels) = mapping_value(mapping, "labels") {
+                result.merge(analyze_runner(labels, matrix, resolving));
+            } else {
+                result.invalid = true;
+            }
+            result
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => RunnerAnalysis {
+            invalid: true,
+            ..RunnerAnalysis::default()
+        },
+        Value::Tagged(tagged) => analyze_runner(tagged.value(), matrix, resolving),
+    }
+}
+
+fn matrix_field_reference(value: &str) -> Option<&str> {
+    let expression = value.trim().strip_prefix("${{")?.strip_suffix("}}")?.trim();
+    let field = expression.strip_prefix("matrix.")?;
+    (!field.is_empty()
+        && field
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then_some(field)
+}
+
+fn matrix_values<'a>(matrix: Option<&'a Mapping>, field: &str) -> Option<Vec<&'a Value>> {
+    let matrix = matrix?;
+    let mut values = Vec::new();
+    let direct = mapping_value(matrix, field);
+    if let Some(value) = direct {
+        let sequence = value.as_sequence()?;
+        values.extend(sequence);
+    }
+    if let Some(include) = mapping_value(matrix, "include") {
+        let include = include.as_sequence()?;
+        for item in include {
+            let item = item.as_mapping()?;
+            if let Some(value) = mapping_value(item, field) {
+                values.push(value);
+            } else if direct.is_none() {
+                return None;
+            }
+        }
+    }
+    (!values.is_empty()).then_some(values)
+}
+
+fn mapping_value<'a>(mapping: &'a Mapping, name: &str) -> Option<&'a Value> {
+    mapping
+        .iter()
+        .find_map(|(key, value)| (key.as_str() == name).then_some(value))
+}
+
+fn contains_exact_yaml_value(value: &Value, target: &str) -> bool {
+    match value {
+        Value::String(value) => value == target,
+        Value::Mapping(mapping) => mapping
+            .iter()
+            .any(|(key, value)| key.as_str() == target || contains_exact_yaml_value(value, target)),
+        Value::Sequence(sequence) => sequence
+            .iter()
+            .any(|value| contains_exact_yaml_value(value, target)),
+        Value::Tagged(tagged) => contains_exact_yaml_value(tagged.value(), target),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn contains_self_hosted_label(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    value.contains("self-hosted") || value.contains("velnor")
+}
+
+fn has_trusted_runner_gate(value: &str) -> bool {
+    value.contains("github.event_name == 'push'")
+        && value.contains("github.event_name == 'schedule'")
+        && value.contains("github.event_name == 'workflow_dispatch'")
+        && value.contains("github.ref == 'refs/heads/")
+}
+
+fn policy_failure(path: &Path, message: &str, failures: &mut usize) {
+    eprintln!("{}: {message}", path.display());
+    *failures += 1;
 }
 
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -839,7 +1128,7 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let package = required_option(&options, "package")?;
     let binary = required_option(&options, "binary")?;
     if !valid_target(target)
-        || !is_semver(version)
+        || !is_artifact_version(version)
         || !valid_package(package)
         || !valid_binary(binary)
     {
@@ -943,6 +1232,10 @@ fn is_semver(value: &str) -> bool {
         })
 }
 
+fn is_artifact_version(value: &str) -> bool {
+    value == "preview" || is_semver(value)
+}
+
 fn valid_branch(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -969,4 +1262,162 @@ fn valid_binary(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+
+    fn policy_fixture(
+        name: &str,
+        workflow: &str,
+        runners: &str,
+    ) -> Result<std::path::PathBuf, Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-policy-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join(".github/workflows"))?;
+        std::fs::create_dir_all(root.join(".github/ci"))?;
+        std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            format!("runners = \"{runners}\"\n"),
+        )?;
+        Ok(root)
+    }
+
+    fn run_policy(root: std::path::PathBuf) -> Result<bool, Box<dyn Error>> {
+        let result = enforce_policy(&root).is_ok();
+        std::fs::remove_dir_all(root)?;
+        Ok(result)
+    }
+
+    #[test]
+    fn policy_parsing_ignores_comments_and_literal_run_content() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Comments
+on: pull_request
+# pull_request_target:
+# uses: actions/checkout@v4
+# runs-on: [self-hosted, velnor]
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: |
+          echo 'pull_request_target:'
+          echo 'uses: actions/checkout@v4'
+          echo 'runs-on: [self-hosted, velnor]'
+";
+        let root = policy_fixture("comments", workflow, "github")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_structural_forbidden_trigger_and_external_reusable_workflow(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Forbidden
+on:
+  pull_request_target:
+jobs:
+  call:
+    uses: acme/ci/.github/workflows/ci.yml@0123456789012345678901234567890123456789
+";
+        let root = policy_fixture("forbidden", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_requires_full_sha_for_external_actions_and_allows_approved_local_calls(
+    ) -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  call:\n    uses: ./.github/workflows/ci-rust.yml\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("uses-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
+        let root = policy_fixture("uses-invalid", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_resolves_static_matrix_runner_and_preserves_trusted_self_hosted_gate(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Matrix
+on: push
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    strategy:
+      matrix:
+        include:
+          - runner: [self-hosted, velnor]
+    runs-on: ${{ matrix.runner }}
+";
+        let root = policy_fixture("matrix-trusted", workflow, "github")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_untrusted_matrix_self_hosted_runner() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Matrix
+on: pull_request
+jobs:
+  verify:
+    strategy:
+      matrix:
+        include:
+          - runner: [self-hosted, velnor]
+    runs-on: ${{ matrix.runner }}
+";
+        let root = policy_fixture("matrix-untrusted", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_unresolved_dynamic_runner_even_when_matrix_is_present(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Dynamic
+on: pull_request
+jobs:
+  verify:
+    strategy:
+      matrix:
+        include:
+          - runner: ${{ inputs.runner }}
+    runs-on: ${{ matrix.runner }}
+";
+        let root = policy_fixture("matrix-dynamic", workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+
+        let workflow = r"
+name: Dynamic
+on: pull_request
+jobs:
+  verify:
+    runs-on: ${{ needs.select.outputs.runner }}
+";
+        let root = policy_fixture("runner-dynamic", workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
 }

@@ -28,6 +28,10 @@ const OWNERSHIP_STATE: &str = ".github/ci/.github-actions-generator-state";
 const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\n";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
+const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
+// Keep hosted-runner bootstrap reproducible. Bump this after publishing a
+// Velnor commit that changes the workflow runtime contract.
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "a2eecb6bededb3ef6c92ef2a921bec436d167256";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3311,6 +3315,7 @@ impl WorkflowIr {
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             ActionPin::Checkout.reference()
         );
+        Self::render_workflow_runtime_setup(output, lane);
         self.render_tool_provisioning(output, unit);
         if let Some(cache) = &unit.cache {
             let (paths, key) = rendered_cache_values(cache);
@@ -3363,13 +3368,19 @@ impl WorkflowIr {
         }
     }
 
+    fn render_workflow_runtime_setup(output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_setup(lane));
+    }
+
     fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --package velnor-workflow --bin velnor-workflow\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
+            VELNOR_WORKFLOW_REPOSITORY,
+            VELNOR_WORKFLOW_SOURCE_REV,
         );
     }
 
@@ -3377,9 +3388,11 @@ impl WorkflowIr {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Policy\n{gate}    runs-on: {}\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Checkout trusted policy\n        uses: {}\n        continue-on-error: true\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}}}\n          path: .github-policy\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root .github-policy",
+            "  policy:\n    name: Policy\n{gate}    runs-on: {}\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --package velnor-workflow --bin velnor-workflow\n      - name: Checkout trusted policy\n        uses: {}\n        continue-on-error: true\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}}}\n          path: .github-policy\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Enforce trusted workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root .github-policy",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
+            VELNOR_WORKFLOW_REPOSITORY,
+            VELNOR_WORKFLOW_SOURCE_REV,
             ActionPin::Checkout.reference(),
         );
     }
@@ -3479,6 +3492,7 @@ impl WorkflowIr {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference(),
             );
+            Self::render_workflow_runtime_setup(output, lane);
             self.render_tool_provisioning(output, unit);
             if let Some(cache) = &unit.cache {
                 let (paths, key) = rendered_cache_values(cache);
@@ -3978,6 +3992,20 @@ fn render_preview(config: &ProjectConfig) -> String {
     )
     .replace("\\n", "\n")
     .replace(
+        "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 75",
+        &format!(
+            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 75",
+            config.default_branch
+        ),
+    )
+    .replace(
+        "      - name: Enforce workflow policy\n",
+        &format!(
+            "{}      - name: Enforce workflow policy\n",
+            workflow_runtime_setup(RunnerMode::Github)
+        ),
+    )
+    .replace(
         "runs-on: ubuntu-24.04",
         &format!("runs-on: {}", selected_runner(config)),
     )
@@ -4046,9 +4074,17 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 unit.label
             ));
             let verify_name = yaml_scalar(&unit.label);
+            let dispatch_gate = if lane == RunnerMode::Velnor {
+                format!(
+                    "    if: ${{{{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/{}' }}}}\n",
+                    config.default_branch
+                )
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {job_name}\n    needs: [{}]\n    runs-on: {runner}\n    timeout-minutes: 60\n    steps:",
+                "  {id}:\n    name: {job_name}\n{dispatch_gate}    needs: [{}]\n    runs-on: {runner}\n    timeout-minutes: 60\n    steps:",
                 needs.join(", ")
             );
             let _ = writeln!(
@@ -4056,6 +4092,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference()
             );
+            WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, unit);
             if let Some(cache) = &unit.cache {
                 let (paths, key) = rendered_cache_values(cache);
@@ -4132,7 +4169,10 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     );
     output = output.replace(
         "      - name: Set up sccache\n",
-        "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
+        &format!(
+            "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
+            workflow_runtime_setup(RunnerMode::Github)
+        ),
     );
     output = output.replace(
         "run: velnor-workflow release verify-tag\n",
@@ -4185,7 +4225,10 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     );
     output = output.replace(
         "      - name: Set up sccache\n",
-        "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
+        &format!(
+            "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
+            workflow_runtime_setup(RunnerMode::Github)
+        ),
     );
     output.push_str(
         "\n  build:\n    name: Build / ${{ matrix.target }}\n    needs: verify\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n",
@@ -4222,6 +4265,16 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::UploadArtifact.reference(),
         ActionPin::DownloadArtifact.reference(),
     );
+    if let Some((prefix, build)) = output.split_once("\n  build:") {
+        let build = build.replace(
+            "      - name: Set up sccache\n",
+            &format!(
+                "{}      - name: Set up sccache\n",
+                workflow_runtime_setup(RunnerMode::Github)
+            ),
+        );
+        output = format!("{prefix}\n  build:{build}");
+    }
     output = output.replace(
         "      - name: Verify archive checksums\n",
         "      - name: Verify artifact provenance\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n",
@@ -4283,7 +4336,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         config.default_branch
     );
     let deploy_condition = format!(
-        "if: ${{{{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/{}') }}}}",
+        "if: ${{{{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/{}' }}}}",
         config.default_branch
     );
     output = output.replace(&push_condition, &deploy_condition);
@@ -4301,6 +4354,13 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         "      - name: Set up Bun\n",
         "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up Bun\n",
     );
+    output = output.replace(
+        "      - name: Enforce workflow policy\n",
+        &format!(
+            "{}      - name: Enforce workflow policy\n",
+            workflow_runtime_setup(RunnerMode::Github)
+        ),
+    );
     output.replace(
         "runs-on: ubuntu-24.04",
         &format!("runs-on: {}", selected_runner(config)),
@@ -4315,6 +4375,16 @@ fn yaml_scalar(value: &str) -> String {
         value.to_owned()
     } else {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+fn workflow_runtime_setup(lane: RunnerMode) -> String {
+    if lane == RunnerMode::Github {
+        format!(
+            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} --package velnor-workflow --bin velnor-workflow\n"
+        )
+    } else {
+        String::new()
     }
 }
 

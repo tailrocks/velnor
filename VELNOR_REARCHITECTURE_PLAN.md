@@ -3172,3 +3172,23 @@ VelnorJob/Rust/MBX authoritative benchmark path. Reserved provisional-acquisitio
 and mixed native/JavaScript post-order work remain with the other lead. Checkout traversal
 error propagation remains deferred because it requires a coordinated change to a reserved
 executor test boundary.
+
+## 31. Workflow migration completion evidence — runtime and policy hardening
+
+T-020 closes the previously open workflow-runtime follow-ups in the migration slice.
+GitHub-hosted generated jobs bootstrap the pinned Velnor commit
+`a2eecb6bededb3ef6c92ef2a921bec436d167256` with `cargo install`; Velnor lanes use the
+packaged `velnor-workflow` binary from the node image/release archive. Preview artifacts
+accept the explicit `preview` version, and Velnor release/preview jobs gate manual dispatch
+to the default branch.
+
+The policy runtime parses YAML structurally, ignores comments and shell text, rejects
+forbidden triggers/external reusable workflows/unpinned actions, and fails closed for
+unresolved dynamic runner labels. The generated policy job checks both the candidate
+checkout and the trusted base checkout. `velnor-tools workflow-monitor` uses bounded
+`reqwest` GitHub API polling with `GITHUB_TOKEN`/`GH_TOKEN` environment authentication,
+plus optional typed-client Velnor observations and atomic evidence writes.
+
+Focused proof: workflow-runtime tests `93` passed; tools tests `192` passed; strict
+package Clippy and locked all-target checks passed. Full workspace gates and live
+dual-lane execution remain final verification work, not claimed here.
