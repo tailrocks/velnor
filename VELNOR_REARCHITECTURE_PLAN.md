@@ -3306,3 +3306,14 @@ preserves the existing pinned-source and pinned-policy trust boundaries and
 is covered by a direct `cargo install --locked --git ... --rev ...
 velnor-workflow --bin velnor-workflow` proof. The corrected immutable policy
 workflow is now pinned at `0b68533ea24e8259ebd8aee54e36905debe8fcc3`.
+
+## 36. Final audit corrections — branch propagation and runtime identity
+
+The final audit found three code-owned gaps to close before migration sign-off:
+interactive and estate generation must honor an explicit default branch, the
+base-owned policy workflow must install a runtime containing exact policy-pin
+enforcement, and Docker preflight must compare the workflow binary with
+image-baked identity metadata. Release tag verification also requires the tag
+commit to equal the protected branch tip, not merely be an ancestor. The live
+branch ruleset remains an operator-owned prerequisite because changing it is an
+external repository policy mutation.
