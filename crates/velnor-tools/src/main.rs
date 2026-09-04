@@ -3897,6 +3897,23 @@ struct RunnerCleanupGuard {
     slots: u64,
 }
 
+impl RunnerCleanupGuard {
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        self.enabled = false;
+        eprintln!("==> Removing runner ({} slot(s))", self.slots);
+        let status = runner_cleanup_command(&self.root, self.slots)
+            .status()
+            .context("spawn velnorctl runner cleanup")?;
+        if !status.success() {
+            bail!("velnorctl remove exited with {status}");
+        }
+        Ok(())
+    }
+}
+
 fn runner_cleanup_command(root: &Path, slots: u64) -> Command {
     let mut command = Command::new("cargo");
     command
@@ -3915,11 +3932,24 @@ fn runner_cleanup_command(root: &Path, slots: u64) -> Command {
 
 impl Drop for RunnerCleanupGuard {
     fn drop(&mut self) {
-        if !self.enabled {
-            return;
+        if let Err(error) = self.cleanup() {
+            eprintln!("==> Runner cleanup failed: {error:#}");
         }
-        eprintln!("==> Removing runner ({} slot(s))", self.slots);
-        let _ = runner_cleanup_command(&self.root, self.slots).status();
+    }
+}
+
+fn finish_smoke_result(smoke_result: Result<()>, cleanup: &mut RunnerCleanupGuard) -> Result<()> {
+    combine_smoke_results(smoke_result, cleanup.cleanup())
+}
+
+fn combine_smoke_results(smoke_result: Result<()>, cleanup_result: Result<()>) -> Result<()> {
+    match (smoke_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(smoke_error), Err(cleanup_error)) => {
+            Err(smoke_error.context(format!("runner cleanup also failed: {cleanup_error:#}")))
+        }
     }
 }
 
@@ -4015,87 +4045,91 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
         "==> Running Velnor fixture daemon with {} slot(s)",
         plan.job_count
     );
-    let _cleanup = RunnerCleanupGuard {
+    let mut cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
         slots: plan.job_count,
     };
 
-    let result = Command::new("cargo")
-        .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args)
-        .current_dir(root)
-        .status()
-        .context("spawn velnor-runner daemon");
-
-    if let Some(run_id) = run_id {
-        println!("==> Fixture run after Velnor");
-        print!("{}", show_run_status_gh(&plan.repo, run_id));
-        write_fixture_evidence(
-            root,
-            "after-velnor",
-            run_id,
-            &plan.repo,
-            &args,
-            &work_dir,
-            &dump_job_messages,
-        )?;
-    }
-
-    let status = result?;
-    if !status.success() {
-        if let Some(run_id) = run_id {
-            let _ = write_fixture_evidence(
-                root,
-                "failed-before-completion",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            );
-        }
-        bail!("velnor-runner daemon exited with {status}");
-    }
-
-    if let Some(run_id) = run_id {
-        println!("==> Waiting briefly for compare-results");
-        let watch_status = Command::new("gh")
-            .args([
-                "run",
-                "watch",
-                &run_id.to_string(),
-                "--repo",
-                &plan.repo,
-                "--exit-status",
-            ])
+    let smoke_result = (|| -> Result<()> {
+        let result = Command::new("cargo")
+            .args(["run", "--bin", "velnor-runner", "--", "daemon"])
+            .args(&daemon_args)
+            .current_dir(root)
             .status()
-            .context("gh run watch")?;
-        if watch_status.success() {
-            write_fixture_evidence(
-                root,
-                "completed",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-        } else {
-            write_fixture_evidence(
-                root,
-                "completed-with-failure",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-            bail!("fixture run completed with failure (exit {})", watch_status);
-        }
-    }
+            .context("spawn velnor-runner daemon");
 
-    Ok(())
+        if let Some(run_id) = run_id {
+            println!("==> Fixture run after Velnor");
+            print!("{}", show_run_status_gh(&plan.repo, run_id));
+            write_fixture_evidence(
+                root,
+                "after-velnor",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+        }
+
+        let status = result?;
+        if !status.success() {
+            if let Some(run_id) = run_id {
+                let _ = write_fixture_evidence(
+                    root,
+                    "failed-before-completion",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                );
+            }
+            bail!("velnor-runner daemon exited with {status}");
+        }
+
+        if let Some(run_id) = run_id {
+            println!("==> Waiting briefly for compare-results");
+            let watch_status = Command::new("gh")
+                .args([
+                    "run",
+                    "watch",
+                    &run_id.to_string(),
+                    "--repo",
+                    &plan.repo,
+                    "--exit-status",
+                ])
+                .status()
+                .context("gh run watch")?;
+            if watch_status.success() {
+                write_fixture_evidence(
+                    root,
+                    "completed",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+            } else {
+                write_fixture_evidence(
+                    root,
+                    "completed-with-failure",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+                bail!("fixture run completed with failure (exit {})", watch_status);
+            }
+        }
+
+        Ok(())
+    })();
+
+    finish_smoke_result(smoke_result, &mut cleanup)
 }
 
 fn wait_for_new_run_id(
@@ -4252,90 +4286,94 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
         "==> Running Velnor {} target daemon with {} slot(s)",
         plan.target_label, plan.job_count
     );
-    let _cleanup = RunnerCleanupGuard {
+    let mut cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
         slots: plan.job_count,
     };
 
-    let result = Command::new("cargo")
-        .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args)
-        .current_dir(root)
-        .status()
-        .context("spawn velnor-runner daemon");
-
-    if let Some(run_id) = run_id {
-        println!("==> Target run after Velnor");
-        print!("{}", show_run_status_gh(&plan.repo, run_id));
-        write_target_evidence(
-            root,
-            "after-velnor",
-            run_id,
-            &plan.repo,
-            &args,
-            &work_dir,
-            &dump_job_messages,
-        )?;
-    }
-
-    let status = result?;
-    if !status.success() {
-        if let Some(run_id) = run_id {
-            let _ = write_target_evidence(
-                root,
-                "failed-before-completion",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            );
-        }
-        bail!("velnor-runner daemon exited with {status}");
-    }
-
-    if let Some(run_id) = run_id
-        && plan.watch_run
-    {
-        println!("==> Waiting for target run completion");
-        let watch_status = Command::new("gh")
-            .args([
-                "run",
-                "watch",
-                &run_id.to_string(),
-                "--repo",
-                &plan.repo,
-                "--exit-status",
-            ])
+    let smoke_result = (|| -> Result<()> {
+        let result = Command::new("cargo")
+            .args(["run", "--bin", "velnor-runner", "--", "daemon"])
+            .args(&daemon_args)
+            .current_dir(root)
             .status()
-            .context("gh run watch")?;
-        if watch_status.success() {
-            write_target_evidence(
-                root,
-                "completed",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-        } else {
-            write_target_evidence(
-                root,
-                "completed-with-failure",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-            bail!("target run completed with failure (exit {})", watch_status);
-        }
-    }
+            .context("spawn velnor-runner daemon");
 
-    println!("{} target smoke job completed.", plan.target_label);
-    Ok(())
+        if let Some(run_id) = run_id {
+            println!("==> Target run after Velnor");
+            print!("{}", show_run_status_gh(&plan.repo, run_id));
+            write_target_evidence(
+                root,
+                "after-velnor",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+        }
+
+        let status = result?;
+        if !status.success() {
+            if let Some(run_id) = run_id {
+                let _ = write_target_evidence(
+                    root,
+                    "failed-before-completion",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                );
+            }
+            bail!("velnor-runner daemon exited with {status}");
+        }
+
+        if let Some(run_id) = run_id
+            && plan.watch_run
+        {
+            println!("==> Waiting for target run completion");
+            let watch_status = Command::new("gh")
+                .args([
+                    "run",
+                    "watch",
+                    &run_id.to_string(),
+                    "--repo",
+                    &plan.repo,
+                    "--exit-status",
+                ])
+                .status()
+                .context("gh run watch")?;
+            if watch_status.success() {
+                write_target_evidence(
+                    root,
+                    "completed",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+            } else {
+                write_target_evidence(
+                    root,
+                    "completed-with-failure",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+                bail!("target run completed with failure (exit {})", watch_status);
+            }
+        }
+
+        println!("{} target smoke job completed.", plan.target_label);
+        Ok(())
+    })();
+
+    finish_smoke_result(smoke_result, &mut cleanup)
 }
 
 fn write_target_evidence(
@@ -4898,6 +4936,34 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
         assert!(!args
             .iter()
             .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
+    }
+
+    #[test]
+    fn runner_cleanup_failure_fails_successful_smoke() {
+        let error = combine_smoke_results(
+            Ok(()),
+            Err(anyhow::anyhow!(
+                "velnorctl remove exited with exit status: 1"
+            )),
+        )
+        .expect_err("cleanup failure must fail smoke");
+
+        assert!(error.to_string().contains("velnorctl remove exited"));
+    }
+
+    #[test]
+    fn runner_cleanup_failure_is_attached_to_smoke_failure() {
+        let error = combine_smoke_results(
+            Err(anyhow::anyhow!("daemon failed")),
+            Err(anyhow::anyhow!(
+                "velnorctl remove exited with exit status: 1"
+            )),
+        )
+        .expect_err("smoke failure must remain an error");
+        let rendered = format!("{error:#}");
+
+        assert!(rendered.contains("daemon failed"));
+        assert!(rendered.contains("runner cleanup also failed"));
     }
 
     #[test]
