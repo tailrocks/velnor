@@ -55,7 +55,8 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, github_api_retry_delay, is_transient_acquire_error, AcquireJobOutcome,
+        acquire_reply_is_definitely_gone, decode_jit_config, github_api_retry_delay,
+        is_transient_acquire_error, renew_failure_is_job_gone, unix_epoch_now, AcquireJobOutcome,
         BrokerClient, DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope,
         ListedRunner, OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
         RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
@@ -449,27 +450,274 @@ fn in_flight_job_path(config_dir: &Path) -> PathBuf {
     config_dir.join("in-flight-job.json")
 }
 
-fn accept_run_service_job_in_journal(
+/// A provisional acquisition is keyed by the broker request until the acquire
+/// reply names the run-service job. That request id is the only identity that
+/// exists before the call.
+fn provisional_job_id(runner_request_id: &str) -> velnor_model::JobId {
+    velnor_model::JobId(runner_request_id.to_owned())
+}
+
+/// Open the fleet journal and locate this runner's slot.
+///
+/// `Ok(None)` means this runner has no journal-managed slot — a configless
+/// runner has no slots at all — and every acquisition step is then a no-op,
+/// exactly as journal acceptance has always been.
+fn open_slot_journal(
     journal_dir: &Path,
     config_dir: &Path,
-    github_job_id: &str,
-) -> Result<()> {
-    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+    what: &str,
+) -> Result<Option<(velnor_control::journal::Journal, velnor_model::SlotId)>> {
+    let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let state = journal
         .materialized_state()
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     if state.slots.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let slot_id = crate::node::complete::infer_slot_id(&journal, config_dir)
-        .ok_or_else(|| anyhow::anyhow!("no slot accepted GitHub job {github_job_id}"))?;
-    crate::node::complete::accept_job(
+        .ok_or_else(|| anyhow::anyhow!("no slot is available to {what}"))?;
+    Ok(Some((journal, slot_id)))
+}
+
+/// Occupy the slot *before* `acquirejob` is called.
+///
+/// This is the write that closes the lost-acquisition window: a crash between
+/// the request and its reply used to leave no local record at all, so the job
+/// was lost until its lease expired. The row is not ownership — it cannot back
+/// a completion — it is evidence that this runner may already hold the job.
+fn intend_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    message_id: &str,
+    run_service_url: &str,
+) -> Result<()> {
+    let Some((mut journal, slot_id)) =
+        open_slot_journal(journal_dir, config_dir, "intend a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    crate::node::complete::intend_acquisition(
         &mut journal,
-        &velnor_model::JobId(github_job_id.to_owned()),
+        &provisional_job_id(runner_request_id),
         &slot_id,
+        message_id,
+        run_service_url,
+        unix_epoch_now(),
     )?;
     Ok(())
+}
+
+/// Retarget the provisional row onto the identity the acquire reply named.
+///
+/// Done as soon as the identity is known and before the job message is even
+/// parsed, because this is what makes the row probeable: until the plan id is
+/// durable, no `renewjob` call can be built for it.
+fn resolve_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let Some((mut journal, _)) =
+        open_slot_journal(journal_dir, config_dir, "resolve a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    let provisional = provisional_job_id(runner_request_id);
+    let generation = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == provisional)
+        .map(|job| job.generation)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no acquisition intent exists for broker request {runner_request_id}")
+        })?;
+    crate::node::complete::resolve_acquisition(
+        &mut journal,
+        &provisional,
+        &velnor_model::JobId(identity.job_id.clone()),
+        &identity.plan_id,
+        generation,
+    )
+}
+
+/// Drop a provisional row the run service says is gone, freeing the slot now
+/// instead of at the next restart.
+fn abandon_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    reason: &str,
+) -> Result<()> {
+    let Some((mut journal, _)) =
+        open_slot_journal(journal_dir, config_dir, "abandon a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    let provisional = provisional_job_id(runner_request_id);
+    let Some(generation) = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == provisional && job.provisional)
+        .map(|job| job.generation)
+    else {
+        return Ok(());
+    };
+    crate::node::complete::abandon_acquisition(&mut journal, &provisional, generation, reason)
+}
+
+/// Ask the run service whether a provisional row is really ours.
+///
+/// `renewjob` is the oracle, and the only one available: it succeeds for the
+/// lease holder and nobody else, which is exactly the discrimination recovery
+/// needs. The 409 from `acquirejob` cannot serve here — upstream's
+/// `RunServiceError` carries `source`, `statusCode` and `errorMessage` and no
+/// runner identity, so a conflict cannot tell "we acquired this and crashed"
+/// from "another runner has it".
+///
+/// Only a typed 404 is a definite "not ours". Transport failure, 5xx, auth
+/// trouble and an unparseable 2xx all leave ownership unproven, and an
+/// indeterminate verdict deliberately changes nothing: promoting a job we may
+/// not own would let two runners publish a terminal result for it, and dropping
+/// one we do own would strand it until its lease expired.
+async fn probe_provisional_acquisition(
+    run_service: &RunServiceClient,
+    row: &velnor_control::journal::JobRecord,
+) -> crate::node::complete::AcquisitionVerdict {
+    use crate::node::complete::AcquisitionVerdict;
+
+    match run_service
+        .renew_job(&row.run_service_url, &row.plan_id, &row.job_id.0)
+        .await
+    {
+        Ok(_) => AcquisitionVerdict::Owned,
+        Err(error) if renew_failure_is_job_gone(&error) => AcquisitionVerdict::NotOurs,
+        Err(error) => {
+            eprintln!(
+                "Acquisition probe for job {} reached no verdict; leaving the row for the next attempt: {}",
+                row.job_id.0,
+                sanitized_retry_error(&error)
+            );
+            AcquisitionVerdict::Indeterminate
+        }
+    }
+}
+
+/// Settle every acquisition a crash left unproven, once, at slot startup.
+///
+/// Probing is bounded by the row's durable budget, because `renewjob` extends
+/// the lease as a side effect: a job this node owns but can never execute must
+/// not have its lease renewed on every restart forever.
+async fn resolve_provisional_acquisitions_at_startup(
+    journal_dir: &Path,
+    config_dir: &Path,
+    run_service: &RunServiceClient,
+    forensics: &mut SlotForensics,
+) {
+    let opened = match open_slot_journal(
+        journal_dir,
+        config_dir,
+        "resolve unproven run-service acquisitions",
+    ) {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!(
+                "Warning: could not open the journal to resolve unproven acquisitions: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
+    let (mut journal, _) = opened;
+    let pending: Vec<velnor_control::journal::JobRecord> = match journal.materialized_state() {
+        Ok(state) => state
+            .jobs
+            .into_iter()
+            .filter(|job| job.provisional)
+            .collect(),
+        Err(error) => {
+            eprintln!("Warning: could not read unproven acquisitions: {error}");
+            return;
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    // The probe closure the journal drives must be synchronous, so ask the run
+    // service first and hand the recorded answers over. Only rows that are
+    // still probeable are asked: a row past its budget, or one the acquire
+    // reply never named, is settled by the journal without a renewal.
+    let now = unix_epoch_now();
+    let mut verdicts: std::collections::HashMap<String, crate::node::complete::AcquisitionVerdict> =
+        std::collections::HashMap::new();
+    for row in pending {
+        if row.plan_id.is_empty() || row.probe_budget_exhausted(now) {
+            continue;
+        }
+        verdicts.insert(
+            row.job_id.0.clone(),
+            probe_provisional_acquisition(run_service, &row).await,
+        );
+    }
+    let resolved =
+        crate::node::complete::resolve_provisional_acquisitions(&mut journal, now, |row| {
+            verdicts
+                .get(&row.job_id.0)
+                .copied()
+                .unwrap_or(crate::node::complete::AcquisitionVerdict::Indeterminate)
+        });
+    match resolved {
+        Ok(resolved) => {
+            for outcome in resolved {
+                let note = format!(
+                    "acquisition {} resolved: verdict={:?} abandoned={}",
+                    outcome.job_id.0, outcome.verdict, outcome.abandoned
+                );
+                println!("{note}");
+                forensics.lifecycle(&note);
+            }
+        }
+        Err(error) => eprintln!(
+            "Warning: resolving unproven acquisitions failed: {}",
+            sanitized_retry_error(&error)
+        ),
+    }
+}
+
+/// Promote the retargeted row to ownership. The run-service acquire path
+/// reaches ownership only through the intent, so it never calls `accept_job`.
+fn accept_run_service_job_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    github_job_id: &str,
+) -> Result<()> {
+    let Some((mut journal, slot_id)) = open_slot_journal(
+        journal_dir,
+        config_dir,
+        &format!("accept GitHub job {github_job_id}"),
+    )?
+    else {
+        return Ok(());
+    };
+    let job_id = velnor_model::JobId(github_job_id.to_owned());
+    let generation = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == job_id)
+        .map(|job| job.generation)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no acquisition row exists for GitHub job {github_job_id}")
+        })?;
+    crate::node::complete::confirm_acquisition(&mut journal, &job_id, &slot_id, generation)
 }
 
 fn persist_in_flight_job(
@@ -4595,6 +4843,16 @@ async fn run_v2(
     ));
     forensics.lifecycle("broker session created");
 
+    // Settle anything a previous crash left unproven before this slot takes new
+    // work. Done once per startup, and bounded, because the probe renews leases.
+    resolve_provisional_acquisitions_at_startup(
+        &crate::node::complete::journal_dir_near(&config_dir),
+        &config_dir,
+        &run_service,
+        &mut forensics,
+    )
+    .await;
+
     let mut poll_state = BrokerPollState::default();
     let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
     let idle_started = Instant::now();
@@ -5396,6 +5654,31 @@ async fn handle_v2_message(
         .run_service_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    // Occupy the slot before asking GitHub for the job. A crash inside the
+    // request used to leave no local record at all — no renewal, no completion,
+    // and the job lost until its lease expired. If the intent cannot be
+    // recorded, do not make the request: an unrecorded acquisition is the exact
+    // failure this write exists to prevent, and the broker redelivers.
+    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    if let Err(error) = intend_run_service_acquisition_in_journal(
+        &acquisition_journal_dir,
+        config_dir,
+        &reference.runner_request_id,
+        &message.message_id.to_string(),
+        run_service_url,
+    ) {
+        forensics.broker(&format!(
+            "acquire SKIPPED request={} durable intent failed: {}",
+            reference.runner_request_id,
+            sanitized_retry_error(&error)
+        ));
+        eprintln!(
+            "Not acquiring run-service job request {}: the acquisition intent could not be recorded: {}",
+            reference.runner_request_id,
+            sanitized_retry_error(&error)
+        );
+        return Ok(V2MessageAction::None);
+    }
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
     let acquire_result = tokio::select! {
@@ -5451,6 +5734,31 @@ async fn handle_v2_message(
             request_id,
             body,
         } => {
+            // Free the slot only on a *definite* gone, read from the typed body
+            // and never from the outer HTTP status. A 409 says the job is held
+            // and cannot say by whom — upstream's error envelope carries no
+            // runner identity — so it is not proof that this runner did not
+            // acquire the job and then crash. Its row stays for the renewjob
+            // probe, which is the only oracle that can tell.
+            if acquire_reply_is_definitely_gone(&body) {
+                if let Err(error) = abandon_run_service_acquisition_in_journal(
+                    &acquisition_journal_dir,
+                    config_dir,
+                    &reference.runner_request_id,
+                    "the run service reports the broker message is gone",
+                ) {
+                    eprintln!(
+                        "Warning: could not release the acquisition intent for request {}: {}",
+                        reference.runner_request_id,
+                        sanitized_retry_error(&error)
+                    );
+                }
+            } else {
+                println!(
+                    "Leaving the acquisition intent for request {} in place: the acquire reply does not prove this runner lost the job.",
+                    reference.runner_request_id
+                );
+            }
             println!(
                 "Skipping run-service job request {} after non-retriable acquire response: status={}, request_id={}, body={}",
                 reference.runner_request_id,
@@ -5464,7 +5772,18 @@ async fn handle_v2_message(
     };
     let acquired_identity = acquired_job_identity(&job_value)
         .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
-    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    // The reply names the job, so retarget the provisional row now — before the
+    // job message is even parsed. Until the plan id is durable no `renewjob`
+    // call can be built for this row, which is to say the crash window between
+    // here and ownership is the one recovery can actually settle.
+    resolve_run_service_acquisition_in_journal(
+        &acquisition_journal_dir,
+        config_dir,
+        &reference.runner_request_id,
+        &acquired_identity,
+    )
+    .context("retarget the acquisition intent onto the acquired job")?;
+    let journal_dir = acquisition_journal_dir;
     let fallback_run_service_job = RunServiceJobContext {
         client: run_service.clone(),
         run_service_url: run_service_url.to_string(),
@@ -15556,6 +15875,200 @@ jobs:
             infrastructure_failure_category(&anyhow::anyhow!("user script failed")),
             None
         );
+    }
+
+    /// Prime a journal with one Ready slot, the state an acquisition starts from.
+    fn ready_slot_journal(dir: &Path) -> (velnor_control::journal::Journal, velnor_model::SlotId) {
+        use velnor_control::journal::{Event, Journal};
+        use velnor_model::{Generation, SlotId};
+
+        let slot = SlotId("velnor-1".to_owned());
+        let generation = Generation::INITIAL;
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        (journal, slot)
+    }
+
+    fn run_service_error_body(status: u16) -> String {
+        serde_json::json!({
+            "source": "actions-run-service",
+            "statusCode": status,
+            "errorMessage": "message",
+        })
+        .to_string()
+    }
+
+    /// A conflict is not proof that this runner lost the job.
+    ///
+    /// Upstream's `RunServiceError` carries `source`, `statusCode` and
+    /// `errorMessage` and no runner identity, so a 409 cannot distinguish "we
+    /// acquired this and then crashed" from "another runner has it". Dropping
+    /// the row on a 409 would throw away the only evidence that this runner may
+    /// hold the lease; promoting on one would let two runners publish a
+    /// terminal result. So it does neither: the row waits for `renewjob`.
+    #[test]
+    fn a_conflict_reply_neither_promotes_nor_drops_the_acquisition_intent() {
+        let dir = unique_temp_dir("acquire-conflict-keeps-intent");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "msg-1",
+            "https://run.example/run",
+        )
+        .unwrap();
+
+        let conflict = run_service_error_body(409);
+        assert!(
+            !acquire_reply_is_definitely_gone(&conflict),
+            "a conflict is never a definite gone"
+        );
+        // The runner only abandons when the reply is definitely gone, so on a
+        // conflict nothing is called and the row stays exactly as it was.
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(
+            state.jobs[0].provisional,
+            "a conflict must not promote the row to ownership"
+        );
+        assert_eq!(
+            state.jobs[0].job_id.0, "request-1",
+            "the row is still keyed by the broker request"
+        );
+        assert_eq!(state.advertised_capacity(), 0, "the slot stays occupied");
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A typed 404 or 422 *is* definite, so the slot comes back immediately
+    /// rather than waiting for the next restart to notice.
+    #[test]
+    fn a_typed_gone_reply_releases_the_acquisition_intent_and_the_slot() {
+        for status in [404u16, 422] {
+            let dir = unique_temp_dir(&format!("acquire-gone-{status}"));
+            fs::create_dir_all(&dir).unwrap();
+            drop(ready_slot_journal(&dir));
+
+            intend_run_service_acquisition_in_journal(
+                &dir,
+                &dir,
+                "request-1",
+                "msg-1",
+                "https://run.example/run",
+            )
+            .unwrap();
+
+            let body = run_service_error_body(status);
+            assert!(acquire_reply_is_definitely_gone(&body));
+            abandon_run_service_acquisition_in_journal(
+                &dir,
+                &dir,
+                "request-1",
+                "the run service reports the broker message is gone",
+            )
+            .unwrap();
+
+            let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+            let state = journal.materialized_state().unwrap();
+            assert!(state.jobs.is_empty(), "status {status} must free the row");
+            assert_eq!(
+                state.advertised_capacity(),
+                1,
+                "status {status} must give the permit back"
+            );
+            drop(journal);
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// The acquire reply's identity replaces the broker request's, in one write,
+    /// and the row only then becomes probeable.
+    #[test]
+    fn the_acquire_reply_retargets_the_intent_onto_the_run_service_job() {
+        let dir = unique_temp_dir("acquire-retarget-identity");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "msg-1",
+            "https://run.example/run",
+        )
+        .unwrap();
+        resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        {
+            let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+            let state = journal.materialized_state().unwrap();
+            assert_eq!(state.jobs.len(), 1, "one row, retargeted, never two");
+            assert_eq!(state.jobs[0].job_id.0, "job-1");
+            assert_eq!(state.jobs[0].plan_id, "plan-1");
+            assert_eq!(state.jobs[0].run_service_url, "https://run.example/run");
+            assert!(state.jobs[0].provisional, "the reply is not yet ownership");
+            assert_eq!(state.advertised_capacity(), 0);
+        }
+
+        // The durable marker then promotes that same row.
+        accept_run_service_job_in_journal(&dir, &dir, "job-1").unwrap();
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(!state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
