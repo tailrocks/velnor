@@ -1524,11 +1524,14 @@ fn fixture_status(args: FixtureStatusArgs) -> Result<()> {
     };
     let run = github_run_view(&args.repo, run_id)?;
     println!("url\t{}", required_string(&run, "url")?);
-    println!(
-        "run\t{}\t{}",
-        required_string(&run, "status")?,
-        optional_string(&run, "conclusion").unwrap_or_default()
-    );
+    let status = required_string(&run, "status")?;
+    let conclusion = optional_string(&run, "conclusion").unwrap_or_default();
+    println!("run\t{}\t{}", status, conclusion);
+    if status != "completed" || conclusion != "success" {
+        bail!(
+            "fixture workflow run {run_id} is not successful: status={status} conclusion={conclusion}"
+        );
+    }
     let jobs = run
         .get("jobs")
         .and_then(|value| value.as_array())
