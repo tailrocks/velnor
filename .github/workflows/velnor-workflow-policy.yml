@@ -2,6 +2,11 @@ name: Velnor workflow policy
 
 on:
   workflow_call:
+    inputs:
+      policy-revision:
+        description: Full SHA of this reusable policy workflow
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -44,7 +49,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 149d1bf \
+            --rev 8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0 \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -53,4 +58,5 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+          VELNOR_WORKFLOW_POLICY_REVISION: ${{ inputs.policy-revision }}
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
