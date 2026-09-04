@@ -379,6 +379,10 @@ impl CargoWorkload {
                 touch(&script)
             }
             Mutation::UpdateLockfile => {
+                let lockfile = workspace.join("Cargo.lock");
+                let before = std::fs::read(&lockfile).with_context(|| {
+                    format!("reading {} before cargo update", lockfile.display())
+                })?;
                 let invocation = context
                     .runner
                     .exec(
@@ -390,6 +394,15 @@ impl CargoWorkload {
                     .context("cargo update")?;
                 if !invocation.ok() {
                     bail!("cargo update failed: {}", invocation.stderr.trim());
+                }
+                let after = std::fs::read(&lockfile).with_context(|| {
+                    format!("reading {} after cargo update", lockfile.display())
+                })?;
+                if !lockfile_bytes_changed(&before, &after) {
+                    bail!(
+                        "cargo update succeeded but {} was unchanged; refusing to measure a no-op as dependency invalidation",
+                        lockfile.display()
+                    );
                 }
                 Ok(())
             }
@@ -620,6 +633,10 @@ fn touch(path: &Path) -> Result<()> {
     let text = std::fs::read(path)?;
     std::fs::write(path, text)?;
     Ok(())
+}
+
+fn lockfile_bytes_changed(before: &[u8], after: &[u8]) -> bool {
+    before != after
 }
 
 fn first_tracked_source(context: &mut Context, workspace: &Path) -> Result<String> {
@@ -857,5 +874,11 @@ mod tests {
         touch(&path).expect("touch");
         assert_eq!(std::fs::read(&path).expect("read"), b"contents");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lockfile_change_requires_different_bytes() {
+        assert!(!lockfile_bytes_changed(b"lockfile", b"lockfile"));
+        assert!(lockfile_bytes_changed(b"lockfile", b"changed"));
     }
 }
