@@ -630,6 +630,7 @@ impl Workload for CargoWorkload {
         let trace_file = trace_file_path(
             &context.work_root,
             self.scenario,
+            self.scratch.nonce,
             self.scratch.id,
             self.iteration,
         );
@@ -897,10 +898,17 @@ fn remove_owned_file(path: &Path) -> Result<()> {
     }
 }
 
-fn trace_file_path(work_root: &Path, scenario: &str, owner_id: u64, iteration: u64) -> PathBuf {
+fn trace_file_path(
+    work_root: &Path,
+    scenario: &str,
+    owner_nonce: u128,
+    owner_id: u64,
+    iteration: u64,
+) -> PathBuf {
     work_root.join(format!(
-        "{}-git-trace-{}-{owner_id}-{iteration}.jsonl",
+        "{}-git-trace-{}-{}-{owner_id}-{iteration}.jsonl",
         std::process::id(),
+        owner_nonce,
         scenario.replace('/', "_")
     ))
 }
@@ -1274,7 +1282,13 @@ mod tests {
         };
         let mut workload = test_workload(plan, scenario);
         let expected_root = workload.scratch.scenario_root(&work_root, scenario);
-        let expected_trace = trace_file_path(&work_root, scenario, workload.scratch.id, 1);
+        let expected_trace = trace_file_path(
+            &work_root,
+            scenario,
+            workload.scratch.nonce,
+            workload.scratch.id,
+            1,
+        );
         std::fs::write(&expected_trace, b"stale trace").expect("write stale trace");
         let mut context = test_context(work_root.clone(), repo, 1);
 
@@ -1514,7 +1528,7 @@ mod tests {
         std::fs::create_dir_all(&measured_root).expect("create measured root");
 
         let disk_before = tree_bytes(&measured_root);
-        let trace_file = trace_file_path(&work_root, "rust/cold", 1, 1);
+        let trace_file = trace_file_path(&work_root, "rust/cold", 1, 1, 1);
         std::fs::write(
             &trace_file,
             br#"{"event":"version"}
