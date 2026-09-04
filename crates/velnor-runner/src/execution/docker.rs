@@ -8,6 +8,12 @@ use crate::executor::CommandRunner;
 use std::path::Path;
 use velnor_model::JobConclusion;
 
+/// One derived resource budget for the machine, and the share of it that
+/// belongs to a single slot. The slice boundary verified below is an
+/// *aggregate* ceiling for every job on the host; dividing it between slots is
+/// this module's job.
+pub(crate) mod host_budget;
+
 /// The drop-in that sets the job slice's CPU quota. Its modification time is
 /// the generation of every host fact derived from the slice's configuration.
 const JOB_CGROUP_DROPIN: &str = "/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf";

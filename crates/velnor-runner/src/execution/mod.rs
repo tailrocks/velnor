@@ -7,7 +7,7 @@
 mod artifacts;
 mod backend;
 mod cache_transport;
-mod docker;
+pub(crate) mod docker;
 mod firecracker;
 mod guest;
 mod guest_actions;
