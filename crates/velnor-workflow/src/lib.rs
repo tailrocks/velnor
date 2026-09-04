@@ -3994,8 +3994,8 @@ fn render_preview(config: &ProjectConfig) -> String {
     .replace(
         "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 75",
         &format!(
-            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 75",
-            config.default_branch
+            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 75",
+            trusted_release_runner_gate(&config.default_branch)
         ),
     )
     .replace(
@@ -4076,8 +4076,8 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             let verify_name = yaml_scalar(&unit.label);
             let dispatch_gate = if lane == RunnerMode::Velnor {
                 format!(
-                    "    if: ${{{{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/{}' }}}}\n",
-                    config.default_branch
+                    "    if: ${{{{ {} }}}}\n",
+                    trusted_release_runner_gate(&config.default_branch)
                 )
             } else {
                 String::new()
@@ -4130,6 +4130,7 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::CratesAuth.reference(),
         github_expression("steps.auth.outputs.token")
     );
+    gate_velnor_release_verify(&mut output, config);
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
     output = output.replace("\n  publish:", &format!("\n{unit_jobs}\n  publish:"));
     output = output.replace(
@@ -4211,6 +4212,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
     );
+    gate_velnor_release_verify(&mut output, config);
     output = output.replace(
         "      - name: Run full CI\n        run: velnor-workflow run --config .github/ci/project.toml --scope full\n",
         "",
@@ -4273,6 +4275,13 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
                 workflow_runtime_setup(RunnerMode::Github)
             ),
         );
+        let build = build.replace(
+            "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 90",
+            &format!(
+                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 90",
+                trusted_release_runner_gate(&config.default_branch)
+            ),
+        );
         output = format!("{prefix}\n  build:{build}");
     }
     output = output.replace(
@@ -4323,6 +4332,17 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         "  verify:\n    name: Verify documentation release\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n",
         ActionPin::Checkout.reference(),
     );
+    let verify = if config.runners == RunnerMode::Velnor {
+        let gate = trusted_release_runner_gate(&config.default_branch);
+        verify.replace(
+            "  verify:\n    name: Verify documentation release\n",
+            &format!(
+                "  verify:\n    name: Verify documentation release\n    if: ${{{{ {gate} }}}}\n"
+            ),
+        )
+    } else {
+        verify
+    };
     output = output.replace(
         "\njobs:\n  deploy:",
         &format!("\njobs:\n{verify}\n  deploy:"),
@@ -4336,7 +4356,7 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         config.default_branch
     );
     let deploy_condition = format!(
-        "if: ${{{{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/{}' }}}}",
+        "if: ${{{{ ((github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/{0}') || github.event_name == 'schedule' }}}}",
         config.default_branch
     );
     output = output.replace(&push_condition, &deploy_condition);
@@ -4385,6 +4405,22 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
         )
     } else {
         String::new()
+    }
+}
+
+fn trusted_release_runner_gate(default_branch: &str) -> String {
+    format!(
+        "(github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/{default_branch}')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}')"
+    )
+}
+
+fn gate_velnor_release_verify(output: &mut String, config: &ProjectConfig) {
+    if config.runners == RunnerMode::Velnor {
+        let gate = trusted_release_runner_gate(&config.default_branch);
+        *output = output.replace(
+            "  verify:\n    name: Verify release\n",
+            &format!("  verify:\n    name: Verify release\n    if: ${{{{ {gate} }}}}\n"),
+        );
     }
 }
 
@@ -7315,7 +7351,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_requires_explicit_mode_for_self_hosted_workflows() {
+    fn policy_requires_a_trusted_gate_for_self_hosted_workflows() {
         let root = temporary_repository("policy-runner-mode");
         let workflows = root.join(".github/workflows");
         let ci = root.join(".github/ci");
@@ -7331,15 +7367,6 @@ mod tests {
         must(
             fs::write(ci.join("project.toml"), "runners = \"velnor\"\n"),
             "write Velnor mode",
-        );
-        must(
-            runtime::enforce_policy(&root),
-            "run selected self-hosted policy",
-        );
-
-        must(
-            fs::write(ci.join("project.toml"), "runners = \"github\"\n"),
-            "write GitHub mode",
         );
         let rejected = runtime::enforce_policy(&root);
         assert!(rejected
