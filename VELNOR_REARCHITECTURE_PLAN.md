@@ -2423,3 +2423,12 @@ Flagged for whoever resumes: binding the baseline to an exact commit SHA turns t
 on **every** unrelated runner commit, which is what produced the hand-retyping commits in the first
 place. The single-command refresh mitigates that but does not remove it, and a content-derived
 identity — hashing the capability document rather than the commit — would.
+
+### Coordination alert — pending Docker cleanup review
+
+A read-only review of the concurrent lead's uncommitted Docker cleanup found two release-blocking
+conditions: `reclaim_unlabeled_testcontainers` force-removes IDs selected only by the shared
+Testcontainers label plus an empty job label, reopening the unrelated-host deletion that `c091338`
+closed; and `unlabeled_testcontainer_ids` silently drops malformed `docker ps` rows, allowing a
+partial listing to drive deletion. T-004 route authorization is unchanged. Restore the fail-closed
+ownership validator and reject malformed listings before this cleanup reaches the shared branch.
