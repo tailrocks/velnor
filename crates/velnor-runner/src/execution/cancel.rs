@@ -575,7 +575,9 @@ struct Inner {
     reason: Mutex<Option<CancelReason>>,
     /// Delay from the first request to forced escalation, seeded from the
     /// server-supplied cancel timeout.
-    forced_after: Duration,
+    /// Millis until forced escalation. Mutable because the grace arrives with
+    /// the server's cancellation message, after the token exists.
+    forced_after_ms: AtomicU64,
     registry: Mutex<Registry>,
     next_id: AtomicU64,
     /// Set once so repeated cancellation never starts a second fan-out.
@@ -665,7 +667,9 @@ impl JobCancellation {
         Self(Arc::new(Inner {
             level: AtomicU8::new(CancelLevel::None.as_u8()),
             reason: Mutex::new(None),
-            forced_after,
+            forced_after_ms: AtomicU64::new(
+                u64::try_from(forced_after.as_millis()).unwrap_or(u64::MAX),
+            ),
             registry: Mutex::new(Registry::default()),
             next_id: AtomicU64::new(0),
             fan_out_started: AtomicBool::new(false),
@@ -681,7 +685,7 @@ impl JobCancellation {
     /// (`src/Runner.Worker/ExecutionContext.cs:436`, `:1384-1395`).
     #[must_use]
     pub fn unlinked(&self) -> Self {
-        Self::with_forced_delay(self.0.forced_after, self.0.live)
+        Self::with_forced_delay(self.forced_after(), self.0.live)
     }
 
     /// Current escalation level.
@@ -715,7 +719,24 @@ impl JobCancellation {
     /// How long after the first request the token escalates to `Forced`.
     #[must_use]
     pub fn forced_after(&self) -> Duration {
-        self.0.forced_after
+        Duration::from_millis(self.0.forced_after_ms.load(Ordering::SeqCst))
+    }
+
+    /// Replace the grace before escalation with the one the server asked for.
+    ///
+    /// Upstream's `JobCancelMessage` carries a timeout and the listener honours
+    /// it; Velnor discarded the field and always used its own default, so a
+    /// server asking for a longer wind-down did not get one. Ignored once the
+    /// escalation timer is already running, so a late message cannot extend a
+    /// cancellation that is already counting down.
+    pub fn set_forced_after(&self, grace: Duration) {
+        if self.0.fan_out_started.load(Ordering::SeqCst) {
+            return;
+        }
+        self.0.forced_after_ms.store(
+            u64::try_from(grace.as_millis()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     /// Request cancellation, running the termination fan-out once.
@@ -824,7 +845,7 @@ impl JobCancellation {
 
     fn spawn_fan_out(&self) {
         let token = self.clone();
-        let forced_after = self.0.forced_after;
+        let forced_after = self.forced_after();
         let spawned = std::thread::Builder::new()
             .name("velnor-cancel-ladder".into())
             .spawn(move || {

@@ -5818,13 +5818,24 @@ async fn handle_job_request(
             registration_lost.clone(),
         )
         .await?;
+        // One token per job, installed as the active token for the job's whole
+        // scope so every host process spawned under it registers its process
+        // group with the thing that can actually terminate it. The poller
+        // drives this token; the executor reads it, which is what makes
+        // `cancelled()` and the `success()`/`failure()` pair truthful.
+        let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
+        let _job_cancellation_active =
+            crate::execution::cancel::set_active(job_cancellation.clone());
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
             broker_cancellation.disable_update,
-            job.job_id.clone(),
-            job_container_name(&job),
-            canceled.clone(),
+            JobCancellationWatch {
+                job_id: job.job_id.clone(),
+                job_container_name: job_container_name(&job),
+                canceled: canceled.clone(),
+                cancellation: job_cancellation.clone(),
+            },
             broker_cancellation.stored,
         );
 
@@ -6670,15 +6681,29 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
     github_api_error_status(error) == Some(404)
 }
 
+/// What the cancellation poller needs to know about the job it is watching, as
+/// opposed to the broker it polls. Grouped so a caller cannot pair one job's id
+/// with another job's cancellation token.
+struct JobCancellationWatch {
+    job_id: String,
+    job_container_name: String,
+    canceled: Arc<AtomicBool>,
+    cancellation: crate::execution::cancel::JobCancellation,
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
     disable_update: bool,
-    job_id: String,
-    job_container_name: String,
-    canceled: Arc<AtomicBool>,
+    watch: JobCancellationWatch,
     stored: StoredRunnerConfig,
 ) -> JoinHandle<()> {
+    let JobCancellationWatch {
+        job_id,
+        job_container_name,
+        canceled,
+        cancellation,
+    } = watch;
     tokio::spawn(async move {
         let mut broker = broker;
         let mut error_streak: u32 = 0;
@@ -6706,6 +6731,8 @@ fn start_broker_cancellation_poll(
                             sanitized_retry_error(&error)
                         );
                         canceled.store(true, Ordering::SeqCst);
+                        cancellation
+                            .request(crate::execution::cancel::CancelReason::RegistrationLost);
                         kill_job_container(&job_container_name);
                         break;
                     }
@@ -6784,6 +6811,15 @@ fn start_broker_cancellation_poll(
                 continue;
             }
             canceled.store(true, Ordering::SeqCst);
+            // The server's own grace, when it sent one, decides how long the
+            // job has before escalation — not a fixed local constant.
+            if let Some(grace) = serde_json::from_str::<JobCancelMessage>(&message.body)
+                .ok()
+                .and_then(|cancel| cancel.grace())
+            {
+                cancellation.set_forced_after(grace);
+            }
+            cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
             kill_job_container(&job_container_name);
             break;
         }
@@ -7485,6 +7521,37 @@ fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String>
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
     job_id: Option<String>,
+    /// Upstream's `JobCancelMessage` carries the grace period alongside the id
+    /// (`src/Sdk/DTWebApi/WebApi/JobCancelMessage.cs`). Velnor discarded it and
+    /// used a fixed delay, so a server that asked for a longer or shorter wind
+    /// down did not get one.
+    #[serde(default, rename = "Timeout", alias = "timeout")]
+    timeout: Option<String>,
+}
+
+impl JobCancelMessage {
+    /// The server-supplied grace as a duration. Upstream serialises a .NET
+    /// `TimeSpan`, so accept both `hh:mm:ss` and a bare number of seconds, and
+    /// treat anything unparseable as absent rather than as zero — a zero grace
+    /// would silently turn a graceful cancellation into an immediate kill.
+    fn grace(&self) -> Option<Duration> {
+        let raw = self.timeout.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if let Ok(seconds) = raw.parse::<f64>() {
+            return (seconds.is_finite() && seconds >= 0.0)
+                .then(|| Duration::from_secs_f64(seconds));
+        }
+        let mut parts = raw.split(':');
+        let hours: u64 = parts.next()?.parse().ok()?;
+        let minutes: u64 = parts.next()?.parse().ok()?;
+        let seconds: f64 = parts.next()?.parse().ok()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        Some(Duration::from_secs(hours * 3600 + minutes * 60) + Duration::from_secs_f64(seconds))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -13639,6 +13706,50 @@ mod tests {
         assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
         assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
         assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
+    }
+
+    /// The server's grace is honoured, and the shapes upstream can send are
+    /// all accepted. A malformed value must be *absent*, never zero: a zero
+    /// grace would turn a graceful cancellation into an immediate kill.
+    #[test]
+    fn server_cancellation_grace_is_parsed_not_discarded() {
+        let parse = |body: &str| {
+            serde_json::from_str::<JobCancelMessage>(body)
+                .expect("cancel message parses")
+                .grace()
+        };
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"00:05:00"}"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"01:00:30.5"}"#),
+            Some(Duration::from_secs_f64(3630.5))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"90"}"#),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(parse(r#"{"JobId":"j"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":""}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"garbage"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"-5"}"#), None);
+    }
+
+    /// A grace that arrives after escalation has begun must not extend a
+    /// cancellation that is already counting down.
+    #[test]
+    fn a_late_grace_cannot_extend_a_running_escalation() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.set_forced_after(Duration::from_secs(120));
+        assert_eq!(token.forced_after(), Duration::from_secs(120));
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        token.set_forced_after(Duration::from_secs(3600));
+        assert_eq!(
+            token.forced_after(),
+            Duration::from_secs(120),
+            "a late grace must not extend an escalation already under way"
+        );
     }
 
     #[test]
