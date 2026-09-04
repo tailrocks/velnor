@@ -130,9 +130,8 @@ pub enum AdmissionNodeKind {
     NativeAction,
     /// A remote composite action whose metadata was fetched and recursed.
     RemoteComposite,
-    /// A remote non-composite (JavaScript/Docker) action — rejected on the
-    /// production path unless it maps to a native adapter, but represented here
-    /// for completeness while recursing.
+    /// A remote non-composite (JavaScript/Docker) action. It is admitted as a
+    /// leaf; the planner selects its executable adapter from the manifest.
     RemoteAction,
     /// A local action or composite read from the workflow repository.
     LocalAction,
@@ -786,7 +785,7 @@ fn admit_remote(
         .map_err(|error| AdmissionError::new(ancestry, "runtime", error.to_string(), Vec::new()))?;
     manifest::validate_action_runtime(step_label, repository, action_ref, &runtime)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
-    if !is_composite(&metadata) {
+    if !matches!(adapter, ActionAdapter::Composite) {
         return Ok(());
     }
     walk.graph.nodes[index].kind = AdmissionNodeKind::RemoteComposite;
@@ -1942,6 +1941,32 @@ mod tests {
         assert_eq!(source.reads(), 1);
         assert_eq!(error.field, "runtime");
         assert_eq!(error.accepted, vec!["docker"]);
+    }
+
+    #[test]
+    fn remote_javascript_action_is_admitted_as_a_leaf() {
+        let action_ref = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+        let repository = "jdx/mr-boxington-action";
+        let job = job(serde_json::json!([repo_step(
+            repository,
+            action_ref,
+            None,
+            serde_json::json!({"backend": "github"})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("{repository}@{action_ref}"),
+            "runs:\n  using: node24\n  main: dist/index.js\n",
+        )]);
+
+        let graph = admit_job(&job, &workflow_context(), &source).unwrap();
+
+        assert_eq!(source.reads(), 1);
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.identity.repository == repository)
+            .expect("JavaScript action should be in the admission graph");
+        assert_eq!(node.kind, AdmissionNodeKind::RemoteAction);
     }
 
     #[test]
