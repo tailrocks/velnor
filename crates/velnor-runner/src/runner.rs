@@ -7709,6 +7709,30 @@ impl MaskPatterns {
         masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
         Masker::new(masks)
     }
+
+    /// One masker carrying every secret any step registered.
+    ///
+    /// `StepLog.masks` records only what *that* step added — the job's running
+    /// set lives on `JobExecutionState`, which the log does not carry. So
+    /// masking each blob with `with_extra(&log.masks)` masked step three's
+    /// upload with step three's secrets only, and a value masked by an
+    /// `::add-mask::` in step one was uploaded in cleartext while looking
+    /// correctly masked in the live feed.
+    ///
+    /// Masking is a property of the upload, not of the record: a blob leaving
+    /// the process must be masked with everything known by then. The union is
+    /// a superset of any single log's set, so nothing that was masked before
+    /// stops being masked.
+    fn with_every_step(&self, logs: &[StepLog]) -> Masker {
+        let mut masks = self.masks.clone();
+        masks.extend(
+            logs.iter()
+                .flat_map(|log| log.masks.iter())
+                .filter(|mask| !mask.is_empty())
+                .cloned(),
+        );
+        Masker::new(masks)
+    }
 }
 
 /// Every encoding of a secret that the masker must also recognise.
@@ -9458,12 +9482,52 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     let Some(task) = task else {
         return Ok(());
     };
-    tokio::task::spawn_blocking(move || task.join())
-        .await
-        .context("join prior slot teardown task")?
-        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))??;
+    // Bounded. The teardown thread retries on its own schedule, so an await
+    // with no deadline let a teardown that never succeeds pin the slot of a job
+    // GitHub had already been told was finished — the one place a *completed*
+    // job could hold a slot indefinitely.
+    //
+    // On expiry the thread is left running: it owns the containers and will
+    // keep trying, and abandoning its handle is strictly better than refusing
+    // to start the next job. What the operator must not get is silence, so the
+    // wait says which slot and how long it waited.
+    let joined = tokio::time::timeout(
+        PRIOR_TEARDOWN_JOIN_DEADLINE,
+        tokio::task::spawn_blocking(move || task.join()),
+    )
+    .await;
+    match joined {
+        Ok(joined) => {
+            joined
+                .context("join prior slot teardown task")?
+                .map_err(|panic| {
+                    anyhow::anyhow!("prior slot teardown task panicked: {panic:?}")
+                })??;
+        }
+        Err(_) => {
+            let message = format!(
+                "prior slot teardown for {} did not finish within {}s; continuing without it, \
+                 its containers may still be present",
+                config_dir.display(),
+                PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs()
+            );
+            eprintln!("{message}");
+            tracing::warn!(
+                target: "velnor.teardown",
+                slot_dir = %config_dir.display(),
+                waited_s = PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs(),
+                "prior slot teardown exceeded its join deadline"
+            );
+        }
+    }
     Ok(())
 }
+
+/// How long a slot waits for the previous job's teardown before starting work.
+///
+/// Generous, because a legitimate teardown of a large workspace takes time, and
+/// bounded, because a completed job must never hold a slot forever.
+const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
@@ -10959,7 +11023,7 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
             };
             out.push_str(&format!("{timestamp} ##[group]{name}\n"));
         }
-        let masker = secret_masks.with_extra(&log.masks);
+        let masker = secret_masks.with_every_step(step_logs);
         for line in &log.lines {
             let masked = masker.mask(line);
             out.push_str(&format!("{timestamp} {masked}\n"));
@@ -11055,6 +11119,8 @@ async fn upload_results_step_log_with_client(
     job: &AgentJobRequestMessage,
     log: &StepLog,
 ) -> Result<()> {
+    // The pre-execution failure path has exactly one log, so its own mask set
+    // is already the whole job's.
     let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
     let lines = mask_log_lines_with(&log.lines, &masker);
     let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
@@ -11205,14 +11271,17 @@ async fn complete_run_service_job(
                 log.completed_at.clone()
             }),
             completed_log_lines: log.lines.len() as i64,
-            annotations: run_service_annotations(log, &annotation_masks.with_extra(&log.masks)),
+            annotations: run_service_annotations(
+                log,
+                &annotation_masks.with_every_step(&step_logs),
+            ),
         })
         .collect();
     let outputs = run_service_outputs(job_outputs, &job_secret_mask_values(job));
     let telemetry = run_service_telemetry(job, &step_logs);
     let annotations: Vec<RunServiceAnnotation> = step_logs
         .iter()
-        .flat_map(|log| run_service_annotations(log, &annotation_masks.with_extra(&log.masks)))
+        .flat_map(|log| run_service_annotations(log, &annotation_masks.with_every_step(&step_logs)))
         .collect();
     // Plan 066 terminal transition for an executed job. Idempotent token
     // keeps the refreshing-completion retry path from duplicating events.
@@ -14164,6 +14233,46 @@ mod tests {
     /// The server's grace is honoured, and the shapes upstream can send are
     /// all accepted. A malformed value must be *absent*, never zero: a zero
     /// grace would turn a graceful cancellation into an immediate kill.
+    /// A secret registered by `::add-mask::` in one step must not appear in a
+    /// later step's uploaded blob.
+    ///
+    /// Masking is cumulative on the live path, because the job state carries a
+    /// running set. `StepLog.masks` does not: it records only what that step
+    /// added. So masking each upload with that log's own set left a step-one
+    /// secret in cleartext in step three's durable blob while the live feed
+    /// looked correct — the failure is invisible in exactly the place people
+    /// check.
+    #[test]
+    fn a_secret_masked_in_one_step_does_not_leak_into_a_later_upload() {
+        let mut first = masking_step_log();
+        first.masks = vec!["hunter2".to_string()];
+        first.lines = vec!["registered hunter2".to_string()];
+        let mut third = masking_step_log();
+        third.masks = Vec::new();
+        third.lines = vec!["echoing hunter2 from a later step".to_string()];
+        let logs = vec![first, third];
+
+        let patterns = MaskPatterns::new(Vec::new());
+
+        // The old behaviour, kept here as the thing being ruled out.
+        let per_log = patterns.with_extra(&logs[1].masks);
+        assert!(
+            mask_log_lines_with(&logs[1].lines, &per_log)
+                .iter()
+                .any(|line| line.contains("hunter2")),
+            "per-log masking is what leaked the secret; if this stops holding \
+             the union below is no longer proving anything"
+        );
+
+        let union = patterns.with_every_step(&logs);
+        for line in mask_log_lines_with(&logs[1].lines, &union) {
+            assert!(
+                !line.contains("hunter2"),
+                "a later step's upload must carry every secret the job knows"
+            );
+        }
+    }
+
     #[test]
     fn server_cancellation_grace_is_parsed_not_discarded() {
         let parse = |body: &str| {
