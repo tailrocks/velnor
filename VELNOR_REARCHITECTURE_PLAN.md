@@ -1444,3 +1444,164 @@ rendering constraint, and nothing tests the coupling.
 
 Both are RC-3 in miniature: a contract recovered by re-parsing a rendering rather than read
 through the serialiser that wrote it.
+
+## 15. Red-team review of the target architecture
+
+Full review in `.rearch/reports/21-redteam.md`. It changes the plan materially, and the
+central finding invalidates the shape of the proposal rather than a detail of it.
+
+### The typestate cannot enforce a cross-process invariant
+
+Velnor is a three-tier **process** fleet: a controller spawns one slot process per slot
+(`node/controller.rs:2208` spawns `current_exe() slot --slot-index N --generation G`), and each
+slot process admits one job at a time (`main.rs:15`). The state the synthesis wants to hold in
+Rust types does not live in one address space — it lives on disk as `Clone + Serialize +
+Deserialize` records with **all fields public** (`journal.rs:300-362`), rehydrated through
+`materialized_state()` (`journal.rs:1045`).
+
+**Seven of the eleven compiler-checked invariants therefore do not hold**, and the failures are
+not incidental:
+
+- **I-1 (fencing an occupied slot is a signature error)** — fencing is a controller decision
+  taken over a *deserialised* `SlotRecord`; `Occupied` exists in a different process. BC-5 is
+  narrowed to a staleness window, not eliminated.
+- **I-3 (`SendClaim` non-`Clone`, consumed by `send()`)** — there are two send paths in two
+  process roles (`runner.rs:10564` versus `:827`/`:10677`); the real uniqueness token is the
+  `OutboxRecord`, which is `Clone + Deserialize` with public fields.
+- **I-5 (`From<Job<Acked>> for JobState`)** — a trait implementation cannot make a disk write
+  happen.
+- **I-11 (no fail-open path)** — false at head; see below.
+- **I-13 (`TrustClass` has no `Default`)** — the derivation it depends on is not implementable
+  as specified; see below.
+- **I-20 (`Redacted<String>`)** — a newtype cannot redact a `String` nested inside a
+  `Serialize` payload such as `trace.jsonl` or a job dump. This needs a serializer, not a type.
+- **I-23 (validator-only construction)** — `ReadyProof::try_new` (`journal.rs:335`) validates
+  four caller-supplied booleans taken off a public-field `Deserialize` record. It is a claim,
+  not evidence.
+
+The correction is not to abandon the typestate but to stop expecting the compiler to carry an
+invariant across a process boundary. Anything crossing that boundary needs a durable mechanism —
+schema-versioned events, fencing tokens checked on read, and validators that derive rather than
+accept. Where the type system genuinely does apply, it still should.
+
+### Live defects the red team found
+
+**A trust split-brain, reachable through the documented hardening step.**
+`github_adapter.rs:223` reads the trust scope from the CLI argument, while
+`cargo_target_trust_scope()` (`:211`) reads `std::env::var` directly and feeds six store paths.
+The shipped unit sets `VELNOR_TRUST_SCOPE=trusted` (`debian/velnor.env:42`). So
+`velnor-runner service --trust-scope public` — the documented way to harden a pool — yields the
+Docker socket correctly withheld and the compiler stores still **trusted**, which is precisely
+the fork-to-trusted poisoning the flag exists to prevent. There are three defaults, not two:
+`service.rs:193-195` declares `trusted` with an `env =` binding, `velnorctl/runtime.rs:71-72`
+declares `public` with none, so `velnorctl` cannot observe the variable at all. The gate also
+governs container options (`:504`), **privileged service containers** (`:514`) and host port
+publishing (`:536`, `:568`) — wider than the socket alone. Dispatched as T-015.
+
+**Expression evaluation is still fail-open at head.** `executor.rs:11577 resolve_expressions`
+does `Err(_) => rendered.push_str(&rest[start..…])`, emitting the raw `${{ … }}` span into the
+shell. Its own comment assigns the fix to "the lifecycle work package" while the synthesis
+assigns it to the semantics package — it is in neither. A **third** expression implementation
+also survives: `action.rs:1513 render_composite_expression` and `:1538` are textual and never
+call the new evaluator.
+
+**`TrustClass` cannot be derived as specified.** `head_repository_id` does not exist in the job
+message. Failing closed on its absence would make every `push` job a fork PR, every executable
+store read-only, and would destroy the Rust cache hot path — the opposite of this program's
+goal. The proposed enum is also non-disjoint (a release, on a tag, on the default branch matches
+four variants, and the namespace key would depend on match order), and `pull_request_target`
+and `workflow_run` have no representation at all. This is now an open design question, not a
+task.
+
+**The migration itself can lose a completion.** `journal.rs:1236` silently `continue`s on an
+undecodable event. An older controller replaying a new `CompletionUnresolvable` event skips it,
+materialises the outbox row as still pending, and re-drives the completion — a duplicate
+terminal send on a fenced generation, defeating the very invariant the change was meant to add.
+Terminal-affecting events must ride a `JOURNAL_SCHEMA_VERSION` bump (`journal.rs:28`, `:997`
+already hard-fails), not be added silently.
+
+**The single Docker I/O thread deadlocks cancellation.** A forty-minute `docker exec` occupies
+the facade's one I/O thread, so the cancellation path's `kill` cannot be driven until the exec
+it targets returns. Not a global bottleneck — the process model prevents that — but an
+intra-job one, landing on the hot path and the cancellation path simultaneously.
+
+**Deleting "one of the two `actions/cache` implementations" would delete a wire protocol.** They
+are not substitutes: `action.rs:176` and `executor.rs:5095` handle the *step*, while
+`gha_cache.rs` serves the v1 Twirp and v2 Results protocols that BuildKit's `type=gha` requires.
+
+### Corrections to the deletion list
+
+**Must not be deleted as written:** the second `actions/cache` implementation, above; the
+`velnorctl → velnor-runner` edge, because velnorctl runs *every* command through runner handlers
+(`runtime.rs:14`, `:16`, `:647`; `lib.rs:294-1309`) — deleting it deletes the CLI, and the
+motivation behind that proposal is fixed by unifying the clap trees instead;
+`GuestPlan::cancel_requested`, since `guest_plan.rs:140-165` is `deny_unknown_fields` and
+removing the field is a vsock wire break — delete it *after* the cancellation package, not
+before; `RunServiceJobJournalState`, a real fork where `runner.rs:11082` and `:11090` send
+different messages; and `normalize_checkout_mtimes`, which has a live caller at
+`checkout.rs:196`.
+
+**Incomplete as written:** the `velnor-cas` / `action-journal` / `action-model` / `supersession`
+/ `diagnostics` set is one connected component and must go together, along with the dead
+`velnor-runner/Cargo.toml:112` edge and the `dependency_boundaries.rs` entries; deleting
+`diagnostics.rs` leaves `velnorctl diagnostics` permanently a stub; and `DistributedTaskClient`
+is 15 methods with 3 live, not 16 of 19.
+
+**Missing from the list:** `ResolvedAction::javascript_invocation` (`action.rs:648`) and all
+`ExecutableStep::JavaScript` machinery, which has zero production construction sites;
+`NativeActionAdapter::ApprovedComposite` (`action.rs:115`), never matched outside the manifest
+and the enabling condition for the mr-boxington defect; `handoff.rs`'s
+`write_completion`/`read_completion`, a completion protocol that never had a caller; and the
+`std::env::var` at `github_adapter.rs:211`.
+
+### Capability-surface defects, confirmed and enlarged
+
+`jdx/mr-boxington-action` is admitted (`manifest.rs:424`) with no adapter (`action.rs:173-202`
+lists 26; the repository's own test asserts the absence at `manifest.rs:2466`), declares node24,
+and therefore reaches `runner.rs:9712 bail!` — admitted but unexecutable. The same shape applies
+to the four `ApprovedComposite` entries as a class, and `fsfe/reuse-action` (`:413`) is already
+mislabelled — it is a Docker action — while `manifest.rs:2604-2609` asserts only the reverse
+direction.
+
+The proposed invariant "a manifest entry with no adapter and a JavaScript runtime is a build
+failure" is **not implementable as stated**: the runtime is discovered at fetch time from
+`action.yml` (`action.rs:229-253`), so no build-time check can know it.
+
+Two further surface defects: `clean` and `fetch-tags` are admitted and honoured but absent from
+the tools list, so `target_audit` `bail!`s (`velnor-tools/src/main.rs:2279`); and
+`actions/setup-python` is advertised (`:2419`) with no manifest backing at all.
+
+### Ordering corrections
+
+Four packages were re-planned that have already landed: admission and pool partitioning in full,
+the expression evaluator, the Docker deadlines and fact cache, and the benchmark harness.
+
+Newly identified conflicts, none of which the synthesis listed:
+
+- **The verifier package versus Rust acceleration.** The fixture's own `.github/AGENTS.md`
+  *mandates* sccache in every Rust compile job, while the acceleration package deletes sccache.
+  The fixture policy has to change first or every fixture Rust job fails.
+- **Verifier, capability surface and acceleration** all own `velnor-tools/src/main.rs` and
+  `manifest.rs`.
+- **Trust derivation versus the one-site security controls** both gate the Docker socket, and
+  the argv-hardening work in flight will freeze on `trust_scope: &str` unless the trust type
+  lands first as a leaf.
+- **`JobStage` unification must precede the lifecycle package**, not follow it: a private
+  three-variant `JobStage` already exists in `runner.rs` from the landed admission work, so the
+  lifecycle package introducing its own would create a *fifth* stage vocabulary — reproducing
+  the very root cause it exists to remove.
+- The Docker package should split into a facade half that can start now and an Engine-abort half
+  that must follow cancellation; as listed it puts priority-2 work behind priority-4.
+
+### Confirmed sound — not to be second-guessed
+
+The seven-root-cause collapse and RC-1's formulation; RC-4's "delete the unsafe overload"
+remedy; the synchronous-facade resolution, which the process model makes more right than the
+synthesis knew; keeping the completion outbox, with its checksum-verified replay and three-point
+fence; `CompletionUnresolvable` and the disk-pressure total state machine; the verifier package
+going first and in parallel; and — named as the single highest-value item for the program's
+stated goal, and untouched at head — deriving a `HostBudget` from the cgroup quota and
+propagating it into the job as `CARGO_BUILD_JOBS` and the mbx scheduler's share. That is not
+P2 work. Dispatched as T-016.
+
+The landed admission fix is named as the model for how the remaining packages should land.
