@@ -737,7 +737,19 @@ impl ResolvedAction {
 
         let (image, build_context_host, dockerfile_host) =
             if let Some(image) = image.strip_prefix("docker://") {
-                (image.to_string(), None, None)
+                // `runs.image` is repository content, so in the fork-PR case it
+                // is attacker-controlled. Without a grammar check a value like
+                // `docker://--privileged` reaches the host `docker run` as a
+                // flag and hands the workflow root on a shared runner host.
+                // Reject anything that is not an OCI reference here, at the
+                // one place the scheme is stripped.
+                let image = crate::docker_argv::ImageReference::parse(image).map_err(|error| {
+                    anyhow::anyhow!(
+                        "action '{}' declares an invalid Docker image: {error}",
+                        self.plan.repository
+                    )
+                })?;
+                (image.as_str().to_string(), None, None)
             } else {
                 let dockerfile_host = self.plan.action_dir.join(image);
                 let tag = docker_action_tag(
@@ -3385,6 +3397,53 @@ runs:
         assert!(invocation
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
+    }
+
+    /// Fork-PR payload: `runs.image` is repository content. Without a grammar
+    /// check `docker://--privileged` becomes a flag of the host `docker run`,
+    /// which is root on a shared runner host.
+    #[test]
+    fn docker_action_image_that_would_be_read_as_a_flag_is_refused() {
+        let actions_host = Path::new("/tmp/actions");
+        for image in [
+            "docker://--privileged",
+            "docker://-v/:/host",
+            "docker://--user=0:0",
+            "docker://",
+        ] {
+            let plan = RepositoryActionPlan {
+                step_id: "evil".into(),
+                repository: "attacker/action".into(),
+                git_ref: "v1".into(),
+                source_path: None,
+                repository_dir: actions_host.join("_actions/attacker_action/v1"),
+                action_dir: actions_host.join("_actions/attacker_action/v1"),
+                inputs: Default::default(),
+                env: Default::default(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            };
+            let metadata = parse_action_metadata(&format!(
+                "runs:\n  using: docker\n  image: {image}\n  args:\n    - --privileged\n"
+            ))
+            .unwrap();
+            let runtime = metadata.runtime().unwrap();
+            let resolved = ResolvedAction {
+                plan,
+                metadata_path: actions_host.join("_actions/attacker_action/v1/action.yml"),
+                metadata,
+                runtime,
+            };
+
+            let error = resolved
+                .docker_invocation(actions_host)
+                .expect_err("a flag-shaped image must never build an invocation");
+            assert!(
+                error.to_string().contains("invalid Docker image"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

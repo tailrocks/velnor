@@ -13790,6 +13790,7 @@ mod tests {
 
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -13862,6 +13863,7 @@ mod tests {
 
     impl CommandRunner for BuildkitCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
             let stdout = match args.first().map(String::as_str) {
                 Some("ps") => {
@@ -13885,6 +13887,7 @@ mod tests {
 
     impl CommandRunner for ServiceContextRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             let stdout = match args.first().map(String::as_str) {
                 Some("inspect") => "container-id\n",
                 Some("port") => "5432/tcp -> 0.0.0.0:32768\n5432/tcp -> [::]:32768\n",
@@ -13929,6 +13932,7 @@ mod tests {
 
     impl CommandRunner for GitDiffRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: if self.missing_refs && args.iter().any(|arg| arg == "cat-file") {
@@ -13953,6 +13957,7 @@ mod tests {
 
     impl CommandRunner for FailingPostRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let code = if args.iter().any(|arg| {
                 arg.contains("/__a/_actions/sccache/dist/show_stats/index.js")
@@ -13979,6 +13984,7 @@ mod tests {
 
     impl CommandRunner for CheckoutOutputRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker"
                 && args.first().is_some_and(|arg| arg == "exec")
@@ -14007,6 +14013,7 @@ mod tests {
 
     impl CommandRunner for ErroringExecRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14054,6 +14061,7 @@ mod tests {
 
     impl CommandRunner for StreamingErrorExecRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14101,6 +14109,7 @@ mod tests {
 
     impl CommandRunner for MainActionErrorRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if args
                 .last()
@@ -14123,6 +14132,7 @@ mod tests {
 
     impl CommandRunner for FailingCheckoutRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14150,6 +14160,7 @@ mod tests {
 
     impl CommandRunner for OutputWritingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let action_process = program == "docker"
                 && (args.first().is_some_and(|arg| arg == "exec")
@@ -14225,6 +14236,7 @@ mod tests {
 
     impl CommandRunner for PhaseStateRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let state_file = has_container_env_path(args, "GITHUB_STATE", "wrapped_state")
                 .then(|| self.temp.join("wrapped_state"));
@@ -14254,6 +14266,7 @@ mod tests {
 
     impl CommandRunner for EnvAndFailureRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if has_container_env_path(args, "GITHUB_ENV", "enable_env") {
                 fs::write(self.temp.join("enable_env"), "CACHE_ON_FAILURE=true\n")?;
@@ -14278,6 +14291,7 @@ mod tests {
 
     impl CommandRunner for StdoutCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
                 "::set-output name=answer::42\n::add-mask::hidden\n::error::broken\nhidden\n"
@@ -14300,6 +14314,7 @@ mod tests {
 
     impl CommandRunner for StreamingMaskRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: 0,
@@ -14332,6 +14347,7 @@ mod tests {
 
     impl CommandRunner for SilentCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: 0,
@@ -14348,6 +14364,7 @@ mod tests {
 
     impl CommandRunner for StderrCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let stderr = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
                 "::set-output name=answer::42\n::add-mask::hidden\n::warning::slow\nhidden\n"
@@ -14847,6 +14864,7 @@ esac
         }
         impl CommandRunner for ReclaimRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 self.calls.push(args.to_vec());
                 let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
                     "guest-id\tguest-postgres\nbk-id\tbuildx_buildkit_velnor-builder-job0\n".into()
@@ -14963,6 +14981,7 @@ esac
 
         impl CommandRunner for LeaseOrderRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
                 if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
                     assert!(
@@ -15044,6 +15063,7 @@ esac
 
         impl CommandRunner for SkipBuildkitRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
                 if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
                     assert!(
@@ -19000,6 +19020,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
     impl CommandRunner for StaleServiceCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
             let running_service_refusal =
                 args.len() == 2 && args[0] == "rm" && args[1] == "running-service";
