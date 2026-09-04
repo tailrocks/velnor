@@ -206,6 +206,7 @@ impl Store {
             ))
         })?;
         connection.busy_timeout(Duration::ZERO)?;
+        connection.execute_batch("PRAGMA synchronous=FULL;")?;
         Ok(connection)
     }
 
@@ -245,7 +246,7 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
     }
     conn.execute_batch(
         "PRAGMA foreign_keys=ON;
-         PRAGMA synchronous=NORMAL;
+         PRAGMA synchronous=FULL;
          PRAGMA wal_autocheckpoint=1000;
          PRAGMA journal_size_limit=67108864;",
     )?;
@@ -436,6 +437,27 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].repository, "org/repo");
         assert_eq!(summaries[0].phase, "queued");
+    }
+
+    #[test]
+    fn opened_connections_use_full_synchronous_durability() {
+        let temp = TempDb::new("synchronous-full");
+        let store = Store::open(&temp.path).expect("open store");
+        let primary: i64 = test_connection(&store)
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read primary synchronous mode");
+        assert_eq!(primary, 2, "primary store must use synchronous=FULL");
+
+        let maintenance = store
+            .open_maintenance_connection()
+            .expect("open maintenance connection");
+        let maintenance_mode: i64 = maintenance
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read maintenance synchronous mode");
+        assert_eq!(
+            maintenance_mode, 2,
+            "maintenance connection must use synchronous=FULL"
+        );
     }
 
     #[test]
