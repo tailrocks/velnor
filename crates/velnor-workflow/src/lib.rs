@@ -34,7 +34,7 @@ const VELNOR_POLICY_WORKFLOW: &str =
 const VELNOR_POLICY_WORKFLOW_REV: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "a099520c761559d3875f76be25f18a1a63ccbafc";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "20b940278fb11c993910aaf201e55a19b802bdf0";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7825,7 +7825,9 @@ path-only = { path = "../path-only" }
                         continue;
                     }
                     if workflow_name == "maintenance.yml" {
-                        assert!(runner_lines.iter().all(|line| !line.contains("self-hosted")));
+                        assert!(runner_lines
+                            .iter()
+                            .all(|line| !line.contains("self-hosted")));
                         continue;
                     }
                     match runners {

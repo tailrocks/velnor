@@ -3317,3 +3317,13 @@ image-baked identity metadata. Release tag verification also requires the tag
 commit to equal the protected branch tip, not merely be an ancestor. The live
 branch ruleset remains an operator-owned prerequisite because changing it is an
 external repository policy mutation.
+
+## 37. Final pin synchronization — hardened hosted runtime `20b9402`
+
+The hosted workflow bootstrap now points at the full Velnor revision
+`20b940278fb11c993910aaf201e55a19b802bdf0`, which contains exact policy-pin
+enforcement and the privileged-job runner routing fixes. The current
+compatibility facade is source commit `d9a409c`; its Cargo lockfile and README
+use the same full Velnor revision. The corrected base-owned policy workflow is
+pinned separately at `47f06562126e8a3cfa08db7b668a21d60def7f1a` and installs
+the hardened runtime.
