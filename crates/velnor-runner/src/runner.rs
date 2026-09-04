@@ -11374,6 +11374,43 @@ async fn send_guarded_run_service_complete(
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let job_id = velnor_model::JobId(completion.job_id.clone());
     let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
+    // Record the conclusion *before* the payload is serialised. A crash in the
+    // gap between producing a terminal result and writing the outbox otherwise
+    // leaves recovery with no idea what the job concluded, so it synthesises a
+    // failure — turning a job that finished green into a red one. The event is
+    // recorded once per generation; a second, different conclusion is refused
+    // rather than treated as a correction.
+    // Serialise through the wire representation, so the recorded conclusion is
+    // exactly the string GitHub is being sent.
+    let recorded_conclusion = serde_json::to_value(completion.conclusion)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned));
+    if let Some(conclusion) = recorded_conclusion
+        && let Err(error) = crate::node::complete::record_terminal_result(
+            &mut journal,
+            &job_id,
+            generation,
+            &conclusion,
+        )
+    {
+        // Deliberately not fatal. The record exists so recovery knows what a
+        // job concluded instead of synthesising a failure; failing the
+        // completion because we could not write that hint would trade a
+        // recovery aid for the very outcome it prevents. A replay legitimately
+        // re-records, and the reducer refuses a second, different conclusion
+        // rather than treating it as a correction — so a rejection here most
+        // often means the conclusion is already durable, which is the state we
+        // wanted.
+        eprintln!(
+            "Could not record the terminal conclusion for {}: {error:#}",
+            job_id.0
+        );
+        tracing::warn!(
+            target: "velnor.completion",
+            job_id = job_id.0.as_str(),
+            "terminal conclusion not recorded; recovery will fall back to a synthetic result"
+        );
+    }
     let payload = serde_json::to_vec(&completion)?;
     crate::node::complete::guarded_complete_async_with_ack(
         &mut journal,
