@@ -170,7 +170,7 @@ impl GitCounters {
                     reason: "sid is missing or not a string".to_owned(),
                 });
             };
-            if sid.is_empty() {
+            if sid.trim().is_empty() {
                 return Err(TraceError::InvalidEvent {
                     line: line_number,
                     reason: "sid is empty".to_owned(),
@@ -239,10 +239,16 @@ impl GitCounters {
                                 });
                             }
                             let code = completion_code(event, line_number, name)?;
-                            if process.exit_code != Some(code) {
+                            let Some(exit_code) = process.exit_code else {
+                                return Err(TraceError::InvalidEvent {
+                                    line: line_number,
+                                    reason: format!("atexit appears before exit for sid {sid}"),
+                                });
+                            };
+                            if exit_code != code {
                                 return Err(TraceError::MismatchedCompletion {
                                     sid: sid.to_owned(),
-                                    exit_code: process.exit_code.expect("checked above"),
+                                    exit_code,
                                     atexit_code: code,
                                 });
                             }
@@ -441,6 +447,14 @@ mod tests {
     fn a_version_without_sid_is_rejected() {
         let error = GitCounters::from_events(r#"{"event":"version","evt":"4"}"#)
             .expect_err("missing sid must fail");
+        assert!(matches!(error, TraceError::InvalidEvent { line: 1, .. }));
+        assert!(error.to_string().contains("sid"));
+    }
+
+    #[test]
+    fn a_whitespace_only_sid_is_rejected() {
+        let error = GitCounters::from_events(r#"{"event":"version","sid":"   ","evt":"4"}"#)
+            .expect_err("blank sid must fail");
         assert!(matches!(error, TraceError::InvalidEvent { line: 1, .. }));
         assert!(error.to_string().contains("sid"));
     }
