@@ -467,6 +467,19 @@ fn open_slot_journal(
     config_dir: &Path,
     what: &str,
 ) -> Result<Option<(velnor_control::journal::Journal, velnor_model::SlotId)>> {
+    // A configless runner has no journal-managed slots. In particular, do not
+    // create an absolute/default config path just because a broker message
+    // arrived; that would turn a harmless no-slot path into a filesystem
+    // failure in read-only environments.
+    if !config_dir.is_dir() {
+        return Ok(None);
+    }
+    // Acquisition intent is written before the first run-service request. The
+    // first request can therefore be the process that creates the configured
+    // journal directory; leaving that to later slot setup reopens the exact
+    // crash window this journal is meant to close.
+    fs::create_dir_all(journal_dir)
+        .with_context(|| format!("create journal directory {}", journal_dir.display()))?;
     let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let state = journal
