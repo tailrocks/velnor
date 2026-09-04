@@ -409,14 +409,7 @@ impl CargoWorkload {
         args: &[String],
         trace_file: Option<&Path>,
     ) -> Result<u64> {
-        let mut env = vec![
-            ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
-            ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
-            ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
-        ];
-        if let Some(trace_file) = trace_file {
-            env.extend(gittrace::trace_env(trace_file));
-        }
+        let env = cargo_env(target, trace_file);
         let started = Instant::now();
         let invocation = context
             .runner
@@ -627,29 +620,20 @@ impl Workload for CargoWorkload {
         // process/resource census and establish the disk baseline immediately
         // before the command; snapshot all observation inputs before restore.
         context.runner.reset();
-        let trace_file = trace_file_path(
-            &context.work_root,
-            self.scenario,
-            self.scratch.nonce,
-            self.scratch.id,
-            self.iteration,
-        );
-        // Register before clearing or allowing Git tracing to create the file.
-        self.scratch.traces.push(trace_file.clone());
-        clear_trace_file(&trace_file)?;
+        let trace_files = self.prepare_trace_files(&context.work_root)?;
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
-            self.run_concurrent(context, &args)?
+            self.run_concurrent(context, &args, &trace_files)?
         } else {
-            self.run_cargo(context, &workspace, &target, &args, Some(&trace_file))?
+            self.run_cargo(context, &workspace, &target, &args, Some(&trace_files[0]))?
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let usage = context.runner.rusage();
         let disk_after = tree_bytes(&root);
         let process_count = context.runner.process_count() as u64;
         let docker_invocations = context.runner.count_of("docker") as u64;
-        let git = GitCounters::from_event_file(&trace_file).unwrap_or_default();
+        let git = read_trace_files(&trace_files).context("reading Git trace evidence")?;
 
         let observation = Observation {
             total_ms,
@@ -703,6 +687,40 @@ impl Workload for CargoWorkload {
 }
 
 impl CargoWorkload {
+    fn prepare_trace_files(&mut self, work_root: &Path) -> Result<Vec<PathBuf>> {
+        // Git resolves GIT_TRACE2_EVENT relative to each worker's workspace.
+        // Use one absolute root so every worker writes to the path we later
+        // read, regardless of the caller's relative --work-root spelling.
+        let work_root = std::fs::canonicalize(work_root)
+            .with_context(|| format!("resolving Cargo trace root {}", work_root.display()))?;
+        let worker_count = if self.plan.workspace == Workspace::PerConcurrentJob {
+            self.scratch.worktrees.len()
+        } else {
+            1
+        };
+        if worker_count == 0 {
+            bail!("Cargo workload has no workers for Git trace evidence");
+        }
+
+        let mut trace_files = Vec::with_capacity(worker_count);
+        for worker_index in 0..worker_count {
+            let trace_file = trace_file_path_for_worker(
+                &work_root,
+                self.scenario,
+                self.scratch.nonce,
+                self.scratch.id,
+                self.iteration,
+                worker_index,
+            );
+            // Register before clearing or allowing Git tracing to create the
+            // file. A partial setup remains owned by teardown.
+            self.scratch.traces.push(trace_file.clone());
+            clear_trace_file(&trace_file)?;
+            trace_files.push(trace_file);
+        }
+        Ok(trace_files)
+    }
+
     fn cleanup_worktrees(&mut self, context: &mut Context, failures: &mut Vec<String>) {
         let owned = std::mem::take(&mut self.scratch.worktrees);
         let mut remaining = Vec::with_capacity(owned.len());
@@ -763,30 +781,43 @@ impl CargoWorkload {
 
     /// Concurrent jobs really do run concurrently: one thread per worktree,
     /// each with its own target directory.
-    fn run_concurrent(&self, context: &mut Context, args: &[String]) -> Result<u64> {
-        let pairs: Vec<(PathBuf, PathBuf)> = self
+    fn run_concurrent(
+        &self,
+        context: &mut Context,
+        args: &[String],
+        trace_files: &[PathBuf],
+    ) -> Result<u64> {
+        if self.scratch.worktrees.len() != self.scratch.targets.len()
+            || self.scratch.worktrees.len() != trace_files.len()
+        {
+            bail!("concurrent Cargo workers, targets, and Git traces must have equal ownership");
+        }
+        if trace_files.is_empty() {
+            bail!("concurrent Cargo workload has no Git trace files");
+        }
+
+        let pairs: Vec<(PathBuf, PathBuf, PathBuf)> = self
             .scratch
             .worktrees
             .iter()
             .map(|worktree| worktree.path.clone())
             .zip(self.scratch.targets.iter().cloned())
+            .zip(trace_files.iter().cloned())
+            .map(|((workspace, target), trace_file)| (workspace, target, trace_file))
             .collect();
         let started = Instant::now();
         let worker_results: Vec<Result<Runner, String>> = std::thread::scope(|scope| {
             let handles: Vec<_> = pairs
                 .iter()
-                .map(|(workspace, target)| {
+                .map(|(workspace, target, trace_file)| {
                     scope.spawn(move || {
                         let mut runner = Runner::new();
+                        let env = cargo_env(target, Some(trace_file));
                         let outcome = match runner.exec_without(
                             "cargo",
                             args,
                             Some(workspace),
-                            &[
-                                ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
-                                ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
-                                ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
-                            ],
+                            &env,
                             AMBIENT_CARGO_ENV_TO_REMOVE,
                         ) {
                             Ok(invocation) if invocation.ok() => Ok(()),
@@ -898,19 +929,45 @@ fn remove_owned_file(path: &Path) -> Result<()> {
     }
 }
 
-fn trace_file_path(
+fn trace_file_path_for_worker(
     work_root: &Path,
     scenario: &str,
     owner_nonce: u128,
     owner_id: u64,
     iteration: u64,
+    worker_index: usize,
 ) -> PathBuf {
     work_root.join(format!(
-        "{}-git-trace-{}-{}-{owner_id}-{iteration}.jsonl",
+        "{}-git-trace-{}-{}-{owner_id}-{iteration}-worker-{worker_index}.jsonl",
         std::process::id(),
         owner_nonce,
         scenario.replace('/', "_")
     ))
+}
+
+fn cargo_env(target: &Path, trace_file: Option<&Path>) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
+        ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
+        ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
+    ];
+    if let Some(trace_file) = trace_file {
+        env.extend(gittrace::trace_env(trace_file));
+    }
+    env
+}
+
+fn read_trace_files(paths: &[PathBuf]) -> Result<GitCounters> {
+    if paths.is_empty() {
+        bail!("no Git trace files were registered for the measured command");
+    }
+    let mut counters = GitCounters::default();
+    for path in paths {
+        let worker = GitCounters::from_event_file(path)
+            .with_context(|| format!("reading worker Git trace {}", path.display()))?;
+        counters.merge(worker);
+    }
+    Ok(counters)
 }
 
 fn clear_trace_file(path: &Path) -> Result<()> {
@@ -1282,12 +1339,13 @@ mod tests {
         };
         let mut workload = test_workload(plan, scenario);
         let expected_root = workload.scratch.scenario_root(&work_root, scenario);
-        let expected_trace = trace_file_path(
+        let expected_trace = trace_file_path_for_worker(
             &work_root,
             scenario,
             workload.scratch.nonce,
             workload.scratch.id,
             1,
+            0,
         );
         std::fs::write(&expected_trace, b"stale trace").expect("write stale trace");
         let mut context = test_context(work_root.clone(), repo, 1);
@@ -1440,7 +1498,7 @@ mod tests {
                         state: WorktreeState::Registered,
                     },
                 ],
-                targets: vec![worktree.clone(), worktree],
+                targets: vec![worktree.clone(), worktree.clone()],
                 ..ScratchOwner::new()
             },
             package: None,
@@ -1455,13 +1513,59 @@ mod tests {
             concurrency: 2,
             runner: Runner::new(),
         };
+        let trace_files = vec![
+            trace_file_path_for_worker(&worktree, "test/concurrent", 1, 1, 1, 0),
+            trace_file_path_for_worker(&worktree, "test/concurrent", 1, 1, 1, 1),
+        ];
 
         harness
-            .run_concurrent(&mut context, &["--version".to_owned()])
+            .run_concurrent(&mut context, &["--version".to_owned()], &trace_files)
             .expect("cargo workers");
 
         assert_eq!(context.runner.process_count(), 2);
         assert_eq!(context.runner.count_of("cargo"), 2);
+    }
+
+    #[test]
+    fn concurrent_trace_paths_and_environments_are_worker_specific() {
+        let root = std::env::temp_dir();
+        let first = trace_file_path_for_worker(&root, "rust/concurrent-jobs", 7, 8, 9, 0);
+        let second = trace_file_path_for_worker(&root, "rust/concurrent-jobs", 7, 8, 9, 1);
+        assert_ne!(first, second);
+
+        let first_env = cargo_env(&root, Some(&first));
+        let second_env = cargo_env(&root, Some(&second));
+        assert!(first_env.contains(&("GIT_TRACE2_EVENT".to_owned(), first.display().to_string())));
+        assert!(second_env.contains(&("GIT_TRACE2_EVENT".to_owned(), second.display().to_string())));
+        assert_ne!(first_env, second_env);
+    }
+
+    #[test]
+    fn concurrent_trace_merge_isolated_and_strict() {
+        let root = test_path("concurrent-trace-merge");
+        std::fs::create_dir_all(&root).expect("create trace root");
+        let first = root.join("worker-0.jsonl");
+        let second = root.join("worker-1.jsonl");
+        let ambient = root.join("ambient.jsonl");
+        let stream = |bytes| {
+            format!(
+                "{{\"event\":\"version\"}}\n{{\"event\":\"data\",\"key\":\"bytes-received\",\"value\":{bytes}}}\n"
+            )
+        };
+        std::fs::write(&first, stream(11)).expect("write first trace");
+        std::fs::write(&second, stream(22)).expect("write second trace");
+        std::fs::write(&ambient, stream(1000)).expect("write ambient trace");
+
+        let counters = read_trace_files(&[first.clone(), second.clone()]).expect("merge traces");
+        assert_eq!(counters.received_bytes, 33);
+        assert_eq!(counters.processes, 2);
+
+        let malformed = root.join("malformed.jsonl");
+        std::fs::write(&malformed, "not json\n").expect("write malformed trace");
+        let error = read_trace_files(&[first, malformed]).expect_err("malformed worker fails");
+        assert!(error.to_string().contains("malformed"), "{error:#}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1528,7 +1632,7 @@ mod tests {
         std::fs::create_dir_all(&measured_root).expect("create measured root");
 
         let disk_before = tree_bytes(&measured_root);
-        let trace_file = trace_file_path(&work_root, "rust/cold", 1, 1, 1);
+        let trace_file = trace_file_path_for_worker(&work_root, "rust/cold", 1, 1, 1, 0);
         std::fs::write(
             &trace_file,
             br#"{"event":"version"}
