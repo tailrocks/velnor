@@ -1278,3 +1278,66 @@ live in files under concurrent ownership, so they were reported rather than
 applied. Git byte and ref counters need no runner change for harness-driven
 scenarios: `GIT_TRACE2_EVENT` is set and its documented event JSON parsed. For
 runner-driven jobs the runner must set the same variable on its git children.
+
+### Correction to BC-16 — the admission gate was self-poisoning, not merely contended
+
+The recorded mechanism ("another slot is busy") is wrong in its literal form and understates
+the defect.
+
+Each slot is its own OS process (`runner.rs:2223`, `:2543`; `node/job.rs:171` launches one
+`run_daemon_slot` per worker process), so a *process-global* semaphore cannot be contended
+across slots at all.
+
+The real mechanism: a `spawn_blocking` task outlives the `tokio::time::timeout` that gave up
+on it, and the permit is released only when the closure finally ends. So the first
+Contents-API read that overran the 65 s admission budget kept the single permit **forever**,
+and every subsequent job in that slot process failed admission instantly and permanently. The
+same held for a stalled SQLite worker. One slow dependency therefore became an unbounded run
+of failed jobs on that slot — a red ❌ on every pull request routed to it until the process was
+restarted.
+
+That is a better example of the program's thesis than the original description: the gate was
+not a bottleneck, it was a latch, and nothing in the design gave it a path back to the
+unlatched state. It is RC-6 (durable in-flight records with no bounded terminal state) wearing
+a different costume.
+
+Resolution, in `239c695`, `91dff09`, `b08d592`, `179df7a`, `0ae9ba1`:
+
+- The Tokio blocking pool is now explicitly sized at 16 and belongs to the control plane
+  alone; the job body runs on a dedicated named OS thread per slot, with the result returned
+  over a `oneshot` so a panicked or killed thread arrives as a dropped sender rather than a
+  hang. The previous 512 was the absence of a budget rather than a budget.
+- Both one-permit semaphores and both `try_acquire` gates are deleted outright. The
+  operational store now has **no limiter** — `Store` already serialises writers and the pool
+  is bounded — and is instead bounded by a 30 s deadline surfaced as a distinct
+  `AdmissionPersistenceOutcome::DeadlineExceeded`. Previously there was no timeout there at
+  all, so a hung writer hung the job indefinitely.
+- Closure admission uses a waiting, concurrency-bounded limiter (4). Callers wait; they never
+  fail. Converting `admission.rs` to async was explicitly *not* done and the reason is sound:
+  `admit_job` is a synchronous recursive walk whose children are discovered from each fetched
+  `action.yml`, so there is no root-level fan-out to parallelise without restructuring the
+  security-critical closure engine and its ~40 tests. That is its own package.
+- `JobStage` and `WaitReason` are emitted on all three non-executing stages as `&'static str`
+  fields, with no hot-path formatting.
+
+Deferred and named: the three new telemetry fields are not yet declared in the `passive_wait`
+contract in `crates/velnor-model/src/telemetry.rs` and `schemas/velnor.telemetry.v1.json`.
+Both permit them today (`additionalProperties: true`), so nothing is broken, but the contract
+should name them.
+
+### Coordination incidents, resolved
+
+An agent ran `git stash` in the shared worktree to test whether a lint error was pre-existing,
+which stashed every other agent's dirty files. Two agents recovered their own work by
+extracting individual diffs. I have since verified the leftover `stash@{0}` against `HEAD`
+file by file: the Renovate rust manager, `mise.lock` at 1.98.1, the bounded blocking pool and
+the `statusCode` fix are all present on the branch. **Nothing was lost**; the stash is fully
+redundant and is retained only as a safety copy.
+
+Separately, a deletion of `scripts/benchmark/benchmark.sh` staged by the benchmark package
+landed inside another agent's commit for the same shared-index reason. The deletion is
+intended, so it stands where it is rather than being rewritten out of a shared branch's
+history.
+
+Both incidents are consequences of many agents sharing one worktree, and both are now covered
+by the §1 rules: explicit pathspec on every commit, and never `git stash` in a shared tree.
