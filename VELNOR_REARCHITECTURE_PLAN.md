@@ -1262,3 +1262,19 @@ round-trip test that writes through the real emitter and reads through
 Both defects invalidate measurement rather than execution, which is why they
 are recorded here by the benchmark work (T-010) rather than patched in place:
 `runner.rs` is under concurrent ownership.
+
+## 13. Completed work packages (continued)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| T-010 | Benchmark system (closes BC-27) | `crates/velnor-bench` replaces `scripts/benchmark/benchmark.sh`, which is deleted. Declarative 33-scenario matrix across lifecycle, Rust, Docker and persistent-host families; NDJSON `velnor.bench.result.v1` output; mandatory environment identity enforced by the schema; `TelemetryLane` reused for the internal/external split; percentiles emitted only where the sample supports them (p50 n>=2, p95 n>=20, p99 n>=100) and single runs refused. Proven end to end on `docker/existing-image` at n=20 against a real Docker daemon. Registered-runner scenarios are declared and reported as unrun on hosts without one; nothing is simulated. |
+
+Two instrumentation hooks remain owed to the harness and are recorded in
+`crates/velnor-bench/README.md`: a counting decorator around `CommandRunner`
+(`crates/velnor-runner/src/executor.rs`) for the per-job process and Docker
+invocation census, and per-phase checkout spans in
+`crates/velnor-runner/src/checkout.rs` matching `stage::CheckoutPhase`. Both
+live in files under concurrent ownership, so they were reported rather than
+applied. Git byte and ref counters need no runner change for harness-driven
+scenarios: `GIT_TRACE2_EVENT` is set and its documented event JSON parsed. For
+runner-driven jobs the runner must set the same variable on its git children.
