@@ -150,6 +150,8 @@ pub struct FirecrackerBackend {
     pub started: bool,
     pub restored: bool,
     pub jailer: Option<SpawnedProcess>,
+    /// Keeps the graceful guest cancel registered; dropped with the session.
+    pub guest_cancel_registration: Option<crate::execution::cancel::TargetRegistration>,
     /// Keeps the jailer registered with the job's cancellation fan-out; dropped
     /// with the session, which deregisters it.
     pub cancellation_registration: Option<crate::execution::cancel::TargetRegistration>,
@@ -369,6 +371,7 @@ impl FirecrackerBackend {
         };
         self.execution = Some(state.clone());
         events.push(ExecutionEvent::FirecrackerApi("vsock DeliverPlan".into()));
+        self.register_guest_cancel(world);
         if let Some(vsock) = world.vsock.as_mut() {
             return drive_vsock(
                 &mut **vsock,
@@ -445,6 +448,28 @@ impl FirecrackerBackend {
                 failures.join("; ")
             )))
         }
+    }
+
+    /// Register the graceful half of microVM cancellation.
+    ///
+    /// The jailer registration below is a bounded kill. This hook runs first,
+    /// on the same connection the session uses, so the guest's own loop reads
+    /// `Cancel` and returns — which is what upstream's worker cancellation
+    /// does. If the guest does not stop, the jailer target still terminates it.
+    fn register_guest_cancel(&mut self, world: &mut ExecutionWorld<'_>) {
+        let Some(token) = crate::execution::cancel::active() else {
+            return;
+        };
+        let Some(handle) = world.vsock.as_mut().and_then(|vsock| vsock.cancel_handle()) else {
+            return;
+        };
+        let handle = std::sync::Arc::new(handle);
+        self.guest_cancel_registration = Some(token.register(
+            crate::execution::cancel::TerminationTarget::Hook {
+                label: "microvm-guest-cancel".to_string(),
+                run: std::sync::Arc::new(move |_level| handle.cancel()),
+            },
+        ));
     }
 
     /// Make the running microVM reachable from the job's cancellation fan-out.
