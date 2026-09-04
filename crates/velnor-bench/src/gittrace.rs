@@ -8,6 +8,7 @@
 //! ignored rather than guessed at; incomplete evidence is rejected.
 
 use std::{
+    collections::BTreeMap,
     fmt, io,
     path::{Path, PathBuf},
 };
@@ -28,9 +29,20 @@ pub enum TraceError {
     },
     /// A JSON event has the wrong shape for trace2.
     InvalidEvent { line: usize, reason: String },
-    /// The stream contains no process-start marker, so it cannot prove that
-    /// the requested command emitted complete trace evidence.
-    NoProcessEvents,
+    /// A process did not emit both lifecycle completion events.
+    IncompleteProcess { sid: String, missing: &'static str },
+    /// A process's exit and atexit codes do not match.
+    MismatchedCompletion {
+        sid: String,
+        exit_code: i64,
+        atexit_code: i64,
+    },
+    /// A process completed unsuccessfully.
+    NonZeroCompletion {
+        sid: String,
+        event: &'static str,
+        code: i64,
+    },
 }
 
 impl fmt::Display for TraceError {
@@ -49,8 +61,19 @@ impl fmt::Display for TraceError {
             Self::InvalidEvent { line, reason } => {
                 write!(formatter, "Git trace line {line} is invalid: {reason}")
             }
-            Self::NoProcessEvents => {
-                formatter.write_str("Git trace contains no process version event")
+            Self::IncompleteProcess { sid, missing } => {
+                write!(formatter, "Git trace process {sid} is missing {missing}")
+            }
+            Self::MismatchedCompletion {
+                sid,
+                exit_code,
+                atexit_code,
+            } => write!(
+                formatter,
+                "Git trace process {sid} has exit code {exit_code} but atexit code {atexit_code}"
+            ),
+            Self::NonZeroCompletion { sid, event, code } => {
+                write!(formatter, "Git trace process {sid} has {event} code {code}")
             }
         }
     }
@@ -61,9 +84,19 @@ impl std::error::Error for TraceError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::MalformedJson { source, .. } => Some(source),
-            Self::Empty | Self::InvalidEvent { .. } | Self::NoProcessEvents => None,
+            Self::Empty
+            | Self::InvalidEvent { .. }
+            | Self::IncompleteProcess { .. }
+            | Self::MismatchedCompletion { .. }
+            | Self::NonZeroCompletion { .. } => None,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct ProcessTrace {
+    exit_code: Option<i64>,
+    atexit_code: Option<i64>,
 }
 
 /// Counters extracted from one git process tree's trace2 event stream.
@@ -85,7 +118,7 @@ impl GitCounters {
     /// Read a trace2 event file written by `GIT_TRACE2_EVENT`.
     ///
     /// # Errors
-    /// The file could not be read.
+    /// The file could not be read or its event stream is incomplete/invalid.
     pub fn from_event_file(path: &Path) -> Result<Self, TraceError> {
         let stream = std::fs::read_to_string(path).map_err(|source| TraceError::Read {
             path: path.to_owned(),
@@ -96,15 +129,21 @@ impl GitCounters {
 
     /// Parse a trace2 event stream (one JSON object per line).
     ///
-    /// Every line must be valid trace2 JSON and the stream must contain at
-    /// least one process version event. This prevents an absent, truncated,
-    /// or malformed file from becoming fabricated zero counters.
+    /// Every line must be valid trace2 JSON, carry a process SID, and belong to
+    /// a process with a complete successful `version` → `exit` → `atexit`
+    /// lifecycle. This prevents an absent, truncated, or malformed file from
+    /// becoming fabricated zero counters.
+    ///
+    /// # Errors
+    /// The stream contains malformed events, an incomplete process lifecycle,
+    /// mismatched completion codes, or a nonzero completion code.
     pub fn from_events(stream: &str) -> Result<Self, TraceError> {
         if stream.trim().is_empty() {
             return Err(TraceError::Empty);
         }
 
         let mut counters = Self::default();
+        let mut processes = BTreeMap::<String, ProcessTrace>::new();
         for (line_index, line) in stream.lines().enumerate() {
             let line_number = line_index + 1;
             if line.trim().is_empty() {
@@ -125,6 +164,18 @@ impl GitCounters {
                     reason: "event must be a JSON object".to_owned(),
                 });
             };
+            let Some(sid) = event.get("sid").and_then(serde_json::Value::as_str) else {
+                return Err(TraceError::InvalidEvent {
+                    line: line_number,
+                    reason: "sid is missing or not a string".to_owned(),
+                });
+            };
+            if sid.is_empty() {
+                return Err(TraceError::InvalidEvent {
+                    line: line_number,
+                    reason: "sid is empty".to_owned(),
+                });
+            }
             let Some(name) = event.get("event").and_then(serde_json::Value::as_str) else {
                 return Err(TraceError::InvalidEvent {
                     line: line_number,
@@ -138,14 +189,98 @@ impl GitCounters {
                 });
             }
             match name {
-                "version" => counters.processes = counters.processes.saturating_add(1),
-                "data" => counters.absorb_data(event, line_number)?,
-                _ => {}
+                "version" => {
+                    if processes
+                        .insert(sid.to_owned(), ProcessTrace::default())
+                        .is_some()
+                    {
+                        return Err(TraceError::InvalidEvent {
+                            line: line_number,
+                            reason: format!("duplicate version event for sid {sid}"),
+                        });
+                    }
+                    counters.processes = counters.processes.saturating_add(1);
+                }
+                _ => {
+                    let Some(process) = processes.get_mut(sid) else {
+                        return Err(TraceError::InvalidEvent {
+                            line: line_number,
+                            reason: format!("event {name} appears before version for sid {sid}"),
+                        });
+                    };
+                    if process.atexit_code.is_some() {
+                        return Err(TraceError::InvalidEvent {
+                            line: line_number,
+                            reason: format!("event {name} appears after atexit for sid {sid}"),
+                        });
+                    }
+                    match name {
+                        "data" => counters.absorb_data(event, line_number)?,
+                        "exit" => {
+                            if process.exit_code.is_some() {
+                                return Err(TraceError::InvalidEvent {
+                                    line: line_number,
+                                    reason: format!("duplicate exit event for sid {sid}"),
+                                });
+                            }
+                            process.exit_code = Some(completion_code(event, line_number, name)?);
+                        }
+                        "atexit" => {
+                            if process.exit_code.is_none() {
+                                return Err(TraceError::InvalidEvent {
+                                    line: line_number,
+                                    reason: format!("atexit appears before exit for sid {sid}"),
+                                });
+                            }
+                            if process.atexit_code.is_some() {
+                                return Err(TraceError::InvalidEvent {
+                                    line: line_number,
+                                    reason: format!("duplicate atexit event for sid {sid}"),
+                                });
+                            }
+                            let code = completion_code(event, line_number, name)?;
+                            if process.exit_code != Some(code) {
+                                return Err(TraceError::MismatchedCompletion {
+                                    sid: sid.to_owned(),
+                                    exit_code: process.exit_code.expect("checked above"),
+                                    atexit_code: code,
+                                });
+                            }
+                            process.atexit_code = Some(code);
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
-        if counters.processes == 0 {
-            return Err(TraceError::NoProcessEvents);
+        for (sid, process) in processes {
+            let Some(exit_code) = process.exit_code else {
+                return Err(TraceError::IncompleteProcess {
+                    sid,
+                    missing: "exit and atexit",
+                });
+            };
+            let Some(atexit_code) = process.atexit_code else {
+                return Err(TraceError::IncompleteProcess {
+                    sid,
+                    missing: "atexit",
+                });
+            };
+            if exit_code != atexit_code {
+                return Err(TraceError::MismatchedCompletion {
+                    sid,
+                    exit_code,
+                    atexit_code,
+                });
+            }
+            if exit_code != 0 {
+                return Err(TraceError::NonZeroCompletion {
+                    sid,
+                    event: "exit",
+                    code: exit_code,
+                });
+            }
         }
         Ok(counters)
     }
@@ -212,6 +347,20 @@ impl GitCounters {
     }
 }
 
+fn completion_code(
+    event: &serde_json::Map<String, serde_json::Value>,
+    line: usize,
+    name: &str,
+) -> Result<i64, TraceError> {
+    event
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| TraceError::InvalidEvent {
+            line,
+            reason: format!("{name} completion code is missing or not an integer"),
+        })
+}
+
 fn is_counter_key(key: &str) -> bool {
     matches!(
         key,
@@ -252,14 +401,18 @@ pub fn trace_env(event_file: &Path) -> [(String, String); 2] {
 mod tests {
     use super::*;
 
-    const STREAM: &str = r#"{"event":"version","evt":"3","exe":"2.51.0"}
-{"event":"data","key":"bytes-received","value":123456}
-{"event":"data","key":"fetch/ref-count","value":"42"}
-{"event":"data","key":"transfer/object-count","value":9001}
-{"event":"data","key":"unrelated","value":7}
-{"event":"version","evt":"3","exe":"2.51.0"}
-{"event":"data","key":"bytes-received","value":1000}
-{"event":"exit","code":0}
+    const STREAM: &str = r#"{"event":"version","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000001Z","evt":"4","exe":"2.50.1"}
+{"event":"start","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000002Z","argv":["git","fetch"]}
+{"event":"data","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000003Z","key":"bytes-received","value":123456}
+{"event":"data","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000004Z","key":"fetch/ref-count","value":"42"}
+{"event":"data","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000005Z","key":"transfer/object-count","value":9001}
+{"event":"data","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000006Z","key":"unrelated","value":7}
+{"event":"exit","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000007Z","code":0}
+{"event":"atexit","sid":"20260905T000000.000000Z-H00000001-P00000001","thread":"main","time":"2026-09-05T00:00:00.000008Z","code":0}
+{"event":"version","sid":"20260905T000000.000000Z-H00000002-P00000002","thread":"main","time":"2026-09-05T00:00:01.000001Z","evt":"4","exe":"2.50.1"}
+{"event":"data","sid":"20260905T000000.000000Z-H00000002-P00000002","thread":"main","time":"2026-09-05T00:00:01.000002Z","key":"bytes-received","value":1000}
+{"event":"exit","sid":"20260905T000000.000000Z-H00000002-P00000002","thread":"main","time":"2026-09-05T00:00:01.000003Z","code":0}
+{"event":"atexit","sid":"20260905T000000.000000Z-H00000002-P00000002","thread":"main","time":"2026-09-05T00:00:01.000004Z","code":0}
 "#;
 
     #[test]
@@ -285,17 +438,92 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_without_process_evidence_is_rejected() {
+    fn a_version_without_sid_is_rejected() {
+        let error = GitCounters::from_events(r#"{"event":"version","evt":"4"}"#)
+            .expect_err("missing sid must fail");
+        assert!(matches!(error, TraceError::InvalidEvent { line: 1, .. }));
+        assert!(error.to_string().contains("sid"));
+    }
+
+    #[test]
+    fn a_truncated_process_is_rejected_without_fabricated_counters() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4","exe":"2.50.1"}"#,
+        )
+        .expect_err("missing lifecycle must fail");
         assert!(matches!(
-            GitCounters::from_events("{\"event\":\"exit\",\"code\":0}\n"),
-            Err(TraceError::NoProcessEvents)
+            error,
+            TraceError::IncompleteProcess {
+                missing: "exit and atexit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_missing_atexit_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"exit","sid":"sid-1","code":0}"#,
+        )
+        .expect_err("missing atexit must fail");
+        assert!(matches!(
+            error,
+            TraceError::IncompleteProcess {
+                missing: "atexit",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_completion_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"exit","sid":"sid-1"}
+{"event":"atexit","sid":"sid-1","code":0}"#,
+        )
+        .expect_err("missing completion code must fail");
+        assert!(matches!(error, TraceError::InvalidEvent { line: 2, .. }));
+    }
+
+    #[test]
+    fn mismatched_completion_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"exit","sid":"sid-1","code":0}
+{"event":"atexit","sid":"sid-1","code":1}"#,
+        )
+        .expect_err("mismatched completion must fail");
+        assert!(matches!(error, TraceError::MismatchedCompletion { .. }));
+    }
+
+    #[test]
+    fn nonzero_completion_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"exit","sid":"sid-1","code":7}
+{"event":"atexit","sid":"sid-1","code":7}"#,
+        )
+        .expect_err("nonzero completion must fail");
+        assert!(matches!(
+            error,
+            TraceError::NonZeroCompletion { code: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn an_event_without_a_process_version_is_rejected() {
+        assert!(matches!(
+            GitCounters::from_events("{\"event\":\"exit\",\"sid\":\"sid-1\",\"code\":0}\n"),
+            Err(TraceError::InvalidEvent { line: 1, .. })
         ));
     }
 
     #[test]
     fn malformed_counter_data_is_rejected() {
         let error = GitCounters::from_events(
-            "{\"event\":\"version\"}\n{\"event\":\"data\",\"key\":\"bytes-received\",\"value\":\"unknown\"}\n",
+            "{\"event\":\"version\",\"sid\":\"sid-1\"}\n{\"event\":\"data\",\"sid\":\"sid-1\",\"key\":\"bytes-received\",\"value\":\"unknown\"}\n",
         )
         .expect_err("invalid counter must fail");
         assert!(matches!(error, TraceError::InvalidEvent { line: 2, .. }));
