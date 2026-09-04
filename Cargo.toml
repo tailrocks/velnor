@@ -58,7 +58,11 @@ time = { version = "0.3.41", features = ["formatting", "parsing"] }
 # Strict, non-regex parsing of mise config/lock TOML for the fail-closed mise
 # policy (crates/velnor-runner/src/mise.rs). Never hand-parse lock TOML.
 toml = "1.0"
-tokio = { version = "1.45.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+# fs: crates/velnor-runner/src/gha_cache.rs uses tokio::fs directly. Declare it
+# rather than relying on transitive feature unification, which any dependency
+# change can withdraw. `process` was dropped: every child process in the tree is
+# spawned through std::process.
+tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2.5.4"
 uuid = { version = "1.18.1", features = ["v4"] }
 unicode-normalization = "0.1.24"
