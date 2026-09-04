@@ -1199,3 +1199,66 @@ live dual-lane run has executed them. The two things most likely to surface ther
 `PATH` in a Velnor job, Velnor-lane records will lack their build identity and the comparator
 will fail the run, which is correct behavior but is a failure — and any observation that
 legitimately differs between lanes now that nothing is silently dropped.
+
+## 8. Discovered bug classes (continued)
+
+### BC-32 — The teardown SLO is compared against a constant zero
+
+`runner.rs:6215` builds every `JobTimingRecord` with `teardown_ms: 0`. On the
+path where a `TeardownHandle` exists, the teardown thread overwrites the field
+with the real duration before emitting (`runner.rs:8507`, currently
+`start_post_completion_teardown`). On the path where it does not, the record is
+emitted verbatim at `runner.rs:6226` with the zero still in it, and that record
+is what `timing_percentiles` (`runner.rs:11584`) feeds into the
+`DEFAULT_SLO_TEARDOWN_MS = 2_000` comparison in `print_doctor_slos`
+(`runner.rs:11674`). A zero can never exceed a 2 s budget, so that SLO cannot
+fire from those records, and it drags the percentile down for every mixed
+sample.
+
+The enabling condition is that the record is constructed complete before one of
+its fields is knowable, using a sentinel that is indistinguishable from a real
+measurement. The class fix is to make unknown unrepresentable: `teardown_ms:
+Option<u64>`, `None` at construction, `Some(duration)` only from the teardown
+thread, and a percentile function that excludes `None` the same way it already
+excludes the absent `queue_ms`. The SLO then reports "no teardown samples"
+rather than a satisfied budget. A same-shape audit is owed for `finalize_ms`
+and `container_boot_ms`, which are built at the same site.
+
+Related, and the same class as BC-27: `timing_percentiles` computes a p95 from
+any non-empty sample (`runner.rs:11584`), so with one completed job the
+reported p95 is that job. `percentile` (`runner.rs:11575`) has no minimum-n
+guard. `crates/velnor-bench/src/stats.rs` states the rule the runner needs —
+quantile `q` requires `1/(1-q)` samples, so p95 requires 20 — and the runner's
+`DEFAULT_SLO_SAMPLE_SIZE = 100` window is large enough to satisfy it once the
+guard exists.
+
+### BC-33 — The only durable timing analytics is a text re-parse
+
+`load_recent_job_timings` (`runner.rs:11630` onward) recovers every timing
+record by reading `lifecycle.log`, splitting each line on the literal
+`"job-timing "` (`parse_job_timing_line`, `runner.rs:11564`) and parsing the
+remainder as JSON. The writer is a `format!("job-timing {json}")` at two
+unrelated call sites. Nothing binds the writer's format to the reader's
+expectation: change the prefix, wrap the line, or add a field before it, and
+every line fails to parse, `records` is empty, and `print_doctor_slos` prints
+"no completed job-timing records yet". The SLOs do not breach — they disappear,
+which reads as health.
+
+The records are then ordered by comparing the timestamp prefix as a string
+(`runner.rs:11647`). That is chronologically correct only because
+`unix_now_iso8601` emits fixed-width UTC with seven fractional digits, and that
+format is maintained for an unrelated reason: GitHub's log UI strips a
+timestamp prefix only in the .NET round-trip shape (`runner.rs:9917-9932`). The
+sort correctness of the analytics is therefore load-bearing on a rendering
+constraint of the GitHub web UI, with no test asserting the coupling.
+
+Missing invariant: *durable analytics must read a durable record, not a
+rendering of one.* The class fix is a typed sink — the timing record appended
+as JSONL to its own file, written and read through one serialiser — with the
+lifecycle log line kept only as human-readable forensics. Until that exists, a
+round-trip test that writes through the real emitter and reads through
+`load_recent_job_timings` would at least make a format change fail loudly.
+
+Both defects invalidate measurement rather than execution, which is why they
+are recorded here by the benchmark work (T-010) rather than patched in place:
+`runner.rs` is under concurrent ownership.
