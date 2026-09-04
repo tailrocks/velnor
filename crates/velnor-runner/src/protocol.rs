@@ -1808,15 +1808,39 @@ fn classify_completion_response(status: u16, body: &str) -> CompletionResponseCl
     }
 }
 
+/// Error envelope returned by the run service. Mirrors actions/runner's
+/// `RunServiceError` (`src/Sdk/RSWebApi/Contracts/RunServiceError.cs`): the
+/// serde names below are the upstream `DataMember(Name = ...)` wire names, not
+/// the C# property identifiers. `Code` is the property; `statusCode` is the
+/// wire field, and only the wire name may appear here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct RunServiceError {
+    #[serde(default, rename = "source")]
+    pub(crate) source: Option<String>,
+    #[serde(default, rename = "statusCode")]
+    pub(crate) code: Option<u16>,
+    #[serde(default, rename = "errorMessage")]
+    pub(crate) message: Option<String>,
+}
+
+impl RunServiceError {
+    /// actions/runner's `RunServiceHttpClient.TryParseErrorBody`: a body only
+    /// counts as a run-service error when it parses and `source` is exactly
+    /// `actions-run-service`. Anything else is an unrelated API failure.
+    fn parse(body: &str) -> Option<Self> {
+        let error: Self = serde_json::from_str(body).ok()?;
+        (error.source.as_deref() == Some(RUN_SERVICE_ERROR_SOURCE)).then_some(error)
+    }
+}
+
+/// `RunServiceHttpClient.TryParseErrorBody` only accepts this source value.
+const RUN_SERVICE_ERROR_SOURCE: &str = "actions-run-service";
+
 /// Match the exact error shape used by actions/runner's RunService client for
 /// a missing completion job. A bare 404 or an unrelated API 404 is not proof
 /// that this job was already terminal.
 fn is_run_service_job_not_found(body: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return false;
-    };
-    value.get("source").and_then(Value::as_str) == Some("actions-run-service")
-        && value.get("code").and_then(Value::as_u64) == Some(404)
+    RunServiceError::parse(body).is_some_and(|error| error.code == Some(404))
 }
 
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
@@ -7705,6 +7729,57 @@ mod tests {
         assert!(!is_retriable_completion_status(422));
     }
 
+    /// Build a run-service error body from the upstream contract, not from
+    /// Velnor's parser. Field names are transcribed from
+    /// `actions/runner@v2.337.0 src/Sdk/RSWebApi/Contracts/RunServiceError.cs`:
+    ///
+    /// ```text
+    /// [DataMember(Name = "source",       EmitDefaultValue = false)] public string Source
+    /// [DataMember(Name = "statusCode",   EmitDefaultValue = false)] public int    Code
+    /// [DataMember(Name = "errorMessage", EmitDefaultValue = false)] public string Message
+    /// ```
+    ///
+    /// Every fixture in this module must come through here so a fixture can
+    /// never be derived from Velnor's own field names.
+    fn upstream_run_service_error_body(
+        source: &str,
+        status_code: u16,
+        message: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "source": source,
+            "statusCode": status_code,
+            "errorMessage": message,
+        })
+    }
+
+    #[test]
+    fn run_service_error_uses_upstream_wire_names() {
+        let parsed: RunServiceError = serde_json::from_value(upstream_run_service_error_body(
+            "actions-run-service",
+            404,
+            "Job not found",
+        ))
+        .unwrap();
+        assert_eq!(parsed.source.as_deref(), Some("actions-run-service"));
+        assert_eq!(parsed.code, Some(404));
+        assert_eq!(parsed.message.as_deref(), Some("Job not found"));
+
+        // The C# *property* names are `Code` and `Message`; the wire names are
+        // `statusCode` and `errorMessage`. Reading the property spellings must
+        // stay impossible, or a 404 acknowledgement silently degrades into a
+        // permanent failure again.
+        let property_named: RunServiceError = serde_json::from_str(
+            r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#,
+        )
+        .unwrap();
+        assert_eq!(property_named.code, None);
+        assert_eq!(property_named.message, None);
+        assert!(!is_run_service_job_not_found(
+            r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#
+        ));
+    }
+
     #[test]
     fn completion_response_classifies_terminal_observations_without_retry() {
         assert_eq!(
@@ -7714,9 +7789,20 @@ mod tests {
         assert_eq!(
             classify_completion_response(
                 404,
-                r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
             ),
             CompletionResponseClass::RemoteObservedTerminal
+        );
+        // An unrelated service emitting the same envelope is not proof that
+        // this job is terminal: upstream gates on `source` too.
+        assert_eq!(
+            classify_completion_response(
+                404,
+                &upstream_run_service_error_body("actions-broker", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::PermanentFailure
         );
         assert_eq!(
             classify_completion_response(409, ""),
@@ -7759,13 +7845,9 @@ mod tests {
             server.reset().await;
             Mock::given(method("POST"))
                 .and(path("/run/jobs/123/completejob"))
-                .respond_with(
-                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
-                        "source": "actions-run-service",
-                        "code": status,
-                        "message": "Job not found",
-                    })),
-                )
+                .respond_with(ResponseTemplate::new(status).set_body_json(
+                    upstream_run_service_error_body("actions-run-service", status, "Job not found"),
+                ))
                 .expect(1)
                 .mount(&server)
                 .await;

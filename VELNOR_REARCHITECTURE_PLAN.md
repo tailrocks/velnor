@@ -707,3 +707,94 @@ Docker and git fault injection. The Docker subcommand census taken through it
 (`exec` 29, `rm` 19, `network` 13, `inspect` 9) independently corroborates the 12+N minimal
 and 52-72 representative per-job figures in BC-7. `TelemetryLane { Github, Velnor }` already
 encodes the internal-versus-external split the benchmark needs.
+
+### Correction to BC-15 / BC-21 — the trust model is pool-level, and nothing enforces that
+
+Two investigations reached opposite conclusions about trust isolation. Resolved from source
+rather than by preferring either report:
+
+- `crates/velnor-runner/src/github_adapter.rs:223-225`
+  (`github_trust_scope_allows_host_docker`) accepts only the exact value `trusted`, and it
+  gates `mount_docker_socket` (`:63-64`). QEMU, registry login and BuildKit secrets are
+  separately gated (`executor.rs:3088-3093`, `:3446-3453`, `:3499-3505`), and stores are
+  namespaced by trust class first (`:227-234`). So the isolation *code* is real and, where
+  it applies, correct.
+- `cargo_target_trust_scope_from` (`github_adapter.rs:215-221`) falls back to
+  **`untrusted`**, i.e. the code fails closed — the earlier note that it defaults to
+  `trusted` was wrong about this function.
+- But `service.rs:194` declares the daemon flag with
+  `default_value = "trusted"`, the shipped unit sets `VELNOR_TRUST_SCOPE=trusted`
+  (`crates/velnor-runner/debian/velnor.env:42`), and the quick-start documentation instructs
+  operators to set exactly that (`content/docs/getting-started.mdx:88`).
+
+The accurate statement is therefore: **Velnor's trust boundary is the daemon/pool, not the
+job** — which `velnor.env:40-41` states as the intended design ("one value per daemon/pool
+trust boundary"). Nothing derives a trust class from the job's event or head repository, so
+a single pool that accepts both fork pull requests and trusted builds has no isolation
+between them at all — and that is precisely the configuration the quick start produces.
+
+That reframes the defect rather than removing it. Two things are wrong, and both are real:
+
+1. **Nothing rejects the unsafe configuration.** A pool configured `trusted` will happily
+   accept a fork-PR job, and no admission check refuses it. A pool-level trust model is
+   defensible, but only if the runner enforces the boundary it claims — a `trusted` pool
+   must reject jobs from outside its trust class rather than run them as trusted.
+2. **`content/docs/guides/execution.mdx:131-137` claims a per-job "admitted trust class"
+   that does not exist.** The documentation describes job-level trust; the implementation is
+   pool-level. One of the two must change, and the documentation is the one that is wrong
+   about the code.
+
+The fork-to-trusted write paths recorded under BC-21 remain valid **within a single
+mixed-use pool**: `$CARGO_HOME/bin` (`container.rs:176-180`) and `/opt/mise/installs` plus
+`/opt/velnor/mise-binaries` (`:186-194`) are mounted read-write onto the next job's `PATH`,
+and Cargo's `registry/{cache,index}` and `git/db` are shared daemon-wide across every
+repository and owner (`container.rs:157-171`). Those are the paths that make a mixed pool
+dangerous rather than merely unisolated.
+
+Target: derive trust class from the job, keep it non-`Default` and failing closed, and make
+a pool refuse a job whose derived class does not match the class the pool was configured to
+serve. Then the pool-level model and the job-level model agree instead of contradicting.
+
+### BC-28 — The job image is 3.0 GB, and BuildKit throws its cache away every job
+
+Measured against the pinned base with a live Docker Engine 29.4.0: base 40.7 MB; the apt
+layer installs 290 packages, 363 MB downloaded and **1628 MB unpacked**; the mise layer adds
+roughly 350 MB compressed and 1.3 GB unpacked. Total around **3.0 GB unpacked**.
+
+Two P0 items:
+
+- **BuildKit cache is destroyed on every job.** `cleanup_job_buildkit`
+  (`executor.rs:3907-3943`) force-removes the buildkitd container *and* its `_state` volume
+  on every terminal path (`:3781`, `:3851`, `:3898`), so a workflow's `keep-state: true` or
+  `cleanup: false` cannot survive it. Every containerized build in every job starts cold.
+  BuildKit is expensive persistent infrastructure being treated as per-job scratch.
+- **The emergency BuildKit reclaim is dead code.** `cache.rs:726` inspects the literal
+  `"velnor-builder"`, but `job_scoped_buildx_builder_name` (`executor.rs:10786-10790`) always
+  appends `-<scope>`, so the inspect never succeeds and the disk-pressure reclaim
+  (`cache.rs:678-680`) is a silent no-op. Same class as the artifact-store path defect in
+  BC-22: a path or name constructed two different ways in two places.
+- **Builder identity is keyed by runner slot, not repository** (`executor.rs:10785-10791`,
+  `job_scope_from_temp` `:10822-10832`). Harmless only because nothing persists today. This
+  is the enabling condition that must be removed *before* persistent builders are
+  introduced, or trusted-class build cache will leak across repositories.
+
+Waste with no consumer: roughly 541 MB of clang/LLVM with nothing using it (no `bindgen` in
+`Cargo.lock`, and the mold adapter explicitly avoids clang, `executor.rs:4928-4930`,
+asserted at `:26629-26633`); roughly 261 MB of `docker.io` + `containerd` + `runc` inside a
+container that uses the *host* Engine through the lease proxy; cosign at 133 MB and hadolint
+at 61 MB baked for single-adapter use; a browser and font stack baked into every job; and
+sccache baked in while off the default path.
+
+Layer invalidation is inverted: `rust-toolchain.toml` (`:106`) gates the entire ~1.3 GB
+toolchain layer, so a Rust patch bump — exactly the P0 upgrade this program is performing —
+reinstalls Node, Python, cosign, hadolint, gh, mold and protoc.
+
+Per-job waste on top of that: `seed_mise_store` copies the full ~1.2 GB baked store per
+(image × trust × repo × **slot**) (`executor.rs:4109-4148`, `container.rs:291-315`,
+`:792-808`); `mise self-update` hits the network per store for a version already baked
+identically; two full `find` walks of the multi-gigabyte tool store run **every job**
+(`executor.rs:4614`, `:4658`); and the QEMU binfmt privileged container is re-run per job for
+host-global state that already persists, with no `/proc/sys/fs/binfmt_misc` check
+(`executor.rs:3123-3133`). Orphan BuildKit reclaim runs only at daemon startup or via
+`doctor` (`runner.rs:3826-3841`, `:11513-11527`), so a crashed worker leaks a buildkitd
+container and a multi-gigabyte volume indefinitely.
