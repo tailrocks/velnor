@@ -109,14 +109,30 @@ pub enum ActionRuntime {
     Docker { image: String },
 }
 
+/// Dispatch class declared by the capability manifest. Generic action classes
+/// are deliberately separate from native adapters so an admitted action names
+/// the planner arm that can execute it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionAdapter {
+    Composite,
+    Docker,
+    Native(NativeActionAdapter),
+}
+
+impl ActionAdapter {
+    /// Stable name used by the exported capability manifest. Keep generic
+    /// dispatch classes distinct from native adapter names.
+    pub fn manifest_name(self) -> String {
+        match self {
+            Self::Composite => "Composite".to_string(),
+            Self::Docker => "Docker".to_string(),
+            Self::Native(adapter) => format!("Native({adapter:?})"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeActionAdapter {
-    /// Strictly approved remote composite expanded from its pinned metadata.
-    ApprovedComposite,
-    /// Strictly approved remote Docker action executed by the generic Docker path.
-    ApprovedDocker,
-    /// Strictly approved remote JavaScript action executed by the generic fetched-action path.
-    ApprovedJavaScript,
     Checkout,
     Cache,
     UploadArtifact,

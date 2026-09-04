@@ -30,10 +30,10 @@ use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
         composite_repository_action_plans_from_resolved, download_repository_actions,
-        is_local_action_step, local_action_plans_with_context, native_action_adapter,
-        native_invocation_from_plan, repository_action_plans, resolve_local_action,
-        unsupported_action_error, ActionMetadata, ActionRuntime, CompositeActionInvocation,
-        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
+        is_local_action_step, local_action_plans_with_context, native_invocation_from_plan,
+        repository_action_plans, resolve_local_action, unsupported_action_error, ActionAdapter,
+        ActionMetadata, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
+        ResolvedAction,
     },
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
@@ -9701,7 +9701,7 @@ where
     while !pending.is_empty() {
         let downloadable = pending
             .iter()
-            .filter(|plan| native_action_adapter(&plan.repository).is_none())
+            .filter(|plan| action_requires_metadata_fetch(&plan.repository))
             .cloned()
             .collect::<Vec<_>>();
         if downloadable.is_empty() {
@@ -9715,7 +9715,7 @@ where
         pending = nested
             .into_iter()
             .filter(|plan| {
-                native_action_adapter(&plan.repository).is_none()
+                action_requires_metadata_fetch(&plan.repository)
                     && !resolved
                         .iter()
                         .any(|action| same_action(&action.plan, plan))
@@ -9726,6 +9726,13 @@ where
             .collect();
     }
     Ok(resolved)
+}
+
+fn action_requires_metadata_fetch(repository: &str) -> bool {
+    !matches!(
+        crate::manifest::find(repository).map(|capability| capability.adapter),
+        Some(ActionAdapter::Native(_))
+    )
 }
 
 fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> bool {
@@ -9918,27 +9925,43 @@ fn append_resolved_action_steps(
     // against the graph. An unknown action that still reaches this point is a
     // hard failure below, not a permissive fallback.
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
-    if let Some(invocation) = action.native_invocation()? {
-        ordered.push(ExecutableStep::Native {
-            step_id: action.plan.step_id.clone(),
-            display_name: display_name.to_string(),
-            invocation,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error,
-            timeout_minutes: action.plan.timeout_minutes,
-        });
-        return Ok(());
-    }
-    if let Some(message) = unsupported_action_error(&action.plan.repository) {
-        bail!("{message}");
-    }
-    match &action.runtime {
-        ActionRuntime::JavaScript { .. } => bail!(
+    let Some(adapter) =
+        crate::manifest::find(&action.plan.repository).map(|capability| capability.adapter)
+    else {
+        if let Some(message) = unsupported_action_error(&action.plan.repository) {
+            bail!("{message}");
+        }
+        bail!(
             "unknown action '{}@{}' reached execution — capability admission must reject this earlier",
             action.plan.repository,
             action.plan.git_ref
-        ),
-        ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
+        );
+    };
+    match adapter {
+        ActionAdapter::Native(expected) => {
+            let Some(invocation) = action.native_invocation()? else {
+                bail!(
+                    "native action '{}' has no native invocation",
+                    action.plan.repository
+                );
+            };
+            if invocation.adapter != expected {
+                bail!(
+                    "native action '{}' adapter mismatch: manifest={expected:?}, invocation={:?}",
+                    action.plan.repository,
+                    invocation.adapter
+                );
+            }
+            ordered.push(ExecutableStep::Native {
+                step_id: action.plan.step_id.clone(),
+                display_name: display_name.to_string(),
+                invocation,
+                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+                continue_on_error,
+                timeout_minutes: action.plan.timeout_minutes,
+            });
+        }
+        ActionAdapter::Docker => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
             invocation: action.docker_invocation(actions_host)?,
@@ -9946,7 +9969,7 @@ fn append_resolved_action_steps(
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
         }),
-        ActionRuntime::Composite => {
+        ActionAdapter::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
             let composite_display = if display_name.is_empty() {
