@@ -392,9 +392,16 @@ fn container_alive(name: &str) -> bool {
     ];
     match docker_bounded(&args) {
         Ok(output) => output.trim() == "true",
-        // "No such container" and any other inspect failure both mean there is
-        // nothing left for the ladder to escalate against.
-        Err(_) => false,
+        Err(detail) => {
+            let detail = format!("{detail:#}");
+            // Only a daemon that positively reports the container missing is
+            // evidence that it is gone. Treating *any* inspect failure as "gone"
+            // let a wedged or timing-out daemon end the ladder having sent no
+            // signal at all, and report the container terminated — the one
+            // failure direction cancellation must never take. An unknown state
+            // keeps the target alive so the ladder escalates against it.
+            !(detail.contains("No such container") || detail.contains("no such container"))
+        }
     }
 }
 
