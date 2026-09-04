@@ -94,7 +94,7 @@ concurrency:
 jobs:
   jackin-project:
     name: jackin-project
-    if: ${{ github.repository_owner == 'jackin-project' }}
+    if: ${{ github.repository_owner == 'jackin-project' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     permissions:
       actions: read
       contents: read
@@ -116,7 +116,7 @@ jobs:
 
   tailrocks:
     name: tailrocks
-    if: ${{ github.repository_owner == 'tailrocks' }}
+    if: ${{ github.repository_owner == 'tailrocks' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     permissions:
       actions: read
       contents: read
@@ -138,7 +138,7 @@ jobs:
 
   ChainArgos:
     name: ChainArgos
-    if: ${{ github.repository_owner == 'ChainArgos' }}
+    if: ${{ github.repository_owner == 'ChainArgos' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     permissions:
       actions: read
       contents: read
@@ -164,7 +164,7 @@ jobs:
       - jackin-project
       - tailrocks
       - ChainArgos
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
     runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 10
     permissions:
