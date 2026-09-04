@@ -56,7 +56,13 @@ fn is_build_kind(kind: Kind) -> bool {
 
 fn unique_build_tag() -> String {
     let serial = NEXT_BUILD_TAG.fetch_add(1, Ordering::Relaxed);
-    format!("velnor-bench-cached-{}-{serial}:latest", std::process::id())
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!(
+        "velnor-bench-cached-{}-{nonce:x}-{serial}:latest",
+        std::process::id()
+    )
 }
 
 fn with_cleanup(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
@@ -96,11 +102,23 @@ fn remove_image_if_missing(context: &mut Context, image: &str) -> Result<()> {
     )
 }
 
-fn force_remove(context: &mut Context, name: &str) -> Result<()> {
+fn parse_docker_id(stdout: &str) -> Result<String> {
+    let id = stdout.trim();
+    if id.len() < 12
+        || id.len() > 64
+        || id.split_whitespace().count() != 1
+        || !id.chars().all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("Docker returned an invalid container ID: {id:?}");
+    }
+    Ok(id.to_owned())
+}
+
+fn force_remove_id(context: &mut Context, id: &str) -> Result<()> {
     let invocation = context
         .runner
-        .run("docker", &["rm", "-f", name])
-        .with_context(|| format!("removing Docker container {name}"))?;
+        .run("docker", &["rm", "-f", id])
+        .with_context(|| format!("removing Docker container {id}"))?;
     if invocation.ok()
         || invocation
             .stderr
@@ -110,17 +128,17 @@ fn force_remove(context: &mut Context, name: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "removing Docker container {name} failed with exit code {}: {}",
+        "removing Docker container {id} failed with exit code {}: {}",
         invocation.code,
         invocation.stderr.trim()
     )
 }
 
-fn remove_network(context: &mut Context, name: &str) -> Result<()> {
+fn remove_network_id(context: &mut Context, id: &str) -> Result<()> {
     let invocation = context
         .runner
-        .run("docker", &["network", "rm", name])
-        .with_context(|| format!("removing Docker network {name}"))?;
+        .run("docker", &["network", "rm", id])
+        .with_context(|| format!("removing Docker network {id}"))?;
     if invocation.ok()
         || invocation
             .stderr
@@ -130,29 +148,10 @@ fn remove_network(context: &mut Context, name: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "removing Docker network {name} failed with exit code {}: {}",
+        "removing Docker network {id} failed with exit code {}: {}",
         invocation.code,
         invocation.stderr.trim()
     )
-}
-
-fn cleanup_resources(context: &mut Context, containers: &[&str], networks: &[&str]) -> Result<()> {
-    let mut failures = Vec::new();
-    for &name in containers {
-        if let Err(error) = force_remove(context, name) {
-            failures.push(error.to_string());
-        }
-    }
-    for &name in networks {
-        if let Err(error) = remove_network(context, name) {
-            failures.push(error.to_string());
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        bail!("Docker resource cleanup failed: {}", failures.join("; "))
-    }
 }
 
 pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
@@ -227,13 +226,25 @@ impl ScratchOwner {
     }
 }
 
+#[derive(Debug, Clone)]
+struct OwnedContainer {
+    name: String,
+    id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnedNetwork {
+    name: String,
+    id: Option<String>,
+}
+
 struct DockerWorkload {
     kind: Kind,
     build_tag: Option<String>,
     build_tag_needs_cleanup: bool,
     scratch: ScratchOwner,
-    owned_containers: Vec<String>,
-    owned_networks: Vec<String>,
+    owned_containers: Vec<OwnedContainer>,
+    owned_networks: Vec<OwnedNetwork>,
     iteration: u64,
     notes: Vec<String>,
 }
@@ -257,11 +268,10 @@ fn require_success(invocation: &Invocation, operation: &str) -> Result<()> {
     );
 }
 
-fn inspect_container_state(context: &mut Context, name: &str) -> Result<()> {
-    let invocation = context.runner.run(
-        "docker",
-        &["inspect", "--format", "{{.State.Status}}", name],
-    )?;
+fn inspect_container_state(context: &mut Context, id: &str) -> Result<()> {
+    let invocation = context
+        .runner
+        .run("docker", &["inspect", "--format", "{{.State.Status}}", id])?;
     require_success(invocation, "docker inspect completion")?;
     if invocation.stdout.trim().is_empty() {
         bail!("docker inspect completion returned no container state");
@@ -271,14 +281,106 @@ fn inspect_container_state(context: &mut Context, name: &str) -> Result<()> {
 
 impl DockerWorkload {
     fn own_container(&mut self, name: &str) {
-        if !self.owned_containers.iter().any(|owned| owned == name) {
-            self.owned_containers.push(name.to_owned());
+        if !self.owned_containers.iter().any(|owned| owned.name == name) {
+            self.owned_containers.push(OwnedContainer {
+                name: name.to_owned(),
+                id: None,
+            });
         }
     }
 
+    fn record_container_id(&mut self, name: &str, invocation: &Invocation) -> Result<String> {
+        let id = parse_docker_id(&invocation.stdout).with_context(|| {
+            format!("Docker create for container {name} returned no verified ID")
+        })?;
+        let owned = self
+            .owned_containers
+            .iter_mut()
+            .find(|owned| owned.name == name)
+            .with_context(|| format!("container {name} was not registered before creation"))?;
+        owned.id = Some(id.clone());
+        Ok(id)
+    }
+
     fn own_network(&mut self, name: &str) {
-        if !self.owned_networks.iter().any(|owned| owned == name) {
-            self.owned_networks.push(name.to_owned());
+        if !self.owned_networks.iter().any(|owned| owned.name == name) {
+            self.owned_networks.push(OwnedNetwork {
+                name: name.to_owned(),
+                id: None,
+            });
+        }
+    }
+
+    fn record_network_id(&mut self, name: &str, invocation: &Invocation) -> Result<String> {
+        let id = parse_docker_id(&invocation.stdout)
+            .with_context(|| format!("Docker network create for {name} returned no verified ID"))?;
+        let owned = self
+            .owned_networks
+            .iter_mut()
+            .find(|owned| owned.name == name)
+            .with_context(|| format!("network {name} was not registered before creation"))?;
+        owned.id = Some(id.clone());
+        Ok(id)
+    }
+
+    fn owner_label(&self) -> String {
+        format!(
+            "com.velnor.bench.owner={:032x}-{}",
+            self.scratch.nonce, self.scratch.id
+        )
+    }
+
+    fn role_label(role: &str) -> String {
+        format!("com.velnor.bench.role={role}")
+    }
+
+    fn resource_labels(&self, role: &str) -> [String; 4] {
+        [
+            "--label".to_owned(),
+            self.owner_label(),
+            "--label".to_owned(),
+            Self::role_label(role),
+        ]
+    }
+
+    fn cleanup_owned_resources(&mut self, context: &mut Context) -> Result<()> {
+        let mut failures = Vec::new();
+        let mut remaining_containers = Vec::new();
+        for resource in std::mem::take(&mut self.owned_containers) {
+            let result = match resource.id.as_deref() {
+                Some(id) => force_remove_id(context, id),
+                None => Err(anyhow::anyhow!(
+                    "container {} has no verified Docker ID; refusing name-based cleanup",
+                    resource.name
+                )),
+            };
+            if let Err(error) = result {
+                failures.push(format!("container {}: {error:#}", resource.name));
+                remaining_containers.push(resource);
+            }
+        }
+        self.owned_containers = remaining_containers;
+
+        let mut remaining_networks = Vec::new();
+        for resource in std::mem::take(&mut self.owned_networks) {
+            let result = match resource.id.as_deref() {
+                Some(id) => remove_network_id(context, id),
+                None => Err(anyhow::anyhow!(
+                    "network {} has no verified Docker ID; refusing name-based cleanup",
+                    resource.name
+                )),
+            };
+            if let Err(error) = result {
+                failures.push(format!("network {}: {error:#}", resource.name));
+                remaining_networks.push(resource);
+            }
+        }
+        self.owned_networks = remaining_networks;
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            bail!("Docker resource cleanup failed: {}", failures.join("; "))
         }
     }
 
@@ -396,20 +498,8 @@ impl Workload for DockerWorkload {
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
         let mut failures = Vec::new();
 
-        if !self.owned_containers.is_empty() {
-            let containers: Vec<&str> = self.owned_containers.iter().map(String::as_str).collect();
-            match cleanup_resources(context, &containers, &[]) {
-                Ok(()) => self.owned_containers.clear(),
-                Err(error) => failures.push(format!("owned container cleanup failed: {error:#}")),
-            }
-        }
-
-        if !self.owned_networks.is_empty() {
-            let networks: Vec<&str> = self.owned_networks.iter().map(String::as_str).collect();
-            match cleanup_resources(context, &[], &networks) {
-                Ok(()) => self.owned_networks.clear(),
-                Err(error) => failures.push(format!("owned network cleanup failed: {error:#}")),
-            }
+        if let Err(error) = self.cleanup_owned_resources(context) {
+            failures.push(format!("owned resource cleanup failed: {error:#}"));
         }
 
         if self.build_tag_needs_cleanup {
@@ -485,6 +575,7 @@ impl DockerWorkload {
             "--entrypoint".to_owned(),
             "/bin/sh".to_owned(),
         ];
+        create_args.extend(self.resource_labels("job"));
         if let Some(mount) = &mount {
             create_args.push("-v".to_owned());
             create_args.push(mount.clone());
@@ -501,49 +592,52 @@ impl DockerWorkload {
         if !created.ok() {
             let stderr = created.stderr.clone();
             let primary = anyhow::anyhow!("docker create failed: {}", stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
+        let id = match self.record_container_id(&name, &created) {
+            Ok(id) => id,
+            Err(error) => return Err(with_cleanup(error, self.cleanup_owned_resources(context))),
+        };
         stages.insert(Stage::ContainerCreate, create_ms);
 
-        let (started, start_ms) =
-            timed(|| context.runner.run("docker", &["start", &name]).cloned());
+        let (started, start_ms) = timed(|| context.runner.run("docker", &["start", &id]).cloned());
         let started = started?;
         if !started.ok() {
             let stderr = started.stderr.clone();
             let primary = anyhow::anyhow!("docker start failed: {}", stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::ContainerStart, start_ms);
 
         let (executed, exec_ms) = timed(|| {
             context
                 .runner
-                .run("docker", &["exec", &name, "/bin/sh", "-c", USER_COMMAND])
+                .run("docker", &["exec", &id, "/bin/sh", "-c", USER_COMMAND])
                 .cloned()
         });
         let executed = executed?;
         if !executed.ok() {
             let stderr = executed.stderr.clone();
             let primary = anyhow::anyhow!("first user command failed: {}", stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::FirstUserCommand, exec_ms);
 
         // What a runner does after the last step and before teardown: read the
         // exit state back out of the daemon.
-        let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
+        let (completion, completion_ms) = timed(|| inspect_container_state(context, &id));
         if let Err(error) = completion {
-            return Err(with_cleanup(error, force_remove(context, &name)));
+            return Err(with_cleanup(error, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::CompletionOverhead, completion_ms);
 
         let (removed, teardown_ms) =
-            timed(|| context.runner.run("docker", &["rm", "-f", &name]).cloned());
+            timed(|| context.runner.run("docker", &["rm", "-f", &id]).cloned());
         let removed = removed?;
         if !removed.ok() {
             let stderr = removed.stderr.clone();
             let primary = anyhow::anyhow!("docker container teardown failed: {}", stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
@@ -559,13 +653,14 @@ impl DockerWorkload {
         let job = self.container_name("job");
         let image = context.job_image.clone();
 
+        // Register before the daemon side effect. A missing ID remains
+        // pending and can never authorize deletion by recyclable name.
         self.own_network(&network);
-        let (network_created, network_ms) = timed(|| {
-            context
-                .runner
-                .run("docker", &["network", "create", &network])
-                .cloned()
-        });
+        let mut network_args = vec!["network".to_owned(), "create".to_owned()];
+        network_args.extend(self.resource_labels("network"));
+        network_args.push(network.clone());
+        let (network_created, network_ms) =
+            timed(|| context.runner.run("docker", &network_args).cloned());
         let network_created = network_created?;
         if !network_created.ok() {
             bail!(
@@ -573,110 +668,93 @@ impl DockerWorkload {
                 network_created.stderr.trim()
             );
         }
+        if let Err(error) = self.record_network_id(&network, &network_created) {
+            return Err(with_cleanup(error, self.cleanup_owned_resources(context)));
+        }
+
         self.own_container(&service);
-        let (service_started, service_ms) = timed(|| {
-            context
-                .runner
-                .run(
-                    "docker",
-                    &[
-                        "run",
-                        "-d",
-                        "--name",
-                        &service,
-                        "--network",
-                        &network,
-                        SERVICE_IMAGE,
-                    ],
-                )
-                .cloned()
-        });
+        let mut service_args = vec![
+            "run".to_owned(),
+            "-d".to_owned(),
+            "--name".to_owned(),
+            service.clone(),
+            "--network".to_owned(),
+            network.clone(),
+        ];
+        service_args.extend(self.resource_labels("service"));
+        service_args.push(SERVICE_IMAGE.to_owned());
+        let (service_started, service_ms) =
+            timed(|| context.runner.run("docker", &service_args).cloned());
         let service_started = service_started?;
         if !service_started.ok() {
             let primary = anyhow::anyhow!(
                 "docker service start failed: {}",
                 service_started.stderr.trim()
             );
-            return Err(with_cleanup(
-                primary,
-                cleanup_resources(context, &[&service], &[&network]),
-            ));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
+        let service_id = match self.record_container_id(&service, &service_started) {
+            Ok(id) => id,
+            Err(error) => return Err(with_cleanup(error, self.cleanup_owned_resources(context))),
+        };
         let setup_ms = network_ms.saturating_add(service_ms);
         stages.insert(Stage::DockerSetup, setup_ms);
 
         // Readiness wait is part of container start from a job's perspective.
-        let (ready, start_ms) = timed(|| wait_for_health(context, &service));
+        let (ready, start_ms) = timed(|| wait_for_health(context, &service_id));
         stages.insert(Stage::ContainerStart, start_ms);
         if !ready {
             let primary = anyhow::anyhow!("service container never became reachable");
-            return Err(with_cleanup(
-                primary,
-                cleanup_resources(context, &[&service], &[&network]),
-            ));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
 
         self.own_container(&job);
-        let (created, create_ms) = timed(|| {
-            context
-                .runner
-                .run(
-                    "docker",
-                    &[
-                        "create",
-                        "--name",
-                        &job,
-                        "--network",
-                        &network,
-                        "--entrypoint",
-                        "/bin/sh",
-                        &image,
-                        "-c",
-                        "sleep 30",
-                    ],
-                )
-                .cloned()
-        });
+        let mut job_args = vec![
+            "create".to_owned(),
+            "--name".to_owned(),
+            job.clone(),
+            "--network".to_owned(),
+            network.clone(),
+            "--entrypoint".to_owned(),
+            "/bin/sh".to_owned(),
+        ];
+        job_args.extend(self.resource_labels("job"));
+        job_args.extend([image.clone(), "-c".to_owned(), "sleep 30".to_owned()]);
+        let (created, create_ms) = timed(|| context.runner.run("docker", &job_args).cloned());
         let created = created?;
         if !created.ok() {
             let primary = anyhow::anyhow!(
                 "docker service job create failed: {}",
                 created.stderr.trim()
             );
-            return Err(with_cleanup(
-                primary,
-                cleanup_resources(context, &[&job, &service], &[&network]),
-            ));
+            return Err(with_cleanup(primary, self.cleanup_owned_resources(context)));
         }
+        let job_id = match self.record_container_id(&job, &created) {
+            Ok(id) => id,
+            Err(error) => return Err(with_cleanup(error, self.cleanup_owned_resources(context))),
+        };
         stages.insert(Stage::ContainerCreate, create_ms);
 
         let (executed, exec_ms) = timed(|| -> Result<()> {
-            let started = context.runner.run("docker", &["start", &job])?;
+            let started = context.runner.run("docker", &["start", &job_id])?;
             require_success(started, "docker service job start")?;
             let executed = context
                 .runner
-                .run("docker", &["exec", &job, "/bin/sh", "-c", USER_COMMAND])?;
+                .run("docker", &["exec", &job_id, "/bin/sh", "-c", USER_COMMAND])?;
             require_success(executed, "docker service first user command")?;
             Ok(())
         });
         if let Err(error) = executed {
-            return Err(with_cleanup(
-                error,
-                cleanup_resources(context, &[&job, &service], &[&network]),
-            ));
+            return Err(with_cleanup(error, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::FirstUserCommand, exec_ms);
-        let (completion, completion_ms) = timed(|| inspect_container_state(context, &job));
+        let (completion, completion_ms) = timed(|| inspect_container_state(context, &job_id));
         if let Err(error) = completion {
-            return Err(with_cleanup(
-                error,
-                cleanup_resources(context, &[&job, &service], &[&network]),
-            ));
+            return Err(with_cleanup(error, self.cleanup_owned_resources(context)));
         }
         stages.insert(Stage::CompletionOverhead, completion_ms);
 
-        let (removed, teardown_ms) =
-            timed(|| cleanup_resources(context, &[&job, &service], &[&network]));
+        let (removed, teardown_ms) = timed(|| self.cleanup_owned_resources(context));
         removed?;
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
@@ -740,16 +818,16 @@ impl DockerWorkload {
 }
 
 /// Poll until the daemon reports the container running and its port answers.
-fn wait_for_health(context: &mut Context, name: &str) -> bool {
+fn wait_for_health(context: &mut Context, id: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if let Ok(status) = context.runner.capture(
-            "docker",
-            &["inspect", "--format", "{{.State.Running}}", name],
-        ) && status == "true"
+        if let Ok(status) = context
+            .runner
+            .capture("docker", &["inspect", "--format", "{{.State.Running}}", id])
+            && status == "true"
             && let Ok(probe) = context
                 .runner
-                .run("docker", &["exec", name, "redis-cli", "ping"])
+                .run("docker", &["exec", id, "redis-cli", "ping"])
             && probe.ok()
         {
             return true;
@@ -937,6 +1015,119 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.starts_with("velnor-bench-cached-"));
         assert!(first.ends_with(":latest"));
+    }
+
+    #[test]
+    fn docker_ids_require_one_hex_token() {
+        let valid = "a".repeat(64);
+        assert_eq!(
+            parse_docker_id(&format!("{valid}\n")).expect("valid ID"),
+            valid
+        );
+        for invalid in ["", "not-an-id", "abc", "a a", "g".repeat(64).as_str()] {
+            assert!(parse_docker_id(invalid).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn resource_labels_bind_owner_and_role() {
+        let workload = DockerWorkload {
+            kind: Kind::JobContainer,
+            build_tag: None,
+            build_tag_needs_cleanup: false,
+            scratch: ScratchOwner::new(),
+            owned_containers: Vec::new(),
+            owned_networks: Vec::new(),
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let labels = workload.resource_labels("job");
+        assert_eq!(labels[0], "--label");
+        assert!(labels[1].starts_with("com.velnor.bench.owner="));
+        assert_eq!(labels[2], "--label");
+        assert_eq!(labels[3], "com.velnor.bench.role=job");
+    }
+
+    #[test]
+    fn successful_resource_outputs_are_recorded_as_immutable_ids() {
+        let id = "b".repeat(64);
+        let invocation = Invocation {
+            program: "docker".into(),
+            args: vec!["create".into()],
+            code: 0,
+            stdout: format!("{id}\n"),
+            stderr: String::new(),
+            wall: Duration::ZERO,
+        };
+        let mut workload = DockerWorkload {
+            kind: Kind::JobContainer,
+            build_tag: None,
+            build_tag_needs_cleanup: false,
+            scratch: ScratchOwner::new(),
+            owned_containers: Vec::new(),
+            owned_networks: Vec::new(),
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        workload.own_container("diagnostic-name");
+        assert_eq!(
+            workload
+                .record_container_id("diagnostic-name", &invocation)
+                .expect("record container ID"),
+            id
+        );
+        assert_eq!(
+            workload.owned_containers[0].id.as_deref(),
+            Some(id.as_str())
+        );
+
+        let network_id = "c".repeat(64);
+        let network_invocation = Invocation {
+            stdout: format!("{network_id}\n"),
+            ..invocation
+        };
+        workload.own_network("network-name");
+        assert_eq!(
+            workload
+                .record_network_id("network-name", &network_invocation)
+                .expect("record network ID"),
+            network_id
+        );
+        assert_eq!(
+            workload.owned_networks[0].id.as_deref(),
+            Some(network_id.as_str())
+        );
+    }
+
+    #[test]
+    fn unresolved_container_cleanup_retains_ownership() {
+        let mut workload = DockerWorkload {
+            kind: Kind::JobContainer,
+            build_tag: None,
+            build_tag_needs_cleanup: false,
+            scratch: ScratchOwner::new(),
+            owned_containers: vec![OwnedContainer {
+                name: "possible-foreign-name".to_owned(),
+                id: None,
+            }],
+            owned_networks: Vec::new(),
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: crate::sys::Runner::new(),
+        };
+
+        let error = workload
+            .cleanup_owned_resources(&mut context)
+            .expect_err("unresolved ownership must fail closed");
+        assert!(error.to_string().contains("refusing name-based cleanup"));
+        assert_eq!(workload.owned_containers.len(), 1);
     }
 
     #[test]
