@@ -570,28 +570,50 @@ fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, 
     use velnor_control::config::ContextStore;
 
     let contexts = context_store()?.list()?;
-    let endpoint = if let Some(context_name) = &globals.context {
+    let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
         let context = contexts
             .iter()
             .find(|context| context.name == *context_name)
             .ok_or_else(|| CommandError::unavailable("named context was not found"))?;
-        context.endpoint.as_str().to_owned()
+        (context.endpoint.as_str().to_owned(), true)
     } else if let Some(context) = contexts.iter().find(|context| context.current) {
-        context.endpoint.as_str().to_owned()
+        (context.endpoint.as_str().to_owned(), true)
     } else {
         let instance = globals
             .instance
             .clone()
             .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
-        format!(
-            "unix:///run/velnor/{}",
-            instance.as_deref().unwrap_or("default")
+        (
+            format!(
+                "unix:///run/velnor/{}",
+                instance.as_deref().unwrap_or("default")
+            ),
+            false,
         )
     };
     let endpoint = velnor_client::UnixEndpoint::parse(&endpoint).map_err(|error| {
         CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
     })?;
+    if context_selected {
+        validate_context_instance(&endpoint, globals.instance.as_deref())?;
+    }
     Ok(velnor_client::UnixControlClient::new(endpoint))
+}
+
+fn validate_context_instance(
+    endpoint: &velnor_client::UnixEndpoint,
+    requested_instance: Option<&str>,
+) -> Result<(), CommandError> {
+    if let Some(requested_instance) = requested_instance
+        && endpoint.instance() != requested_instance
+    {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "instance.context_mismatch",
+            "requested instance does not match the selected context",
+        ));
+    }
+    Ok(())
 }
 
 fn client_query(args: &commands::ResourceQueryArgs) -> velnor_client::ResourceQuery {
@@ -1371,4 +1393,21 @@ fn flag_metadata<'a>(args: impl Iterator<Item = &'a clap::Arg>, global: bool) ->
         global,
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_instance_rejects_a_different_context_endpoint() {
+        let endpoint = velnor_client::UnixEndpoint::parse("unix:///run/velnor/primary")
+            .expect("valid context endpoint");
+
+        let error = validate_context_instance(&endpoint, Some("secondary"))
+            .expect_err("different explicit instance must fail closed");
+
+        assert_eq!(error.class, ExitClass::Conflict);
+        assert_eq!(error.reason, "instance.context_mismatch");
+    }
 }
