@@ -185,7 +185,14 @@ pub struct BenchRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordError {
     UnknownScenario(String),
-    StageOutsideDriverCoverage { driver: Driver, stage: Stage },
+    StageOutsideDriverCoverage {
+        driver: Driver,
+        stage: Stage,
+    },
+    DriverRunnabilityMismatch {
+        driver: Driver,
+        runnability_driver: Option<Driver>,
+    },
     ScenarioFamilyMismatch,
     WrongSchema(String),
 }
@@ -201,6 +208,15 @@ impl std::fmt::Display for RecordError {
                 "driver {} cannot observe stage {}",
                 driver.as_str(),
                 stage.as_str()
+            ),
+            Self::DriverRunnabilityMismatch {
+                driver,
+                runnability_driver,
+            } => write!(
+                formatter,
+                "record driver {} contradicts runnability driver {}",
+                driver.as_str(),
+                runnability_driver.map_or("unrunnable", Driver::as_str)
             ),
             Self::ScenarioFamilyMismatch => {
                 write!(
@@ -229,6 +245,12 @@ impl BenchRecord {
             .ok_or_else(|| RecordError::UnknownScenario(self.scenario.clone()))?;
         if scenario.family != self.family {
             return Err(RecordError::ScenarioFamilyMismatch);
+        }
+        if self.runnability.driver() != Some(self.driver) {
+            return Err(RecordError::DriverRunnabilityMismatch {
+                driver: self.driver,
+                runnability_driver: self.runnability.driver(),
+            });
         }
         let observable = self.driver.observable_stages();
         for observation in &self.observations {
@@ -350,6 +372,21 @@ mod tests {
                 driver: Driver::DockerDirect,
                 stage: Stage::BrokerDelivery,
             }
+        );
+    }
+
+    #[test]
+    fn an_unrunnable_record_may_not_carry_a_driver_or_observations() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.runnability = Runnability::Unrunnable {
+            missing: vec![crate::scenario::Requirement::DockerDaemon],
+        };
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::DriverRunnabilityMismatch {
+                driver: Driver::DockerDirect,
+                runnability_driver: None,
+            })
         );
     }
 
