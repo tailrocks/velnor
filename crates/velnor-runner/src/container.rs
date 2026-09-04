@@ -6,8 +6,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::container::host_budget::{observe_slots, HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
-use crate::execution::docker::host_budget::{observe_slots, HostBudget, SlotBudget};
+
+/// One derived resource budget for the machine, and the share of it that
+/// belongs to a single runner slot. Every job container is sized from it.
+pub(crate) mod host_budget;
 
 pub use crate::docker_argv::PreparedDockerArgs;
 
