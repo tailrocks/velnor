@@ -3396,6 +3396,33 @@ This remains static/fixture proof: no live dual-lane run, deployed image
 identity, default-mbx end-to-end result, VelnorJob lifecycle benchmark,
 fault/soak result, or reserved runner/executor change is claimed.
 
+## 45. Benchmark cleanup ownership correction — T-024 `9b71121`
+
+Benchmark cleanup now preserves ownership and failure information across the
+real Cargo and Docker drivers. Cargo reports failed mutation restoration and
+all worktree-removal failures. Docker uses a unique per-workload build tag,
+so failed preparation cannot remove an unrelated image, and every container,
+network, and build-image cleanup path reports failures while retaining the
+primary workload error. Missing resources remain idempotent cleanup outcomes.
+
+Focused source proof at `9b71121b4c5a43fe7942cad6560dd45146849103`:
+`velnor-bench` nextest passed (`85` tests), strict package Clippy passed, and
+format checks passed. The complete source code gate also passed: locked
+all-target workspace check, workspace Clippy with warnings denied, and locked
+workspace nextest (`2,552` passed, `1` skipped across `41` binaries).
+The aggregate source `mise run check` was attempted but actionlint `1.7.12`
+rejects the repository's canonical `ubuntu-26.04` label at
+`.github/workflows/velnor-workflow-policy.yml:17`; every repository workflow
+uses that same intentional label and no newer pinned actionlint release exists.
+This is a tooling/label gate blocker, not a T-024 code failure.
+
+The fixture baseline was refreshed to this source at `8ebad89`; its full gate
+passed (`44` Python tests, `53` Rust tests, workflow/actionlint, capability
+readiness, format/check, and L2 closure). This remains static/fixture proof:
+no live dual-lane run, deployed image identity, default-mbx end-to-end result,
+VelnorJob lifecycle benchmark, fault/soak result, or reserved runner/executor
+change is claimed.
+
 ## 43. Full workspace verification — T-022 `a19f08b`
 
 After T-022, the complete source workspace gate passed at
