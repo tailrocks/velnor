@@ -1511,3 +1511,113 @@ fn controller_sends_pending_completion_outbox() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Every durable model this program built must be *named by production code*.
+///
+/// Three times now a complete, well-tested, upstream-cited model shipped with no
+/// consumer: the cancellation ladder, the disk-pressure state machine, and the
+/// provisional-acquisition machinery each existed, passed their own tests, and
+/// changed nothing about how a job ran. Tests passing is not evidence that a
+/// model is wired, because a model's own tests exercise it directly.
+///
+/// Two honest limits, so nobody reads more into a green result than it carries.
+/// This proves *mention*, not reachability — a call sitting behind a branch that
+/// is never taken satisfies it. And it needs deliberate updating on a rename,
+/// which is the price of a grep-shaped guard; the alternative is a call-graph
+/// analysis this repository does not have. It is a tripwire for the specific
+/// mistake that has already cost this effort three rediscoveries, not a proof of
+/// liveness.
+#[test]
+fn every_durable_model_is_named_by_production_code() {
+    /// Strip in-file test modules, so a `#[cfg(test)]`-only reference cannot
+    /// satisfy the assertion — that is exactly how the gap hid the first two
+    /// times.
+    ///
+    /// Splitting on the first `#[cfg(test)]`, as the older checks in this file
+    /// do, is wrong for a file with more than one test module: `runner.rs`
+    /// opens one at line 3638 and has production code well past it, so a naive
+    /// split discards most of the crate and reports a false gap. This removes
+    /// each attribute's own block by brace matching and keeps the rest.
+    fn production(source: &str) -> String {
+        let mut kept = String::with_capacity(source.len());
+        let mut rest = source;
+        while let Some(at) = rest.find("#[cfg(test)]") {
+            kept.push_str(&rest[..at]);
+            let after = &rest[at..];
+            let Some(open) = after.find('{') else {
+                break;
+            };
+            let mut depth = 0usize;
+            let mut end = None;
+            for (offset, byte) in after.bytes().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match end {
+                Some(end) => rest = &after[end..],
+                None => return kept,
+            }
+        }
+        kept.push_str(rest);
+        kept
+    }
+
+    let runner = production(include_str!("../src/runner.rs"));
+    let executor = production(include_str!("../src/executor.rs"));
+    let complete = production(include_str!("../src/node/complete.rs"));
+    let runner = runner.as_str();
+    let executor = executor.as_str();
+    let complete = complete.as_str();
+
+    for (symbol, hay, why) in [
+        (
+            "JobCancellation::new",
+            runner,
+            "a job must own a cancellation token, or the ladder terminates nothing",
+        ),
+        (
+            "request(",
+            runner,
+            "the broker's cancellation message must drive the token",
+        ),
+        (
+            "DiskPressure::new",
+            runner,
+            "disk pressure must be a bounded machine, not an indefinite park",
+        ),
+        (
+            "intend_acquisition",
+            runner,
+            "the acquire window must be recorded before GitHub is asked for the job",
+        ),
+        (
+            "resolve_provisional_acquisitions",
+            runner,
+            "a crash in the acquire window must be resolved on restart",
+        ),
+        (
+            "record_terminal_result",
+            complete,
+            "a job's conclusion must be durable before its payload is serialised",
+        ),
+        (
+            "cancellation",
+            executor,
+            "execution must see cancellation, or the status functions lie",
+        ),
+    ] {
+        assert!(
+            hay.contains(symbol),
+            "{symbol} is not named by production code: {why}"
+        );
+    }
+}
