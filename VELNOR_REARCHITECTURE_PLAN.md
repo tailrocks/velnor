@@ -1830,3 +1830,84 @@ masker is correct and its coverage is not. Routed to the `runner.rs` owner.
 - Upstream reads the `ACTIONS_ALLOW_UNSECURE_*` opt-ins from the job `env:` context as well as
   the process environment; `parse_workflow_commands` has no env context, so only the process half
   is modelled and a workflow setting the flag in `env:` is refused.
+
+### BC-20 resolved on both sides — the lock-in is broken
+
+The Velnor half went first, so the fixture was never briefly failing an assertion that no
+longer reflected intent. `crates/velnor-tools/src/main.rs` no longer requires the fixture to
+contain `mozilla-actions/sccache-action@`, `SCCACHE_GHA_ENABLED:` and `cache-sccache:`. In
+their place, `fixture_rust_scenarios()` and `check_rust_scenarios()` walk the Rust suite **per
+job**: the default path is mandatory and must declare no compiler-cache environment, no
+sccache/mbx/kache action and no `target/` cache, while sccache is one of five scenarios.
+Forbidden declarations are matched against real `env` keys, step `uses` values and
+`actions/cache` `with.path` entries rather than substrings, so a scenario may still *read* a
+variable it must not *set*. The gate was proven to bite: against the old suite it reports all
+five scenarios missing; against the new one it passes (`7f3e14c`, `c3b5907`).
+
+The fixture now implements all five scenarios with their own evidence and comparator legs
+(`03e3020`, `0e51b36`): the default path with plain `cargo`; explicit sccache asserting
+`MBX_DISABLE=1` and no mbx store wherever the sccache store was mounted; the acceleration
+opt-out; cache interaction across source-cache, target-cache, source-change and lockfile-change;
+and four simultaneous shards per lane with a hard assertion that they actually overlapped.
+Crucially, `compiler_cache_wrapper` is **measured** in the evidence rather than assumed — a
+mismatch on the default path means Velnor leaked a wrapper into it.
+
+I also corrected the fixture policy that had codified the lock-in
+(`velnor-actions-fixture` `209ff57`): `.github/AGENTS.md` still read *"Rust compile jobs use
+mold and local-only sccache v0.16.0 with a 20 GiB bound"*, which would have re-created the
+defect on the next fixture change. It now states that the default Velnor Rust path is the
+baseline and sccache is one compatibility scenario.
+
+### The acceleration opt-out exists — correcting the verifier audit
+
+The claim that no workflow-level acceleration opt-out exists in Velnor is **wrong**.
+`crates/velnor-runner/src/runtime_env.rs:436` reads
+`|| (upper.starts_with("MBX_") && upper != "MBX_DISABLE")`: every `MBX_`-prefixed name is a
+protected runner-owned variable dropped from workflow-supplied environment
+(`runtime_env.rs:201-205`) **except** `MBX_DISABLE`, which is deliberately carved out and
+passed through into `job_runtime_env`, feeding `base_env` at `runner.rs:7853`. Velnor relies on
+that meaning internally (`container.rs:87`). The opt-out was undocumented and untested, not
+absent.
+
+Gap now recorded: **there is no test asserting the `MBX_DISABLE` passthrough.** One line of
+carve-out is all that stands between a supported opt-out and its silent removal.
+
+### New structural finding — acceleration is selected before conditions are evaluated
+
+An `if:`-guarded sccache step still switches the **whole job's** acceleration branch, because
+`manifest::declares_sccache` filters on `step.enabled`, which an `if:` expression does not
+clear. A matrix job containing a conditional sccache step therefore runs *every* variant on the
+compatibility branch. This forced the cache-interaction scenario to split `explicit-sccache`
+into its own job.
+
+The root cause is that acceleration selection is decided from *declared* steps at admission,
+before conditions are evaluated — so no workflow can mix accelerated and unaccelerated variants
+within one job. That is a real limitation of the admission-time model, not a bug in the
+condition evaluator, and it belongs with the trust/derivation work where the same
+"decide-at-admission from declared shape" pattern appears.
+
+### Fixture items now blocked on the capability baseline refresh
+
+These are correctly blocked rather than forced, because the readiness gate the verifier package
+built is doing its job: `validate_remote_uses` rejects any `uses:` for an action absent from the
+capability snapshot, and the audit already fails loudly with
+`coverage/velnor-capabilities.json source_sha is '2858e92…', but the Velnor build under test
+reports 'd4d6e93…'; the baseline is stale`.
+
+Required, in order: regenerate `coverage/velnor-capabilities.json` from the v11 build; move
+`EXPECTED_MANIFEST_VERSION` from 10 to 11; drop `EXPECTED_KACHE_REF`,
+`EXPECTED_KACHE_VERSION` and `validate_kache_contract`; add a `jdx/mr-boxington-action` row to
+`fixture-coverage.json` and `action-surface-coverage.json`; remove the
+`kunobi-ninja/kache-action` rows **and** the `compat.yml:cache-kache` job, which is now
+unadmittable because Velnor's manifest has no such action at all; and remove
+`mozilla-actions/sccache-action` from `MICROVM_SUPPORTED`, flipping that coverage row to
+`expected-unsupported` — `validate_microvm_compiler_cache` (`manifest.rs:1371-1385`) refuses
+microVM for a declared sccache action *or* any `RUSTC_WRAPPER`/`SCCACHE_*` environment, so the
+current `microvm: supported` claim is false.
+
+Once the baseline lands, the sixteen admitted mr-boxington inputs split cleanly: `backend=local`,
+`version`, `cache-key`, `restore-keys`, `cache-generation`, `save-on-workflow-dispatch`,
+`toolchain`, `max-size` and `cache-links` are exercisable from a sixth scenario; `github-token`,
+`server-url`, `namespace`, `token`, `token-file`, `oidc-audience` and `server-mode` select a
+remote cache backend and should be recorded `admission_only` under this fixture's local-only
+store policy.
