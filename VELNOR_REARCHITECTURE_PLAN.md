@@ -102,6 +102,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `deny.toml` + `mise.toml` deny task | opus-lead | claimed — T-003 |
 | `crates/velnor-runner/Cargo.toml` tokio feature set | opus-lead | claimed — T-003 |
 | `crates/velnor-runner/src/docker_lease.rs` (job Docker request authorization and unlabeled cleanup) | codex-lead | complete — T-004 (`3749065`) |
+| `crates/velnor-runner/src/cache.rs` (explicit storage context for reclaim enumeration) | codex-lead | claimed — T-017 |
 
 ## 8. Discovered bug classes
 
