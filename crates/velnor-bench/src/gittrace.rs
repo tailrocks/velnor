@@ -188,7 +188,12 @@ impl GitEvidence {
                 observed_workers,
                 no_git_workers,
                 ..
-            } => counters.processes > 0 && *observed_workers > 0 && *no_git_workers > 0,
+            } => {
+                counters.processes > 0
+                    && *observed_workers > 0
+                    && *no_git_workers > 0
+                    && counters.processes >= *observed_workers
+            }
         }
     }
 
@@ -704,5 +709,35 @@ mod tests {
         });
         assert_eq!(counters.received_bytes, 33);
         assert_eq!(counters.processes, 2);
+    }
+
+    #[test]
+    fn mixed_evidence_rejects_more_observed_workers_than_processes() {
+        let evidence = GitEvidence::Mixed {
+            counters: GitCounters {
+                processes: 1,
+                ..GitCounters::default()
+            },
+            successful: true,
+            observed_workers: 2,
+            no_git_workers: 1,
+        };
+
+        assert!(!evidence.is_valid());
+    }
+
+    #[test]
+    fn mixed_evidence_accepts_process_count_equal_to_observed_workers() {
+        let evidence = GitEvidence::Mixed {
+            counters: GitCounters {
+                processes: 2,
+                ..GitCounters::default()
+            },
+            successful: true,
+            observed_workers: 2,
+            no_git_workers: 1,
+        };
+
+        assert!(evidence.is_valid());
     }
 }
