@@ -3816,3 +3816,18 @@ Format and diff checks pass. Focused cargo execution was attempted twice with
 an isolated target and was stopped after 60 seconds each time because the host
 was saturated by unrelated Rust workloads; no new runtime test pass is
 claimed yet.
+
+## 67. Shared-branch preservation audit — 2026-09-05
+
+After `6fb1243`, the canonical worktree at
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` is clean on
+`perf/docker-rust-mbx`, and its local tip equals the remote tip. All known
+worker worktrees are clean and retained, including the credential-reaper
+worker branch, which made no changes before shutdown. The old clone remains
+clean and untouched at `ae72e3a`; its tip is still an ancestor of the
+canonical branch.
+
+Connectivity and no-reflog unreachable-object scans are clean, and
+`git worktree prune --dry-run --verbose` reports no candidates. No branch,
+worktree, stash, or archived object was reset, deleted, pruned, or
+force-pushed during this continuation.
