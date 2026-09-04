@@ -234,6 +234,11 @@ fn normalize_checkout_mtimes<R>(runner: &mut R, destination: &Path, log: &mut Ve
 where
     R: CommandRunner,
 {
+    let _span = tracing::info_span!(
+        "checkout.workspace.mtime_normalize",
+        phase = "mtime-normalization",
+    )
+    .entered();
     let args = [
         "-C".to_string(),
         path_arg(destination),
@@ -727,80 +732,89 @@ where
     )?;
 
     let fetch_env = git_auth_env(clone_url, token);
-    if let Some(mirror) = mirror {
-        hydrate_from_mirror(
-            runner,
-            &mirror,
-            destination,
-            clone_url,
-            git_ref,
-            fetch_depth.is_none(),
-            fetch_tags,
-            log,
-        )?;
-        // Hydration has linked or copied every object and wrote the refs and
-        // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
-        // only the workspace, so do not hold the mirror reader lease for it.
-        drop(mirror);
-    } else {
-        run_network_fetch(
-            runner,
-            destination,
-            git_ref,
-            fetch_depth,
-            fetch_tags,
-            &fetch_env,
-            log,
-        )?;
-    }
-
-    // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
-    // LFS blobs. It authenticates through the same header the fetch used, which
-    // is passed per command rather than written into the workspace config, so
-    // no credential outlives the checkout unless the job asked for one.
-    let mut checkout = vec!["-C".to_string(), path_arg(destination)];
-    if !lfs {
-        checkout.extend(lfs_skip_smudge_args());
-    }
-    checkout.extend([
-        "checkout".to_string(),
-        "--force".to_string(),
-        "FETCH_HEAD".to_string(),
-    ]);
-    if lfs {
-        run_git_with_env_and_display(runner, &checkout, &checkout, &fetch_env, log)?;
-    } else {
-        run_git(runner, &checkout, log)?;
-    }
-
-    if clean {
-        let mut reset = vec!["-C".to_string(), path_arg(destination)];
-        if !lfs {
-            reset.extend(lfs_skip_smudge_args());
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.fetch", phase = "workspace-fetch",).entered();
+        if let Some(mirror) = mirror {
+            hydrate_from_mirror(
+                runner,
+                &mirror,
+                destination,
+                clone_url,
+                git_ref,
+                fetch_depth.is_none(),
+                fetch_tags,
+                log,
+            )?;
+            // Hydration has linked or copied every object and wrote the refs and
+            // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
+            // only the workspace, so do not hold the mirror reader lease for it.
+            drop(mirror);
+        } else {
+            run_network_fetch(
+                runner,
+                destination,
+                git_ref,
+                fetch_depth,
+                fetch_tags,
+                &fetch_env,
+                log,
+            )?;
         }
-        reset.extend([
-            "reset".to_string(),
-            "--hard".to_string(),
-            "HEAD".to_string(),
+    }
+
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.checkout", phase = "workspace-checkout",)
+                .entered();
+        // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
+        // LFS blobs. It authenticates through the same header the fetch used, which
+        // is passed per command rather than written into the workspace config, so
+        // no credential outlives the checkout unless the job asked for one.
+        let mut checkout = vec!["-C".to_string(), path_arg(destination)];
+        if !lfs {
+            checkout.extend(lfs_skip_smudge_args());
+        }
+        checkout.extend([
+            "checkout".to_string(),
+            "--force".to_string(),
+            "FETCH_HEAD".to_string(),
         ]);
         if lfs {
-            run_git_with_env_and_display(runner, &reset, &reset, &fetch_env, log)?;
+            run_git_with_env_and_display(runner, &checkout, &checkout, &fetch_env, log)?;
         } else {
-            run_git(runner, &reset, log)?;
+            run_git(runner, &checkout, log)?;
         }
-        let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
-        run_git(
-            runner,
-            &checkout_clean_args(destination, preserve_workspace_target),
-            log,
-        )?;
+
+        if clean {
+            let mut reset = vec!["-C".to_string(), path_arg(destination)];
+            if !lfs {
+                reset.extend(lfs_skip_smudge_args());
+            }
+            reset.extend([
+                "reset".to_string(),
+                "--hard".to_string(),
+                "HEAD".to_string(),
+            ]);
+            if lfs {
+                run_git_with_env_and_display(runner, &reset, &reset, &fetch_env, log)?;
+            } else {
+                run_git(runner, &reset, log)?;
+            }
+            let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
+                .ok()
+                .is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                });
+            run_git(
+                runner,
+                &checkout_clean_args(destination, preserve_workspace_target),
+                log,
+            )?;
+        }
     }
 
     if persist_credentials && let Some(token) = token {

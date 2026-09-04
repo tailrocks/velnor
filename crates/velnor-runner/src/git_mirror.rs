@@ -206,8 +206,12 @@ pub fn ensure_mirror<R: CommandRunner>(
         .open(&lock_path)
         .with_context(|| format!("open git mirror lock {}", lock_path.display()))?;
 
-    flock(&lock, FlockOperation::LockShared)
-        .with_context(|| format!("share-lock git mirror {}", mirror.display()))?;
+    {
+        let _span =
+            tracing::info_span!("checkout.mirror.lock_wait", phase = "mirror-lock-wait",).entered();
+        flock(&lock, FlockOperation::LockShared)
+            .with_context(|| format!("share-lock git mirror {}", mirror.display()))?;
+    }
 
     let healthy = mirror_is_healthy(runner, &mirror);
     if healthy && let Some(sha) = warm_mirror_sha(runner, &mirror, want) {
@@ -215,8 +219,12 @@ pub fn ensure_mirror<R: CommandRunner>(
     }
     flock(&lock, FlockOperation::Unlock)
         .with_context(|| format!("unlock git mirror {}", mirror.display()))?;
-    flock(&lock, FlockOperation::LockExclusive)
-        .with_context(|| format!("lock git mirror {}", mirror.display()))?;
+    {
+        let _span =
+            tracing::info_span!("checkout.mirror.lock_wait", phase = "mirror-lock-wait",).entered();
+        flock(&lock, FlockOperation::LockExclusive)
+            .with_context(|| format!("lock git mirror {}", mirror.display()))?;
+    }
 
     // The shared read phase is only a fast preflight. A writer may have
     // repaired or changed the mirror after it released the shared lock, so the
@@ -234,7 +242,10 @@ pub fn ensure_mirror<R: CommandRunner>(
         return MirrorCheckout::new(mirror, sha, false, repaired, lock, true);
     }
 
-    fetch_want(runner, &mirror, clone_url, token, want)?;
+    {
+        let _span = tracing::info_span!("checkout.mirror.fetch", phase = "mirror-fetch").entered();
+        fetch_want(runner, &mirror, clone_url, token, want)?;
+    }
 
     // The fetch reported success, so the mirror holds what was asked for. When
     // rev-parse cannot name it (an object id the mirror stores under our own
