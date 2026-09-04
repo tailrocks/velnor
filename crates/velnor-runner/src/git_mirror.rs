@@ -824,6 +824,40 @@ mod tests {
     }
 
     #[test]
+    fn mutable_ref_refetches_and_repins_to_current_commit() {
+        let fixture = Fixture::new();
+        let first = fixture.commit("one");
+        let mut runner = ProcessCommandRunner;
+        let initial = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &want("master"),
+        )
+        .unwrap();
+        assert_eq!(initial.sha, first);
+        assert!(initial.fetched);
+        drop(initial);
+
+        let second = fixture.commit("two");
+        let refreshed = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &want("master"),
+        )
+        .unwrap();
+        assert_eq!(refreshed.sha, second);
+        assert!(refreshed.fetched);
+        assert_eq!(
+            rev_parse(&mut runner, &refreshed.path, "refs/velnor/wanted/master"),
+            second
+        );
+    }
+
+    #[test]
     fn mirror_does_not_fetch_pull_request_refs() {
         let fixture = Fixture::new();
         let sha = fixture.commit("one");
