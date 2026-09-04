@@ -2208,3 +2208,93 @@ so each gained one line expanding the env file under `cfg(test)`. Eleven asserti
 `!call.contains("GITHUB_TOKEN=…")` became delivery assertions with a comment recording why:
 confidentiality is no longer a property of those call sites, it is enforced by construction and
 tested where the construction happens. That is the correct place for the assertion to live.
+
+### BC-9 and BC-10 closed — credentials are reaped, and checkout stopped doing work it did not need
+
+`1d5ecf8`, `35e09bd`.
+
+**Credential lifetime.** Both leak paths were confirmed: `runner.rs:8109` returns early before the
+cleanup at `:8126`, and a crash skips it entirely, while `checkout.rs:311-318` printed to stderr
+and returned `Ok`. The fix uses the kernel as the liveness oracle rather than guessing: a
+credential is journalled *before* it reaches disk, in a file the owning process holds an
+**exclusive flock** on, so however the process dies the lock is released.
+`reap_stale_checkout_credentials()` then scrubs every entry whose lock is free while live jobs'
+entries stay locked. Cleanup is unconditional, tolerates only git's exit 5 ("key not set"),
+*verifies* the config afterwards, scrubs any residual `extraheader`, and returns `Err` if one
+survives — which the caller already turns into a job failure.
+
+The agent declined to remove the persisted credential entirely, correctly: `persist-credentials:
+true` is upstream's default and later steps legitimately use it. What it removed is the write
+nobody asked for — the `lfs: true` path called `persist_git_credentials` *before* the fetch
+regardless of the setting, and cleanup then skipped it. LFS now authenticates through the same
+per-command `GIT_CONFIG_*` environment the fetch uses, so `persist-credentials: false` with
+`lfs: true` writes nothing to disk.
+
+**A GHES defect found independently of the ignored input.** `checkout_clone_url` hardcoded
+`https://github.com/{repository}.git` for external repositories, so a GHES job checking out a
+second repository fetched from the public site. Now derived from the job's own self-repository
+clone URL. This is the same defect the ignored `github-server-url` input would have caused, but it
+did not need that input to trigger.
+
+**Mirror and hydration.** The store key is now `{host}__{owner}__{repo}`, with scp-style
+`git@host:owner/repo.git` split correctly — that form previously produced a mangled owner.
+Corruption detection now requires git to recognise the repository, `for-each-ref` to read, and an
+object named by a ref to exist; a failing mirror is renamed aside under the exclusive lock and
+rebuilt, and the warn-and-fall-back path is gone, so mirror failure fails the checkout step
+carrying git's own exit code. The mirror fetches only the wanted revision, pins it under
+`refs/velnor/*`, holds the exclusive lock only for create and repair, fetches under a **shared**
+lock, and short-circuits with zero network when the commit is already present. The workspace no
+longer fetches from the mirror at all — it hard-links objects and writes refs directly.
+
+Measured on a synthetic 6 MB repository with 250 `refs/pull/*`:
+
+| | before | after |
+| --- | --- | --- |
+| cold mirror | 7448 KB, 1.13 s | **1296 KB, 0.45 s** |
+| five further matrix legs on the same commit | 3.36 s, five full mirror fetches | **1.90 s, zero fetches** |
+| object bytes copied per workspace | 264 KB | **0** (inode identity asserted) |
+| unique disk for five workspaces | 1320 KB | **92 KB** |
+
+The safety argument for hard links is explicit and I accept it: alternates were rejected because
+the job container does not mount the mirror store, so the workspace would be a broken repository
+inside the container; a fetch only *adds* object files and never rewrites a linked one, with
+in-progress files carrying a `tmp_` name; mirror gc cannot reach pinned revisions and is disabled
+anyway, and even an unlinked pack keeps its inode alive through the link; workspace deletion
+unlinks names only; rebuild happens only after the probe declared the mirror broken, under the
+exclusive lock; and EXDEV falls back to a copy, so correctness never depends on links existing.
+
+**One deliberate semantic deviation, flagged rather than buried:** with `fetch-depth: 1` the
+workspace is no longer shallow — it carries the mirror's full linked history at zero byte cost —
+so `git rev-parse --is-shallow-repository` differs from upstream. Everything visible in the
+worktree is identical. This also makes the mtime pinning *more* consistent, because
+`git log -1 --format=%ct` now resolves on any commit rather than only a shallow tip.
+
+### Confirmed again, independently: BC-8 was correctly withdrawn
+
+The agent verified the fail-closed path itself rather than taking my word: `manifest.rs:434-449`
+declares nine `InputRule`s, `validate_inputs` (`:1526-1560`) raises a violation for any unmatched
+name, and `runner.rs:5736` calls `validate_job_with_context` before anything runs. No rejection
+logic was added and `submodules` was not implemented.
+
+Implementing `submodules` properly is blocked from that file set: it needs a `CheckoutPlan` field,
+and `CheckoutPlan` is built as a struct literal in nine places across `executor.rs`, `runner.rs`
+and `execution/tests.rs`.
+
+### Routing queue from T-011
+
+1. `runner.rs` startup should call `checkout::reap_stale_checkout_credentials()` once. Today it
+   runs at the start of every checkout, so a leak is reclaimed on the next job but not while a host
+   sits idle — the same gap the security audit found in `leftover_disk.rs:14`, which only reaps at
+   90% disk.
+2. `executor.rs:12183` prints `submodules` as a literal `false`; it should reflect the plan once
+   the field exists.
+3. The guest lane has no post step, so the credential scrub is an in-script handler covering the
+   abort case; a real post-job step is the structural fix.
+4. `velnor-tools/src/main.rs:2110-2117` should stop advertising `submodules`.
+
+**Recommendation, endorsed: unify the two checkout implementations.** The guest shell script has
+already drifted in ways that mattered — it passed `--no-tags --tags` together, had no credential
+cleanup, and inherited credentials from a reused workspace, none of which were true of the host
+path. The guest lane should call the same Rust checkout over the guest command channel rather than
+maintaining a second implementation in shell where every fix must be made twice. That is BC-23's
+shape again: a second implementation of a thing that already exists, drifting silently.
