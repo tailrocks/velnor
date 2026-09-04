@@ -26,7 +26,7 @@ use anyhow::Result;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::action::{native_action_adapter, ActionMetadata, NATIVE_ACTION_REF};
+use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE_ACTION_REF};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
@@ -739,6 +739,16 @@ fn admit_remote(
     reject_unresolved_capability_inputs(ancestry, repository, &inputs)?;
     manifest::validate_resolved_action(step_label, repository, action_ref, subpath, &inputs)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    let adapter = manifest::find(repository)
+        .map(|capability| capability.adapter)
+        .ok_or_else(|| {
+            AdmissionError::new(
+                ancestry,
+                "uses",
+                "action capability disappeared during admission",
+                Vec::new(),
+            )
+        })?;
 
     let normalized = normalize_subpath(subpath);
     let identity = ActionIdentity {
@@ -748,7 +758,15 @@ fn admit_remote(
     };
 
     // A native adapter is authoritative: no metadata fetch, no recursion.
-    if native_action_adapter(repository).is_some() {
+    if let ActionAdapter::Native(expected) = adapter {
+        if native_action_adapter(repository) != Some(expected) {
+            return Err(AdmissionError::new(
+                ancestry,
+                "adapter",
+                "manifest native adapter does not match the native adapter table",
+                vec![format!("{expected:?}")],
+            ));
+        }
         let index = walk
             .graph
             .intern(identity, AdmissionNodeKind::NativeAction, ancestry)?;
@@ -763,6 +781,11 @@ fn admit_remote(
     walk.graph.link(parent, index, ancestry)?;
 
     let metadata = cached_metadata(walk, &action_key, repository, action_ref, subpath, ancestry)?;
+    let runtime = metadata
+        .runtime()
+        .map_err(|error| AdmissionError::new(ancestry, "runtime", error.to_string(), Vec::new()))?;
+    manifest::validate_action_runtime(step_label, repository, action_ref, &runtime)
+        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
     if !is_composite(&metadata) {
         return Ok(());
     }
@@ -1641,6 +1664,7 @@ mod tests {
     }
 
     const CACHE_SHA: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
+    const REUSE_SHA: &str = "676e2d560c9a403aa252096d99fcab3e1132b0f5";
 
     #[test]
     fn case_distinct_local_subpaths_are_not_aliases() {
@@ -1900,6 +1924,24 @@ mod tests {
         // Native adapter: admitted without any metadata fetch.
         assert_eq!(source.reads(), 0);
         assert!(graph.contains_remote_action("actions/cache", CACHE_SHA, Some("restore")));
+    }
+
+    #[test]
+    fn remote_action_runtime_must_match_manifest_dispatch_class() {
+        let job = job(serde_json::json!([repo_step(
+            "fsfe/reuse-action",
+            REUSE_SHA,
+            None,
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("fsfe/reuse-action@{REUSE_SHA}"),
+            "runs:\n  using: composite\n  steps: []\n",
+        )]);
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+        assert_eq!(source.reads(), 1);
+        assert_eq!(error.field, "runtime");
+        assert_eq!(error.accepted, vec!["docker"]);
     }
 
     #[test]

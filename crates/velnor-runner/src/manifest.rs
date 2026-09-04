@@ -5,7 +5,8 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::action::{
-    string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
+    native_action_adapter, string_inputs, unsupported_action_error, ActionAdapter, ActionRuntime,
+    NativeActionAdapter, NATIVE_ACTION_REF,
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
@@ -15,7 +16,7 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
 // Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
 // Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11;
-// explicit generic action runtime kinds are v12.
+// explicit planner dispatch classes are v12.
 pub const MANIFEST_VERSION: u32 = 12;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
@@ -30,7 +31,7 @@ pub struct CapabilityManifest {
 #[derive(Debug, Clone, Copy)]
 pub struct ActionCapability {
     pub repository: &'static str,
-    pub adapter: NativeActionAdapter,
+    pub adapter: ActionAdapter,
     pub allowed_refs: &'static [AllowedRef],
     /// Non-root action subpaths this repository exposes (for example
     /// `actions/cache` exposes `restore` and `save`). The root action is always
@@ -272,24 +273,6 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("disable_annotations", &["false"]),
     InputRule::Forbidden("token"),
 ];
-const MR_BOXINGTON_INPUTS: &[InputRule] = &[
-    InputRule::Literal("backend", &["github", "server"]),
-    InputRule::Any("version"),
-    InputRule::Any("github-token"),
-    InputRule::Any("cache-key"),
-    InputRule::Any("restore-keys"),
-    InputRule::Any("cache-generation"),
-    InputRule::Literal("save-on-workflow-dispatch", &["true", "false"]),
-    InputRule::Any("toolchain"),
-    InputRule::Any("max-size"),
-    InputRule::Literal("cache-links", &["auto", "true", "false"]),
-    InputRule::Any("server-url"),
-    InputRule::Any("namespace"),
-    InputRule::Any("token"),
-    InputRule::Any("token-file"),
-    InputRule::Any("oidc-audience"),
-    InputRule::Literal("server-mode", &["read-write", "read-only", "write-only"]),
-];
 const RUST_CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("shared-key"),
     InputRule::Any("cache-directories"),
@@ -333,7 +316,7 @@ macro_rules! capability {
     ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr, subpaths: $subpaths:expr) => {
         ActionCapability {
             repository: $repo,
-            adapter: NativeActionAdapter::$adapter,
+            adapter: ActionAdapter::Native(NativeActionAdapter::$adapter),
             allowed_refs: $refs,
             allowed_subpaths: $subpaths,
             inputs: $inputs,
@@ -345,7 +328,7 @@ macro_rules! capability {
 pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
         repository: "tailrocks/velnor-actions",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
                 "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
@@ -386,7 +369,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "jackin-project/jackin-role-action",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
                 "041f17a6d32f8fd2a8ef03c2a63be58346993136",
@@ -412,7 +395,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "fsfe/reuse-action",
-        adapter: NativeActionAdapter::ApprovedDocker,
+        adapter: ActionAdapter::Docker,
         allowed_refs: &[allowed(
             "676e2d560c9a403aa252096d99fcab3e1132b0f5",
             "pinned REUSE compliance Docker action",
@@ -420,17 +403,6 @@ pub static ACTIONS: &[ActionCapability] = &[
         allowed_subpaths: &[],
         inputs: &[],
         notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
-    },
-    ActionCapability {
-        repository: "jdx/mr-boxington-action",
-        adapter: NativeActionAdapter::ApprovedJavaScript,
-        allowed_refs: &[allowed(
-            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
-            "v1.2.0",
-        )],
-        allowed_subpaths: &[],
-        inputs: MR_BOXINGTON_INPUTS,
-        notes: "pinned Node24 main/post action; generic fetched-action execution with a closed identity and input surface",
     },
     capability!(
         "actions/checkout",
@@ -818,7 +790,7 @@ fn assert_manifest_integrity_of(
             if allowed_ref.value == NATIVE_ACTION_REF {
                 // `__native` authorizes broker-managed checkout only; it must
                 // never stand in for a metadata-fetched action ref.
-                if capability.adapter != NativeActionAdapter::Checkout {
+                if capability.adapter != ActionAdapter::Native(NativeActionAdapter::Checkout) {
                     anyhow::bail!(
                         "manifest integrity: '__native' ref is only valid for broker-managed checkout, found on '{}'",
                         capability.repository
@@ -861,6 +833,27 @@ fn assert_manifest_integrity_of(
                 );
             }
             seen_subpaths.push(subpath);
+        }
+
+        match capability.adapter {
+            ActionAdapter::Native(adapter) => {
+                if native_action_adapter(capability.repository) != Some(adapter) {
+                    anyhow::bail!(
+                        "manifest integrity: native adapter {:?} for '{}' does not match the native adapter table",
+                        adapter,
+                        capability.repository
+                    );
+                }
+            }
+            ActionAdapter::Composite | ActionAdapter::Docker => {
+                if let Some(adapter) = native_action_adapter(capability.repository) {
+                    anyhow::bail!(
+                        "manifest integrity: generic action '{}' is also mapped to native adapter {:?}",
+                        capability.repository,
+                        adapter
+                    );
+                }
+            }
         }
     }
 
@@ -913,6 +906,65 @@ pub fn find(repository: &str) -> Option<&'static ActionCapability> {
     ACTIONS
         .iter()
         .find(|capability| capability.repository.eq_ignore_ascii_case(repository))
+}
+
+/// Validate the fetched runtime against the manifest's dispatch class. Native
+/// actions never reach this function: their static adapter table is checked by
+/// manifest integrity and admission skips metadata fetches for them.
+pub fn validate_action_runtime(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    runtime: &ActionRuntime,
+) -> Result<()> {
+    let capability = find(repository).ok_or_else(|| {
+        violation(
+            step,
+            repository,
+            action_ref,
+            "uses",
+            repository,
+            ACTIONS
+                .iter()
+                .map(|item| item.repository.to_string())
+                .collect(),
+        )
+    })?;
+    let expected = match capability.adapter {
+        ActionAdapter::Composite => "composite",
+        ActionAdapter::Docker => "docker",
+        ActionAdapter::Native(adapter) => {
+            return Err(violation(
+                step,
+                repository,
+                action_ref,
+                "runtime",
+                runtime_kind(runtime),
+                vec![format!("native:{adapter:?}")],
+            )
+            .into());
+        }
+    };
+    if runtime_kind(runtime) != expected {
+        return Err(violation(
+            step,
+            repository,
+            action_ref,
+            "runtime",
+            runtime_kind(runtime),
+            vec![expected.to_string()],
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn runtime_kind(runtime: &ActionRuntime) -> &'static str {
+    match runtime {
+        ActionRuntime::JavaScript { .. } => "javascript",
+        ActionRuntime::Composite => "composite",
+        ActionRuntime::Docker { .. } => "docker",
+    }
 }
 
 pub fn validate_resolved_action(
@@ -1656,7 +1708,7 @@ pub fn to_json() -> Result<String> {
         .iter()
         .map(|item| ExportAction {
             repository: item.repository,
-            adapter: format!("{:?}", item.adapter),
+            adapter: item.adapter.manifest_name(),
             allowed_refs: item
                 .allowed_refs
                 .iter()
@@ -1813,7 +1865,7 @@ mod tests {
     ) -> ActionCapability {
         ActionCapability {
             repository,
-            adapter: NativeActionAdapter::Cache,
+            adapter: ActionAdapter::Composite,
             allowed_refs,
             allowed_subpaths,
             inputs: &[],
@@ -1833,23 +1885,60 @@ mod tests {
     #[test]
     fn admitted_remote_actions_declare_their_actual_runtime_kind() {
         let expected = [
-            (
-                "tailrocks/velnor-actions",
-                NativeActionAdapter::ApprovedComposite,
-            ),
+            ("tailrocks/velnor-actions", ActionAdapter::Composite),
             (
                 "jackin-project/jackin-role-action",
-                NativeActionAdapter::ApprovedComposite,
+                ActionAdapter::Composite,
             ),
-            ("fsfe/reuse-action", NativeActionAdapter::ApprovedDocker),
-            (
-                "jdx/mr-boxington-action",
-                NativeActionAdapter::ApprovedJavaScript,
-            ),
+            ("fsfe/reuse-action", ActionAdapter::Docker),
         ];
         for (repository, adapter) in expected {
             assert_eq!(find(repository).map(|item| item.adapter), Some(adapter));
         }
+    }
+
+    #[test]
+    fn generic_runtime_must_match_declared_dispatch_class() {
+        let docker = ActionRuntime::Docker {
+            image: "docker://alpine:3.20".to_string(),
+        };
+        assert!(validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &docker,
+        )
+        .is_ok());
+
+        let mismatch = validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &ActionRuntime::Composite,
+        )
+        .unwrap_err();
+        let mismatch = mismatch.downcast_ref::<CapabilityViolation>().unwrap();
+        assert_eq!(mismatch.field, "runtime");
+        assert_eq!(mismatch.received, "composite");
+        assert_eq!(mismatch.accepted, vec!["docker"]);
+
+        let javascript = validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &ActionRuntime::JavaScript {
+                node: "node24".to_string(),
+                main: "dist/index.js".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            javascript
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "runtime"
+        );
     }
 
     #[test]
@@ -2244,7 +2333,7 @@ mod tests {
                 if allowed_ref.value == NATIVE_ACTION_REF {
                     assert_eq!(
                         capability.adapter,
-                        NativeActionAdapter::Checkout,
+                        ActionAdapter::Native(NativeActionAdapter::Checkout),
                         "__native only for checkout"
                     );
                     continue;
@@ -2313,7 +2402,7 @@ mod tests {
     fn integrity_rejects_native_ref_outside_checkout() {
         let actions = [ActionCapability {
             repository: "acme/notcheckout",
-            adapter: NativeActionAdapter::Cache,
+            adapter: ActionAdapter::Native(NativeActionAdapter::Cache),
             allowed_refs: &[AllowedRef {
                 value: NATIVE_ACTION_REF,
                 release: "",
@@ -2440,69 +2529,20 @@ mod tests {
     }
 
     #[test]
-    fn mr_boxington_rejects_unsupported_local_backend() {
-        const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
-
-        for backend in ["github", "server"] {
-            validate_resolved_action(
-                "cache",
-                "jdx/mr-boxington-action",
-                SHA,
-                None,
-                &BTreeMap::from([("backend".to_string(), backend.to_string())]),
-            )
-            .unwrap();
-        }
-
-        let local_error = validate_resolved_action(
+    fn unsupported_generic_javascript_action_is_not_admitted() {
+        let error = validate_resolved_action(
             "cache",
             "jdx/mr-boxington-action",
-            SHA,
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
             None,
-            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
+            &BTreeMap::new(),
         )
         .unwrap_err();
         assert_eq!(
-            local_error
-                .downcast_ref::<CapabilityViolation>()
-                .unwrap()
-                .field,
-            "with.backend"
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "uses"
         );
-
-        let backend_error = validate_resolved_action(
-            "cache",
-            "jdx/mr-boxington-action",
-            SHA,
-            None,
-            &BTreeMap::from([("backend".to_string(), "unknown".to_string())]),
-        )
-        .unwrap_err();
-        assert_eq!(
-            backend_error
-                .downcast_ref::<CapabilityViolation>()
-                .unwrap()
-                .field,
-            "with.backend"
-        );
-
-        let ref_error = validate_resolved_action(
-            "cache",
-            "jdx/mr-boxington-action",
-            "1111111111111111111111111111111111111111",
-            None,
-            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
-        )
-        .unwrap_err();
-        assert_eq!(
-            ref_error
-                .downcast_ref::<CapabilityViolation>()
-                .unwrap()
-                .field,
-            "ref"
-        );
-
-        assert!(crate::action::native_action_adapter("jdx/mr-boxington-action").is_none());
+        assert!(find("jdx/mr-boxington-action").is_none());
     }
 
     #[test]
@@ -2613,9 +2653,6 @@ mod tests {
     #[test]
     fn manifest_covers_every_native_adapter() {
         let expected = [
-            NativeActionAdapter::ApprovedComposite,
-            NativeActionAdapter::ApprovedDocker,
-            NativeActionAdapter::ApprovedJavaScript,
             NativeActionAdapter::Checkout,
             NativeActionAdapter::Cache,
             NativeActionAdapter::UploadArtifact,
@@ -2624,6 +2661,7 @@ mod tests {
             NativeActionAdapter::ConfigurePages,
             NativeActionAdapter::DeployPages,
             NativeActionAdapter::AttestBuildProvenance,
+            NativeActionAdapter::CreateGitHubAppToken,
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
@@ -2644,10 +2682,18 @@ mod tests {
         ];
         for adapter in expected {
             assert!(
-                ACTIONS.iter().any(|item| item.adapter == adapter),
+                ACTIONS
+                    .iter()
+                    .any(|item| item.adapter == ActionAdapter::Native(adapter)),
                 "missing {adapter:?}"
             );
         }
+        assert!(ACTIONS
+            .iter()
+            .any(|item| item.adapter == ActionAdapter::Composite));
+        assert!(ACTIONS
+            .iter()
+            .any(|item| item.adapter == ActionAdapter::Docker));
     }
 
     #[test]
@@ -2665,6 +2711,17 @@ mod tests {
         // `development` sentinel from build.rs.
         assert_eq!(value["source_sha"], env!("VELNOR_SOURCE_SHA"));
         assert_eq!(value["crate_version"], env!("CARGO_PKG_VERSION"));
+        let actions = value["actions"].as_array().unwrap();
+        let reuse = actions
+            .iter()
+            .find(|item| item["repository"] == "fsfe/reuse-action")
+            .unwrap();
+        assert_eq!(reuse["adapter"], "Docker");
+        let cache = actions
+            .iter()
+            .find(|item| item["repository"] == "actions/cache")
+            .unwrap();
+        assert_eq!(cache["adapter"], "Native(Cache)");
     }
 
     #[test]
