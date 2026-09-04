@@ -100,8 +100,18 @@ impl StorageLayout {
 }
 
 pub fn cache_class_path(legacy_work_root: &Path, class: &str, legacy_name: &str) -> PathBuf {
+    let layout = StorageLayout::resolve();
+    cache_class_path_with_layout(legacy_work_root, class, legacy_name, layout.as_ref())
+}
+
+pub fn cache_class_path_with_layout(
+    legacy_work_root: &Path,
+    class: &str,
+    legacy_name: &str,
+    layout: Option<&StorageLayout>,
+) -> PathBuf {
     let legacy = legacy_work_root.join(legacy_name);
-    let Some(layout) = StorageLayout::resolve() else {
+    let Some(layout) = layout else {
         return legacy;
     };
     let canonical = layout.cache_class(&crate::github_adapter::cargo_target_trust_scope(), class);
@@ -118,9 +128,26 @@ pub fn cache_class_path_for_trust(
     class: &str,
     legacy_name: &str,
 ) -> PathBuf {
+    let layout = StorageLayout::resolve();
+    cache_class_path_for_trust_with_layout(
+        legacy_work_root,
+        trust_scope,
+        class,
+        legacy_name,
+        layout.as_ref(),
+    )
+}
+
+pub fn cache_class_path_for_trust_with_layout(
+    legacy_work_root: &Path,
+    trust_scope: &str,
+    class: &str,
+    legacy_name: &str,
+    layout: Option<&StorageLayout>,
+) -> PathBuf {
     let trust = crate::container::sanitize_store_key(trust_scope);
     let legacy = legacy_work_root.join(legacy_name).join(&trust);
-    let Some(layout) = StorageLayout::resolve() else {
+    let Some(layout) = layout else {
         return legacy;
     };
     let canonical = layout.cache_class(&trust, class);

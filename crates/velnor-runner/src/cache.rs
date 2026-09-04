@@ -147,8 +147,10 @@ fn run_gc(
     if !args.dry_run && !args.yes {
         bail!("destructive cache gc requires --yes");
     }
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
+    let storage_layout = crate::storage::StorageLayout::resolve();
+    let run_root = storage_layout
+        .as_ref()
+        .map(|layout| layout.run_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
     let _destructive_locks = if args.dry_run {
         None
@@ -168,7 +170,7 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing(work_root, false)?;
+    let listing = cache_listing_with_layout(work_root, false, storage_layout.as_ref())?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
@@ -181,7 +183,10 @@ fn run_gc(
         max_total_bytes: args.max_size_bytes,
         class_budgets,
         in_use_scopes,
-        protected_paths: pointer_protected_target_generations(work_root),
+        protected_paths: pointer_protected_target_generations_with_layout(
+            work_root,
+            storage_layout.as_ref(),
+        ),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
@@ -204,8 +209,9 @@ fn run_gc(
         return Ok(());
     }
 
-    let log_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.log_root)
+    let log_root = storage_layout
+        .as_ref()
+        .map(|layout| layout.log_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
         let result = remove_candidate(&candidate);
@@ -340,14 +346,35 @@ struct StoreRoot {
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
-    let cargo = crate::container::cargo_store_host(work_root);
+    let layout = crate::storage::StorageLayout::resolve();
+    store_roots_with_layout(work_root, layout.as_ref())
+}
+
+fn store_roots_with_layout(
+    work_root: &Path,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> Vec<StoreRoot> {
+    let daemon_root = crate::container::daemon_store_root(work_root);
+    let cargo = crate::storage::cache_class_path_with_layout(
+        &daemon_root,
+        "cargo",
+        "_velnor_cargo",
+        layout,
+    );
     let cargo_bin = cargo.join("bin");
     let cargo_bin_legacy = is_legacy_store(&cargo);
-    let mise = crate::container::mise_store_host(work_root);
+    let mise =
+        crate::storage::cache_class_path_with_layout(&daemon_root, "mise", "_velnor_mise", layout);
     let mise_legacy = is_legacy_store(&mise);
-    let targets = crate::container::cargo_target_store_host(work_root);
+    let targets = crate::storage::cache_class_path_with_layout(
+        &daemon_root,
+        "targets",
+        "_velnor_targets",
+        layout,
+    );
     let targets_legacy = is_legacy_store(&targets);
-    let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
+    let actions_cache =
+        crate::storage::cache_class_path_with_layout(work_root, "caches", "_velnor_caches", layout);
     let actions_cache_legacy = is_legacy_store(&actions_cache);
     let mut stores = vec![
         StoreRoot {
@@ -458,16 +485,23 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         for (kind, path) in [
             (
                 CacheStore::Mbx,
-                crate::storage::cache_class_path_for_trust(
+                crate::storage::cache_class_path_for_trust_with_layout(
                     work_root,
                     trust_scope,
                     "compiler/mbx",
                     "_velnor_mbx",
+                    layout,
                 ),
             ),
             (
                 CacheStore::Sccache,
-                crate::container::sccache_host(work_root, trust_class),
+                crate::storage::cache_class_path_for_trust_with_layout(
+                    &daemon_root,
+                    trust_scope,
+                    "compiler/sccache",
+                    "_velnor_sccache",
+                    layout,
+                ),
             ),
         ] {
             stores.push(StoreRoot {
@@ -525,15 +559,22 @@ fn collect_scoped_sizes(
     Ok(total)
 }
 
-fn cache_listing(work_root: &Path, emergency: bool) -> Result<Vec<CacheEntry>> {
+fn cache_listing_with_layout(
+    work_root: &Path,
+    emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    for store in store_roots(work_root).into_iter().filter(|store| {
-        if emergency {
-            store.emergency_managed
-        } else {
-            store.gc_managed
-        }
-    }) {
+    for store in store_roots_with_layout(work_root, layout)
+        .into_iter()
+        .filter(|store| {
+            if emergency {
+                store.emergency_managed
+            } else {
+                store.gc_managed
+            }
+        })
+    {
         collect_candidates(&store, &store.path, 0, &mut entries)?;
     }
     Ok(entries)
@@ -551,13 +592,14 @@ pub fn reclaim(
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
 ) -> Result<ReclaimReport> {
-    reclaim_work_root(
+    reclaim_work_root_with_layout(
         &layout.cache_root,
         &layout.run_root,
         &layout.log_root,
         target_bytes,
         in_use_scopes,
         false,
+        Some(layout),
     )
 }
 
@@ -570,6 +612,14 @@ pub fn reclaim(
 pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
     let roots = crate::leftover_disk::discover_daemon_work_roots();
     let layout = crate::storage::StorageLayout::resolve();
+    reclaim_for_disk_pressure_with_context(target_bytes, &roots, layout.as_ref())
+}
+
+fn reclaim_for_disk_pressure_with_context(
+    target_bytes: u64,
+    roots: &[PathBuf],
+    layout: Option<&crate::storage::StorageLayout>,
+) -> ReclaimReport {
     let mut report = ReclaimReport::default();
 
     for work_root in roots {
@@ -586,13 +636,14 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
         if remaining == 0 {
             break;
         }
-        match reclaim_work_root(
+        match reclaim_work_root_with_layout(
             &work_root,
             &run_root,
             &log_root,
             remaining,
             &BTreeSet::new(),
             true,
+            layout,
         ) {
             Ok(root_report) => {
                 report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
@@ -608,13 +659,14 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
     report
 }
 
-pub(crate) fn reclaim_work_root(
+fn reclaim_work_root_with_layout(
     work_root: &Path,
     run_root: &Path,
     log_root: &Path,
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
     emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
@@ -632,7 +684,7 @@ pub(crate) fn reclaim_work_root(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
-    let mut entries = cache_listing(work_root, emergency)?;
+    let mut entries = cache_listing_with_layout(work_root, emergency, layout)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -640,7 +692,7 @@ pub(crate) fn reclaim_work_root(
         max_total_bytes: None,
         class_budgets: BTreeMap::new(),
         in_use_scopes: active_scopes,
-        protected_paths: pointer_protected_target_generations(work_root),
+        protected_paths: pointer_protected_target_generations_with_layout(work_root, layout),
     };
     entries.retain(|entry| !in_use(entry, &policy) && !protected(entry, &policy));
     entries.sort_by(|left, right| {
@@ -1284,9 +1336,12 @@ fn target_generation_is_current(path: &Path) -> Result<bool> {
     Ok(current_pointer_generation_checked(parent)?.as_deref() == Some(name.as_ref()))
 }
 
-fn pointer_protected_target_generations(work_root: &Path) -> BTreeSet<PathBuf> {
+fn pointer_protected_target_generations_with_layout(
+    work_root: &Path,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> BTreeSet<PathBuf> {
     let mut protected = BTreeSet::new();
-    for store in store_roots(work_root)
+    for store in store_roots_with_layout(work_root, layout)
         .into_iter()
         .filter(|store| store.kind == CacheStore::Targets)
     {
@@ -1656,13 +1711,14 @@ mod tests {
             fs::create_dir_all(path).unwrap();
             fs::write(path.join("data"), vec![0; 16]).unwrap();
         }
-        let report = reclaim_work_root(
+        let report = reclaim_work_root_with_layout(
             &work,
             &root.join("run"),
             &root.join("log"),
             16,
             &BTreeSet::from(["actions-cache/trusted/active".into()]),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(report.deleted.len(), 1);
@@ -1687,23 +1743,10 @@ mod tests {
         fs::write(cache.join("payload"), vec![0; 16]).unwrap();
         fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
 
-        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
-        // SAFETY: this synchronous test owns the process environment value
-        // while exercising the discovery path and restores it below. The
-        // canonical actions-cache path is trust-scoped; nothing reads
-        // VELNOR_TRUST_SCOPE any more, so the fixture uses the fail-closed
-        // scope an unresolved process reports.
-        unsafe {
-            std::env::set_var("VELNOR_STORAGE_ROOT", &root);
-        }
-        let report = reclaim_for_disk_pressure(32);
-        // SAFETY: restore the values owned by this synchronous test.
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("VELNOR_STORAGE_ROOT", value),
-                None => std::env::remove_var("VELNOR_STORAGE_ROOT"),
-            }
-        }
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let work_roots = crate::leftover_disk::discover_daemon_work_roots_in(&root.join("lib"));
+        assert_eq!(work_roots, vec![work.clone()]);
+        let report = reclaim_for_disk_pressure_with_context(32, &work_roots, Some(&layout));
 
         assert_eq!(report.freed_bytes, 32);
         assert_eq!(
