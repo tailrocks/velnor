@@ -3098,3 +3098,20 @@ Focused proof at this package: `velnor-workflow` tests `87` passed, all-targets
 check passed, and the package was pushed to `perf/docker-rust-mbx`. Packaging,
 monitoring, and the full workspace gate remain follow-up work in this same
 ownership claim.
+
+## 28. Workflow runtime distribution and evidence — package pending
+
+The Velnor node image and Debian release package now include
+`velnor-workflow`. Release archives carry the executable beside the runner;
+release verification checks its presence and the Debian payload digest. The
+workspace dependency-boundary inventory includes the new package.
+
+`velnor-tools workflow-monitor` now polls the authoritative GitHub run through
+`gh api`, optionally snapshots the selected Velnor instance through the typed
+`velnor-client` read transport, and atomically rewrites bounded JSON evidence.
+Timeout, local transport failure, and GitHub terminal failure remain distinct;
+local success never substitutes for GitHub completion. The monitor is
+read-only and credentials stay in the existing environment/runner transport.
+
+Focused proof: `velnor-tools` tests `192` passed, strict package Clippy passed,
+and dependency-boundary tests `6` passed. Full workspace gates remain required.
