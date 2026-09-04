@@ -19,7 +19,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Invocation, Rusage},
+    sys::{tree_bytes, Invocation},
 };
 
 /// Shape of the container workload.
@@ -190,7 +190,6 @@ impl Workload for DockerWorkload {
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
         context.runner.reset();
-        let before_usage = Rusage::children();
         let work_root = context.work_root.clone();
         let disk_before = tree_bytes(&work_root);
         let started = Instant::now();
@@ -214,7 +213,7 @@ impl Workload for DockerWorkload {
         }
 
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage = Rusage::children().since(before_usage);
+        let usage = context.runner.rusage();
         let disk_after = tree_bytes(&work_root);
 
         resources.cpu_user_us = usage.user_us;

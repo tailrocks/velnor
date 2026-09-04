@@ -25,7 +25,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Runner, Rusage},
+    sys::{tree_bytes, Runner},
 };
 
 /// How the workspace is prepared before each measured iteration.
@@ -462,7 +462,6 @@ impl Workload for CargoWorkload {
     fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
         self.iteration += 1;
         context.runner.reset();
-        let before_usage = Rusage::children();
         let root = context.work_root.join(self.scenario.replace('/', "_"));
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
@@ -499,7 +498,7 @@ impl Workload for CargoWorkload {
         self.restore(context, &workspace);
 
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let usage = Rusage::children().since(before_usage);
+        let usage = context.runner.rusage();
         let disk_after = tree_bytes(&root);
         let git = GitCounters::from_event_file(&trace_file).unwrap_or_default();
 
