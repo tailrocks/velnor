@@ -330,7 +330,7 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -601,7 +601,7 @@ impl JobContainerSpec {
             "-v".to_owned(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".to_owned(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".to_owned(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -706,7 +706,7 @@ impl JobContainerSpec {
             "-v".to_owned(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".to_owned(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".to_owned(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -1379,6 +1379,10 @@ mod tests {
         args.contains(&mount(host, container))
     }
 
+    fn has_read_only_mount(args: &[String], host: &Path, container: &str) -> bool {
+        args.contains(&format!("{}:ro", mount(host, container)))
+    }
+
     fn spec() -> JobContainerSpec {
         let root = container_test_temp("spec");
         let work = root.join("work");
@@ -1805,6 +1809,8 @@ mod tests {
             &workflow_host(&job.temp_host),
             "/github/workflow"
         ));
+        assert!(has_read_only_mount(&args, &job.actions_host, "/__a"));
+        assert!(!has_mount(&args, &job.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
@@ -1919,7 +1925,7 @@ mod tests {
         assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
-        assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
+        assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
@@ -2254,6 +2260,8 @@ mod tests {
             &workflow_host(&spec.temp_host),
             "/github/workflow"
         ));
+        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -2440,6 +2448,8 @@ mod tests {
             &workflow_host(&spec.temp_host),
             "/github/workflow"
         ));
+        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
