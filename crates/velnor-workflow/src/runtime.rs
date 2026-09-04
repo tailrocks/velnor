@@ -20,14 +20,14 @@ use globset::{Glob, GlobSetBuilder};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
-const IMMUTABLE_POLICY_WORKFLOW: &str =
-    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
+const IMMUTABLE_POLICY_WORKFLOW: &str =
+    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
+const TRUSTED_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 #[expect(
@@ -178,7 +178,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "policy" => {
-            let options = parse_options(&arguments[1..], &["workflow-root"])?;
+            let options = parse_options(
+                &arguments[1..],
+                &["workflow-root", "approved-policy-revision"],
+            )?;
             let root = options
                 .get("workflow-root")
                 .map_or_else(
@@ -188,7 +191,16 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 .or_else(|| env::var_os("GITHUB_WORKSPACE").map(PathBuf::from))
                 .or_else(|| env::current_dir().ok())
                 .ok_or_else(|| GeneratorError::usage("resolve workflow root"))?;
-            enforce_policy(&root)?;
+            let trusted_revision = options
+                .get("approved-policy-revision")
+                .cloned()
+                .or_else(|| env::var(TRUSTED_POLICY_REVISION_ENV).ok())
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "{TRUSTED_POLICY_REVISION_ENV} or --approved-policy-revision is required"
+                    ))
+                })?;
+            enforce_policy_with_revision(&root, &trusted_revision)?;
             Ok(true)
         }
         "release" => {
@@ -685,7 +697,15 @@ fn collect_manifests(
     Ok(())
 }
 
-pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
+pub(crate) fn enforce_policy_with_revision(
+    root: &Path,
+    trusted_revision: &str,
+) -> Result<(), GeneratorError> {
+    if !is_full_sha(trusted_revision) {
+        return Err(GeneratorError::usage(format!(
+            "{TRUSTED_POLICY_REVISION_ENV} must be a full 40-character SHA"
+        )));
+    }
     let workflows = root.join(".github/workflows");
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
@@ -720,7 +740,7 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
             );
             continue;
         };
-        inspect_workflow(workflow, &path, &mut failures);
+        inspect_workflow(workflow, &path, trusted_revision, &mut failures);
     }
     if !found_policy_entrypoint {
         policy_failure(
@@ -737,8 +757,9 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn inspect_workflow(workflow: &Mapping, path: &Path, failures: &mut usize) {
-    let approved_policy_entrypoint = is_approved_policy_entrypoint(path, workflow);
+fn inspect_workflow(workflow: &Mapping, path: &Path, trusted_revision: &str, failures: &mut usize) {
+    let approved_policy_entrypoint =
+        is_approved_policy_entrypoint(path, workflow, trusted_revision);
     for (key, value) in workflow {
         let key = key.as_str();
         match key {
@@ -749,13 +770,13 @@ fn inspect_workflow(workflow: &Mapping, path: &Path, failures: &mut usize) {
                     policy_failure(path, "pull_request_target is forbidden", failures);
                 }
             }
-            "jobs" => inspect_jobs(value, path, failures),
-            _ => inspect_yaml_value(value, path, None, false, failures),
+            "jobs" => inspect_jobs(value, path, trusted_revision, failures),
+            _ => inspect_yaml_value(value, path, None, false, trusted_revision, failures),
         }
     }
 }
 
-fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping) -> bool {
+fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revision: &str) -> bool {
     if !path.ends_with(Path::new(".github/workflows/ci-policy.yml"))
         || mapping_value(workflow, "name").and_then(Value::as_str) != Some("Velnor workflow policy")
     {
@@ -792,7 +813,8 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping) -> bool {
         || mapping_value(policy, "name").and_then(Value::as_str) != Some("Policy")
         || mapping_value(policy, "uses")
             .and_then(Value::as_str)
-            .is_none_or(|value| !is_approved_policy_reusable(value))
+            .is_none_or(|value| !is_approved_policy_reusable(value, trusted_revision))
+        || !has_policy_revision_input(policy, trusted_revision)
     {
         return false;
     }
@@ -803,10 +825,10 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping) -> bool {
         && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
         && policy
             .keys()
-            .all(|key| matches!(key.as_str(), "name" | "uses" | "permissions"))
+            .all(|key| matches!(key.as_str(), "name" | "uses" | "with" | "permissions"))
 }
 
-fn inspect_jobs(value: &Value, path: &Path, failures: &mut usize) {
+fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &mut usize) {
     let Some(jobs) = value.as_mapping() else {
         policy_failure(path, "jobs must be a YAML mapping", failures);
         return;
@@ -821,6 +843,17 @@ fn inspect_jobs(value: &Value, path: &Path, failures: &mut usize) {
             );
             continue;
         };
+        if mapping_value(job, "uses")
+            .and_then(Value::as_str)
+            .is_some_and(|value| is_approved_policy_reusable(value, trusted_revision))
+            && !has_policy_revision_input(job, trusted_revision)
+        {
+            policy_failure(
+                path,
+                "approved policy workflow call must pass the trusted policy-revision input",
+                failures,
+            );
+        }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
             .is_some_and(has_trusted_runner_gate);
@@ -828,7 +861,7 @@ fn inspect_jobs(value: &Value, path: &Path, failures: &mut usize) {
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
             .and_then(Value::as_mapping);
-        inspect_mapping(job, path, matrix, trusted_gate, failures);
+        inspect_mapping(job, path, matrix, trusted_gate, trusted_revision, failures);
     }
 }
 
@@ -837,19 +870,34 @@ fn inspect_yaml_value(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
+    trusted_revision: &str,
     failures: &mut usize,
 ) {
     match value {
         Value::Mapping(mapping) => {
-            inspect_mapping(mapping, path, matrix, trusted_gate, failures);
+            inspect_mapping(
+                mapping,
+                path,
+                matrix,
+                trusted_gate,
+                trusted_revision,
+                failures,
+            );
         }
         Value::Sequence(sequence) => {
             for item in sequence {
-                inspect_yaml_value(item, path, matrix, trusted_gate, failures);
+                inspect_yaml_value(item, path, matrix, trusted_gate, trusted_revision, failures);
             }
         }
         Value::Tagged(tagged) => {
-            inspect_yaml_value(tagged.value(), path, matrix, trusted_gate, failures);
+            inspect_yaml_value(
+                tagged.value(),
+                path,
+                matrix,
+                trusted_gate,
+                trusted_revision,
+                failures,
+            );
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
@@ -860,6 +908,7 @@ fn inspect_mapping(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
+    trusted_revision: &str,
     failures: &mut usize,
 ) {
     for (key, value) in mapping {
@@ -868,19 +917,26 @@ fn inspect_mapping(
             "pull_request_target" => {
                 policy_failure(path, "pull_request_target is forbidden", failures);
             }
-            "uses" => inspect_uses(value, path, failures),
+            "uses" => inspect_uses(value, path, trusted_revision, failures),
             "runs-on" => inspect_runner(value, path, matrix, trusted_gate, failures),
-            _ => inspect_yaml_value(value, path, matrix, trusted_gate, failures),
+            _ => inspect_yaml_value(
+                value,
+                path,
+                matrix,
+                trusted_gate,
+                trusted_revision,
+                failures,
+            ),
         }
     }
 }
 
-fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
+fn inspect_uses(value: &Value, path: &Path, trusted_revision: &str, failures: &mut usize) {
     let Some(action) = value.as_str() else {
         policy_failure(path, "uses must be a scalar reference", failures);
         return;
     };
-    if is_approved_local_reusable(action) || is_approved_policy_reusable(action) {
+    if is_approved_local_reusable(action) || is_approved_policy_reusable(action, trusted_revision) {
         return;
     }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
@@ -899,10 +955,20 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
     }
 }
 
-fn is_approved_policy_reusable(value: &str) -> bool {
+fn is_approved_policy_reusable(value: &str, trusted_revision: &str) -> bool {
     value.split_once('@').is_some_and(|(path, reference)| {
-        path == IMMUTABLE_POLICY_WORKFLOW && reference == IMMUTABLE_POLICY_WORKFLOW_REV
+        path == IMMUTABLE_POLICY_WORKFLOW && reference == trusted_revision && is_full_sha(reference)
     })
+}
+
+fn has_policy_revision_input(policy: &Mapping, trusted_revision: &str) -> bool {
+    let Some(with) = mapping_value(policy, "with").and_then(Value::as_mapping) else {
+        return false;
+    };
+    with.len() == 1
+        && mapping_value(with, "policy-revision")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == trusted_revision && is_full_sha(value))
 }
 
 fn is_approved_local_reusable(value: &str) -> bool {
@@ -920,13 +986,16 @@ fn is_approved_local_reusable(value: &str) -> bool {
 }
 
 fn is_full_sha_reference(value: &str) -> bool {
-    value.split_once('@').is_some_and(|(action, reference)| {
-        !action.is_empty()
-            && reference.len() == 40
-            && reference
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-    })
+    value
+        .split_once('@')
+        .is_some_and(|(action, reference)| !action.is_empty() && is_full_sha(reference))
+}
+
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || HEX_DIGITS.contains(&byte))
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1357,6 +1426,7 @@ mod tests {
     use super::*;
 
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+    const POLICY_REVISION: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
 
     fn policy_fixture(
         name: &str,
@@ -1374,7 +1444,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    with:\n      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1384,7 +1454,7 @@ mod tests {
     }
 
     fn run_policy(root: std::path::PathBuf) -> Result<bool, Box<dyn Error>> {
-        let result = enforce_policy(&root).is_ok();
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION).is_ok();
         std::fs::remove_dir_all(root)?;
         Ok(result)
     }
@@ -1436,6 +1506,8 @@ on: pull_request
 jobs:
   policy:
     uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
+    with:
+      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1487,6 +1559,8 @@ jobs:
   policy:
     name: Policy
     uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
+    with:
+      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a
     permissions:
       contents: read
 ";
