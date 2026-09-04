@@ -2880,10 +2880,9 @@ The shared branch now contains these bounded follow-ups from the post-handoff au
 - `b665fae` makes `ReadyProof` an opaque model capability. Its deserializer routes every wire
   value through `try_new`, so an all-false or partially false serialized proof cannot satisfy a
   readiness check; the existing JSON shape remains unchanged.
-- `ac85ea1` adds a microVM guest-cancel hook, but a read-only review found the jailer is
-  registered before that hook while cancellation fan-out preserves registration order. The
-  graceful guest stop is therefore not proven at this tip; the ordering fix remains in the other
-  lead's reserved `execution/firecracker.rs` and `execution/cancel.rs`.
+- `ac85ea1` adds the microVM guest-cancel hook. `8725209` then orders hooks before process and
+  container termination regardless of registration order, so the guest gets its graceful stop
+  request before its jailer can be killed; focused cancellation tests pass.
 - `0a23bbc` closes the opposite cancellation failure direction: an unknown Docker inspect error
   keeps the container in the escalation ladder instead of falsely treating an unproven daemon as
   gone.
@@ -2913,11 +2912,12 @@ The shared branch now contains these bounded follow-ups from the post-handoff au
   CAS crates. The later journal/CAS durability findings therefore do not apply to this tree; no
   remaining root publisher owns that abandoned API.
 
-The latest full fixture gate passed at source `ac389d64578f1dd26f210769388a22cb8e0c9eb8`, with
-the generated export at fixture commit `6cc55a43aecdc5fcd469d4e9952a27daf82289c0`. The later
-cleanup, dependency-boundary, and documentation commits do not alter the capability manifest;
-the fixture baseline is refreshed independently to the current source tip.
+A full fixture gate passed at source `62deda7fc641265123b37479309d4f59bc86afa5`, with
+the fixture branch at commit `580f74472ee3dc137304c893a001d5c5409ddfc0` and its generated export
+from `2b61ac5f3d4a9d1a4bed0c3c9c00fd0a8d6bd762`. The cleanup, dependency-boundary, and
+documentation commits do not alter the capability manifest; the refresh readiness audit and the
+full gate both passed after the final provenance update.
 
-These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
-mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
-other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
+These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation
+and mixed native/JavaScript post-action ordering remain in the other lead's reserved `runner.rs`,
+`executor.rs`, and `execution/**` worktrees.
