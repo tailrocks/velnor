@@ -2687,3 +2687,107 @@ The pinned upstream runner contract (`actions/runner` `397b032`) sends only `job
 does not identify the runner that won it. Velnor's provisional-marker design therefore cannot
 use a remote winner identity: `409` means unavailable/owned elsewhere, while local durable
 claims, leases, and generation fencing remain the ownership proof.
+
+## 20. Final verification — five-task handoff
+
+This is the final evidence section. It supersedes older counts and the artifact-callsite
+blocked status above. The runner tip verified here is
+`cade1dfc9fe2cf0441499d4bc6bc1c57c99b0b7e`; the verifier tip is
+`ba69155c094e9c6758de9fb785412314c9a587bc`. Every runner build/test below came from
+`git archive <SHA> | tar -x` of the stated immutable commit.
+
+### T-001 capability surface — executable and manifest-derived
+
+The tools audit now derives the checkout surface from the manifest and asserts the exact
+supported set: `clean`, `fetch-tags`, `fetch-depth`, `lfs`, `path`, `persist-credentials`,
+`ref`, `repository`, and `token`. `submodules` is absent and remains rejected by admission.
+The target inventory no longer advertises capabilities absent from the manifest; the regression
+test parses the compiled manifest source and fails on either direction of drift. The relevant
+surface work is in `7ca8b17`, `0e3b6ea`, and `637ae99`.
+
+The pinned `jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03` bundle accepts
+only `github` and `server`. The manifest and admission path now use explicit
+`ActionAdapter::JavaScript`, validate the closed input/runtime surface, and route the capability
+to the existing JavaScript executor (`0bcc304`, `01229a8`). The fixture uses `backend: github`,
+not the unsupported `local` value.
+
+### T-002 storage — merged with explicit BuildKit safety decision
+
+`2036c30`, `5af89ef`, `c881402`, and `371d3c1` preserve both sides of the cache/storage merge:
+`StoreCatalog` is the path-construction authority, `HostCapacity` combines `statvfs` with Docker
+accounting, leases and claims participate in liveness, and disk pressure exposes bounded refusal
+transitions. `7b0bfd7` makes claim-directory iteration fail closed: an unreadable directory entry
+marks evidence incomplete, so the reaper deletes nothing.
+
+Emergency reclaim deliberately does not run BuildKit prune. No BuildKit lease spans mutable
+content, so `buildx prune --max-used-space 0B` could delete live state. `prune_owned_builder`
+remains available only to a future caller that proves that lease; no broad Docker/system/volume/
+builder prune was added.
+
+The artifact-store constructor now calls
+`StoreCatalog::for_job_temp(temp).artifacts_run(&run_key)` at `executor.rs:9492-9498`
+(`506847b`). This follow-up landed on the shared remote from another concurrent lead after the
+earlier boundary report; this turn did not edit the forbidden executor file. The remaining
+forbidden-boundary patch instructions are unchanged: move disk-pressure admission and reclaim to
+the shared `HostCapacity`/`DiskPressure` snapshot before acquisition
+(`runner.rs:2588-2646, 2751-2760`), publish the missing `artifacts`/`gha-cache`/`mbx`/`sccache`
+policy and leases (`runner.rs:5683-5705`), and use that same snapshot for reservation/acquire
+ordering (`runner.rs:4786-4833, 5330-5338`).
+
+### T-003 test isolation — race enabling conditions removed where allowed
+
+`13b2bc5` gives container tests UUID-qualified roots. Cache/container tests no longer mutate
+process environment or assert against shared fixed paths. The forbidden executor test hazards
+remain at `executor.rs:172-176` (`/tmp/velnor` fallback) and
+`executor.rs:15310-15350, 15394-15434` (`/tmp/vlc-abort-*` and `/tmp/vlc-defer-*`); inject a
+per-test run/lease root there when that boundary is available. No executor test edit was made by
+this turn.
+
+Focused comparison evidence: container tests were `45 passed` on `7b0bfd7` versus `44 passed`
+on the unmodified storage baseline `c881402`; cache tests were `34 passed` on both, with eight
+test threads. The final runner snapshot passes the serial library gate with `1567 passed, 1
+ignored`. Full parallel runner suites at both comparison snapshots stalled in the same controller/
+wiremock harness after about seven minutes and were stopped; that is a harness limitation, not a
+claimed pass or a code failure. Serial execution is the accepted gate for this repository.
+
+### T-004 documentation — synchronized with runtime trust boundaries
+
+`fb8ae38` changes the getting-started trust example to `VELNOR_TRUST_SCOPE=untrusted`, updates
+Mr Boxington references to 1.7.0, and describes daemon-pool trust rather than a nonexistent
+per-job trust class. The execution guide records unavailable `head_repository_id` and the
+fail-closed/ephemeral fallback for missing repository identity.
+
+### T-005 verifier — content identity plus source provenance
+
+`ee91532` makes `capability_id` the SHA-256 of canonical capability content, excluding only
+`source_sha` and `capability_id`; `source_sha` remains a required full lowercase commit SHA for
+provenance. Baseline and fixture coverage therefore remain bound to content while still proving
+which runner produced the export. The final immutable refresh from runner
+`cade1dfc9fe2cf0441499d4bc6bc1c57c99b0b7e` reports manifest version `12`, crate version
+`0.1.250`, capability ID
+`23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and leaves the fixture
+clean. Readiness passed against that archive; a baseline-only audit still fails closed when no
+runner source/export is supplied.
+
+### Final gates
+
+| Gate | Immutable source | Result |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | runner `cade1df` | pass |
+| `cargo check --workspace --all-targets --features velnor-runner/test-support --locked` | runner `cade1df` | pass; 3 crates compiled |
+| `cargo clippy --workspace --all-targets --features velnor-runner/test-support --locked -- -D warnings` | runner `cade1df` | pass; `cargo clippy: No issues found` |
+| `cargo test -p velnor-runner --lib --features test-support --locked -- --test-threads=1` | runner `cade1df` | pass; 1567 passed, 1 ignored (59.53s) |
+| `cargo test -p velnor-tools --locked -- --test-threads=1` | runner `cade1df` | pass; 187 passed (6.01s) |
+| `just refresh-capability-baseline` + readiness audit | runner archive `cade1df`, fixture `ba69155` | pass; v12 / ID `23749db8…` |
+| `python3 .github/scripts/test_audits.py` | fixture `ba69155` | pass; 38 tests |
+| `just capability-contract` | fixture `ba69155` | pass |
+| `just python-check` | fixture `ba69155` | pass |
+
+### Shared-tree boundary note
+
+The final shared runner tip also contains concurrent-lead commits
+`7ed4883`, `cade1df`, `506847b`, `575097a`, `d285d0f`, and `d500aab` touching files that this turn was instructed not
+to edit (`executor.rs` and `execution/**`, plus related runner integration). They were already
+on the shared remote and were not authored or reverted here. The exact remaining forbidden-file
+patches are recorded above and in §18; this report does not misstate the final tree as
+boundary-clean.
