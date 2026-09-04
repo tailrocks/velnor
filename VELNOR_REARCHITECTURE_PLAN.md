@@ -3393,3 +3393,15 @@ workflow/actionlint, capability readiness, format/check, and L2 closure).
 This remains static/fixture proof: no live dual-lane run, deployed image
 identity, default-mbx end-to-end result, VelnorJob lifecycle benchmark,
 fault/soak result, or reserved runner/executor change is claimed.
+
+## 43. Full workspace verification — T-022 `a19f08b`
+
+After T-022, the complete source workspace gate passed at
+`a19f08be09693d79efcb88f5c09fd33ace5d8129`: format check, locked all-targets
+workspace check (`86` crates), locked workspace Clippy with warnings denied,
+and locked workspace nextest (`2,492` passed, `1` skipped across `41`
+binaries). The fixture gate had already passed at `f0c3f58` against the
+T-022 source code and is refreshed below for this plan-only source revision.
+No live dual-lane, deployed image identity, default-mbx end-to-end result,
+VelnorJob lifecycle benchmark, fault/soak result, or reserved runner/executor
+change is claimed.
