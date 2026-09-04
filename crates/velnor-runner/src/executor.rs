@@ -14256,6 +14256,15 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
+            if program == "git"
+                && args.first().is_some_and(|arg| arg == "init")
+                && args.iter().any(|arg| arg == "--bare")
+                && let Some(path) = args.last()
+            {
+                // Strict checkout hydration requires the fake mirror to model
+                // the object database that `git init --bare` creates.
+                std::fs::create_dir_all(Path::new(path).join("objects"))?;
+            }
             let stdout = if program == "docker"
                 && args.first().is_some_and(|arg| arg == "exec")
                 && args.iter().any(|arg| arg == "/__t/source.sh")

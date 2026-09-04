@@ -934,14 +934,16 @@ fn link_object_store(source: &Path, destination: &Path) -> Result<(usize, u64)> 
     let mut bytes = 0u64;
     let mut pending = vec![PathBuf::new()];
     while let Some(relative) = pending.pop() {
-        let Ok(entries) = fs::read_dir(source.join(&relative)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let directory = source.join(&relative);
+        let entries = fs::read_dir(&directory)
+            .with_context(|| format!("read Git object directory {}", directory.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("read Git object entry in {}", directory.display()))?;
             let name = entry.file_name();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
+            let file_type = entry.file_type().with_context(|| {
+                format!("read Git object entry type for {}", entry.path().display())
+            })?;
             let child = relative.join(&name);
             if file_type.is_dir() {
                 // `info/` holds regenerable caches, and an `alternates` file
@@ -980,7 +982,12 @@ fn link_object_store(source: &Path, destination: &Path) -> Result<(usize, u64)> 
                 }
             }
             linked += 1;
-            bytes += entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+            bytes = bytes.saturating_add(
+                entry
+                    .metadata()
+                    .with_context(|| format!("read Git object metadata for {}", origin.display()))?
+                    .len(),
+            );
         }
     }
     Ok((linked, bytes))
@@ -2239,6 +2246,20 @@ mod tests {
             }
         }
         assert!(checked > 0, "workspace has no objects from the mirror");
+    }
+
+    #[test]
+    fn checkout_hydration_fails_closed_when_object_directory_is_missing() {
+        let fixture = RepoFixture::new();
+        let error = link_object_store(
+            &fixture.root.join("missing-objects"),
+            &fixture.root.join("workspace-objects"),
+        )
+        .expect_err("missing mirror objects must fail closed");
+        assert!(
+            format!("{error:#}").contains("read Git object directory"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
