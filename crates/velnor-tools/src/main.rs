@@ -1733,8 +1733,6 @@ fn fixture_smoke_daemon_args(
     let mut args = vec![
         "--url".to_string(),
         fixture_url.to_string(),
-        "--pat".to_string(),
-        "$GITHUB_TOKEN".to_string(),
         "--name".to_string(),
         runner_name.to_string(),
         "--labels".to_string(),
@@ -1856,8 +1854,6 @@ fn target_smoke_daemon_args(
     let mut args = vec![
         "--url".to_string(),
         target_url.to_string(),
-        "--pat".to_string(),
-        "$GITHUB_TOKEN".to_string(),
         "--name".to_string(),
         runner_name.to_string(),
         "--target-mvp-labels".to_string(),
@@ -3898,11 +3894,10 @@ fn check_runner_exclusivity_gh(
 struct RunnerCleanupGuard {
     enabled: bool,
     root: PathBuf,
-    pat: String,
     slots: u64,
 }
 
-fn runner_cleanup_command(root: &Path, pat: &str, slots: u64) -> Command {
+fn runner_cleanup_command(root: &Path, slots: u64) -> Command {
     let mut command = Command::new("cargo");
     command
         .args([
@@ -3911,8 +3906,6 @@ fn runner_cleanup_command(root: &Path, pat: &str, slots: u64) -> Command {
             "velnorctl",
             "--",
             "remove",
-            "--pat",
-            pat,
             "--slots",
             &slots.to_string(),
         ])
@@ -3926,7 +3919,7 @@ impl Drop for RunnerCleanupGuard {
             return;
         }
         eprintln!("==> Removing runner ({} slot(s))", self.slots);
-        let _ = runner_cleanup_command(&self.root, &self.pat, self.slots).status();
+        let _ = runner_cleanup_command(&self.root, self.slots).status();
     }
 }
 
@@ -3941,7 +3934,7 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
     validate_workflow_dispatch_inputs(&plan.fixture_inputs)?;
     validate_live_evidence_controls(&args.log_lines.to_string(), &args.local_entries.to_string())?;
 
-    let pat = env::var("GITHUB_TOKEN")
+    env::var("GITHUB_TOKEN")
         .context("GITHUB_TOKEN is required to create fixture JIT runner configs.")?;
     ensure_command("gh")?;
 
@@ -4018,13 +4011,6 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
         &dump_job_messages,
     );
 
-    let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for arg in &mut daemon_args_with_pat {
-        if arg == "$GITHUB_TOKEN" {
-            *arg = pat.clone();
-        }
-    }
-
     println!(
         "==> Running Velnor fixture daemon with {} slot(s)",
         plan.job_count
@@ -4032,13 +4018,12 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
     let _cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
-        pat: pat.clone(),
         slots: plan.job_count,
     };
 
     let result = Command::new("cargo")
         .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args_with_pat)
+        .args(&daemon_args)
         .current_dir(root)
         .status()
         .context("spawn velnor-runner daemon");
@@ -4180,7 +4165,7 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
     validate_real_target_manual_confirmation_bool(&plan.repo, plan.real_target_manual_confirm)?;
     validate_live_evidence_controls(&args.log_lines.to_string(), &args.local_entries.to_string())?;
 
-    let pat = env::var("GITHUB_TOKEN")
+    env::var("GITHUB_TOKEN")
         .context("GITHUB_TOKEN is required to create target JIT runner configs.")?;
 
     if !plan.workflow.is_empty() || plan.run_id.is_some() {
@@ -4263,13 +4248,6 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
         &dump_job_messages,
     );
 
-    let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for arg in &mut daemon_args_with_pat {
-        if arg == "$GITHUB_TOKEN" {
-            *arg = pat.clone();
-        }
-    }
-
     println!(
         "==> Running Velnor {} target daemon with {} slot(s)",
         plan.target_label, plan.job_count
@@ -4277,13 +4255,12 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
     let _cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
-        pat: pat.clone(),
         slots: plan.job_count,
     };
 
     let result = Command::new("cargo")
         .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args_with_pat)
+        .args(&daemon_args)
         .current_dir(root)
         .status()
         .context("spawn velnor-runner daemon");
@@ -4910,7 +4887,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
 
     #[test]
     fn runner_cleanup_uses_operator_cli() {
-        let command = runner_cleanup_command(Path::new("/work"), "test-pat", 2);
+        let command = runner_cleanup_command(Path::new("/work"), 2);
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -4918,6 +4895,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
 
         assert!(args.windows(2).any(|pair| pair == ["--bin", "velnorctl"]));
         assert!(args.windows(2).any(|pair| pair == ["--", "remove"]));
+        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -4943,6 +4921,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(!args.contains(&"--require-docker-socket".to_string()));
         assert!(!args.contains(&"--docker-host-work-dir".to_string()));
+        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -5005,6 +4984,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .windows(2)
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(args.contains(&"--require-docker-socket".to_string()));
+        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
