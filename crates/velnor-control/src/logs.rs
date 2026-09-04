@@ -4,9 +4,9 @@ use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
 use crate::ports::{LogItem, LogPort, LogRequest, PortError};
-use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
+use velnor_model::redaction::SecretMasker;
 
 const MAX_BUFFER: usize = 16_384;
 const MAX_RECORD_BYTES: usize = 256 * 1024;
@@ -222,30 +222,13 @@ fn redact_message(message: &str, secrets: &[&str]) -> Result<String, PortError> 
 }
 
 fn replace_literal_secrets(message: &str, secrets: &[&str]) -> Result<String, PortError> {
-    let patterns: Vec<&str> = secrets
-        .iter()
-        .copied()
-        .filter(|secret| !secret.is_empty())
-        .collect();
-    if patterns.is_empty() {
+    // One masker for the whole system: same sentinel, same encoded-variant
+    // and multi-line rules as the runner and the durable store validator.
+    let masker = SecretMasker::new(secrets.iter().copied());
+    if masker.is_empty() {
         return Ok(message.to_owned());
     }
-    let matcher = AhoCorasickBuilder::new()
-        .match_kind(MatchKind::LeftmostLongest)
-        .build(&patterns)
-        .map_err(|_| PortError::Operation {
-            operation: "log secret matcher could not be built".to_owned(),
-        })?;
-    let mut output = String::with_capacity(message.len());
-    let mut cursor = 0;
-    for matched in matcher.find_iter(message) {
-        let start = matched.start();
-        let end = matched.end();
-        output.push_str(&message[cursor..start]);
-        output.push_str("[REDACTED]");
-        cursor = end;
-    }
-    output.push_str(&message[cursor..]);
+    let output = masker.mask(message);
     if output.len() > MAX_RECORD_BYTES {
         return Err(PortError::Invalid {
             field: "message".to_owned(),

@@ -7,6 +7,7 @@
 use sha2::{Digest, Sha256};
 
 use crate::ports::PortError;
+use velnor_model::redaction::SecretMasker;
 
 const MAX_MEMBER_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
@@ -108,12 +109,8 @@ impl DiagnosticsService {
                 });
                 continue;
             }
-            let mut content = String::from_utf8_lossy(&raw).into_owned();
-            for secret in &self.secrets {
-                if !secret.is_empty() {
-                    content = content.replace(secret, "[REDACTED]");
-                }
-            }
+            let content =
+                SecretMasker::new(self.secrets.iter()).mask(&String::from_utf8_lossy(&raw));
             if content.len() > MAX_MEMBER_BYTES
                 || total.saturating_add(content.len()) > MAX_TOTAL_BYTES
             {
