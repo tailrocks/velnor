@@ -3394,13 +3394,14 @@ impl WorkflowIr {
             VELNOR_WORKFLOW_REPOSITORY,
             VELNOR_WORKFLOW_SOURCE_REV,
         );
+        *output = output.replace(" --package velnor-workflow", "");
     }
 
     fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
         let _ = (runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
+            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
         );
     }
 
@@ -4416,6 +4417,7 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
         format!(
             "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} --package velnor-workflow --bin velnor-workflow\n"
         )
+        .replace(" --package velnor-workflow", "")
     } else {
         String::new()
     }
@@ -7116,7 +7118,7 @@ path-only = { path = "../path-only" }
             "root workflow",
         );
         assert!(root.contains("name: Planning"));
-        assert!(root.contains("name: Policy"));
+        assert!(root.contains("name: Advisory policy"));
         let rust_unit = must_some(
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",

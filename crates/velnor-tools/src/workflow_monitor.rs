@@ -19,6 +19,15 @@ const GITHUB_API_URL: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const GITHUB_USER_AGENT: &str = "velnor-tools-workflow-monitor";
+const MAX_EVIDENCE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LOCAL_ERRORS: usize = 16;
+const MAX_LOCAL_ERROR_BYTES: usize = 512;
+const MAX_LOCAL_SNAPSHOT_BYTES: usize = 256 * 1024;
+const MAX_MONITOR_OBSERVATIONS: usize = 2048;
+const MAX_MONITOR_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const MIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const LOCAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCAL_PAGE_LIMIT: u32 = 100;
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Configuration for monitoring one GitHub Actions run.
@@ -90,8 +99,14 @@ impl WorkflowMonitorConfig {
         if self.run_id == 0 {
             bail!("run id must be greater than zero");
         }
-        if self.timeout.is_zero() || self.poll_interval.is_zero() {
-            bail!("monitor timeout and poll interval must be greater than zero");
+        if self.timeout.is_zero() {
+            bail!("monitor timeout must be greater than zero");
+        }
+        if self.timeout > MAX_MONITOR_TIMEOUT {
+            bail!("monitor timeout must not exceed 24 hours");
+        }
+        if self.poll_interval < MIN_POLL_INTERVAL {
+            bail!("poll interval must be at least 100 milliseconds");
         }
         if self.instance.as_deref().is_some_and(|value| {
             value.is_empty()
@@ -231,6 +246,7 @@ pub fn monitor_workflow_run<'a>(
     let evidence_path = config.evidence_path();
     let mut observations: Vec<WorkflowRunObservation> = Vec::new();
     let mut timed_out = false;
+    let mut observation_count = 0;
 
     let mut first_poll = true;
     let final_run = loop {
@@ -260,19 +276,23 @@ pub fn monitor_workflow_run<'a>(
                 .map(|instance| collect_velnor_observation(instance, deadline)),
         };
         let current = observation.run.clone();
+        if observations.len() == MAX_MONITOR_OBSERVATIONS {
+            observations.remove(0);
+        }
         observations.push(observation);
+        observation_count += 1;
         write_current_evidence(
             evidence_path,
             &config.repo,
             config.run_id,
             &started_at,
             false,
-            &observations,
+            &mut observations,
         )?;
         if current.is_terminal() {
             break current;
         }
-        if Instant::now() >= deadline {
+        if observation_count >= MAX_MONITOR_OBSERVATIONS || Instant::now() >= deadline {
             timed_out = true;
             break current;
         }
@@ -290,7 +310,7 @@ pub fn monitor_workflow_run<'a>(
             config.run_id,
             &started_at,
             true,
-            &observations,
+            &mut observations,
         )?;
     }
     Ok(WorkflowMonitorResult {
@@ -342,44 +362,52 @@ fn github_token() -> Result<String> {
 
 fn collect_velnor_observation(instance: &str, deadline: Instant) -> VelnorObservation {
     let instance = instance.to_owned();
-    let worker_instance = instance.clone();
-    let thread = thread::Builder::new()
-        .name("velnor-workflow-monitor".to_owned())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("build local Velnor observation runtime")?;
-            runtime.block_on(collect_velnor_snapshot(&worker_instance, deadline))
-        });
-    match thread {
-        Ok(thread) => match thread.join() {
-            Ok(Ok(observation)) => observation,
-            Ok(Err(error)) => unavailable_velnor_observation(instance, error.to_string()),
-            Err(_) => unavailable_velnor_observation(instance, "observation thread panicked"),
-        },
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return unavailable_velnor_observation(instance, "monitor deadline exhausted");
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
         Err(error) => {
-            unavailable_velnor_observation(instance, format!("spawn observation thread: {error}"))
+            return unavailable_velnor_observation(
+                instance,
+                format!("build local Velnor observation runtime: {error}"),
+            );
         }
+    };
+    match runtime.block_on(tokio::time::timeout(
+        remaining,
+        collect_velnor_snapshot(&instance, deadline),
+    )) {
+        Ok(Ok(observation)) => observation,
+        Ok(Err(error)) => unavailable_velnor_observation(instance, error.to_string()),
+        Err(_) => unavailable_velnor_observation(instance, "monitor deadline exhausted"),
     }
 }
 
 async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<VelnorObservation> {
     let endpoint = UnixEndpoint::from_instance(instance).context("validate Velnor instance")?;
-    let timeout = Duration::from_secs(10).min(deadline.saturating_duration_since(Instant::now()));
+    let timeout = LOCAL_REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
     if timeout.is_zero() {
         bail!("monitor deadline exhausted before local snapshot");
     }
     let client = UnixControlClient::new(endpoint).with_timeout(timeout);
     let query = ResourceQuery {
-        limit: Some(100),
+        limit: Some(LOCAL_PAGE_LIMIT),
         ..ResourceQuery::default()
     };
     let mut snapshots = std::collections::BTreeMap::new();
     let mut errors = Vec::new();
+    let mut snapshot_budget = MAX_LOCAL_SNAPSHOT_BYTES;
     match client.info().await {
         Ok(info) => {
-            snapshots.insert(
+            insert_local_snapshot(
+                &mut snapshots,
+                &mut errors,
+                &mut snapshot_budget,
                 "status".to_owned(),
                 serde_json::json!({
                     "api_version": info.api_version,
@@ -388,7 +416,7 @@ async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<Ve
                 }),
             );
         }
-        Err(error) => errors.push(format!("status: {error}")),
+        Err(error) => record_local_error(&mut errors, "status", error),
     }
     for (key, resource) in [
         ("hosts", "hosts"),
@@ -399,12 +427,15 @@ async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<Ve
         ("runs", "runs"),
     ] {
         if deadline <= Instant::now() {
-            errors.push(format!("{key}: monitor deadline exhausted"));
+            record_local_error(&mut errors, key, "monitor deadline exhausted");
             continue;
         }
         match client.get_resources(resource, &query).await {
             Ok(page) => {
-                snapshots.insert(
+                insert_local_snapshot(
+                    &mut snapshots,
+                    &mut errors,
+                    &mut snapshot_budget,
                     key.to_owned(),
                     serde_json::json!({
                         "resources": page.resources,
@@ -412,21 +443,33 @@ async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<Ve
                     }),
                 );
             }
-            Err(error) => errors.push(format!("{key}: {error}")),
+            Err(error) => record_local_error(&mut errors, key, error),
         }
     }
     if deadline > Instant::now() {
-        match client.watch(None, None, Some(100)).await {
+        match client.watch(None, None, Some(LOCAL_PAGE_LIMIT)).await {
             Ok(events) => {
-                snapshots.insert(
-                    "events".to_owned(),
-                    serde_json::to_value(events).context("serialize Velnor events")?,
-                );
+                let value = match serde_json::to_value(events) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        record_local_error(&mut errors, "events", error);
+                        Value::Null
+                    }
+                };
+                if !value.is_null() {
+                    insert_local_snapshot(
+                        &mut snapshots,
+                        &mut errors,
+                        &mut snapshot_budget,
+                        "events".to_owned(),
+                        value,
+                    );
+                }
             }
-            Err(error) => errors.push(format!("events: {error}")),
+            Err(error) => record_local_error(&mut errors, "events", error),
         }
     } else {
-        errors.push("events: monitor deadline exhausted".to_owned());
+        record_local_error(&mut errors, "events", "monitor deadline exhausted");
     }
     Ok(VelnorObservation {
         instance: instance.to_owned(),
@@ -436,12 +479,59 @@ async fn collect_velnor_snapshot(instance: &str, deadline: Instant) -> Result<Ve
     })
 }
 
+fn insert_local_snapshot(
+    snapshots: &mut std::collections::BTreeMap<String, Value>,
+    errors: &mut Vec<String>,
+    budget: &mut usize,
+    key: String,
+    value: Value,
+) {
+    let size = match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes.len(),
+        Err(error) => {
+            record_local_error(errors, &key, error);
+            return;
+        }
+    };
+    if size > *budget {
+        record_local_error(
+            errors,
+            &key,
+            format!("snapshot exceeds the {MAX_LOCAL_SNAPSHOT_BYTES}-byte evidence budget"),
+        );
+        return;
+    }
+    *budget -= size;
+    snapshots.insert(key, value);
+}
+
+fn record_local_error(errors: &mut Vec<String>, key: &str, error: impl std::fmt::Display) {
+    if errors.len() >= MAX_LOCAL_ERRORS {
+        return;
+    }
+    let message = format!("{key}: {error}");
+    errors.push(truncate_utf8(message, MAX_LOCAL_ERROR_BYTES));
+}
+
+fn truncate_utf8(mut value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes.saturating_sub("…".len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value.push('…');
+    value
+}
+
 fn unavailable_velnor_observation(instance: String, error: impl Into<String>) -> VelnorObservation {
     VelnorObservation {
         instance,
         available: false,
         snapshots: std::collections::BTreeMap::new(),
-        errors: vec![error.into()],
+        errors: vec![truncate_utf8(error.into(), MAX_LOCAL_ERROR_BYTES)],
     }
 }
 
@@ -451,19 +541,59 @@ fn write_current_evidence(
     run_id: u64,
     started_at: &str,
     timed_out: bool,
-    observations: &[WorkflowRunObservation],
+    observations: &mut Vec<WorkflowRunObservation>,
 ) -> Result<()> {
     let Some(path) = path else { return Ok(()) };
+    let updated_at = utc_timestamp()?;
+    trim_observations_to_evidence_budget(
+        repo,
+        run_id,
+        started_at,
+        &updated_at,
+        timed_out,
+        observations,
+    )?;
     let evidence = WorkflowMonitorEvidence {
         schema_version: EVIDENCE_SCHEMA_VERSION,
         repo: repo.to_owned(),
         run_id,
         started_at: started_at.to_owned(),
-        updated_at: utc_timestamp()?,
+        updated_at,
         timed_out,
-        observations: observations.to_owned(),
+        observations: observations.clone(),
     };
     write_evidence(path, &evidence)
+}
+
+fn trim_observations_to_evidence_budget(
+    repo: &str,
+    run_id: u64,
+    started_at: &str,
+    updated_at: &str,
+    timed_out: bool,
+    observations: &mut Vec<WorkflowRunObservation>,
+) -> Result<()> {
+    loop {
+        let evidence = WorkflowMonitorEvidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            repo: repo.to_owned(),
+            run_id,
+            started_at: started_at.to_owned(),
+            updated_at: updated_at.to_owned(),
+            timed_out,
+            observations: observations.clone(),
+        };
+        let size = serde_json::to_vec_pretty(&evidence)
+            .context("serialize workflow evidence for size limit")?
+            .len();
+        if size <= MAX_EVIDENCE_BYTES {
+            return Ok(());
+        }
+        if observations.len() <= 1 {
+            bail!("single workflow observation exceeds {MAX_EVIDENCE_BYTES}-byte evidence limit");
+        }
+        observations.remove(0);
+    }
 }
 
 fn write_evidence(path: &Path, evidence: &WorkflowMonitorEvidence) -> Result<()> {
@@ -484,6 +614,9 @@ fn write_evidence(path: &Path, evidence: &WorkflowMonitorEvidence) -> Result<()>
     ));
     let result = (|| {
         let bytes = serde_json::to_vec_pretty(evidence).context("serialize workflow evidence")?;
+        if bytes.len() > MAX_EVIDENCE_BYTES {
+            bail!("workflow evidence exceeds {MAX_EVIDENCE_BYTES}-byte limit");
+        }
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -544,6 +677,95 @@ mod tests {
             .with_instance("../other")
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn validation_rejects_unbounded_monitor_settings() {
+        assert!(WorkflowMonitorConfig::new("owner/repo", 1)
+            .with_timeout(MAX_MONITOR_TIMEOUT + Duration::from_secs(1))
+            .validate()
+            .is_err());
+        assert!(WorkflowMonitorConfig::new("owner/repo", 1)
+            .with_poll_interval(MIN_POLL_INTERVAL - Duration::from_millis(1))
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn local_snapshots_and_errors_stay_bounded() {
+        let mut snapshots = std::collections::BTreeMap::new();
+        let mut errors = Vec::new();
+        let mut budget = MAX_LOCAL_SNAPSHOT_BYTES;
+        insert_local_snapshot(
+            &mut snapshots,
+            &mut errors,
+            &mut budget,
+            "oversized".to_owned(),
+            serde_json::json!("x".repeat(MAX_LOCAL_SNAPSHOT_BYTES + 1)),
+        );
+        for _ in 0..(MAX_LOCAL_ERRORS + 4) {
+            record_local_error(
+                &mut errors,
+                "resource",
+                "x".repeat(MAX_LOCAL_ERROR_BYTES + 1),
+            );
+        }
+        assert!(snapshots.is_empty());
+        assert!(budget == MAX_LOCAL_SNAPSHOT_BYTES);
+        assert_eq!(errors.len(), MAX_LOCAL_ERRORS);
+        assert!(errors
+            .iter()
+            .all(|error| error.len() <= MAX_LOCAL_ERROR_BYTES));
+    }
+
+    #[test]
+    fn expired_deadline_does_not_start_local_observation() {
+        let started = Instant::now();
+        let observation = collect_velnor_observation("velnor", started);
+        assert!(!observation.available);
+        assert_eq!(observation.snapshots.len(), 0);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn evidence_history_is_trimmed_to_byte_budget() {
+        let run = GitHubActionsRun {
+            id: 1,
+            status: "in_progress".to_owned(),
+            conclusion: None,
+            name: Some("x".repeat(256 * 1024)),
+            html_url: None,
+            head_sha: None,
+            head_branch: None,
+            workflow_path: None,
+        };
+        let mut observations = (0..40)
+            .map(|_| WorkflowRunObservation {
+                observed_at: "2026-01-01T00:00:00Z".to_owned(),
+                run: run.clone(),
+                velnor: None,
+            })
+            .collect::<Vec<_>>();
+        trim_observations_to_evidence_budget(
+            "owner/repo",
+            1,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            false,
+            &mut observations,
+        )
+        .unwrap();
+        let evidence = WorkflowMonitorEvidence {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            repo: "owner/repo".to_owned(),
+            run_id: 1,
+            started_at: "2026-01-01T00:00:00Z".to_owned(),
+            updated_at: "2026-01-01T00:00:00Z".to_owned(),
+            timed_out: false,
+            observations,
+        };
+        assert!(serde_json::to_vec(&evidence).unwrap().len() <= MAX_EVIDENCE_BYTES);
+        assert!(evidence.observations.len() < 40);
     }
 
     #[test]
