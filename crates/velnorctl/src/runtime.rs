@@ -64,20 +64,33 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
-    #[arg(long, default_value = "2")]
+    /// Docker `--cpus` limit appended to every job container. Empty leaves the
+    /// per-job cap to the derived host budget, which divides the machine
+    /// between the provisioned slots; a value here is an operator cap that
+    /// only ever narrows that share. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
     pub job_cpus: String,
-    #[arg(long, default_value = "4g")]
+    /// Docker `--memory` limit appended to every job container. Empty leaves
+    /// the job uncapped by the daemon; the derived budget still sizes the
+    /// compile scheduler. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
     pub job_memory: String,
     /// Pool trust boundary. Flattened from the single declaration in
     /// `velnor_runner::trust_scope`, so this binary and `velnor-runner` cannot
     /// disagree about a security gate.
     #[command(flatten)]
     pub trust: velnor_runner::trust_scope::TrustScopeArg,
-    #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024_u64)]
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
     pub emergency_reserve_bytes: u64,
-    #[arg(long, default_value_t = 4 * 1024 * 1024 * 1024_u64)]
+    #[arg(long, env = "VELNOR_JOB_PEAK_BYTES", default_value_t = 32_212_254_720u64)]
     pub job_peak_bytes: u64,
-    #[arg(long, default_value = "velnor/node-actions:latest")]
+    /// Empty keeps each JavaScript action on its own declared Node runtime
+    /// image. Must match `velnor_runner::service`.
+    #[arg(long, default_value = "")]
     pub node_action_image: String,
     #[arg(long)]
     pub work_dir: Option<PathBuf>,

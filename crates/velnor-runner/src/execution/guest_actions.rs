@@ -60,27 +60,48 @@ fn guest_action_script(step: &GuestStep, action: &str) -> Result<String, String>
     })
 }
 
+/// Shell that removes every checkout credential from a guest workspace.
+///
+/// The guest lane has no post-job step, so the checkout script itself owns the
+/// credential's whole lifetime: it scrubs before it writes (a reused workspace
+/// must not carry another job's token into this one) and, for the default
+/// `persist-credentials: true`, it arms a scrub that runs when the shell exits
+/// for any reason the kernel lets a shell observe.
+const GUEST_CHECKOUT_CREDENTIAL_SCRUB: &str = r#"velnor_scrub_credentials() {
+  [ -d "$1/.git" ] || return 0
+  git -C "$1" config --local --name-only --get-regexp '^http\..*\.extraheader$' 2>/dev/null |
+    while IFS= read -r key; do
+      [ -n "$key" ] && git -C "$1" config --local --unset-all "$key" 2>/dev/null || true
+    done
+  return 0
+}
+"#;
+
 fn guest_checkout_script(_step: &GuestStep) -> String {
     // Values arrive via `docker exec -e VELNOR_INPUT_*` so untrusted
     // checkout inputs never interpolate into the script text.
     // Auth parity with actions/checkout: the resolved token is delivered as
     // VELNOR_INPUT_token; persist_credentials=false keeps it out of the
     // workspace .git/config by passing the header per command instead.
-    r#"set -eu
-dest="${VELNOR_INPUT_destination:-/__w}"
-clone_url="${VELNOR_INPUT_clone_url:?}"
-version="${VELNOR_INPUT_version:-}"
-depth="${VELNOR_INPUT_fetch_depth:-}"
-token="${VELNOR_INPUT_token:-${GITHUB_TOKEN:-}}"
-fetch_tags="${VELNOR_INPUT_fetch_tags:-0}"
-persist="${VELNOR_INPUT_persist_credentials:-1}"
-clean="${VELNOR_INPUT_clean:-1}"
+    format!(
+        r#"set -eu
+{GUEST_CHECKOUT_CREDENTIAL_SCRUB}dest="${{VELNOR_INPUT_destination:-/__w}}"
+clone_url="${{VELNOR_INPUT_clone_url:?}}"
+version="${{VELNOR_INPUT_version:-}}"
+depth="${{VELNOR_INPUT_fetch_depth:-}}"
+token="${{VELNOR_INPUT_token:-${{GITHUB_TOKEN:-}}}}"
+fetch_tags="${{VELNOR_INPUT_fetch_tags:-0}}"
+persist="${{VELNOR_INPUT_persist_credentials:-1}}"
+clean="${{VELNOR_INPUT_clean:-1}}"
 mkdir -p "$dest"
 if [ "$clean" = "1" ] && [ -d "$dest/.git" ]; then
   git -C "$dest" clean -ffdx
   git -C "$dest" reset --hard
 fi
 git -C "$dest" init
+# A workspace handed to this job may still carry a credential from whatever
+# ran in it before. Never inherit one.
+velnor_scrub_credentials "$dest"
 header=""
 if [ -n "$token" ]; then
   header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
@@ -90,11 +111,15 @@ fi
 # this workspace.
 scope="$(printf '%s' "$clone_url" | sed -E 's#^(https?://[^/]+/).*$#\1#')"
 if [ -n "$token" ] && [ "$persist" = "1" ]; then
-  git -C "$dest" config "http.${scope}.extraheader" "$header"
+  # The credential is only ever created together with the handler that removes
+  # it again, so an aborted checkout cannot leave one behind. A checkout that
+  # succeeds keeps it: that is what persist-credentials: true means.
+  trap 'velnor_checkout_status=$?; [ "$velnor_checkout_status" -eq 0 ] || velnor_scrub_credentials "$dest"; exit "$velnor_checkout_status"' EXIT HUP INT QUIT TERM
+  git -C "$dest" config "http.${{scope}}.extraheader" "$header"
 fi
 git -C "$dest" remote remove origin >/dev/null 2>&1 || true
 git -C "$dest" remote add origin "$clone_url"
-tags_flag=""
+tags_flag="--no-tags"
 if [ "$fetch_tags" = "1" ]; then
   tags_flag="--tags"
 fi
@@ -103,7 +128,7 @@ if [ -n "$depth" ]; then
   depth_arg="--depth=$depth"
 fi
 refspec="$version"
-if [ -n "${GITHUB_REF:-}" ] && [ -n "$version" ]; then
+if [ -n "${{GITHUB_REF:-}}" ] && [ -n "$version" ]; then
   case "$GITHUB_REF" in
     refs/pull/*)
       mapped=$(printf '%s' "$GITHUB_REF" | sed 's#^refs/#refs/remotes/#')
@@ -113,13 +138,13 @@ if [ -n "${GITHUB_REF:-}" ] && [ -n "$version" ]; then
 fi
 # shellcheck disable=SC2086
 if [ -n "$header" ] && [ "$persist" != "1" ]; then
-  git -c "http.${scope}.extraheader=$header" -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
+  git -c "http.${{scope}}.extraheader=$header" -C "$dest" -c protocol.version=2 fetch --prune $tags_flag $depth_arg origin "$refspec"
 else
-  git -C "$dest" -c protocol.version=2 fetch --prune --no-tags $tags_flag $depth_arg origin "$refspec"
+  git -C "$dest" -c protocol.version=2 fetch --prune $tags_flag $depth_arg origin "$refspec"
 fi
 git -C "$dest" checkout --force FETCH_HEAD
 "#
-    .to_string()
+    )
 }
 
 fn guest_cache_script(_step: &GuestStep, output_name: &str) -> String {
