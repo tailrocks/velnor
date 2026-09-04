@@ -421,6 +421,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         process::Command,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -437,12 +438,23 @@ mod tests {
     }
 
     fn fixture_repo(remote: Option<&str>) -> PathBuf {
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("velnor-bench-fixture-{suffix}"));
-        std::fs::create_dir_all(&path).expect("create fixture repo");
+        static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+        let path = loop {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos();
+            let sequence = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let candidate = std::env::temp_dir().join(format!(
+                "velnor-bench-fixture-{}-{suffix}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create fixture repo {}: {error}", candidate.display()),
+            }
+        };
         run_git(&path, &["init", "--quiet"]);
         if let Some(remote) = remote {
             run_git(&path, &["remote", "add", "origin", remote]);
