@@ -447,17 +447,19 @@ fn crate_dependency_direction_matches_approved_graph() {
         );
     }
     for legacy in ["velnor-tools"] {
-        for new_crate in [
-            "velnor-model",
-            "velnor-control",
-            "velnor-client",
-            "velnor-render",
-        ] {
+        for forbidden in ["velnor-control", "velnor-client", "velnor-render"] {
             assert!(
-                !graph[legacy].iter().any(|d| d == new_crate),
-                "legacy crate {legacy} must not depend on new crate {new_crate}"
+                !graph[legacy].iter().any(|d| d == forbidden),
+                "legacy crate {legacy} must not depend on new crate {forbidden}"
             );
         }
+        // Transitional leaf exception: velnor-tools uses velnor-model's
+        // SecretMasker while the legacy crate is retired; no service/client
+        // or renderer edge is permitted here.
+        assert!(
+            graph[legacy].iter().any(|d| d == "velnor-model"),
+            "legacy crate {legacy} must retain only the approved model leaf edge"
+        );
     }
     // Transitional Plan 066 amendment: the legacy runner feeds the durable
     // operational store directly at its lifecycle boundaries until Plan 079
