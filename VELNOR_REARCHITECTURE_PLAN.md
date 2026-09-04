@@ -3304,4 +3304,5 @@ The hosted bootstrap and immutable policy workflow must pass the positional
 the Velnor git workspace contains multiple binary packages. This correction
 preserves the existing pinned-source and pinned-policy trust boundaries and
 is covered by a direct `cargo install --locked --git ... --rev ...
-velnor-workflow --bin velnor-workflow` proof.
+velnor-workflow --bin velnor-workflow` proof. The corrected immutable policy
+workflow is now pinned at `0b68533ea24e8259ebd8aee54e36905debe8fcc3`.
