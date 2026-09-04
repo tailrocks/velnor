@@ -71,45 +71,48 @@ version, job image digest, and the runner configuration including slot count.
 driver's observable set, so a container-only measurement can never be read as a
 claim about job acquisition latency.
 
-## Instrumentation the product still owes this harness
+## Instrumentation the harness consumes, and what is still owed
 
-Both of these are in files owned by other work in flight, so they are recorded
-here rather than applied.
+### 1. The per-job process census — delivered, and read here
 
-### 1. A `CommandRunner` decorator for the per-job process census
+`crates/velnor-runner/src/docker/metrics.rs` now counts every host `docker`
+process a job spawns. The count is taken at the one seam that sees them all:
+`crates/velnor-runner/src/executor.rs:479`, inside the concrete `CommandRunner`,
+so no call site carries a counter. Each invocation is classified into a
+`DockerOp` (`crates/velnor-runner/src/docker/deadline.rs`) and the per-class
+count and summed latency are reported by a guard that fires however the job
+ends.
 
-`crates/velnor-runner/src/executor.rs` defines `trait CommandRunner` as the
-single choke point for every host process spawn. A counting decorator around it
-is the only place that can produce a *per-job* Docker invocation count and
-per-call latency without touching a single call site:
+Those counters are process globals inside the runner, so the seam another
+process reads them through is the `tracing` event the guard emits, which the
+runner's file layer writes to `<config-base>/logs/trace.jsonl`. `runnertrace`
+is that reader, and `velnor-bench census --trace <trace.jsonl>` prints one
+`JobDockerCensus` per job plus a summary of processes per job under the same
+percentile policy as every other statistic. A trace with no job scope in it is
+an error, never a zero.
 
-```rust
-pub struct CountingRunner<R: CommandRunner> {
-    inner: R,
-    counts: BTreeMap<String, u64>,   // program -> invocations
-    latencies: Vec<(String, Duration)>,
-}
-```
+The per-invocation events are `DEBUG`; without a filter that admits
+`velnor.docker` at debug level a trace carries only the per-job totals, so the
+per-class figure is a *sum over the job*, not a sample, and no percentile over
+individual calls is computed from it.
 
-It must wrap every method that spawns (`run`, `run_timeout`, `run_with_env`,
-`run_streaming*`, `run_with_stdin*`, `spawn`), because the default method bodies
-delegate but the implementations override them. Until it exists, this crate's
-`sys::Runner` counts only the processes *the harness itself* spawns, which is a
-strict subset of a real job's process count.
+### 2. Per-phase checkout spans and GIT_TRACE2 counters — still owed
 
-### 2. Per-phase checkout spans and GIT_TRACE2 counters
+`crates/velnor-runner/src/checkout.rs` still emits no `tracing` span per phase
+— mirror lock wait, mirror fetch, workspace fetch, workspace checkout, mtime
+normalization — and still sets no `GIT_TRACE2_EVENT` on the git processes it
+spawns. Neither `checkout.rs` nor `git_mirror.rs` contains a single `tracing`
+call. Until they do, `Observation::checkout_phases_ms` cannot be filled from a
+real job, whatever driver runs it.
 
-`crates/velnor-runner/src/checkout.rs` needs a `tracing` span per phase —
-mirror lock wait, mirror fetch, workspace fetch, workspace checkout, mtime
-normalization — matching `stage::CheckoutPhase`. The trace file layer already
-records span close events with busy/idle timings
-(`crates/velnor-runner/src/telemetry.rs`), so spans alone make the breakdown
-readable from `trace.jsonl` with no new sink.
-
-Byte and ref counters do **not** need a runner change: `gittrace` sets
-`GIT_TRACE2_EVENT` on the git processes it spawns and reads the documented
-event JSON back. For jobs the runner drives, the runner must set the same
-variable on its git children for those counters to appear.
+`checkout_replay` exists because of that gap, and is careful about what it
+claims. It replays, against a real synthetic repository, the exact git argv the
+baseline (`2858e92`) and the current tip (`22c1b95`) build — a full
+`+refs/*:refs/*` mirror fetch under the exclusive lock followed by a workspace
+fetch from the mirror, versus a wanted-revision fetch followed by hard-linking
+the object files. That is a measurement of two command sequences, not an
+execution of `checkout.rs`, so it is deliberately **not** a row of the scenario
+matrix, and every record it emits carries that caveat in `notes`.
 
 ## Coverage inherited from the deleted script
 
@@ -145,6 +148,9 @@ velnor-bench --velnor-repo . --fixture-repo ../velnor-actions-fixture probe
 velnor-bench --velnor-repo . list
 velnor-bench --velnor-repo . --network-egress \
   run --scenario docker/existing-image --iterations 20 --output bench.ndjson
+velnor-bench census --trace /etc/velnor/logs/trace.jsonl
+velnor-bench --velnor-repo . checkout-replay --iterations 20 --legs 6 \
+  --pull-refs 250 --output checkout.ndjson
 ```
 
 `--github-credentials` and `--network-egress` are asserted by the operator, not

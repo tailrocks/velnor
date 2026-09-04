@@ -13,11 +13,13 @@
 //! 4. **A statistic is only emitted when the sample supports it.** See
 //!    [`stats`].
 
+pub mod checkout_replay;
 pub mod drivers;
 pub mod env;
 pub mod fact;
 pub mod gittrace;
 pub mod record;
+pub mod runnertrace;
 pub mod scenario;
 pub mod stage;
 pub mod stats;

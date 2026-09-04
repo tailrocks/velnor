@@ -10,10 +10,13 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 
 use velnor_bench::{
+    checkout_replay::{self, ReplayRecord, ReplaySummaries, Strategy, REPLAY_SCHEMA},
     drivers,
     env::{EnvironmentIdentity, ProbeInputs},
     record::{BenchRecord, Summaries, RESULT_SCHEMA},
+    runnertrace::JobDockerCensus,
     scenario::{self, Capabilities, Runnability},
+    stats::Summary,
     sys::Runner,
 };
 
@@ -69,6 +72,40 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         concurrency: usize,
         /// Append the record here instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Read the runner's per-job host `docker` counters out of a trace file.
+    ///
+    /// The counters live in process globals inside the runner
+    /// (`crates/velnor-runner/src/docker/metrics.rs`); the `tracing` event its
+    /// job guard emits is the only seam another process can read them through.
+    Census {
+        /// A runner `trace.jsonl` (`<config-base>/logs/trace.jsonl`).
+        #[arg(long)]
+        trace: PathBuf,
+    },
+    /// Replay both checkout strategies against a synthetic repository.
+    ///
+    /// Not a scenario: this measures two sequences of `git` commands, not the
+    /// runner's checkout, which has no entry point outside a job.
+    CheckoutReplay {
+        /// Measured replays per strategy.
+        #[arg(long, default_value_t = 20)]
+        iterations: usize,
+        /// Workspaces per replay: one cold leg plus the matrix legs.
+        #[arg(long, default_value_t = 6)]
+        legs: usize,
+        /// `refs/pull/*` refs the synthetic origin advertises.
+        #[arg(long, default_value_t = 250)]
+        pull_refs: usize,
+        /// Tracked blobs on the wanted commit.
+        #[arg(long, default_value_t = 96)]
+        blobs: usize,
+        /// Bytes per blob.
+        #[arg(long, default_value_t = 65_536)]
+        blob_bytes: usize,
+        /// Append the records here instead of stdout.
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -200,6 +237,101 @@ fn main() -> Result<()> {
                     eprintln!("wrote 1 record to {}", path.display());
                 }
                 None => println!("{line}"),
+            }
+        }
+        Command::Census { trace } => {
+            let census = JobDockerCensus::from_trace_file(&trace)
+                .with_context(|| format!("reading {}", trace.display()))?;
+            if census.is_empty() {
+                anyhow::bail!(
+                    "{} carries no `{}` job scope; either no job ran under this runner or \
+                     its telemetry file layer was not enabled",
+                    trace.display(),
+                    velnor_bench::runnertrace::JOB_SUMMARY_MESSAGE
+                );
+            }
+            for job in &census {
+                println!("{}", serde_json::to_string(job)?);
+            }
+            let invocations: Vec<u64> = census.iter().map(|job| job.invocations).collect();
+            match Summary::new(&invocations) {
+                Ok(summary) => {
+                    eprintln!("{} job(s)", census.len());
+                    eprintln!(
+                        "docker processes per job: {}",
+                        serde_json::to_string(&summary)?
+                    );
+                }
+                Err(reason) => eprintln!("{} job(s): {reason}", census.len()),
+            }
+        }
+        Command::CheckoutReplay {
+            iterations,
+            legs,
+            pull_refs,
+            blobs,
+            blob_bytes,
+            output,
+        } => {
+            let root = work_root.join("checkout-replay");
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+            let fixture =
+                checkout_replay::build_fixture(&root, &mut runner, pull_refs, blob_bytes, blobs)?;
+            eprintln!(
+                "fixture: {} pull refs, {} bytes of content, commit {}",
+                fixture.pull_refs, fixture.content_bytes, fixture.sha
+            );
+
+            let mut lines = Vec::new();
+            for strategy in Strategy::ALL {
+                let mut replays = Vec::with_capacity(iterations);
+                for iteration in 0..iterations {
+                    let dir = root.join(format!("{}-{iteration}", strategy.as_str()));
+                    std::fs::create_dir_all(&dir)?;
+                    let replay =
+                        checkout_replay::replay(strategy, &fixture, &dir, &mut runner, legs)?;
+                    // The tree is large; keep only the measurement.
+                    let _ = std::fs::remove_dir_all(&dir);
+                    replays.push(replay);
+                }
+                let summaries = ReplaySummaries::new(&replays)?;
+                let record = ReplayRecord {
+                    schema: REPLAY_SCHEMA.to_owned(),
+                    run_id: format!("{}-{}", std::process::id(), unix_ms()),
+                    recorded_at_unix_ms: unix_ms(),
+                    strategy,
+                    revision: strategy.revision().to_owned(),
+                    environment: environment.clone(),
+                    fixture: checkout_replay::FixtureIdentity {
+                        pull_refs: fixture.pull_refs,
+                        content_bytes: fixture.content_bytes,
+                        commit: fixture.sha.clone(),
+                    },
+                    legs,
+                    replays,
+                    summaries,
+                    notes: checkout_replay::caveats(),
+                };
+                lines.push(record.to_ndjson()?);
+            }
+            match output {
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    for line in &lines {
+                        writeln!(file, "{line}")?;
+                    }
+                    eprintln!("wrote {} record(s) to {}", lines.len(), path.display());
+                }
+                None => {
+                    for line in &lines {
+                        println!("{line}");
+                    }
+                }
             }
         }
     }
