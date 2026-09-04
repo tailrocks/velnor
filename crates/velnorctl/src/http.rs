@@ -1341,6 +1341,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_control_socket_fails_closed_for_undurable_reads() {
+        let path = test_socket_path("production-control");
+        let database = path.with_extension("db");
+        let services = velnor_control::application::ApplicationServices::with_store(
+            Arc::new(velnor_control::store::Store::open(&database).expect("open store")),
+            "default",
+        )
+        .expect("compose production services");
+        let state = ApiState::from_services_for_instance(&services, "default");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind control socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, control_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let query = socket_request(&path, "GET", "/v1/jobs", b"").await;
+        assert_eq!(response_status(&query), 501);
+        assert!(String::from_utf8_lossy(&query).contains("operation.unsupported"));
+
+        let logs = socket_request(&path, "GET", "/v1/logs/job-1", b"").await;
+        assert_eq!(response_status(&logs), 501);
+        assert!(String::from_utf8_lossy(&logs).contains("operation.unsupported"));
+
+        shutdown.send(true).expect("signal control shutdown");
+        server.await.expect("join control server").expect("serve");
+        drop(services);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[tokio::test]
     async fn real_admin_socket_rejects_unimplemented_mutation_and_bad_json() {
         let services = velnor_control::application::ApplicationServices::in_memory_for_tests();
         let mutation = Arc::new(RecordingMutation::default());

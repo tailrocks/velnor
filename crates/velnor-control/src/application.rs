@@ -107,8 +107,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::ports::{LogPort, QueryPort, TelemetryPort, WatchPort};
-    use velnor_model::{Event, ResourceMeta, Source, Timestamp};
+    use crate::ports::{LogPort, PortError, QueryPort, TelemetryPort, WatchPort};
+    use velnor_model::{Event, ResourceMeta, Source, StorageClass, StorageObject, Timestamp};
 
     struct TempDb {
         dir: PathBuf,
@@ -186,7 +186,15 @@ mod tests {
             services
                 .query()
                 .query(crate::ports::QueryRequest::default()),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.query().replace(Vec::new()),
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.query().generation(),
+            Err(PortError::Unsupported { .. })
         ));
         services
             .events()
@@ -199,11 +207,37 @@ mod tests {
                 cursor: None,
                 limit: 10,
             }),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.logs().append("job-1", "active", "safe", &[]),
+            Err(PortError::Unsupported { .. })
         ));
         assert!(matches!(
             services.storage().snapshot("default"),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.storage().upsert(StorageObject {
+                id: "cache/default".to_owned(),
+                class: StorageClass::Cache,
+                scope: "default".to_owned(),
+                owner: "daemon".to_owned(),
+                logical_bytes: 0,
+                physical_bytes: Some(0),
+                active: false,
+                resource_version: 0,
+                observed_at: Timestamp::UNIX_EPOCH,
+            }),
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.storage().plan_gc("default"),
+            Err(PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.storage().execute_gc("gc-1", "digest", false),
+            Err(PortError::Unsupported { .. })
         ));
         drop(services);
 
@@ -228,7 +262,7 @@ mod tests {
             reopened
                 .query()
                 .query(crate::ports::QueryRequest::default()),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
         ));
         assert!(matches!(
             reopened.logs().logs(crate::ports::LogRequest {
@@ -237,11 +271,11 @@ mod tests {
                 cursor: None,
                 limit: 10,
             }),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
         ));
         assert!(matches!(
             reopened.storage().snapshot("default"),
-            Err(crate::ports::PortError::Unsupported { .. })
+            Err(PortError::Unsupported { .. })
         ));
     }
 }
