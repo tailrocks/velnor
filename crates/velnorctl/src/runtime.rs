@@ -119,6 +119,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     enforce_admission()?;
     crate::http::validate_socket_groups()?;
     let instance = args.name.as_deref().unwrap_or("default");
+    // `--name` is the GitHub runner/socket identity. Durable runner rows use
+    // the host identity, so the API must compose services with that same
+    // operational scope while retaining `instance` for socket authorization.
+    let operational_instance = velnor_runner::scaffold::operational_instance_slug();
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
@@ -138,8 +142,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let command = rt::Command::Daemon(Box::new(legacy_args));
     init_telemetry(telemetry_dir(&command).as_deref());
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
-    let services =
-        velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
+    let services = velnor_control::application::ApplicationServices::with_store(
+        Arc::clone(&store),
+        &operational_instance,
+    )?;
     let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
     let control_listener = OwnedUnixListener::new(
         crate::http::bind_unix(

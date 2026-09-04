@@ -97,6 +97,25 @@ pub mod scaffold {
         }
     }
 
+    /// Stable durable-store identity for the host running this daemon.
+    ///
+    /// Runner registration names select GitHub-facing endpoints and may vary
+    /// per slot; operational rows use the same hostname projection as the
+    /// runner's persistence path so API reads and writes share one identity.
+    #[must_use]
+    pub fn operational_instance_slug() -> String {
+        #[cfg(unix)]
+        let host =
+            String::from_utf8_lossy(rustix::system::uname().nodename().to_bytes()).into_owned();
+        #[cfg(not(unix))]
+        let host = String::new();
+        operational_instance_slug_from_host(&host)
+    }
+
+    fn operational_instance_slug_from_host(raw: &str) -> String {
+        crate::ops::sanitize_slug_for_instance(raw)
+    }
+
     pub async fn dispatch(command: Command) -> Result<()> {
         match command {
             Command::Cache(args) => crate::cache::run(args),
@@ -109,6 +128,21 @@ pub mod scaffold {
             Command::Storage(args) => crate::storage::run(args),
             Command::Doctor(args) => crate::runner::doctor(args).await,
             Command::Release(args) => crate::release::run(args),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn operational_identity_uses_the_host_slug_projection() {
+            assert_eq!(
+                super::operational_instance_slug_from_host("build host 1"),
+                "build-host-1"
+            );
+            assert_eq!(
+                super::operational_instance_slug_from_host("!!!"),
+                "velnor-instance"
+            );
         }
     }
 }
