@@ -3656,3 +3656,11 @@ index/untracked parents, old-clone reflog commits, and standalone objects
 remain published under the archive refs recorded above, so every input is
 recoverable for a separately reviewed merge if a unique requirement is later
 identified.
+
+## 56. Merge-audit object retention — 2026-09-05
+
+The read-only merge audit materialized `78` temporary tree/blob objects while
+constructing its candidate merge trees. They are retained under
+`refs/archive/canonical/audit-merge-tree-*`; this keeps the canonical object
+database auditable (`git fsck --no-reflogs --unreachable` remains empty) and
+prevents even audit artifacts from becoming untracked garbage.
