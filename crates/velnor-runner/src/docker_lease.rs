@@ -223,7 +223,7 @@ impl DockerLeasePolicy {
             }
             ["networks", id, operation] => {
                 self.require_owned(DockerResourceKind::Network, id)?;
-                if matches!(operation.as_ref(), "connect" | "disconnect") && method == "POST" {
+                if matches!(*operation, "connect" | "disconnect") && method == "POST" {
                     self.require_owned_container_in_body(request)?;
                     return authorize_docker_route(
                         AuthorizedDockerRoute::Owned(DockerResourceKind::Network),
@@ -2313,12 +2313,14 @@ fn bind_unix_lease(
         .spawn(move || {
             accept_loop(
                 listener,
-                host_socket,
-                job_id,
-                daemon_id,
-                conns_thread,
-                policy_thread,
-                listen_path_thread,
+                LeaseServeContext {
+                    host_socket,
+                    job_id,
+                    daemon_id,
+                    conns: conns_thread,
+                    policy: policy_thread,
+                    listen_path: listen_path_thread,
+                },
                 wake_reader,
             );
         })
@@ -2333,16 +2335,32 @@ fn bind_unix_lease(
 }
 
 #[cfg(unix)]
-fn accept_loop(
-    listener: std::os::unix::net::UnixListener,
+/// Everything `accept_loop` needs that identifies *which* lease it serves, as
+/// opposed to the sockets it serves it on. Grouped so the identity travels as
+/// one value: a caller cannot pass a job id from one lease with the policy of
+/// another.
+struct LeaseServeContext {
     host_socket: PathBuf,
     job_id: String,
     daemon_id: String,
     conns: Arc<LeaseConnSet>,
     policy: Arc<DockerLeasePolicy>,
     listen_path: PathBuf,
+}
+
+fn accept_loop(
+    listener: std::os::unix::net::UnixListener,
+    context: LeaseServeContext,
     wake_reader: std::os::unix::net::UnixStream,
 ) {
+    let LeaseServeContext {
+        host_socket,
+        job_id,
+        daemon_id,
+        conns,
+        policy,
+        listen_path,
+    } = context;
     use std::os::fd::AsRawFd;
 
     let mut poll_fds = [
@@ -2487,17 +2505,10 @@ fn handle_client_with(
         if upgrade && !matches!(authorization, AuthorizedDockerRoute::Hijack(_)) {
             bail!("Docker lease denied unowned upgrade/tunnel route");
         }
-        let forwarded = match transform_request_buffer(bytes, &mut budget, |request| {
+        let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
             rewrite_docker_api_request(request, job_id, daemon_id)
-        }) {
-            Ok(forwarded) => forwarded,
-            Err(error) => return Err(error),
-        };
-        let forwarded =
-            match transform_request_buffer(forwarded, &mut budget, without_expect_continue) {
-                Ok(forwarded) => forwarded,
-                Err(error) => return Err(error),
-            };
+        })?;
+        let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
         if conns.is_shutdown() {
             return Ok(());
         }
