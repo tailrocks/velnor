@@ -208,6 +208,10 @@ pub enum RecordError {
     },
     ScenarioFamilyMismatch,
     InvalidGitEvidence,
+    GitBytesMismatch {
+        evidence: u64,
+        resources: u64,
+    },
     WrongSchema(String),
     InsufficientObservations {
         samples: usize,
@@ -272,6 +276,13 @@ impl std::fmt::Display for RecordError {
                     "record contains structurally invalid Git evidence"
                 )
             }
+            Self::GitBytesMismatch {
+                evidence,
+                resources,
+            } => write!(
+                formatter,
+                "Git evidence reports {evidence} received bytes but resources report {resources}"
+            ),
             Self::WrongSchema(schema) => write!(formatter, "unexpected schema {schema}"),
             Self::InsufficientObservations { samples, required } => write!(
                 formatter,
@@ -347,6 +358,16 @@ impl BenchRecord {
         for observation in &self.observations {
             if !observation.git.is_valid() {
                 return Err(RecordError::InvalidGitEvidence);
+            }
+            if matches!(
+                &observation.git,
+                GitEvidence::Observed { .. } | GitEvidence::Mixed { .. }
+            ) && observation.git.received_bytes() != observation.resources.bytes_downloaded
+            {
+                return Err(RecordError::GitBytesMismatch {
+                    evidence: observation.git.received_bytes(),
+                    resources: observation.resources.bytes_downloaded,
+                });
             }
             for stage in observation.stages_ms.keys() {
                 if !observable.contains(stage) {
@@ -498,6 +519,28 @@ mod tests {
             successful: true,
         };
         assert_eq!(record.validate(), Err(RecordError::InvalidGitEvidence));
+    }
+
+    #[test]
+    fn a_record_rejects_observed_git_bytes_that_disagree_with_resources() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations[0].git = GitEvidence::Observed {
+            counters: crate::gittrace::GitCounters {
+                received_bytes: 17,
+                processes: 1,
+                ..crate::gittrace::GitCounters::default()
+            },
+            successful: true,
+        };
+        record.observations[0].resources.bytes_downloaded = 11;
+        record.summaries = Summaries::new(&record.observations).expect("summaries");
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::GitBytesMismatch {
+                evidence: 17,
+                resources: 11,
+            })
+        );
     }
 
     #[test]
