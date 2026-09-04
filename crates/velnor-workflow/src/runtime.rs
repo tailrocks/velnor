@@ -19,6 +19,9 @@ use std::thread;
 use globset::{Glob, GlobSetBuilder};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
+
+const IMMUTABLE_POLICY_WORKFLOW: &str =
+    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -810,7 +813,7 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
         policy_failure(path, "uses must be a scalar reference", failures);
         return;
     };
-    if is_approved_local_reusable(action) {
+    if is_approved_local_reusable(action) || is_approved_policy_reusable(action) {
         return;
     }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
@@ -827,6 +830,16 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
             failures,
         );
     }
+}
+
+fn is_approved_policy_reusable(value: &str) -> bool {
+    value.split_once('@').is_some_and(|(path, reference)| {
+        path == IMMUTABLE_POLICY_WORKFLOW
+            && reference.len() == 40
+            && reference
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    })
 }
 
 fn is_approved_local_reusable(value: &str) -> bool {
@@ -1337,6 +1350,30 @@ jobs:
     uses: acme/ci/.github/workflows/ci.yml@0123456789012345678901234567890123456789
 ";
         let root = policy_fixture("forbidden", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_allows_only_full_sha_for_immutable_policy_workflow() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Policy caller
+on: pull_request
+jobs:
+  policy:
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+";
+        let root = policy_fixture("approved-policy", workflow, "github")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Policy caller
+on: pull_request
+jobs:
+  policy:
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@main
+";
+        let root = policy_fixture("floating-policy", workflow, "github")?;
         assert!(!run_policy(root)?);
         Ok(())
     }

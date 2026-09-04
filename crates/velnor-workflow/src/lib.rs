@@ -29,6 +29,9 @@ const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
 const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
+const VELNOR_POLICY_WORKFLOW: &str =
+    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "ef344c901a51afca9042938b5d37e4745a04ac96";
@@ -3389,15 +3392,10 @@ impl WorkflowIr {
     }
 
     fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
-        let gate = self.trusted_runner_gate(runners, trusted);
+        let _ = (runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Policy\n{gate}    runs-on: {}\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --package velnor-workflow --bin velnor-workflow\n      - name: Checkout trusted policy\n        uses: {}\n        continue-on-error: true\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}}}\n          path: .github-policy\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Enforce trusted workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root .github-policy",
-            self.runner_for(runners),
-            ActionPin::Checkout.reference(),
-            VELNOR_WORKFLOW_REPOSITORY,
-            VELNOR_WORKFLOW_SOURCE_REV,
-            ActionPin::Checkout.reference(),
+            "  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
         );
     }
 
@@ -7017,9 +7015,11 @@ path-only = { path = "../path-only" }
         assert!(workflow.contains("persist-credentials: false"));
         assert!(workflow.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));
-        assert!(!workflow.contains("uses: ./.github/workflows/"));
-        assert!(workflow.contains("path: .github-policy"));
-        assert!(workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
+        assert!(workflow.contains(
+            "uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
+        ));
+        assert!(!workflow.contains("path: .github-policy"));
+        assert!(!workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
         assert!(workflow.contains("velnor-workflow run --config .github/ci/project.toml"));
         for action in [
             ActionPin::Checkout.reference(),
@@ -7063,7 +7063,9 @@ path-only = { path = "../path-only" }
             files.get(&PathBuf::from(".github/workflows/nightly.yml")),
             "generated nightly workflow",
         );
-        assert!(pr_workflow.contains("name: Checkout workflow data"));
+        assert!(pr_workflow.contains(
+            "uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
+        ));
         assert!(pr_workflow.contains("pull_request:"));
         assert!(!pr_workflow.contains("branches: [main]"));
         assert!(main_workflow.contains("branches: [main]"));
@@ -7074,9 +7076,11 @@ path-only = { path = "../path-only" }
                 || content.contains("scope: ${{ needs.plan.outputs.scope }}")
         }));
         assert!(files.contains_key(&PathBuf::from(".github/workflows/maintenance.yml")));
-        assert!(files
-            .values()
-            .any(|content| content.contains("velnor-workflow policy")));
+        assert!(files.values().any(|content| {
+            content.contains(
+                "uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33",
+            )
+        }));
         assert!(files
             .values()
             .any(|content| content.contains("velnor-workflow run")));
