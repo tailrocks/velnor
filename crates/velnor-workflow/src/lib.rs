@@ -32,9 +32,10 @@ const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.gi
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
+const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "20b940278fb11c993910aaf201e55a19b802bdf0";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4479,7 +4480,7 @@ fn yaml_scalar(value: &str) -> String {
 fn workflow_runtime_setup(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} velnor-workflow --bin velnor-workflow\n"
+            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} velnor-workflow --bin velnor-workflow\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
