@@ -7191,15 +7191,19 @@ mod tests {
         assert!(!nightly.contains("pull_request:"));
         assert!(!nightly.contains("  required:\n    name: required"));
         assert_eq!(
-            runtime::scope_for_event_values("push", None)
-                .unwrap()
-                .as_deref(),
+            must(
+                runtime::scope_for_event_values("push", None),
+                "resolve push scope",
+            )
+            .as_deref(),
             Some("full")
         );
         assert_eq!(
-            runtime::scope_for_event_values("pull_request", None)
-                .unwrap()
-                .as_deref(),
+            must(
+                runtime::scope_for_event_values("pull_request", None),
+                "resolve pull-request scope",
+            )
+            .as_deref(),
             Some("affected")
         );
         assert!(runtime::scope_for_event_values("push", Some("affected")).is_err());
