@@ -209,7 +209,7 @@ where
         plan.persist_credentials,
         plan.clean,
         plan.lfs,
-        mirror.as_ref(),
+        mirror,
         log,
     )?;
     normalize_checkout_mtimes(runner, &plan.destination, log);
@@ -671,7 +671,7 @@ pub fn fetch_git_ref<R>(
     persist_credentials: bool,
     clean: bool,
     lfs: bool,
-    mirror: Option<&crate::git_mirror::MirrorCheckout>,
+    mirror: Option<crate::git_mirror::MirrorCheckout>,
     log: &mut Vec<String>,
 ) -> Result<()>
 where
@@ -730,7 +730,7 @@ where
     if let Some(mirror) = mirror {
         hydrate_from_mirror(
             runner,
-            mirror,
+            &mirror,
             destination,
             clone_url,
             git_ref,
@@ -738,6 +738,10 @@ where
             fetch_tags,
             log,
         )?;
+        // Hydration has linked or copied every object and wrote the refs and
+        // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
+        // only the workspace, so do not hold the mirror reader lease for it.
+        drop(mirror);
     } else {
         run_network_fetch(
             runner,
@@ -2221,6 +2225,90 @@ mod tests {
             }
         }
         assert!(checked > 0, "workspace has no objects from the mirror");
+    }
+
+    #[test]
+    fn checkout_releases_mirror_reader_lease_after_hydration() {
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let mut setup = ProcessCommandRunner;
+        let mirror = crate::git_mirror::ensure_mirror(
+            &mut setup,
+            &fixture.store(),
+            &plan.clone_url,
+            None,
+            &mirror_want(&plan),
+        )
+        .unwrap();
+        let lock_path = std::fs::read_dir(fixture.store())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "lock")
+            })
+            .expect("mirror lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        ));
+        drop(mirror);
+        drop(contender);
+        let mut runner = LeaseProbeRunner {
+            inner: ProcessCommandRunner,
+            lock_path,
+            checkout_lock_available: None,
+            initial_lock_available: None,
+        };
+
+        execute_checkout_with_mirror(&mut runner, &plan, &mut Vec::new(), Some(&fixture.store()))
+            .unwrap();
+
+        assert_eq!(
+            runner.checkout_lock_available,
+            Some(true),
+            "workspace checkout must not keep the mirror reader lease"
+        );
+        assert_eq!(runner.initial_lock_available, Some(false));
+    }
+
+    struct LeaseProbeRunner {
+        inner: ProcessCommandRunner,
+        lock_path: PathBuf,
+        checkout_lock_available: Option<bool>,
+        initial_lock_available: Option<bool>,
+    }
+
+    impl CommandRunner for LeaseProbeRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if program == "git" && args.iter().any(|arg| arg == "checkout") {
+                let contender = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_path)?;
+                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                self.checkout_lock_available = Some(available);
+            }
+            if program == "git"
+                && self.initial_lock_available.is_none()
+                && args.iter().any(|arg| arg == "init")
+            {
+                let contender = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_path)?;
+                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                self.initial_lock_available = Some(available);
+            }
+            self.inner.run(program, args)
+        }
     }
 
     #[test]
