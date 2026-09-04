@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -22,6 +23,7 @@ use sha2::{Digest, Sha256};
 use super::GeneratorError;
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 #[expect(
     dead_code,
@@ -323,7 +325,6 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .append(true)
             .open(&output_path)
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
-        use std::io::Write as _;
         writeln!(file, "scope={}", scope_name(scope))
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
     }
@@ -344,12 +345,10 @@ pub(crate) fn scope_for_event_values(
 ) -> Result<Option<String>, GeneratorError> {
     match event {
         "push" | "workflow_dispatch" | "schedule" => {
-            if let Some(scope) = override_scope {
-                if scope != "full" {
-                    return Err(GeneratorError::usage(
-                        "trusted events require full CI scope",
-                    ));
-                }
+            if override_scope.is_some_and(|scope| scope != "full") {
+                return Err(GeneratorError::usage(
+                    "trusted events require full CI scope",
+                ));
             }
             Ok(Some("full".to_owned()))
         }
@@ -441,9 +440,7 @@ fn selected_units<'a>(
         let mut matched = false;
         for unit in &config.unit {
             if unit.watch.iter().any(|pattern| {
-                Glob::new(pattern)
-                    .map(|glob| glob.compile_matcher().is_match(file))
-                    .unwrap_or(false)
+                Glob::new(pattern).is_ok_and(|glob| glob.compile_matcher().is_match(file))
             }) {
                 selected.insert(unit.id.clone());
                 matched = true;
@@ -672,7 +669,7 @@ fn collect_manifests(
             .map_err(|error| GeneratorError::usage(format!("inspect {}: {error}", path.display())))?
             .is_dir()
         {
-            if matches!(relative.to_str(), Some(".git") | Some("target")) {
+            if matches!(relative.to_str(), Some(".git" | "target")) {
                 continue;
             }
             collect_manifests(root, &path, manifests)?;
@@ -725,8 +722,10 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
             }
             if let Some(value) = body.strip_prefix("uses:") {
                 let action = value.split_whitespace().next().unwrap_or_default();
-                let local =
-                    action.starts_with("./.github/workflows/ci-") && action.ends_with(".yml");
+                let local = action.starts_with("./.github/workflows/ci-")
+                    && Path::new(action)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"));
                 let pinned = action.split_once('@').is_some_and(|(_, reference)| {
                     reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
                 });
@@ -919,7 +918,12 @@ fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
     let contents =
         fs::read(path).map_err(|error| GeneratorError::io("read release archive", path, &error))?;
     let digest = Sha256::digest(contents);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    Ok(output)
 }
 
 fn is_semver(value: &str) -> bool {
