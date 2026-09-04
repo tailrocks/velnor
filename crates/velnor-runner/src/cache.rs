@@ -777,9 +777,13 @@ fn reclaim_work_root_with_layout(
             }
         }
     }
-    if report.freed_bytes < target_bytes {
-        let _ = prune_owned_builder(0)?;
-    }
+    // Deliberate safety decision: emergency reclaim does not prune BuildKit.
+    // `prune_owned_builder` can enumerate Velnor's builders, but this reclaimer
+    // has no BuildKit lease or job-claim covering the builder's content. A
+    // builder can therefore be live while its cache path is idle, and
+    // `buildx prune --max-used-space 0B` is destructive in exactly that window.
+    // Keep the explicit operator function available; only a future caller that
+    // holds the matching BuildKit lease may invoke it.
     Ok(report)
 }
 
@@ -848,8 +852,13 @@ pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
     names
 }
 
-/// Prune every Velnor-owned BuildKit builder down to `max_used_space_bytes`.
-/// Returns whether at least one owned builder was pruned.
+/// Explicitly prune every Velnor-owned BuildKit builder down to
+/// `max_used_space_bytes`. Emergency reclaim intentionally does not call this:
+/// the builder content has no lease/claim boundary yet.
+#[allow(
+    dead_code,
+    reason = "operator action requires an explicit BuildKit lease"
+)]
 pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
     let Ok(listed) = std::process::Command::new("docker")
         .args(["buildx", "ls"])
