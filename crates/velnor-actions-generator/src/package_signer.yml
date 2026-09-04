@@ -13,6 +13,19 @@ on:
       source-ref:
         required: true
         type: string
+      # Declared here so a CALLER always resolves it to the declared default
+      # (''), while a standalone workflow_dispatch always resolves it to the
+      # dispatched choice (velnor|github|both). GitHub leaks the CALLER's event
+      # inputs into the callee's `inputs` context, so an undeclared `lanes`
+      # silently inherits the caller's dispatch value (e.g. `github`) and any
+      # `inputs.lanes == ''` discriminator flips false inside a call — the
+      # regression that skipped every attest job for releases dispatched on the
+      # github lane (v0.1.247, v0.1.250). Declaring the input removes the leak.
+      lanes:
+        description: standalone dispatch lane; callers must leave it unset
+        required: false
+        default: ''
+        type: string
   workflow_dispatch:
     inputs:
       lanes:
@@ -29,10 +42,11 @@ jobs:
     # workflow_call, so a standalone dispatch is a documented no-op instead of
     # a run that can never satisfy the immutable-source admission.
     # A called workflow inherits the CALLER's github.event_name (push,
-    # workflow_dispatch, ...), so event_name can never identify this file's own
-    # standalone dispatch. Discriminate on `lanes`, which only the standalone
-    # dispatch defines: a caller never passes it, a direct dispatch always has
-    # it (default `velnor`).
+    # workflow_dispatch, ...) and can leak the caller's event inputs into the
+    # callee `inputs` context, so neither event_name nor an undeclared input
+    # can discriminate. `lanes` is DECLARED on workflow_call with default '':
+    # a caller that omits it always resolves '', a standalone dispatch always
+    # resolves its dispatched choice.
     if: ${{ inputs.lanes == '' }}
     runs-on: ${{ inputs.lanes == 'github' && 'ubuntu-26.04' || 'velnor-trusted' }}
     timeout-minutes: 15
