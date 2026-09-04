@@ -114,6 +114,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-bench/src/record.rs` (derived-summary integrity) | codex-lead | claimed — T-021 |
 | `crates/velnor-bench/src/sys.rs` + `drivers/cargo.rs` (Cargo measurement environment) | codex-lead | claimed — T-022 |
 | `crates/velnor-bench/src/drivers/mod.rs` (failure cleanup) | codex-lead | claimed — T-023 |
+| `crates/velnor-bench/src/drivers/cargo.rs` + `drivers/docker.rs` (cleanup ownership and error propagation) | codex-lead | claimed — T-024 |
 
 ## 8. Discovered bug classes
 
