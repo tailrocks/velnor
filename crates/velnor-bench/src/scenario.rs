@@ -294,7 +294,6 @@ const CONTAINER: &[Requirement] = &[Requirement::DockerDaemon];
 /// this crate replaces, and is never a claim about Velnor.
 const HOST_RUST: &[Requirement] = &[Requirement::RustToolchain];
 const HOST_RUST_ONLINE: &[Requirement] = &[Requirement::RustToolchain, Requirement::NetworkEgress];
-const CONTAINER_PULL: &[Requirement] = &[Requirement::DockerDaemon, Requirement::NetworkEgress];
 const CONTAINER_BUILDX: &[Requirement] = &[Requirement::DockerDaemon, Requirement::Buildx];
 
 macro_rules! scenarios {
@@ -361,7 +360,7 @@ scenarios! {
     // Docker behaviour.
     "docker/existing-image", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
         "Container lifecycle for an image already present on the host";
-    "docker/image-pull", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER_PULL,
+    "docker/image-pull", Docker, VelnorJob, None, VELNOR_JOB, &[],
         "Cold pull of the job image from the registry";
     "docker/simple-job-container", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
         "Job container running a trivial user command";
@@ -514,6 +513,24 @@ mod tests {
         assert!(matches!(
             host.runnability(capabilities),
             Runnability::Unrunnable { .. }
+        ));
+    }
+
+    #[test]
+    fn image_pull_is_unrun_until_isolated_daemon_exists() {
+        let capabilities = Capabilities {
+            docker_daemon: true,
+            registered_runner: true,
+            github_credentials: true,
+            actions_fixture: true,
+            network_egress: true,
+            ..Capabilities::default()
+        };
+        let scenario = find("docker/image-pull").expect("scenario");
+        assert!(matches!(
+            scenario.runnability(capabilities),
+            Runnability::Unrunnable { ref missing }
+                if missing == &vec![Requirement::VelnorJobDriver]
         ));
     }
 
