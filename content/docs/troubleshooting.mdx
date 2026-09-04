@@ -33,9 +33,18 @@ action closure and rejects unsupported, unpinned, untrusted, or over-limit
 work before side effects.
 
 Distinguish rejection here from execution failure: there should be no backend
-start or checkout activity. Unknown actions, unsupported action metadata,
-capability mismatch, trust-policy violation, oversized/deep action graphs, and
-forbidden secrets are likely causes.
+start or checkout activity. Likely causes are an action that is not on the
+closed allowlist, an unpinned ref, an action input outside its declared rules,
+a trust-policy violation, an oversized or deep action graph, and user secrets
+in a non-`trusted` scope. The rejection names the field, the received value,
+and the accepted values. See
+[what Velnor does not support](/guides/execution#what-velnor-does-not-support)
+and [Trust scope](/reference/trust-scope).
+
+A step that neither ran nor failed but was *skipped* is usually not an
+admission problem at all — an `if:` that names no status function is compiled
+as `success() && (<CONDITION>)`. See
+[Expressions and conditions](/reference/expressions#the-rule-most-people-get-wrong).
 
 ## 3. Authentication and connectivity
 
@@ -142,8 +151,14 @@ that `/var/cache/mbx` is writable. Managed targets are under
 `/var/cache/mbx/targets`; the packaged host path is
 `/var/cache/velnor/v1/TRUST_CLASS/compiler/mbx/REPOSITORY_ID`. Confirm the
 repository ID and `untrusted`, `trusted`, or `release` partition before
-comparing jobs. Cargo registry and Git source caches are separate, so a warm
-registry does not imply a warm Mr Boxington store.
+comparing jobs — a node whose trust scope changed reads a different partition
+and looks cold once. Cargo registry and Git source caches are separate, so a
+warm registry does not imply a warm Mr Boxington store.
+
+If the build looks under-parallelized, read `VELNOR_JOB_BUDGET` from the job
+environment before assuming a defect: `CARGO_BUILD_JOBS` is the slot's share of
+the derived host budget, not the host's core count, and a workflow that sets it
+is overridden.
 
 Set `MBX_DISABLE=1` in the workflow to reproduce with plain Cargo outside Mr
 Boxington. An explicit `mozilla-actions/sccache-action` is the only supported
@@ -160,9 +175,15 @@ remote acknowledgement, then clears in-flight state.
 
 Inspect completion events, `daemon.log`, telemetry, job/run state, and outbox
 age. A local success without GitHub completion means the outbox or remote
-acknowledgement path is still pending. Completion retries transient failures;
-a typed remote terminal response can mean GitHub already considers the job
-terminal.
+acknowledgement path is still pending. Completion retries transient failures —
+every status except 4xx other than 408, 409, and 429 — under a bounded budget
+of eight attempts and six hours. A typed remote terminal response can mean
+GitHub already considers the job terminal.
+
+If GitHub timed the job out while Velnor believed it finished, the entry was
+abandoned rather than acknowledged: its budget was spent, and the reason is in
+the journal's unresolvable completions. Outbox age will not show it, because
+that metric counts only pending entries.
 
 Do not delete completion/outbox evidence while diagnosing. It is the recovery
 proof that separates “posted,” “acknowledged,” and “cleaned up.”

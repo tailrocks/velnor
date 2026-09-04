@@ -95,13 +95,13 @@ check GitHub's job UI; these views are not an archival record.
 
 ### Docker
 
-The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Job and action containers are removed during cancellation/teardown.
+The Docker backend requires the host Docker socket and a verified cgroup/systemd boundary. A per-job lease proxy applies ownership labels and rejects privileged, host-bind, and device escapes outside the permitted trust boundary. Cancellation signals containers; removal of job, action, and service containers is teardown's job.
 
 ### MicroVM
 
 The MicroVM backend requires KVM, verified Firecracker and jailer artifacts, isolated namespaces/networking, and a working vsock guest agent. The guest handshake checks identity, generation, isolation, and absence of job credentials. Plans and blobs cross vsock with versioned, size-bounded, checksum-verified frames.
 
-There is no automatic fallback between backends. MicroVM currently supports a narrower action/runtime surface and does not provide fully end-to-end cancellation parity with Docker.
+There is no automatic fallback between backends. MicroVM supports a narrower action and runtime surface, named explicitly in [MicroVM is narrower than Docker](/guides/execution#microvm-is-narrower-than-docker), and does not provide end-to-end cancellation parity with Docker.
 
 ## Credentials and trust
 
@@ -122,9 +122,9 @@ Velnor has no current adapter for S3/object storage, Redis, PostgreSQL/MySQL, Ku
 
 ## Interruption behavior
 
-Broker polling errors back off; authentication failures trigger credential/session recovery. A lost runner registration cancels the affected job. Active jobs have a separate broker cancellation poller. Docker cancellation tears down containers; MicroVM cancellation is currently limited.
+Broker polling errors back off; authentication failures trigger credential/session recovery. A lost runner registration cancels the affected job. Active jobs have a separate broker cancellation poller. Docker cancellation terminates the job's processes and containers through a signal ladder without removing them; MicroVM cancellation is not wired end to end. See [Cancellation](/guides/execution#cancellation).
 
-Completion is the durable boundary: Velnor records the payload locally, submits it, records remote acknowledgement, and only then removes the outbox entry. If the process fails before acknowledgement, recovery can retry the same completion payload. If GitHub has already accepted completion, a terminal remote observation prevents treating it as a new job result.
+Completion is the durable boundary: Velnor records the terminal conclusion, writes the payload, journals the intent, takes one send claim, submits it, records remote acknowledgement, and only then removes the outbox entry. If the process fails before acknowledgement, recovery retries the same payload under the same claim. If GitHub has already accepted completion, a terminal remote observation prevents treating it as a new job result. The retry budget is bounded — a permanent refusal, eight attempts, or six hours — and a spent budget abandons the entry without telling GitHub anything, recording the reason in the journal. See [Completion durability](/guides/execution#completion-durability).
 
 For operator diagnosis, distinguish the endpoint that failed:
 

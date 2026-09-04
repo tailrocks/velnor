@@ -157,19 +157,38 @@ flowchart TD
 
 ## Durable completion outbox
 
-Before sending a terminal result, Velnor serializes a bounded completion
-payload into a job- and generation-specific local outbox entry. The entry is
-claimed under a recovery lock. Velnor then:
+The ordered steps are:
 
-1. sends the exact payload to the Run Service;
-2. records the remote terminal acknowledgement;
-3. removes the outbox entry only after acknowledgement;
-4. clears the local in-flight marker after completion handling.
+1. record the job's terminal conclusion, before the payload is serialized;
+2. write the bounded payload to the job- and generation-specific outbox file
+   atomically, then journal the intent and its SHA-256 — payload first, because
+   the reverse order left a completing job with no replayable bytes;
+3. take the one durable send claim; a second concurrent send is unrepresentable;
+4. send the exact payload to the Run Service;
+5. record the remote terminal acknowledgement;
+6. remove the outbox entry;
+7. clear the local in-flight marker after completion handling.
 
-If the process or network fails between these steps, recovery can retry the
-same payload and preserve ownership evidence. It does not fabricate a new
-result from partial memory. Missing, non-regular, symlinked, oversized, or
-orphaned entries fail closed and are retained or quarantined for inspection.
+If the process or network fails between these steps, recovery replays the same
+payload under the same claim and preserves ownership evidence. It does not
+fabricate a new result from partial memory. Missing, non-regular, symlinked,
+oversized, or orphaned entries fail closed and are retained or quarantined for
+inspection.
+
+The retry budget is bounded. An entry stops being retried when the run service
+permanently refuses it (any 4xx except 408, 409, and 429), after eight
+attempts, or six hours after the intent was committed — whichever comes first.
+Every other status, and any error carrying no HTTP status at all, is transient:
+not knowing the remote's answer is exactly the case where retrying is the only
+correct move.
+
+An entry whose budget is spent is *abandoned*: the payload is removed and the
+slot freed, GitHub is never told the job finished, and the run service will
+time the job out. The terminal state is proven from the journal rather than
+asserted by a caller, and the reason is preserved permanently as one of "the
+run service permanently refused this completion payload", "the durable
+completion send budget is spent", or "the completion resolution deadline
+passed".
 
 This guarantee applies to completion intent. Bounded logs, telemetry, and
 normal operational projections have weaker retention and may not be rebuilt
@@ -187,7 +206,8 @@ after service recreation.
 | Drain or service stop | Idle slots exit at a poll boundary; active jobs drain, then escalation may terminate them. | GitHub may see cancellation or infrastructure failure if the deadline expires. |
 | Job cancellation | Active broker cancellation is matched to the job; Velnor cancels execution and reports terminal state. | Cancellation is not equivalent to a normal successful completion. |
 | Progress upload failure | Continue execution when safe; retain bounded local evidence. | GitHub's live log/timeline can lag or be incomplete even while local execution continues. |
-| Completion request failure | Retry transient failures; preserve the outbox until acknowledgement or terminal remote observation. | Inspect outbox age and remote job state before retrying manually. |
+| Completion request failure | Retry transient failures under a bounded budget; preserve the outbox until acknowledgement, terminal remote observation, or budget exhaustion. | Inspect outbox age and remote job state before retrying manually. |
+| Completion budget exhausted | Abandon the entry, free the slot, record the reason in the journal. | GitHub was never told; it will time the job out. Read the journal's unresolvable completions. |
 | Process crash after completion staging | Replay the exact outbox payload during recovery. | A staged completion is stronger evidence than an in-memory success message. |
 
 ## Cancellation semantics: Velnor versus upstream
@@ -196,12 +216,19 @@ The upstream runner's usual model sends a cancellation request to the worker,
 allows the worker to handle it, and escalates to process termination after a
 timeout.
 
-Velnor's active V2 path differs. Its Docker cancellation path directly
-terminates the relevant host-side job/action containers. The Firecracker path
-does not provide full end-to-end equivalence to upstream worker cancellation.
-Velnor still drains publishers, collects available state, and attempts terminal
-completion, but operators must not assume identical graceful step cancellation
-or cleanup timing.
+Velnor models the same split: one cancellation token per job with `Requested`
+and `Forced` levels, and a `SIGINT → SIGTERM → SIGKILL` ladder per target. The
+current step's own work — its host process tree, its Docker-action sidecar, its
+BuildKit builder — dies at `Requested`; the job and service containers survive
+to `Forced` so `always()` and `cancelled()` post steps still have a container.
+Cancellation signals; removal belongs to teardown.
+
+It is not fully equivalent yet. Only host process groups register as
+termination targets on the live path, so containers are killed by name rather
+than through the ladder, and the Firecracker path sends no vsock cancel to the
+guest. Velnor still drains publishers, collects available state, and attempts
+terminal completion, but operators must not assume identical graceful step
+cancellation or cleanup timing.
 
 This is the principal intentional adapter difference. Broker session creation,
 long polling, job acquisition, lease renewal, completion, status mapping, and
