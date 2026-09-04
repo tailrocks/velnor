@@ -2568,3 +2568,85 @@ Still blocked by the task boundary: apply `StoreCatalog::for_job_temp(...).artif
 `executor.rs:9400-9408`; move disk-pressure admission ahead of acquisition at
 `runner.rs:2588-2646` and `2751-2760`; and publish the three missing lease classes at
 `runner.rs:5688-5695`. Those files remain untouched by T-020.
+
+## 18. Continuation — capability/runtime repair, race isolation, and forbidden-boundary report
+
+### T-001 capability surface — repaired and re-bound to executable dispatch
+
+The tools-side target audit now derives its checkout surface from the runner manifest and asserts
+the exact set: `clean`, `fetch-tags`, `fetch-depth`, `lfs`, `path`, `persist-credentials`,
+`ref`, `repository`, and `token`. `submodules` is explicitly absent and remains rejected by
+admission. The target action inventory was reduced to actions that actually occur in the manifest;
+`actions/setup-python`, `baptiste0928/cargo-install`, and `dtolnay/rust-toolchain` are no longer
+advertised. The regression test parses the compiled manifest source and fails if either list drifts.
+
+The pinned `jdx/mr-boxington-action@adc5c234c02592f7edd008bf81d5bc0e9584dc03` bundle was checked:
+its backend parser accepts only `github` and `server`. The fixture now uses `backend: github`.
+The runner manifest restores that action as an explicit `ActionAdapter::JavaScript` capability,
+with the closed input surface and runtime validation. The ordered planner now sends that class to
+the existing JavaScript sidecar executor; it is not mislabeled native or silently admitted without
+an executable arm. This landed in `0bcc304`.
+
+### T-003 test isolation — changed where the race was enabled
+
+Cache and container tests now use UUID-qualified temporary roots and no cache test mutates process
+environment. The executor tests remain untouched as required. Their remaining hazards are
+`docker_lifecycle_guard()`'s `/tmp/velnor` fallback at `executor.rs:172-176` and the shared-shape
+lease paths in `executor.rs:15170-15254` (`/tmp/vlc-abort-*` and `/tmp/vlc-defer-*`). They need
+the same injected per-test root/lease fixture when that forbidden file is available.
+
+### T-004 documentation — pool trust is the boundary
+
+The getting-started example uses `VELNOR_TRUST_SCOPE=untrusted`; README and execution guidance use
+Mr Boxington 1.7.0. The execution guide now describes daemon-pool trust, no per-job trust
+classification, unavailable `head_repository_id`, and the fail-closed/ephemeral fallback for
+missing repository identity.
+
+### T-005 verifier — identity made content-derived
+
+The fixture audit now binds the capability document by a canonical-content SHA-256 identity rather
+than rejecting every unrelated runner commit. The runner export still requires a valid full source
+SHA for provenance; no readiness check was skipped or weakened. After the final runner manifest
+export, `just refresh-capability-baseline` is the only intended baseline update.
+
+### Exact patches blocked by the file boundary
+
+These are implementation instructions, not applied changes:
+
+1. `crates/velnor-runner/src/executor.rs:9400-9408`: retain the existing temp/run-key validation,
+   then return `StoreCatalog::for_job_temp(temp).artifacts_run(&run_key)`. The two callers at
+   `executor.rs:7099` and `:7327` then share the catalog's artifact root with GC. Remove the
+   temporary `store_catalog.rs` exemption after the call site lands.
+
+2. `crates/velnor-runner/src/runner.rs:2588-2646`: replace the `df`/`free_space_bytes` probe
+   and best-effort reclaim with `HostCapacity::probe` over every writable root, a total
+   `DiskPressure` transition, and bounded `RefuseUntil`. A failed capacity probe must be unhealthy,
+   not treated as available capacity; reclaim must use the same layout snapshot and lease/claim
+   set as normal GC.
+
+3. `runner.rs:2751-2760`: remove the unbounded 60-second retry loop. Dispatch the transition's
+   bounded `RefuseUntil` deadline, then `Drain` and finally `Deregister`; wake the wait on the
+   existing drain signal so an operator can terminate the state machine promptly.
+
+4. `runner.rs:5683-5695`: construct lease scopes from `StoreCatalog` and publish every mounted
+   emergency-managed class before execution, including the missing `mise/rustup`, `mbx`, and
+   `sccache` scopes. Decide and test explicit policy for `artifacts` and `gha-cache`, whose writers
+   still bypass the catalog; they must either acquire matching leases or be removed from the
+   reclaimable set. Do not let a lease-free class look live merely because its directory is fresh.
+
+5. `runner.rs:4786-4833` and `:5330-5338`: use the same `HostCapacity`/`DiskPressure` snapshot for
+   post-acquire reservation and place capacity admission before `acquire_job` where protocol
+   semantics allow. The current path still calls `free_space_bytes`, then reserves after acquire.
+
+6. `executor.rs:172-176`, `:15170-15254`: inject the job/test run root into the Docker lifecycle
+   guard and cancellation cleanup fixtures. Do not use the ambient `/tmp/velnor` fallback or
+   shared `/tmp/vlc-*` names in parallel tests.
+
+### Evidence at handoff
+
+Runner `0bcc304` passes the serialized library suite (`1523 passed, 1 ignored`) and tools suite
+(`187 passed`); workspace all-target check with `velnor-runner/test-support` also passes. The full
+format check still reports only pre-existing formatting in forbidden `execution/cancel.rs`,
+`execution/mod.rs`, and the already-landed tools surface file. BuildKit emergency reclaim remains
+deliberately disabled because no BuildKit lease spans its mutable content; `prune_owned_builder`
+is reserved for a future caller that proves that lease.

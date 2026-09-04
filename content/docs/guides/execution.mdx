@@ -132,12 +132,12 @@ target directories at `/var/cache/mbx`. `VELNOR_TRUST_SCOPE` is configured for
 the daemon pool, not independently admitted for each job; it selects the
 pool's trust namespace (such as `untrusted`, `trusted`, or `release`) for
 persistent compiler stores. Those stores are further scoped by repository
-identity when the acquired job payload provides it. A per-job trust class
-remains unresolved: the job message has no `head_repository_id` from which
-Velnor can safely derive one. If repository identity is missing or invalid,
+identity when the acquired job payload provides it. Velnor derives no per-job
+trust classification: the job message has no `head_repository_id` from which
+it could safely derive one. If repository identity is missing or invalid,
 Velnor falls back to a job-ephemeral store. This fallback is a persistence
-decision, not a per-job trust classification. Trust partitioning is a cache
-reuse boundary, not encryption or protection from a compromised host.
+decision, not a trust classification. Trust partitioning is a cache reuse
+boundary, not encryption or protection from a compromised host.
 
 Mr Boxington owns garbage collection inside this store. Velnor supplies the
 current limits: 20 GiB for its cache, 30 GiB for managed targets, and 50 GiB
