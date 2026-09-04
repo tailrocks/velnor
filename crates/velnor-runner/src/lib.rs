@@ -27,6 +27,7 @@ pub mod docker;
 mod docker_lease;
 pub mod execution;
 mod executor;
+mod expression;
 mod fs_copy;
 pub mod gha_cache;
 mod git_mirror;

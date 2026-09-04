@@ -8,6 +8,7 @@ use crate::{
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{JobContainerSpec, Shell},
+    expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -1816,7 +1817,21 @@ where
                         let frame_state = state.with_step_action(step_id);
                         let resolved_display = frame_state.resolve_expressions(display_name);
                         let backend_step_id = github_backend_step_id(step_id);
-                        let skipped = !frame_state.evaluate_condition(condition.as_deref());
+                        let skipped = match frame_state.evaluate_condition(condition.as_deref()) {
+                            Ok(condition_met) => !condition_met,
+                            Err(error) => {
+                                // actions/runner fails the step when its
+                                // condition cannot be evaluated
+                                // (src/Runner.Worker/StepsRunner.cs:231-242).
+                                // A composite umbrella has no result row of
+                                // its own before the frame exists, so the job
+                                // carries the failure.
+                                step_error = Some(anyhow::anyhow!(
+                                    "Step '{resolved_display}' condition could not be evaluated: {error}"
+                                ));
+                                break;
+                            }
+                        };
                         if skipped {
                             eprintln!(
                                 "forensics.lifecycle event=step-skipped step={resolved_display}"
@@ -1869,7 +1884,53 @@ where
             // (ActionRunner.TryUpdateDisplayName); unresolvable expressions
             // stay raw, matching the upstream prettified-token fallback.
             let display_name = step_state.resolve_expressions(step.display_name());
-            if !step_state.evaluate_condition(step.condition()) {
+            let condition_met = match step_state.evaluate_condition(step.condition()) {
+                Ok(condition_met) => condition_met,
+                Err(error) => {
+                    // actions/runner reports the error and completes the step
+                    // as failed, then keeps running the remaining steps
+                    // (src/Runner.Worker/StepsRunner.cs:231-242). The
+                    // string-rewriting evaluator this replaces was fail-open
+                    // and ran the step instead.
+                    let message =
+                        format!("Step '{display_name}' condition could not be evaluated: {error}");
+                    eprintln!("{message}");
+                    let reports = composite_frame.is_none() && step.reports_timeline_start();
+                    let mut failed_started_at = String::new();
+                    if reports {
+                        failed_started_at = self.emit_step_started(
+                            step_backend_id.clone(),
+                            &display_name,
+                            &mut timeline_order,
+                        );
+                    }
+                    let result = StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: message,
+                    };
+                    if reports {
+                        let log = step_log_with_name(
+                            &step_backend_id,
+                            &display_name,
+                            timeline_order,
+                            &failed_started_at,
+                            &unix_now_rfc3339(),
+                            &result,
+                            &step_log_prelude(step, &step_state),
+                        );
+                        self.emit_step_log(&log);
+                        step_logs.push(log);
+                    }
+                    state.apply(&step_context_id, &result);
+                    results.push(result);
+                    continue;
+                }
+            };
+            if !condition_met {
                 // Embedded composite steps never surface their own rows;
                 // a skipped one simply leaves no trace in the parent's log.
                 eprintln!("forensics.lifecycle event=step-skipped step={display_name}");
@@ -1916,7 +1977,7 @@ where
                 ..
             } = step
                 && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
-                && step_state.evaluate_post_condition(invocation.pre_condition.as_deref())
+                && step_state.post_condition_met(invocation.pre_condition.as_deref())
             {
                 if invocation.post_container_path.is_some() {
                     post_actions.push(PostJavaScriptAction {
@@ -2326,12 +2387,12 @@ where
         let native_post_actions = native_post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
             .collect::<Vec<_>>();
         let post_actions = post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
             .collect::<Vec<_>>();
         reserve_github_post_step_orders(
             &mut timeline_order,
@@ -7876,7 +7937,7 @@ fn native_attest_build_provenance(
     let api_url = trusted_github_api_base(state)?;
     let server_url = trusted_github_server_base(state)?;
     let visibility = action_state
-        .resolve_context_data_expression("github.event.repository.visibility")
+        .context_string("github.event.repository.visibility")
         .or_else(|| {
             action_state
                 .immutable_env
@@ -9347,7 +9408,7 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
     let repository = state
-        .resolve_context_expression("github.repository")
+        .context_string("github.repository")
         .filter(|value| !value.is_empty());
     let Some(repository) = repository else {
         eprintln!(
@@ -11037,7 +11098,7 @@ fn docker_metadata_tags(state: &JobExecutionState, input: &str) -> Vec<String> {
                     }
                     "pr" => {
                         if let Some(pr_number) = state
-                            .resolve_context_data_expression("github.event.pull_request.number")
+                            .context_string("github.event.pull_request.number")
                             .filter(|v| !v.is_empty())
                         {
                             tags.push(format!("pr-{pr_number}"));
@@ -11144,11 +11205,11 @@ fn paths_filter_patterns(value: &serde_yaml::Value) -> Result<Vec<String>> {
 
 fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
     state
-        .resolve_context_data_expression("github.event.pull_request.base.sha")
+        .context_string("github.event.pull_request.base.sha")
         .filter(|value| !value.is_empty())
         .or_else(|| {
             state
-                .resolve_context_data_expression("github.event.before")
+                .context_string("github.event.before")
                 .filter(|value| !value.is_empty())
         })
         .or_else(|| state.env.get("GITHUB_BASE_REF").cloned())
@@ -11158,7 +11219,7 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
         // detached, depth-one SHA and has no local default-branch ref.
         .or_else(|| {
             state
-                .resolve_context_data_expression("github.event.repository.default_branch")
+                .context_string("github.event.repository.default_branch")
                 .filter(|value| !value.is_empty())
                 .map(|branch| format!("origin/{branch}"))
         })
@@ -11166,7 +11227,7 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
 
 fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
     state
-        .resolve_context_data_expression("github.event.pull_request.head.sha")
+        .context_string("github.event.pull_request.head.sha")
         .filter(|value| !value.is_empty())
         .or_else(|| state.env.get("GITHUB_SHA").cloned())
 }
@@ -11499,10 +11560,20 @@ impl JobExecutionState {
             .collect()
     }
 
+    /// Interpolate every `${{ ... }}` span in `value`.
+    ///
+    /// Each span is parsed and evaluated by [`crate::expression`] and rendered
+    /// with upstream's `ConvertToString` rules
+    /// (`src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs:136-155`).
+    ///
+    /// Deferred root cause: upstream fails template evaluation, and therefore
+    /// the step, when a `${{ }}` span cannot be evaluated
+    /// (`PipelineTemplateEvaluator` calls `context.Errors.Check()` after every
+    /// evaluate). Velnor keeps the raw span here instead; making
+    /// interpolation fail-closed changes step-preparation lifecycle and is
+    /// owned by the lifecycle work package. Step *conditions* are fail-closed
+    /// below, which is the divergence this module owns.
     pub(crate) fn resolve_expressions(&self, value: &str) -> String {
-        if !expression_within_budget(value) {
-            return value.to_string();
-        }
         let mut rendered = String::with_capacity(value.len());
         let mut rest = value;
         while let Some(start) = rest.find("${{") {
@@ -11513,10 +11584,9 @@ impl JobExecutionState {
                 return rendered;
             };
             let expression = after_start[..end].trim();
-            if let Some(value) = self.resolve_expression_value(expression) {
-                rendered.push_str(&value);
-            } else {
-                rendered.push_str(&rest[start..start + 3 + end + 2]);
+            match expression::evaluate(expression, &self.expression_context()) {
+                Ok(value) => rendered.push_str(&value.convert_to_string()),
+                Err(_) => rendered.push_str(&rest[start..start + 3 + end + 2]),
             }
             rest = &after_start[end + 2..];
         }
@@ -11524,193 +11594,7 @@ impl JobExecutionState {
         rendered
     }
 
-    fn resolve_step_output_expression(&self, expression: &str) -> Option<&str> {
-        let expression = expression.strip_prefix("steps.")?;
-        let (step_id, output) = expression.split_once(".outputs")?;
-        let output = if let Some(output) = output.strip_prefix('.') {
-            output
-        } else {
-            output.strip_prefix("['")?.strip_suffix("']")?
-        };
-        self.outputs
-            .get(step_id)
-            .and_then(|outputs| outputs.get(output))
-            .map(String::as_str)
-    }
-
-    fn resolve_expression_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if let Some(inner) = strip_wrapping_parentheses(expression) {
-            return self.resolve_expression_value(inner);
-        }
-        if let Some((left, right)) = split_top_level(expression, "||") {
-            let left = self.resolve_expression_value(left).unwrap_or_default();
-            if expression_truthy(&left) {
-                return Some(left);
-            }
-            return self.resolve_expression_value(right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "&&") {
-            let left = self.resolve_expression_value(left).unwrap_or_default();
-            if expression_truthy(&left) {
-                return self.resolve_expression_value(right);
-            }
-            return Some("false".to_string());
-        }
-        if let Some(inner) = expression.strip_prefix('!') {
-            let value = self.resolve_expression_value(inner).unwrap_or_default();
-            return Some((!expression_truthy(&value)).to_string());
-        }
-        if let Some((left, right)) = split_top_level(expression, "!=") {
-            return Some(
-                (!github_string_eq(
-                    &self.resolve_expression_value(left).unwrap_or_default(),
-                    &self.resolve_expression_value(right).unwrap_or_default(),
-                ))
-                .to_string(),
-            );
-        }
-        if let Some((left, right)) = split_top_level(expression, "==") {
-            return Some(
-                github_string_eq(
-                    &self.resolve_expression_value(left).unwrap_or_default(),
-                    &self.resolve_expression_value(right).unwrap_or_default(),
-                )
-                .to_string(),
-            );
-        }
-        if let Some((value, needle)) = parse_contains(expression) {
-            return Some(
-                self.resolve_expression_value(value)
-                    .is_some_and(|value| github_contains(&value, unquote(needle.trim())))
-                    .to_string(),
-            );
-        }
-        if is_quoted(expression) {
-            return Some(unquote(expression).to_string());
-        }
-        if expression == "true" || expression == "false" {
-            return Some(expression.to_string());
-        }
-        if expression == "null" {
-            return Some(String::new());
-        }
-        if let Some(output) = self.resolve_step_output_expression(expression) {
-            return Some(output.to_string());
-        }
-        if expression.starts_with("steps.") && expression.contains(".outputs.") {
-            return Some(String::new());
-        }
-        if let Some(context) = parse_to_json(expression) {
-            return self
-                .resolve_context_data_value(context)
-                .and_then(|value| serde_json::to_string(value).ok());
-        }
-        if let Some(patterns) = parse_hash_files(expression) {
-            return self.resolve_hash_files_expression(patterns);
-        }
-        if expression.trim().starts_with("format(") {
-            // Resolve format() args through the full state resolver so that runtime
-            // values like `steps.run-output.outputs.output` are available (not just
-            // compile-time context_data values from the job message).
-            return self.resolve_format_expression(expression.trim());
-        }
-        self.resolve_context_expression(expression)
-    }
-
-    fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
-        let workspace = self.workspace_host.as_ref()?;
-        // Match actions/runner's HashFilesFunction: evaluate against the
-        // workspace as it exists at this expression call. In particular, an
-        // evaluation before checkout may correctly be empty, but must not
-        // poison the same expression after checkout has populated the tree.
-        Some(hash_files(workspace, &patterns))
-    }
-
-    /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
-    /// so runtime step outputs (`steps.X.outputs.Y`) are accessible for args.
-    fn resolve_format_expression(&self, expression: &str) -> Option<String> {
-        let inner = expression.strip_prefix("format(")?.strip_suffix(')')?;
-        let parts = crate::script_step::split_format_args_pub(inner);
-        const MAX_FORMAT_ARGS: usize = 64;
-        const MAX_FORMAT_TEMPLATE_BYTES: usize = 64 * 1024;
-        if parts.is_empty() || parts.len().saturating_sub(1) > MAX_FORMAT_ARGS {
-            return None;
-        }
-        let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-        if template.len() > MAX_FORMAT_TEMPLATE_BYTES {
-            return None;
-        }
-        let args = parts[1..]
-            .iter()
-            .map(|arg| {
-                self.resolve_expression_value(arg.trim())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-        render_format_template(template.replace("''", "'").as_str(), &args)
-    }
-
-    fn resolve_context_expression(&self, expression: &str) -> Option<String> {
-        if let Some(name) = expression.trim().strip_prefix("env.") {
-            return self.env.get(name).cloned();
-        }
-        if expression.trim() == "job.status" {
-            return Some(self.job_status().to_string());
-        }
-        if expression.trim() == "github.action_status" {
-            return Some(self.action_status().to_string());
-        }
-
-        let env_name = match expression.trim() {
-            "github.actor" => "GITHUB_ACTOR",
-            "github.actor_id" => "GITHUB_ACTOR_ID",
-            "github.action" => "GITHUB_ACTION",
-            "github.action_path" => "GITHUB_ACTION_PATH",
-            "github.action_ref" => "GITHUB_ACTION_REF",
-            "github.action_repository" => "GITHUB_ACTION_REPOSITORY",
-            "github.api_url" => "GITHUB_API_URL",
-            "github.base_ref" => "GITHUB_BASE_REF",
-            "github.event_name" => "GITHUB_EVENT_NAME",
-            "github.event_path" => "GITHUB_EVENT_PATH",
-            "github.graphql_url" => "GITHUB_GRAPHQL_URL",
-            "github.head_ref" => "GITHUB_HEAD_REF",
-            "github.ref" => "GITHUB_REF",
-            "github.ref_protected" => "GITHUB_REF_PROTECTED",
-            "github.ref_type" => "GITHUB_REF_TYPE",
-            "github.repository" => "GITHUB_REPOSITORY",
-            "github.repository_id" => "GITHUB_REPOSITORY_ID",
-            "github.repository_owner" => "GITHUB_REPOSITORY_OWNER",
-            "github.repository_owner_id" => "GITHUB_REPOSITORY_OWNER_ID",
-            "github.retention_days" => "GITHUB_RETENTION_DAYS",
-            "github.run_id" => "GITHUB_RUN_ID",
-            "github.run_attempt" => "GITHUB_RUN_ATTEMPT",
-            "github.run_number" => "GITHUB_RUN_NUMBER",
-            "github.server_url" => "GITHUB_SERVER_URL",
-            "github.sha" => "GITHUB_SHA",
-            "github.token" => "GITHUB_TOKEN",
-            "github.triggering_actor" => "GITHUB_TRIGGERING_ACTOR",
-            "github.workflow" => "GITHUB_WORKFLOW",
-            "github.workflow_ref" => "GITHUB_WORKFLOW_REF",
-            "github.workflow_sha" => "GITHUB_WORKFLOW_SHA",
-            "github.ref_name" => "GITHUB_REF_NAME",
-            "github.workspace" => "GITHUB_WORKSPACE",
-            "runner.arch" => "RUNNER_ARCH",
-            "runner.debug" => "RUNNER_DEBUG",
-            "runner.environment" => "RUNNER_ENVIRONMENT",
-            "runner.name" => "RUNNER_NAME",
-            "runner.os" => "RUNNER_OS",
-            "runner.temp" => "RUNNER_TEMP",
-            "runner.tool_cache" => "RUNNER_TOOL_CACHE",
-            "runner.workspace" => "RUNNER_WORKSPACE",
-            _ => return self.resolve_context_data_expression(expression),
-        };
-        self.env
-            .get(env_name)
-            .cloned()
-            .or_else(|| self.resolve_context_data_expression(expression))
-    }
-
+    /// `job.status` — `success` unless a step has already concluded failed.
     fn job_status(&self) -> &'static str {
         if self
             .conclusions
@@ -11723,104 +11607,15 @@ impl JobExecutionState {
         }
     }
 
+    /// `github.action_status` — the composite-scoped equivalent of
+    /// `job.status`, matching how `SuccessFunction` picks its source
+    /// (`src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`).
     fn action_status(&self) -> &'static str {
         if self.status_scope_has_failure() {
             "failure"
         } else {
             "success"
         }
-    }
-
-    pub(crate) fn evaluate_condition(&self, condition: Option<&str>) -> bool {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return self.evaluate_condition_expr("success()");
-        };
-        let expression = strip_expression(condition);
-        if condition_has_status_check(expression) {
-            return self.evaluate_condition_expr(expression);
-        }
-        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
-    }
-
-    fn evaluate_post_condition(&self, condition: Option<&str>) -> bool {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return true;
-        };
-        let expression = strip_expression(condition);
-        if condition_has_status_check(expression) {
-            return self.evaluate_condition_expr(expression);
-        }
-        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
-    }
-
-    fn evaluate_condition_expr(&self, expression: &str) -> bool {
-        if !expression_within_budget(expression) {
-            return false;
-        }
-        let expression = expression.trim();
-        if expression == "always()" {
-            return true;
-        }
-        if expression == "success()" {
-            return !self.status_scope_has_failure();
-        }
-        if expression == "failure()" {
-            return self.status_scope_has_failure();
-        }
-        if expression == "cancelled()" {
-            return false;
-        }
-        if let Some(inner) = strip_wrapping_parentheses(expression) {
-            return self.evaluate_condition_expr(inner);
-        }
-        if let Some((left, right)) = split_top_level(expression, "||") {
-            return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "&&") {
-            return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
-        }
-        if let Some(inner) = expression.strip_prefix('!') {
-            return !self.evaluate_condition_expr(inner);
-        }
-        if let Some((value, needle)) = parse_contains(expression) {
-            return self
-                .resolve_condition_value(value)
-                .is_some_and(|value| github_contains(&value, unquote(needle.trim())));
-        }
-        if let Some((left, right)) = split_top_level(expression, "!=") {
-            let left = self
-                .resolve_condition_comparison_value(left)
-                .unwrap_or_default();
-            let right = self
-                .resolve_condition_comparison_value(right)
-                .unwrap_or_default();
-            return !github_string_eq(&left, &right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "==") {
-            let left = self
-                .resolve_condition_comparison_value(left)
-                .unwrap_or_default();
-            let right = self
-                .resolve_condition_comparison_value(right)
-                .unwrap_or_default();
-            return github_string_eq(&left, &right);
-        }
-        if expression == "true" {
-            return true;
-        }
-        if expression == "false" {
-            return false;
-        }
-        if let Some(value) = self.resolve_condition_value(expression) {
-            return expression_truthy(&value);
-        }
-        true
     }
 
     fn status_scope_has_failure(&self) -> bool {
@@ -11836,104 +11631,428 @@ impl JobExecutionState {
         }
     }
 
-    fn resolve_condition_comparison_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if condition_returns_bool(expression) {
-            return Some(self.evaluate_condition_expr(expression).to_string());
+    /// Read a dotted context path (e.g. `github.event.pull_request.number`)
+    /// as a string, through the same evaluator every expression uses.
+    ///
+    /// `None` when the path is absent, empty, or resolves to a collection —
+    /// upstream's `ConvertToString` would render those as `"Object"`/`"Array"`
+    /// (`EvaluationResult.cs:152-153`), which is never a usable value here.
+    pub(crate) fn context_string(&self, path: &str) -> Option<String> {
+        let value = expression::evaluate(path, &self.expression_context()).ok()?;
+        if !value.is_primitive() {
+            return None;
         }
-        self.resolve_condition_value(expression)
+        let rendered = value.convert_to_string();
+        (!rendered.is_empty()).then_some(rendered)
     }
 
-    fn resolve_condition_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if let Some(output) = self.resolve_step_output_expression(expression) {
-            return Some(output.to_string());
-        }
-        if let Some(expression) = expression.strip_prefix("steps.") {
-            let (step_id, field) = expression.split_once('.')?;
-            if field == "outcome" {
-                return self
-                    .outcomes
-                    .get(step_id)
-                    .map(|outcome| outcome.as_str().to_string());
+    fn expression_context(&self) -> JobExpressionContext<'_> {
+        JobExpressionContext { state: self }
+    }
+
+    /// Evaluate a step condition.
+    ///
+    /// The default condition is `success()`, and a condition that does not
+    /// itself reference a status function is implicitly `success() && (...)`
+    /// — how the service composes `if:` before handing the runner a
+    /// `Condition` string.
+    ///
+    /// A condition that fails to evaluate returns `Err`, which callers must
+    /// turn into a failed step, matching
+    /// `src/Runner.Worker/StepsRunner.cs:231-242`.
+    pub(crate) fn evaluate_condition(
+        &self,
+        condition: Option<&str>,
+    ) -> Result<bool, expression::ExpressionError> {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
+            return Ok(!self.status_scope_has_failure());
+        };
+        self.evaluate_condition_expression(strip_expression(condition), true)
+    }
+
+    /// Pre/post step conditions. An absent condition runs unconditionally
+    /// (`ActionRunner` only registers a pre/post step when its condition is
+    /// satisfied), otherwise the `success()` default applies as above.
+    fn evaluate_post_condition(
+        &self,
+        condition: Option<&str>,
+    ) -> Result<bool, expression::ExpressionError> {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
+            return Ok(true);
+        };
+        self.evaluate_condition_expression(strip_expression(condition), true)
+    }
+
+    /// Whether a pre/post step's condition is satisfied.
+    ///
+    /// Deferred root cause: upstream fails the owning step when a pre/post
+    /// condition cannot be evaluated
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`). Velnor registers pre/post
+    /// steps outside the main step-result path, so there is no result row to
+    /// fail here; giving them one belongs to the lifecycle work package. Until
+    /// then the condition is fail-*closed* and the error is reported — never
+    /// fail-open, which is the divergence this module removes.
+    fn post_condition_met(&self, condition: Option<&str>) -> bool {
+        match self.evaluate_post_condition(condition) {
+            Ok(condition_met) => condition_met,
+            Err(error) => {
+                eprintln!(
+                    "Pre/post step condition {:?} could not be evaluated: {error}",
+                    condition.unwrap_or_default()
+                );
+                false
             }
-            if field == "conclusion" {
-                return self
-                    .conclusions
-                    .get(step_id)
-                    .map(|outcome| outcome.as_str().to_string());
-            }
         }
-        if expression == "runner.os" {
-            return self
-                .resolve_context_expression(expression)
-                .or_else(|| Some("Linux".to_string()));
-        }
-        if let Some(value) = self.resolve_context_expression(expression) {
-            return Some(value);
-        }
-        Some(unquote(expression).to_string())
     }
 
-    fn resolve_context_data_expression(&self, expression: &str) -> Option<String> {
-        self.resolve_context_data_value(expression)
-            .and_then(context_value_string)
-            .or_else(|| missing_context_value(expression))
-    }
-
-    fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
-        let mut segments = expression.trim().split('.');
-        let root = segments.next()?;
-        let (root_name, mut value) = self.context_data.iter().find(|(name, _)| {
-            *name == root
-                || root.eq_ignore_ascii_case("inputs") && name.eq_ignore_ascii_case("inputs")
-        })?;
-        let input_context = root_name.eq_ignore_ascii_case("inputs");
-        for segment in segments {
-            value = if input_context {
-                value
-                    .as_object()?
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(segment))
-                    .map(|(_, value)| value)?
-            } else {
-                value.get(segment)?
-            };
+    fn evaluate_condition_expression(
+        &self,
+        expression: &str,
+        apply_success_default: bool,
+    ) -> Result<bool, expression::ExpressionError> {
+        let context = self.expression_context();
+        let Some(node) = expression::parse(expression, &context)? else {
+            return Ok(!self.status_scope_has_failure());
+        };
+        // `success() && (...)` short-circuits, so a job that has already failed
+        // never evaluates — and therefore never errors on — the rest.
+        if apply_success_default
+            && !node_references_status_function(&node)
+            && self.status_scope_has_failure()
+        {
+            return Ok(false);
         }
-        Some(value)
+        Ok(expression::evaluate_node(&node, &context)?.is_truthy())
     }
 }
 
-fn render_format_template(template: &str, args: &[String]) -> Option<String> {
-    const MAX_FORMAT_OUTPUT_BYTES: usize = 256 * 1024;
-    let mut result = String::with_capacity(template.len());
-    let mut cursor = 0usize;
-    while cursor < template.len() {
-        let byte = template.as_bytes()[cursor];
-        if byte == b'{' {
-            if template.as_bytes().get(cursor + 1) == Some(&b'{') {
-                result.push('{');
-                cursor += 2;
-                continue;
-            }
-            let end = template[cursor + 1..].find('}')? + cursor + 1;
-            let index = template[cursor + 1..end].parse::<usize>().ok()?;
-            let replacement = args.get(index)?;
-            result.push_str(replacement);
-            cursor = end + 1;
-        } else if byte == b'}' && template.as_bytes().get(cursor + 1) == Some(&b'}') {
-            result.push('}');
-            cursor += 2;
-        } else {
-            let character = template[cursor..].chars().next()?;
-            result.push(character);
-            cursor += character.len_utf8();
-        }
-        if result.len() > MAX_FORMAT_OUTPUT_BYTES {
-            return None;
+/// Whether the tree calls one of the runner's status functions, which is what
+/// suppresses the implicit `success() &&` prefix.
+fn node_references_status_function(node: &expression::Node) -> bool {
+    if let expression::Node::Function { name, .. } = node
+        && matches!(
+            name.to_ascii_lowercase().as_str(),
+            "success" | "failure" | "always" | "cancelled"
+        )
+    {
+        return true;
+    }
+    node.children()
+        .iter()
+        .any(|child| node_references_status_function(child))
+}
+
+/// The root contexts and extension functions an expression is evaluated
+/// against, mirroring `IExecutionContext.ExpressionValues` /
+/// `ExpressionFunctions` (`src/Runner.Worker/StepsRunner.cs:92-106`).
+struct JobExpressionContext<'a> {
+    state: &'a JobExecutionState,
+}
+
+/// The root contexts GitHub always defines for a step. Referencing anything
+/// outside this set is a parse error upstream
+/// (`ExpressionParser.cs:144-147`), never a silent null.
+const ROOT_CONTEXTS: &[&str] = &[
+    "github", "env", "job", "jobs", "runner", "steps", "secrets", "strategy", "matrix", "needs",
+    "inputs", "vars",
+];
+
+/// `github.*` keys the runner exports as environment variables. Environment
+/// wins over the job message's `github` context, preserving the precedence
+/// Velnor's runtime already relied on.
+const GITHUB_ENV_KEYS: &[(&str, &str)] = &[
+    ("actor", "GITHUB_ACTOR"),
+    ("actor_id", "GITHUB_ACTOR_ID"),
+    ("action", "GITHUB_ACTION"),
+    ("action_path", "GITHUB_ACTION_PATH"),
+    ("action_ref", "GITHUB_ACTION_REF"),
+    ("action_repository", "GITHUB_ACTION_REPOSITORY"),
+    ("api_url", "GITHUB_API_URL"),
+    ("base_ref", "GITHUB_BASE_REF"),
+    ("event_name", "GITHUB_EVENT_NAME"),
+    ("event_path", "GITHUB_EVENT_PATH"),
+    ("graphql_url", "GITHUB_GRAPHQL_URL"),
+    ("head_ref", "GITHUB_HEAD_REF"),
+    ("ref", "GITHUB_REF"),
+    ("ref_protected", "GITHUB_REF_PROTECTED"),
+    ("ref_type", "GITHUB_REF_TYPE"),
+    ("repository", "GITHUB_REPOSITORY"),
+    ("repository_id", "GITHUB_REPOSITORY_ID"),
+    ("repository_owner", "GITHUB_REPOSITORY_OWNER"),
+    ("repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+    ("retention_days", "GITHUB_RETENTION_DAYS"),
+    ("run_id", "GITHUB_RUN_ID"),
+    ("run_attempt", "GITHUB_RUN_ATTEMPT"),
+    ("run_number", "GITHUB_RUN_NUMBER"),
+    ("server_url", "GITHUB_SERVER_URL"),
+    ("sha", "GITHUB_SHA"),
+    ("token", "GITHUB_TOKEN"),
+    ("triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+    ("workflow", "GITHUB_WORKFLOW"),
+    ("workflow_ref", "GITHUB_WORKFLOW_REF"),
+    ("workflow_sha", "GITHUB_WORKFLOW_SHA"),
+    ("ref_name", "GITHUB_REF_NAME"),
+    ("workspace", "GITHUB_WORKSPACE"),
+];
+
+/// `runner.*` keys, likewise environment-backed.
+const RUNNER_ENV_KEYS: &[(&str, &str)] = &[
+    ("arch", "RUNNER_ARCH"),
+    ("debug", "RUNNER_DEBUG"),
+    ("environment", "RUNNER_ENVIRONMENT"),
+    ("name", "RUNNER_NAME"),
+    ("os", "RUNNER_OS"),
+    ("temp", "RUNNER_TEMP"),
+    ("tool_cache", "RUNNER_TOOL_CACHE"),
+    ("workspace", "RUNNER_WORKSPACE"),
+];
+
+fn upsert_entry(
+    entries: &mut Vec<(String, expression::Value)>,
+    name: &str,
+    value: expression::Value,
+) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        existing.1 = value;
+    } else {
+        entries.push((name.to_string(), value));
+    }
+}
+
+impl JobExpressionContext<'_> {
+    fn context_data_entries(&self, root: &str) -> Vec<(String, expression::Value)> {
+        match self.state.context_data.get(root) {
+            Some(Value::Object(map)) => map
+                .iter()
+                .map(|(name, value)| (name.clone(), expression::eval::from_serde_json(value)))
+                .collect(),
+            _ => Vec::new(),
         }
     }
-    Some(result)
+
+    fn github_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("github");
+        for (name, variable) in GITHUB_ENV_KEYS {
+            if let Some(value) = self.state.env.get(*variable) {
+                upsert_entry(&mut entries, name, expression::Value::string(value));
+            }
+        }
+        upsert_entry(
+            &mut entries,
+            "action_status",
+            expression::Value::string(self.state.action_status()),
+        );
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    fn runner_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("runner");
+        for (name, variable) in RUNNER_ENV_KEYS {
+            if let Some(value) = self.state.env.get(*variable) {
+                upsert_entry(&mut entries, name, expression::Value::string(value));
+            }
+        }
+        if entries
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("os"))
+        {
+            upsert_entry(&mut entries, "os", expression::Value::string("Linux"));
+        }
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    /// The `env` context is case-sensitive on every non-Windows runner
+    /// (`src/Runner.Worker/StepsRunner.cs:101-106`).
+    fn env_context(&self) -> expression::Value {
+        expression::Value::Object(expression::ObjectValue::case_sensitive(
+            self.state
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                .collect(),
+        ))
+    }
+
+    /// `steps.<id>.{outputs,outcome,conclusion}`, built from the runtime
+    /// step state rather than parsed out of the expression text.
+    fn steps_context(&self) -> expression::Value {
+        let mut ids: Vec<&String> = Vec::new();
+        for id in self
+            .state
+            .outputs
+            .keys()
+            .chain(self.state.outcomes.keys())
+            .chain(self.state.conclusions.keys())
+        {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+
+        let entries = ids
+            .into_iter()
+            .map(|id| {
+                let mut step: Vec<(String, expression::Value)> = Vec::new();
+                let outputs = self
+                    .state
+                    .outputs
+                    .get(id)
+                    .map(|outputs| {
+                        outputs
+                            .iter()
+                            .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                step.push((
+                    "outputs".to_string(),
+                    expression::Value::Object(expression::ObjectValue::new(outputs)),
+                ));
+                if let Some(outcome) = self.state.outcomes.get(id) {
+                    step.push((
+                        "outcome".to_string(),
+                        expression::Value::string(outcome.as_str()),
+                    ));
+                }
+                if let Some(conclusion) = self.state.conclusions.get(id) {
+                    step.push((
+                        "conclusion".to_string(),
+                        expression::Value::string(conclusion.as_str()),
+                    ));
+                }
+                (
+                    id.clone(),
+                    expression::Value::Object(expression::ObjectValue::new(step)),
+                )
+            })
+            .collect();
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    fn job_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("job");
+        upsert_entry(
+            &mut entries,
+            "status",
+            expression::Value::string(self.state.job_status()),
+        );
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    /// `hashFiles(...)` — `src/Runner.Worker/Expressions/HashFilesFunction.cs:19-60`.
+    fn hash_files_function(
+        &self,
+        args: &[expression::Value],
+    ) -> Result<expression::Value, expression::ExpressionError> {
+        let mut patterns: Vec<String> = Vec::new();
+        for (position, arg) in args.iter().enumerate() {
+            let arg = arg.convert_to_string();
+            if position == 0 && arg.starts_with("--") {
+                if arg.eq_ignore_ascii_case("--follow-symbolic-links") {
+                    continue;
+                }
+                return Err(expression::ExpressionError::evaluation(format!(
+                    "Invalid glob option {arg}, avaliable option: '--follow-symbolic-links'."
+                )));
+            }
+            patterns.push(arg);
+        }
+
+        // Evaluated against the workspace as it exists at this call: an
+        // evaluation before checkout may correctly be empty, and must not
+        // poison the same expression after checkout populated the tree.
+        let Some(workspace) = self.state.workspace_host.as_ref() else {
+            return Ok(expression::Value::string(""));
+        };
+        Ok(expression::Value::string(hash_files(workspace, &patterns)))
+    }
+}
+
+impl expression::ParseEnvironment for JobExpressionContext<'_> {
+    fn is_named_value(&self, name: &str) -> bool {
+        ROOT_CONTEXTS
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(name))
+            || self
+                .state
+                .context_data
+                .keys()
+                .any(|root| root.eq_ignore_ascii_case(name))
+    }
+
+    fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
+        match name.to_ascii_lowercase().as_str() {
+            // `src/Runner.Worker/StepsRunner.cs:92-97`.
+            "success" | "failure" | "always" | "cancelled" => Some((0, 0)),
+            "hashfiles" => Some((1, 255)),
+            _ => None,
+        }
+    }
+}
+
+impl expression::EvaluationContext for JobExpressionContext<'_> {
+    fn named_value(&self, name: &str) -> expression::Value {
+        match name.to_ascii_lowercase().as_str() {
+            "github" => self.github_context(),
+            "env" => self.env_context(),
+            "runner" => self.runner_context(),
+            "steps" => self.steps_context(),
+            "job" => self.job_context(),
+            other => {
+                let entries = self.context_data_entries(other);
+                if entries.is_empty()
+                    && let Some(value) = self
+                        .state
+                        .context_data
+                        .iter()
+                        .find(|(root, _)| root.eq_ignore_ascii_case(other))
+                        .map(|(_, value)| value)
+                {
+                    return expression::eval::from_serde_json(value);
+                }
+                expression::Value::Object(expression::ObjectValue::new(entries))
+            }
+        }
+    }
+
+    fn call_function(
+        &self,
+        name: &str,
+        args: &[expression::Value],
+    ) -> Result<expression::Value, expression::ExpressionError> {
+        match name.to_ascii_lowercase().as_str() {
+            // `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
+            "success" => Ok(expression::Value::Boolean(
+                !self.state.status_scope_has_failure(),
+            )),
+            // `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`
+            "failure" => Ok(expression::Value::Boolean(
+                self.state.status_scope_has_failure(),
+            )),
+            // `src/Runner.Worker/Expressions/AlwaysFunction.cs:19-23`
+            "always" => Ok(expression::Value::Boolean(true)),
+            // SEAM: cancellation. Upstream's `CancelledFunction`
+            // (`src/Runner.Worker/Expressions/CancelledFunction.cs:20-29`)
+            // returns `job.status == cancelled`. Velnor has no truthful job
+            // cancellation status yet; the cancellation work package replaces
+            // this constant with that status and must change nothing else in
+            // this module.
+            "cancelled" => Ok(expression::Value::Boolean(false)),
+            "hashfiles" => self.hash_files_function(args),
+            other => Err(expression::ExpressionError::evaluation(format!(
+                "Unrecognized function: '{other}'"
+            ))),
+        }
+    }
 }
 
 /// Return true only when a step condition is provably false from immutable
@@ -11950,57 +12069,66 @@ pub(crate) fn condition_is_statically_false(
     let Some(condition) = condition else {
         return false;
     };
-    immutable_github_expression_is_false(
-        strip_expression(condition),
-        &JobExecutionState::new_with_context(base_env, context_data),
-    )
-}
-
-fn immutable_github_expression_is_false(expression: &str, state: &JobExecutionState) -> bool {
-    let expression = expression.trim();
-    if let Some(inner) = strip_wrapping_parentheses(expression) {
-        return immutable_github_expression_is_false(inner, state);
-    }
-    // A conjunction is false when any operand is independently provable
-    // false. GitHub's broker prefixes ordinary step conditions with
-    // `success() &&`; the immutable operand can still prove the whole value.
-    if let Some((left, right)) = split_top_level(expression, "&&") {
-        return immutable_github_expression_is_false(left, state)
-            || immutable_github_expression_is_false(right, state);
-    }
-    // A disjunction is false only when both operands are independently
-    // provable false.
-    if let Some((left, right)) = split_top_level(expression, "||") {
-        return immutable_github_expression_is_false(left, state)
-            && immutable_github_expression_is_false(right, state);
-    }
-    let lower = expression.to_ascii_lowercase();
-    if !lower.contains("github.")
-        || [
-            "steps.",
-            "needs.",
-            "env.",
-            "job.",
-            "matrix.",
-            "strategy.",
-            "runner.",
-            "secrets.",
-        ]
-        .iter()
-        .any(|runtime| lower.contains(runtime))
-    {
+    let state = JobExecutionState::new_with_context(base_env, context_data);
+    let context = state.expression_context();
+    let Ok(Some(node)) = expression::parse(strip_expression(condition), &context) else {
+        // An expression that does not even parse is not provably false.
         return false;
-    }
-    !state.evaluate_condition(Some(expression))
+    };
+    immutable_expression_is_false(&node, &context)
 }
 
-fn missing_context_value(expression: &str) -> Option<String> {
-    let expression = expression.trim();
-    if expression.starts_with("github.event.") {
-        return Some(String::new());
+/// Walk the parsed condition rather than its text: a conjunction is provably
+/// false when any operand is, a disjunction only when every operand is, and a
+/// leaf counts only when it reads exclusively immutable `github` context.
+fn immutable_expression_is_false(
+    node: &expression::Node,
+    context: &JobExpressionContext<'_>,
+) -> bool {
+    match node {
+        expression::Node::And(parameters) => parameters
+            .iter()
+            .any(|parameter| immutable_expression_is_false(parameter, context)),
+        expression::Node::Or(parameters) => parameters
+            .iter()
+            .all(|parameter| immutable_expression_is_false(parameter, context)),
+        node => {
+            if !reads_only_immutable_github(node) {
+                return false;
+            }
+            matches!(
+                expression::evaluate_node(node, context),
+                Ok(value) if value.is_falsy()
+            )
+        }
     }
-    let root = expression.split('.').next()?;
-    matches!(root, "matrix" | "needs" | "inputs" | "vars" | "secrets").then(String::new)
+}
+
+/// True when the subtree reads the `github` context and nothing that only
+/// exists once the job is running: other root contexts, the status functions,
+/// or `hashFiles`.
+fn reads_only_immutable_github(node: &expression::Node) -> bool {
+    fn walk(node: &expression::Node, saw_github: &mut bool, immutable: &mut bool) {
+        match node {
+            expression::Node::NamedValue(name) => {
+                if name.eq_ignore_ascii_case("github") {
+                    *saw_github = true;
+                } else {
+                    *immutable = false;
+                }
+            }
+            expression::Node::Function { .. } => *immutable = false,
+            _ => {}
+        }
+        for child in node.children() {
+            walk(child, saw_github, immutable);
+        }
+    }
+
+    let mut saw_github = false;
+    let mut immutable = true;
+    walk(node, &mut saw_github, &mut immutable);
+    saw_github && immutable
 }
 
 fn evaluate_job_outputs(
@@ -12527,62 +12655,6 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
     }
 }
 
-fn context_value_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => Some(String::new()),
-        Value::String(value) => Some(value.clone()),
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_contains(expression: &str) -> Option<(&str, &str)> {
-    let inner = expression
-        .trim()
-        .strip_prefix("contains(")?
-        .strip_suffix(')')?;
-    split_top_level(inner, ",")
-}
-
-fn parse_to_json(expression: &str) -> Option<&str> {
-    expression
-        .trim()
-        .strip_prefix("toJSON(")?
-        .strip_suffix(')')
-        .map(str::trim)
-}
-
-fn parse_hash_files(expression: &str) -> Option<Vec<String>> {
-    let inner = expression
-        .trim()
-        .strip_prefix("hashFiles(")?
-        .strip_suffix(')')?;
-    let mut patterns = Vec::new();
-    let mut rest = inner.trim();
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if rest.starts_with(',') {
-            rest = rest[1..].trim_start();
-            continue;
-        }
-        let quote = rest.chars().next()?;
-        if quote != '\'' && quote != '"' {
-            return None;
-        }
-        let value_start = quote.len_utf8();
-        let value_end = rest[value_start..].find(quote)? + value_start;
-        patterns.push(rest[value_start..value_end].to_string());
-        rest = rest[value_end + quote.len_utf8()..].trim_start();
-        if rest.starts_with(',') {
-            rest = rest[1..].trim_start();
-        } else if !rest.is_empty() {
-            return None;
-        }
-    }
-    Some(patterns)
-}
-
 fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     let Ok(globs) = build_ordered_globs(patterns) else {
         return String::new();
@@ -12740,63 +12812,6 @@ fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
-    let mut depth = 0_i32;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in expression.char_indices() {
-        if let Some(quote_char) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote_char {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && expression[index..].starts_with(operator) {
-            return Some((
-                expression[..index].trim(),
-                expression[index + operator.len()..].trim(),
-            ));
-        }
-    }
-    None
-}
-
-fn strip_wrapping_parentheses(expression: &str) -> Option<&str> {
-    let expression = expression.trim();
-    let inner = expression.strip_prefix('(')?.strip_suffix(')')?;
-    let mut depth = 0_i32;
-    for (index, ch) in expression.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 && index != expression.len() - 1 {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-        if depth < 0 {
-            return None;
-        }
-    }
-    (depth == 0).then_some(inner.trim())
-}
-
 fn strip_expression(condition: &str) -> &str {
     condition
         .strip_prefix("${{")
@@ -12805,64 +12820,8 @@ fn strip_expression(condition: &str) -> &str {
         .unwrap_or(condition)
 }
 
-fn expression_truthy(value: &str) -> bool {
-    let value = value.trim();
-    !(value.is_empty()
-        || value.eq_ignore_ascii_case("false")
-        || value == "0"
-        || value.eq_ignore_ascii_case("null"))
-}
-
 fn github_string_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
-}
-
-fn github_contains(value: &str, needle: &str) -> bool {
-    value
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
-}
-
-fn condition_returns_bool(expression: &str) -> bool {
-    let expression = expression.trim();
-    if matches!(
-        expression,
-        "always()" | "success()" | "failure()" | "cancelled()" | "true" | "false"
-    ) {
-        return true;
-    }
-    if expression.starts_with('!') {
-        return true;
-    }
-    let expression = strip_wrapping_parentheses(expression).unwrap_or(expression);
-    split_top_level(expression, "||").is_some()
-        || split_top_level(expression, "&&").is_some()
-        || split_top_level(expression, "!=").is_some()
-        || split_top_level(expression, "==").is_some()
-        || parse_contains(expression).is_some()
-}
-
-fn condition_has_status_check(expression: &str) -> bool {
-    ["always()", "success()", "failure()", "cancelled()"]
-        .iter()
-        .any(|function| expression.contains(function))
-}
-
-fn is_quoted(value: &str) -> bool {
-    (value.starts_with('\'') && value.ends_with('\''))
-        || (value.starts_with('"') && value.ends_with('"'))
-}
-
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('\'')
-        .and_then(|value| value.strip_suffix('\''))
-        .or_else(|| {
-            value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-        })
-        .unwrap_or(value)
 }
 
 fn exit_code(status: ExitStatus) -> Result<i32> {
@@ -19587,25 +19546,33 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             state.resolve_expressions("missing-input=${{ inputs.publish }}"),
             "missing-input="
         );
-        assert!(state.evaluate_condition(Some("matrix.zigbuild")));
-        assert!(state.evaluate_condition(Some("matrix.target")));
-        assert!(!state.evaluate_condition(Some("inputs.publish")));
-        assert!(!state.evaluate_condition(Some("secrets.MISSING_TOKEN")));
-        assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
-        assert!(state.evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'")));
+        assert!(state.evaluate_condition(Some("matrix.zigbuild")).unwrap());
+        assert!(state.evaluate_condition(Some("matrix.target")).unwrap());
+        assert!(!state.evaluate_condition(Some("inputs.publish")).unwrap());
+        assert!(!state
+            .evaluate_condition(Some("secrets.MISSING_TOKEN"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(matrix.target, 'apple')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'"))
+            .unwrap());
         assert!(state.evaluate_condition(Some(
             "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))"
-        )));
-        assert!(
-            state.evaluate_condition(Some("contains(inputs.packages, 'BITCOIN-PROCESSOR-APP')"))
-        );
-        assert!(state.evaluate_condition(Some("needs.changes.outputs.bake-targets != ''")));
-        assert!(
-            !state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
-        );
-        assert!(
-            state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
-        );
+        )).unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(inputs.packages, 'BITCOIN-PROCESSOR-APP')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("needs.changes.outputs.bake-targets != ''"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
+            .unwrap());
 
         let false_state = JobExecutionState::new_with_context(
             &[],
@@ -19616,7 +19583,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 }),
             )],
         );
-        assert!(!false_state.evaluate_condition(Some("matrix.zigbuild")));
+        assert!(!false_state
+            .evaluate_condition(Some("matrix.zigbuild"))
+            .unwrap());
     }
 
     #[test]
@@ -19645,13 +19614,15 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )],
         );
 
-        assert!(state.evaluate_condition(Some(
-            "github.event_name == 'workflow_run' && \
+        assert!(state
+            .evaluate_condition(Some(
+                "github.event_name == 'workflow_run' && \
              github.event.workflow_run.conclusion == 'success' && \
              github.event.workflow_run.event == 'push' && \
              github.event.workflow_run.head_repository.full_name == github.repository && \
              github.event.workflow_run.head_branch == 'main'"
-        )));
+            ))
+            .unwrap());
         assert_eq!(
             state.resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}"),
             "sha=def456"
@@ -19723,7 +19694,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 let mut conditions = Vec::new();
                 collect_yaml_key_strings(&yaml, "if", &mut conditions);
                 for condition in conditions {
-                    state.evaluate_condition(Some(condition));
+                    state.evaluate_condition(Some(condition)).unwrap();
                 }
             }
         }
@@ -19786,7 +19757,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 let mut conditions = Vec::new();
                 collect_yaml_key_strings(&yaml, "if", &mut conditions);
                 for condition in conditions {
-                    state.evaluate_condition(Some(condition));
+                    state.evaluate_condition(Some(condition)).unwrap();
                 }
             }
         }
@@ -21952,24 +21923,42 @@ fi"#
             },
         );
 
-        assert!(state.evaluate_condition(Some("steps.sccache.outcome == 'success'")));
-        assert!(state.evaluate_condition(Some("steps.sccache.conclusion == 'success'")));
-        assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
-        assert!(state.evaluate_condition(Some("steps.disabled.conclusion == 'skipped'")));
-        assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
-        assert!(state.evaluate_condition(Some("runner.os == 'linux'")));
-        assert!(state.evaluate_condition(Some("runner.os != 'windows'")));
+        assert!(state
+            .evaluate_condition(Some("steps.sccache.outcome == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.sccache.conclusion == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.disabled.outcome != 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.disabled.conclusion == 'skipped'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os == 'Linux'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os == 'linux'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os != 'windows'"))
+            .unwrap());
         assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
         assert_eq!(
             state.resolve_expressions("${{ github.action_status }}"),
             "success"
         );
-        assert!(state.evaluate_condition(Some("job.status == 'success'")));
-        assert!(state.evaluate_condition(Some("github.action_status == 'success'")));
-        assert!(state.evaluate_condition(Some("success()")));
-        assert!(!state.evaluate_condition(Some("failure()")));
-        assert!(!state.evaluate_condition(Some("cancelled()")));
-        assert!(state.evaluate_condition(Some("!cancelled()")));
+        assert!(state
+            .evaluate_condition(Some("job.status == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.action_status == 'success'"))
+            .unwrap());
+        assert!(state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("!cancelled()")).unwrap());
 
         state.apply(
             "failed",
@@ -21983,17 +21972,25 @@ fi"#
             },
         );
 
-        assert!(!state.evaluate_condition(Some("success()")));
-        assert!(state.evaluate_condition(Some("failure()")));
-        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
-        assert!(state.evaluate_condition(Some("always() && failure()")));
+        assert!(!state.evaluate_condition(Some("success()")).unwrap());
+        assert!(state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("failure() && !cancelled()"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("always() && failure()"))
+            .unwrap());
         assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
         assert_eq!(
             state.resolve_expressions("${{ github.action_status }}"),
             "failure"
         );
-        assert!(state.evaluate_condition(Some("always() && job.status == 'failure'")));
-        assert!(state.evaluate_condition(Some("always() && github.action_status == 'failure'")));
+        assert!(state
+            .evaluate_condition(Some("always() && job.status == 'failure'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("always() && github.action_status == 'failure'"))
+            .unwrap());
 
         let mut ignored_state = JobExecutionState::default();
         ignored_state.apply(
@@ -22008,10 +22005,14 @@ fi"#
             },
         );
 
-        assert!(ignored_state.evaluate_condition(Some("steps.ignored.outcome == 'failure'")));
-        assert!(ignored_state.evaluate_condition(Some("steps.ignored.conclusion == 'success'")));
-        assert!(ignored_state.evaluate_condition(Some("success()")));
-        assert!(!ignored_state.evaluate_condition(Some("failure()")));
+        assert!(ignored_state
+            .evaluate_condition(Some("steps.ignored.outcome == 'failure'"))
+            .unwrap());
+        assert!(ignored_state
+            .evaluate_condition(Some("steps.ignored.conclusion == 'success'"))
+            .unwrap());
+        assert!(ignored_state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!ignored_state.evaluate_condition(Some("failure()")).unwrap());
         assert_eq!(
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
@@ -22033,13 +22034,17 @@ fi"#
             },
         );
 
-        assert!(
-            !state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
-        );
-        assert!(state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'")));
-        assert!(state.evaluate_condition(Some("!cancelled()")));
-        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
-        assert!(!state.evaluate_condition(Some("!failure()")));
+        assert!(!state
+            .evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'"))
+            .unwrap());
+        assert!(state.evaluate_condition(Some("!cancelled()")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("failure() && !cancelled()"))
+            .unwrap());
+        assert!(!state.evaluate_condition(Some("!failure()")).unwrap());
     }
 
     #[test]
