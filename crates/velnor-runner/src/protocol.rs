@@ -1775,6 +1775,23 @@ pub fn is_retriable_completion_status(status: u16) -> bool {
     !(400..500).contains(&status) || matches!(status, 408 | 409 | 429)
 }
 
+/// Whether a failed completion send is one that retrying can never fix.
+///
+/// The completion journal needs this to distinguish a node that is merely
+/// unlucky from a payload the run service will refuse forever. A permanent
+/// refusal spends the whole recovery budget at once, so the job's slot is
+/// released now instead of after hours of doomed retries.
+///
+/// Transport failures and status-less errors are never permanent: not knowing
+/// the remote's answer is the case where retrying is the only correct move.
+#[must_use]
+pub fn completion_failure_is_permanent(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .is_some_and(|api| !is_retriable_completion_status(api.status))
+}
+
 /// Protocol disposition for a completion POST.
 ///
 /// `RemoteObservedTerminal` is a successful observation: the remote service
@@ -7778,6 +7795,29 @@ mod tests {
         assert!(!is_run_service_job_not_found(
             r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#
         ));
+    }
+
+    #[test]
+    fn permanent_completion_failures_are_told_apart_from_unlucky_ones() {
+        let permanent = github_api_error("complete run-service job", 422, "invalid payload");
+        assert!(completion_failure_is_permanent(&permanent));
+        let permanent = permanent.context("complete run-service job after credential refresh");
+        assert!(
+            completion_failure_is_permanent(&permanent),
+            "the classification must survive the context the callers add"
+        );
+
+        let retriable = github_api_error("complete run-service job", 503, "try later");
+        assert!(!completion_failure_is_permanent(&retriable));
+        assert!(!completion_failure_is_permanent(&github_api_error(
+            "complete run-service job",
+            409,
+            "conflict"
+        )));
+        // Not knowing the remote's answer is exactly when retrying is right.
+        assert!(!completion_failure_is_permanent(&anyhow::anyhow!(
+            "connection reset"
+        )));
     }
 
     #[test]
