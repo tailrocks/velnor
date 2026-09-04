@@ -511,6 +511,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
         }
         Command::Remove(args) => {
+            validate_remove_target_selectors(&globals)?;
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
@@ -564,6 +565,24 @@ fn control_api_unavailable(command: &str) -> CommandError {
         "control.api.unavailable",
         format!("{command} requires a reachable v1 control API endpoint"),
     )
+}
+
+fn validate_remove_target_selectors(globals: &GlobalArgs) -> Result<(), CommandError> {
+    if globals.instance.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "remove.instance_selector_unsupported",
+            "remove does not support global --instance; use --config-dir or VELNOR_INSTANCE",
+        ));
+    }
+    if globals.repo.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "remove.repo_selector_unsupported",
+            "remove does not support global --repo; remove targets local configuration only",
+        ));
+    }
+    Ok(())
 }
 
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
@@ -1441,5 +1460,32 @@ mod tests {
 
         assert_eq!(error.class, ExitClass::Usage);
         assert_eq!(error.reason, "repo.selector_unsupported");
+    }
+
+    #[test]
+    fn remove_rejects_global_instance_selector_before_mutation() {
+        let mut globals = globals_with_repo(None);
+        globals.instance = Some("secondary".to_owned());
+
+        let error = validate_remove_target_selectors(&globals)
+            .expect_err("remove must reject a selector it cannot carry to the runner");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "remove.instance_selector_unsupported");
+    }
+
+    #[test]
+    fn remove_rejects_global_repo_selector_before_mutation() {
+        let error = validate_remove_target_selectors(&globals_with_repo(Some("owner/repo")))
+            .expect_err("remove must reject a selector it cannot carry to the runner");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "remove.repo_selector_unsupported");
+    }
+
+    #[test]
+    fn remove_without_target_selector_remains_valid() {
+        validate_remove_target_selectors(&globals_with_repo(None))
+            .expect("valid remove behavior must remain available");
     }
 }
