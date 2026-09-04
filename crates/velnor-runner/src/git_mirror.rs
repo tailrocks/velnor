@@ -1,6 +1,8 @@
 use std::{
-    fs::{self, OpenOptions},
+    fmt,
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{bail, Context, Result};
@@ -86,7 +88,6 @@ impl MirrorWant {
 }
 
 /// A mirror that is known-good and known to contain the wanted commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorCheckout {
     pub path: PathBuf,
     /// The resolved commit id the workspace must check out.
@@ -97,6 +98,82 @@ pub struct MirrorCheckout {
     /// True when the mirror was rebuilt from scratch because the on-disk copy
     /// failed its health probe.
     pub repaired: bool,
+    /// Shared reader lease held through workspace hydration. A mirror cannot
+    /// be quarantined or rebuilt while this checkout is alive.
+    _reader_lease: Arc<File>,
+}
+
+impl MirrorCheckout {
+    fn new(
+        path: PathBuf,
+        sha: String,
+        fetched: bool,
+        repaired: bool,
+        lock: File,
+        downgrade_to_reader: bool,
+    ) -> Result<Self> {
+        if downgrade_to_reader {
+            flock(&lock, FlockOperation::LockShared)
+                .with_context(|| format!("share-lock git mirror {}", path.display()))?;
+        }
+        Ok(Self {
+            path,
+            sha,
+            fetched,
+            repaired,
+            _reader_lease: Arc::new(lock),
+        })
+    }
+}
+
+impl Clone for MirrorCheckout {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            sha: self.sha.clone(),
+            fetched: self.fetched,
+            repaired: self.repaired,
+            _reader_lease: Arc::clone(&self._reader_lease),
+        }
+    }
+}
+
+impl fmt::Debug for MirrorCheckout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MirrorCheckout")
+            .field("path", &self.path)
+            .field("sha", &self.sha)
+            .field("fetched", &self.fetched)
+            .field("repaired", &self.repaired)
+            .finish()
+    }
+}
+
+impl PartialEq for MirrorCheckout {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.sha == other.sha
+            && self.fetched == other.fetched
+            && self.repaired == other.repaired
+    }
+}
+
+impl Eq for MirrorCheckout {}
+
+fn warm_mirror_sha<R: CommandRunner>(
+    runner: &mut R,
+    mirror: &Path,
+    want: &MirrorWant,
+) -> Option<String> {
+    if want.full_history || want.tags || !is_object_id(&want.git_ref) {
+        return None;
+    }
+    if !object_exists(runner, mirror, &want.git_ref) {
+        return None;
+    }
+    let pinned = resolved_ref_sha(runner, mirror, &want.wanted_ref())?;
+    (pinned == want.git_ref).then(|| want.git_ref.clone())
 }
 
 /// Bring the shared mirror up to date for `want` and return the commit.
@@ -132,7 +209,10 @@ pub fn ensure_mirror<R: CommandRunner>(
     flock(&lock, FlockOperation::LockShared)
         .with_context(|| format!("share-lock git mirror {}", mirror.display()))?;
 
-    let initially_healthy = mirror_is_healthy(runner, &mirror);
+    let healthy = mirror_is_healthy(runner, &mirror);
+    if healthy && let Some(sha) = warm_mirror_sha(runner, &mirror, want) {
+        return MirrorCheckout::new(mirror, sha, false, false, lock, false);
+    }
     flock(&lock, FlockOperation::Unlock)
         .with_context(|| format!("unlock git mirror {}", mirror.display()))?;
     flock(&lock, FlockOperation::LockExclusive)
@@ -142,7 +222,7 @@ pub fn ensure_mirror<R: CommandRunner>(
     // repaired or changed the mirror after it released the shared lock, so the
     // exclusive owner must always recheck before mutating it.
     let mut repaired = false;
-    if !initially_healthy || !mirror_is_healthy(runner, &mirror) {
+    if !mirror_is_healthy(runner, &mirror) {
         if mirror.exists() {
             quarantine_mirror(&mirror)?;
             repaired = true;
@@ -151,12 +231,7 @@ pub fn ensure_mirror<R: CommandRunner>(
     }
 
     if let Some(sha) = short_circuit_sha(runner, &mirror, want) {
-        return Ok(MirrorCheckout {
-            path: mirror,
-            sha,
-            fetched: false,
-            repaired,
-        });
+        return MirrorCheckout::new(mirror, sha, false, repaired, lock, true);
     }
 
     fetch_want(runner, &mirror, clone_url, token, want)?;
@@ -167,12 +242,7 @@ pub fn ensure_mirror<R: CommandRunner>(
     // revision: the workspace checkout resolves it against the linked objects
     // and fails loudly there if it really is absent.
     let sha = resolved_wanted_sha(runner, &mirror, want).unwrap_or_else(|| want.git_ref.clone());
-    Ok(MirrorCheckout {
-        path: mirror,
-        sha,
-        fetched: true,
-        repaired,
-    })
+    MirrorCheckout::new(mirror, sha, true, repaired, lock, true)
 }
 
 /// Every ref the mirror holds outside the internal `refs/velnor` namespace,
@@ -355,27 +425,33 @@ fn resolved_wanted_sha<R: CommandRunner>(
     want: &MirrorWant,
 ) -> Option<String> {
     for reference in [want.wanted_ref(), want.git_ref.clone()] {
-        let Ok(result) = git(
-            runner,
-            &[
-                "-C".to_string(),
-                path_arg(mirror),
-                "rev-parse".to_string(),
-                "--verify".to_string(),
-                "--quiet".to_string(),
-                format!("{reference}^{{commit}}"),
-            ],
-        ) else {
-            continue;
-        };
-        if result.code == 0 {
-            let sha = result.stdout.trim().to_string();
-            if !sha.is_empty() {
-                return Some(sha);
-            }
+        if let Some(sha) = resolved_ref_sha(runner, mirror, &reference) {
+            return Some(sha);
         }
     }
     None
+}
+
+fn resolved_ref_sha<R: CommandRunner>(
+    runner: &mut R,
+    mirror: &Path,
+    reference: &str,
+) -> Option<String> {
+    let result = git(
+        runner,
+        &[
+            "-C".to_string(),
+            path_arg(mirror),
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "--quiet".to_string(),
+            format!("{reference}^{{commit}}"),
+        ],
+    )
+    .ok()?;
+    (result.code == 0)
+        .then(|| result.stdout.trim().to_string())
+        .filter(|sha| !sha.is_empty())
 }
 
 fn fetch_want<R: CommandRunner>(
@@ -625,6 +701,8 @@ mod tests {
         .unwrap();
         assert_eq!(mirror.sha, first);
         assert!(mirror.fetched);
+        let mirror_path = mirror.path.clone();
+        drop(mirror);
 
         let second = fixture.commit("two");
         let refreshed = ensure_mirror(
@@ -638,7 +716,7 @@ mod tests {
         assert_eq!(refreshed.sha, second);
         assert_ne!(first, second);
 
-        let config = fs::read_to_string(mirror.path.join("config")).unwrap();
+        let config = fs::read_to_string(mirror_path.join("config")).unwrap();
         assert!(!config.contains("token"));
         assert!(!config.contains("url ="));
     }
@@ -682,6 +760,37 @@ mod tests {
         assert_eq!(first_result, first);
         assert_eq!(second_result, second);
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn checkout_reader_lease_blocks_mirror_repair() {
+        let fixture = Fixture::new();
+        let sha = fixture.commit("one");
+        let mut runner = ProcessCommandRunner;
+        let mirror = ensure_mirror(
+            &mut runner,
+            &fixture.store,
+            &fixture.clone_url(),
+            None,
+            &want(&sha),
+        )
+        .unwrap();
+        let lock_path = fixture.store.join(format!(
+            "{}.lock",
+            repository_store_name(&fixture.clone_url()).unwrap()
+        ));
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+
+        assert!(matches!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        ));
+        drop(mirror);
+        flock(&contender, FlockOperation::NonBlockingLockExclusive).unwrap();
     }
 
     #[test]
@@ -775,12 +884,14 @@ mod tests {
             &want(&sha),
         )
         .unwrap();
+        let mirror_path = mirror.path.clone();
+        drop(mirror);
 
         // A mirror whose objects are gone but whose refs and HEAD survive was
         // previously accepted as healthy for the rest of the host's life.
-        fs::remove_dir_all(mirror.path.join("objects")).unwrap();
-        fs::create_dir_all(mirror.path.join("objects")).unwrap();
-        assert!(!mirror_is_healthy(&mut runner, &mirror.path));
+        fs::remove_dir_all(mirror_path.join("objects")).unwrap();
+        fs::create_dir_all(mirror_path.join("objects")).unwrap();
+        assert!(!mirror_is_healthy(&mut runner, &mirror_path));
 
         let repaired = ensure_mirror(
             &mut runner,
