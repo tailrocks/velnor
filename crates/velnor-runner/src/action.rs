@@ -116,6 +116,7 @@ pub enum ActionRuntime {
 pub enum ActionAdapter {
     Composite,
     Docker,
+    JavaScript,
     Native(NativeActionAdapter),
 }
 
@@ -126,6 +127,7 @@ impl ActionAdapter {
         match self {
             Self::Composite => "Composite".to_string(),
             Self::Docker => "Docker".to_string(),
+            Self::JavaScript => "JavaScript".to_string(),
             Self::Native(adapter) => format!("Native({adapter:?})"),
         }
     }

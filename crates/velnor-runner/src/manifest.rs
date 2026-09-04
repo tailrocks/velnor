@@ -273,6 +273,24 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("disable_annotations", &["false"]),
     InputRule::Forbidden("token"),
 ];
+const MR_BOXINGTON_INPUTS: &[InputRule] = &[
+    InputRule::Literal("backend", &["github", "server"]),
+    InputRule::Any("version"),
+    InputRule::Any("github-token"),
+    InputRule::Any("cache-key"),
+    InputRule::Any("restore-keys"),
+    InputRule::Any("cache-generation"),
+    InputRule::Literal("save-on-workflow-dispatch", &["true", "false"]),
+    InputRule::Any("toolchain"),
+    InputRule::Any("max-size"),
+    InputRule::Literal("cache-links", &["auto", "true", "false"]),
+    InputRule::Any("server-url"),
+    InputRule::Any("namespace"),
+    InputRule::Any("token"),
+    InputRule::Any("token-file"),
+    InputRule::Any("oidc-audience"),
+    InputRule::Literal("server-mode", &["read-write", "read-only", "write-only"]),
+];
 const RUST_CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("shared-key"),
     InputRule::Any("cache-directories"),
@@ -403,6 +421,17 @@ pub static ACTIONS: &[ActionCapability] = &[
         allowed_subpaths: &[],
         inputs: &[],
         notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
+    },
+    ActionCapability {
+        repository: "jdx/mr-boxington-action",
+        adapter: ActionAdapter::JavaScript,
+        allowed_refs: &[allowed(
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            "v1.2.0",
+        )],
+        allowed_subpaths: &[],
+        inputs: MR_BOXINGTON_INPUTS,
+        notes: "pinned Node24 main/post action; generic fetched-action execution with a closed identity and input surface",
     },
     capability!(
         "actions/checkout",
@@ -845,7 +874,7 @@ fn assert_manifest_integrity_of(
                     );
                 }
             }
-            ActionAdapter::Composite | ActionAdapter::Docker => {
+            ActionAdapter::Composite | ActionAdapter::Docker | ActionAdapter::JavaScript => {
                 if let Some(adapter) = native_action_adapter(capability.repository) {
                     anyhow::bail!(
                         "manifest integrity: generic action '{}' is also mapped to native adapter {:?}",
@@ -933,6 +962,7 @@ pub fn validate_action_runtime(
     let expected = match capability.adapter {
         ActionAdapter::Composite => "composite",
         ActionAdapter::Docker => "docker",
+        ActionAdapter::JavaScript => "javascript",
         ActionAdapter::Native(adapter) => {
             return Err(violation(
                 step,
@@ -1891,6 +1921,7 @@ mod tests {
                 ActionAdapter::Composite,
             ),
             ("fsfe/reuse-action", ActionAdapter::Docker),
+            ("jdx/mr-boxington-action", ActionAdapter::JavaScript),
         ];
         for (repository, adapter) in expected {
             assert_eq!(find(repository).map(|item| item.adapter), Some(adapter));
@@ -2529,20 +2560,82 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_generic_javascript_action_is_not_admitted() {
-        let error = validate_resolved_action(
+    fn mr_boxington_rejects_unsupported_local_backend() {
+        const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+
+        for backend in ["github", "server"] {
+            validate_resolved_action(
+                "cache",
+                "jdx/mr-boxington-action",
+                SHA,
+                None,
+                &BTreeMap::from([("backend".to_string(), backend.to_string())]),
+            )
+            .unwrap();
+        }
+
+        let local_error = validate_resolved_action(
             "cache",
             "jdx/mr-boxington-action",
-            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            local_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
+
+        let unknown_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "unknown".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
+
+        let ref_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            "1111111111111111111111111111111111111111",
             None,
             &BTreeMap::new(),
         )
         .unwrap_err();
         assert_eq!(
-            error.downcast_ref::<CapabilityViolation>().unwrap().field,
-            "uses"
+            ref_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "ref"
         );
-        assert!(find("jdx/mr-boxington-action").is_none());
+        assert!(crate::action::native_action_adapter("jdx/mr-boxington-action").is_none());
+    }
+
+    #[test]
+    fn mr_boxington_declares_javascript_runtime() {
+        validate_action_runtime(
+            "cache",
+            "jdx/mr-boxington-action",
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            &ActionRuntime::JavaScript {
+                node: "node24".to_string(),
+                main: "dist/index.js".to_string(),
+            },
+        )
+        .unwrap();
     }
 
     #[test]

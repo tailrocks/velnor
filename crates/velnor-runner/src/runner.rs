@@ -9969,6 +9969,14 @@ fn append_resolved_action_steps(
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
         }),
+        ActionAdapter::JavaScript => ordered.push(ExecutableStep::JavaScript {
+            step_id: action.plan.step_id.clone(),
+            display_name: display_name.to_string(),
+            invocation: action.javascript_invocation(actions_host)?,
+            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
+        }),
         ActionAdapter::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
