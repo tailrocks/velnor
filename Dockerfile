@@ -71,6 +71,11 @@ COPY --from=build /src/target/release/velnorctl /usr/local/bin/velnorctl
 COPY --from=build /src/target/release/velnor-runner /usr/local/bin/velnor-runner
 COPY --from=build /src/target/release/velnor-tools /usr/local/bin/velnor-tools
 COPY --from=build /src/target/release/velnor-workflow /usr/local/bin/velnor-workflow
+RUN install -d -m 0755 /usr/local/share/velnor \
+    && sha256sum /usr/local/bin/velnor-workflow \
+        > /usr/local/share/velnor/velnor-workflow.sha256 \
+    && chmod 0644 /usr/local/share/velnor/velnor-workflow.sha256 \
+    && sha256sum --check --strict --status /usr/local/share/velnor/velnor-workflow.sha256
 
 WORKDIR /work
 ENTRYPOINT ["velnorctl"]

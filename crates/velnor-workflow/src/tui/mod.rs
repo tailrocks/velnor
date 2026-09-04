@@ -25,9 +25,9 @@ use termrock::style::{ColorCapability, DesignSystem};
 use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write, scan_repository, Checkout,
-    Cli, GeneratedWritePlan, GeneratorError, ProjectConfig, RepositorySource, RunnerMode,
-    WriteOutcome,
+    apply_generated_write_plan, generated_files, plan_generated_write,
+    scan_repository_with_default_branch, Checkout, Cli, GeneratedWritePlan, GeneratorError,
+    ProjectConfig, RepositorySource, RunnerMode, WriteOutcome,
 };
 
 const MIN_WIDTH: u16 = 52;
@@ -499,7 +499,12 @@ impl App {
         let Ok(source) = RepositorySource::parse(&self.target) else {
             return;
         };
-        let receiver = spawn_scan(source, self.cli.runners, self.cli.output.clone());
+        let receiver = spawn_scan(
+            source,
+            self.cli.runners,
+            self.cli.output.clone(),
+            self.cli.default_branch.clone(),
+        );
         self.receiver = receiver;
         self.phase = Phase::Scanning;
         self.overlay = None;
@@ -773,12 +778,18 @@ fn spawn_scan(
     source: RepositorySource,
     runners: RunnerMode,
     output: Option<std::path::PathBuf>,
+    default_branch: Option<String>,
 ) -> Receiver<ScanResult> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let result = (|| {
             let checkout = source.checkout()?;
-            let config = scan_repository(checkout.path(), runners)?;
+            let default_branch = match default_branch.as_deref() {
+                Some(branch) => super::validate_default_branch(branch)?.to_owned(),
+                None => source.default_branch(checkout.path())?,
+            };
+            let config =
+                scan_repository_with_default_branch(checkout.path(), runners, &default_branch)?;
             let output_root = match output.as_deref() {
                 Some(path) => super::resolve_output_path(path)?,
                 None => source.output_root(checkout.path())?,
@@ -797,7 +808,12 @@ fn spawn_scan(
 
 pub(super) fn run(cli: &Cli) -> Result<(), GeneratorError> {
     let source = RepositorySource::parse(&cli.target)?;
-    let receiver = spawn_scan(source, cli.runners, cli.output.clone());
+    let receiver = spawn_scan(
+        source,
+        cli.runners,
+        cli.output.clone(),
+        cli.default_branch.clone(),
+    );
     let mut app = App::new(cli.clone(), receiver);
     let system = design_system();
     let mut session = Session::enter(io::stdout(), SessionOptions::default())

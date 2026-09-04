@@ -31,7 +31,7 @@ const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .gith
 const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const VELNOR_POLICY_WORKFLOW_REV: &str = "0b68533ea24e8259ebd8aee54e36905debe8fcc3";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "a099520c761559d3875f76be25f18a1a63ccbafc";
@@ -2717,6 +2717,14 @@ fn release_spec(profile: &EstateProfile) -> Option<ReleaseSpec> {
 }
 
 fn catalog_config(profile: &'static EstateProfile, runners: RunnerMode) -> ProjectConfig {
+    catalog_config_with_default_branch(profile, runners, "main")
+}
+
+fn catalog_config_with_default_branch(
+    profile: &'static EstateProfile,
+    runners: RunnerMode,
+    default_branch: &str,
+) -> ProjectConfig {
     let release = profile.verified.then(|| release_spec(profile)).flatten();
     let mut notes = vec![
         "Profile and workflow membership are Rust-owned catalog data derived from the repository inventory.".to_owned(),
@@ -2756,7 +2764,7 @@ fn catalog_config(profile: &'static EstateProfile, runners: RunnerMode) -> Proje
         verified: profile.verified,
         workflow_files: estate_workflow_files(profile),
         notes,
-        default_branch: "main".to_owned(),
+        default_branch: default_branch.to_owned(),
         runners,
         github_runner: "ubuntu-24.04".to_owned(),
         velnor_labels: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
@@ -4644,11 +4652,15 @@ fn run_estate(cli: &Cli) -> Result<(), GeneratorError> {
         None => root.join("repositories"),
     };
     let mut generated = 0usize;
+    let default_branch = match cli.default_branch.as_deref() {
+        Some(branch) => validate_default_branch(branch)?.to_owned(),
+        None => "main".to_owned(),
+    };
     for entry in ESTATE_PROFILES {
         let profile = estate_profile(entry.repository).ok_or_else(|| {
             GeneratorError::usage(format!("missing catalog profile: {}", entry.repository))
         })?;
-        let config = catalog_config(profile, cli.runners);
+        let config = catalog_config_with_default_branch(profile, cli.runners, &default_branch);
         let files = generated_files(&config);
         let (owner, repository) = profile.repository.split_once('/').ok_or_else(|| {
             GeneratorError::usage(format!(
@@ -6542,6 +6554,16 @@ mod tests {
     }
 
     #[test]
+    fn estate_catalog_uses_explicit_default_branch() {
+        let config =
+            catalog_config_with_default_branch(&ESTATE_PROFILES[0], RunnerMode::Github, "trunk");
+        assert_eq!(config.default_branch, "trunk");
+        assert!(WorkflowIr::from_config(&config)
+            .render(WorkflowKind::Main)
+            .contains("refs/heads/trunk"));
+    }
+
+    #[test]
     fn hosted_runtime_install_selects_the_multi_binary_workspace_package() {
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -7605,7 +7627,7 @@ path-only = { path = "../path-only" }
         must(
             fs::write(
                 workflows.join("ci-policy.yml"),
-                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3\n    permissions:\n      contents: read\n",
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
             ),
             "write policy entrypoint",
         );

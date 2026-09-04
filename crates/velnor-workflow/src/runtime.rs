@@ -22,7 +22,7 @@ use serde_yaml::{Mapping, Value};
 
 const IMMUTABLE_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "0b68533ea24e8259ebd8aee54e36905debe8fcc3";
+const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -1162,18 +1162,14 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
     if !valid_branch(branch) {
         return Err(GeneratorError::usage("invalid release branch"));
     }
-    git_success([
-        "show-ref",
-        "--verify",
-        "--quiet",
-        &format!("refs/remotes/origin/{branch}"),
-    ])?;
-    git_success([
-        "merge-base",
-        "--is-ancestor",
-        &reference,
-        &format!("refs/remotes/origin/{branch}"),
-    ])?;
+    let branch_reference = format!("refs/remotes/origin/{branch}");
+    let tag_commit = git_revision(&reference)?;
+    let branch_commit = git_revision(&branch_reference)?;
+    if tag_commit != branch_commit {
+        return Err(GeneratorError::usage(format!(
+            "release tag must equal current origin/{branch} tip"
+        )));
+    }
     if let Some(package) = options.get("package") {
         if !valid_package(package) {
             return Err(GeneratorError::usage("invalid release package"));
@@ -1272,16 +1268,24 @@ fn required_option<'a>(
         .ok_or_else(|| GeneratorError::usage(format!("--{name} needs a value")))
 }
 
-fn git_success<const N: usize>(arguments: [&str; N]) -> Result<(), GeneratorError> {
-    let status = Command::new("git")
-        .args(arguments)
-        .status()
+fn git_revision(reference: &str) -> Result<String, GeneratorError> {
+    let revision_reference = format!("{reference}^{{commit}}");
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &revision_reference])
+        .output()
         .map_err(|error| GeneratorError::usage(format!("run git: {error}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(GeneratorError::usage("git release verification failed"))
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "git could not resolve release reference {reference}"
+        )));
     }
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(format!(
+            "git returned an invalid revision for {reference}"
+        )));
+    }
+    Ok(revision)
 }
 
 fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
@@ -1370,7 +1374,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3\n    permissions:\n      contents: read\n",
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1431,7 +1435,7 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1482,7 +1486,7 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@0b68533ea24e8259ebd8aee54e36905debe8fcc3
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
     permissions:
       contents: read
 ";

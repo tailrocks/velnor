@@ -272,4 +272,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 FROM jobimage
 COPY --from=workflow-builder /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow
 RUN test -x /usr/local/bin/velnor-workflow \
-    && /usr/local/bin/velnor-workflow --help >/dev/null
+    && /usr/local/bin/velnor-workflow --help >/dev/null \
+    && install -d -m 0755 /usr/local/share/velnor \
+    && sha256sum /usr/local/bin/velnor-workflow \
+        > /usr/local/share/velnor/velnor-workflow.sha256 \
+    && chmod 0644 /usr/local/share/velnor/velnor-workflow.sha256 \
+    && sha256sum --check --strict --status /usr/local/share/velnor/velnor-workflow.sha256

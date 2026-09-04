@@ -10,6 +10,8 @@ use std::{
 };
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+const VELNOR_WORKFLOW_BINARY: &str = "/usr/local/bin/velnor-workflow";
+const VELNOR_WORKFLOW_SHA256_FILE: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
 
 pub fn preflight(args: PreflightArgs) -> Result<()> {
     let mut runner = ProcessCommandRunner;
@@ -258,13 +260,14 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
-        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v sudo >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && command -v velnor-workflow >/dev/null && velnor-workflow --help >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
-            .to_string(),
+        format!(
+            "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v sudo >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && command -v velnor-workflow >/dev/null && test -x {VELNOR_WORKFLOW_BINARY} && sha256sum --check --strict --status {VELNOR_WORKFLOW_SHA256_FILE} && {VELNOR_WORKFLOW_BINARY} --help >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
+        ),
     ];
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
-            "Docker image '{}' is missing target job tools, Node, velnor-workflow, or preinstalled estate Rust targets. stderr: {}",
+            "Docker image '{}' is missing target job tools, Node, velnor-workflow, its SHA-256 metadata, or preinstalled estate Rust targets. stderr: {}",
             docker_image,
             result.stderr
         );
@@ -374,6 +377,9 @@ fn preflight_work_dir(work_dir: Option<PathBuf>) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::executor::CommandResult;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -443,8 +449,9 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
+        let sequence = NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "velnor-preflight-test-{}-{}",
+            "velnor-preflight-test-{}-{}-{sequence}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -525,9 +532,14 @@ mod tests {
             .1
             .iter()
             .any(|value| value.contains("command -v node >/dev/null && node --version")));
-        assert!(image_tools_call.1.iter().any(|value| value.contains(
-            "command -v velnor-workflow >/dev/null && velnor-workflow --help >/dev/null"
-        )));
+        assert!(image_tools_call
+            .1
+            .iter()
+            .any(|value| value.contains("command -v velnor-workflow >/dev/null")));
+        assert!(image_tools_call
+            .1
+            .iter()
+            .any(|value| value.contains("sha256sum --check --strict --status")));
         let script_call = &runner.calls[7];
         assert_eq!(script_call.0, "docker");
         assert!(script_call.1.windows(2).any(|pair| {
