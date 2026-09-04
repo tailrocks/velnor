@@ -20,7 +20,7 @@ use velnor_model::telemetry::TelemetryLane;
 use crate::{
     env::EnvironmentIdentity,
     gittrace::GitCounters,
-    scenario::{Driver, Family, Runnability},
+    scenario::{Driver, Family, Requirement, Runnability},
     stage::{CheckoutPhase, Stage},
     stats::{Summary, TooFewSamples},
 };
@@ -199,6 +199,13 @@ pub enum RecordError {
         runnability_driver: Option<Driver>,
         declared_driver: Option<Driver>,
     },
+    DegradedRequirementsEmpty,
+    DuplicateDegradedRequirement {
+        requirement: Requirement,
+    },
+    DegradedRequirementNotRequired {
+        requirement: Requirement,
+    },
     ScenarioFamilyMismatch,
     WrongSchema(String),
     InsufficientObservations {
@@ -238,6 +245,20 @@ impl std::fmt::Display for RecordError {
                 runnability_driver.map_or("unrunnable", Driver::as_str),
                 declared_driver.map_or("unrunnable", Driver::as_str)
             ),
+            Self::DegradedRequirementsEmpty => write!(
+                formatter,
+                "degraded record must identify at least one missing preferred requirement"
+            ),
+            Self::DuplicateDegradedRequirement { requirement } => write!(
+                formatter,
+                "degraded record repeats missing preferred requirement {}",
+                requirement.as_str()
+            ),
+            Self::DegradedRequirementNotRequired { requirement } => write!(
+                formatter,
+                "degraded record identifies {} as missing, but the scenario does not require it",
+                requirement.as_str()
+            ),
             Self::ScenarioFamilyMismatch => {
                 write!(
                     formatter,
@@ -265,9 +286,9 @@ impl BenchRecord {
     /// Check the invariants the schema alone cannot express.
     ///
     /// # Errors
-    /// Unknown scenario, family mismatch, wrong schema, a stage the driver is
-    /// structurally unable to observe, or summaries not derived from the
-    /// observations.
+    /// Unknown scenario, family mismatch, malformed degraded evidence, wrong
+    /// schema, a stage the driver is structurally unable to observe, or
+    /// summaries not derived from the observations.
     pub fn validate(&self) -> Result<(), RecordError> {
         if self.schema != RESULT_SCHEMA {
             return Err(RecordError::WrongSchema(self.schema.clone()));
@@ -293,6 +314,27 @@ impl BenchRecord {
                 runnability_driver: self.runnability.driver(),
                 declared_driver,
             });
+        }
+        if let Runnability::Degraded {
+            missing_for_preferred,
+            ..
+        } = &self.runnability
+        {
+            if missing_for_preferred.is_empty() {
+                return Err(RecordError::DegradedRequirementsEmpty);
+            }
+            for (index, requirement) in missing_for_preferred.iter().enumerate() {
+                if missing_for_preferred[..index].contains(requirement) {
+                    return Err(RecordError::DuplicateDegradedRequirement {
+                        requirement: *requirement,
+                    });
+                }
+                if !scenario.requires.contains(requirement) {
+                    return Err(RecordError::DegradedRequirementNotRequired {
+                        requirement: *requirement,
+                    });
+                }
+            }
         }
         let observable = self.driver.observable_stages();
         for observation in &self.observations {
@@ -381,6 +423,15 @@ mod tests {
         }
     }
 
+    fn degraded_record(missing_for_preferred: Vec<Requirement>) -> BenchRecord {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.runnability = Runnability::Degraded {
+            driver: Driver::DockerDirect,
+            missing_for_preferred,
+        };
+        record
+    }
+
     #[test]
     fn a_valid_record_round_trips_and_validates() {
         let record = record(Driver::DockerDirect, Stage::ContainerStart);
@@ -389,6 +440,49 @@ mod tests {
         assert!(!line.contains('\n'));
         let parsed: BenchRecord = serde_json::from_str(&line).expect("deserialise");
         assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn a_degraded_record_requires_missing_preferred_evidence() {
+        let record = degraded_record(Vec::new());
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::DegradedRequirementsEmpty)
+        );
+    }
+
+    #[test]
+    fn a_degraded_record_rejects_duplicate_missing_requirements() {
+        let record = degraded_record(vec![
+            Requirement::VelnorJobDriver,
+            Requirement::VelnorJobDriver,
+        ]);
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::DuplicateDegradedRequirement {
+                requirement: Requirement::VelnorJobDriver,
+            })
+        );
+    }
+
+    #[test]
+    fn a_degraded_record_rejects_requirements_not_declared_by_the_scenario() {
+        let record = degraded_record(vec![Requirement::LinuxHost]);
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::DegradedRequirementNotRequired {
+                requirement: Requirement::LinuxHost,
+            })
+        );
+    }
+
+    #[test]
+    fn a_degraded_record_accepts_unique_scenario_requirements() {
+        let record = degraded_record(vec![
+            Requirement::VelnorJobDriver,
+            Requirement::RegisteredRunner,
+        ]);
+        record.validate().expect("valid degraded evidence");
     }
 
     #[test]
