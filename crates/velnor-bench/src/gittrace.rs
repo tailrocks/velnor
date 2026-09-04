@@ -274,6 +274,17 @@ impl GitCounters {
                     reason: "event name is empty".to_owned(),
                 });
             }
+            if let Some(process) = processes.get(sid) {
+                if process.exit_code.is_some() && process.atexit_code.is_none() && name != "atexit"
+                {
+                    return Err(TraceError::InvalidEvent {
+                        line: line_number,
+                        reason: format!(
+                            "event {name} appears after exit before atexit for sid {sid}"
+                        ),
+                    });
+                }
+            }
             match name {
                 "version" => {
                     if processes
@@ -594,6 +605,33 @@ mod tests {
         )
         .expect_err("mismatched completion must fail");
         assert!(matches!(error, TraceError::MismatchedCompletion { .. }));
+    }
+
+    #[test]
+    fn data_after_exit_before_atexit_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"exit","sid":"sid-1","code":0}
+{"event":"data","sid":"sid-1","key":"bytes-received","value":7}
+{"event":"atexit","sid":"sid-1","code":0}"#,
+        )
+        .expect_err("data after exit must fail");
+        assert!(matches!(error, TraceError::InvalidEvent { line: 3, .. }));
+        assert!(error.to_string().contains("after exit"));
+    }
+
+    #[test]
+    fn event_after_exit_before_atexit_is_rejected() {
+        let error = GitCounters::from_events(
+            r#"{"event":"version","sid":"sid-1","evt":"4"}
+{"event":"start","sid":"sid-1","argv":["git","fetch"]}
+{"event":"exit","sid":"sid-1","code":0}
+{"event":"child","sid":"sid-1","child_id":"child-1"}
+{"event":"atexit","sid":"sid-1","code":0}"#,
+        )
+        .expect_err("event after exit must fail");
+        assert!(matches!(error, TraceError::InvalidEvent { line: 4, .. }));
+        assert!(error.to_string().contains("after exit"));
     }
 
     #[test]
