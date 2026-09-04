@@ -112,7 +112,9 @@ pub struct GitCounters {
 /// produced useful, attributable evidence when its lifecycle is complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GitTrace {
+    /// Counters extracted from the complete event stream.
     pub counters: GitCounters,
+    /// Whether every traced process completed with code zero.
     pub successful: bool,
 }
 
@@ -145,10 +147,10 @@ impl GitTrace {
 
 /// Evidence state stored on a benchmark observation.
 ///
-/// `NoGitProcess` is only valid after the trace destination was independently
-/// proven writable immediately before the measured command. It is not a
+/// `NoGitTraceObserved` is only valid for an armed trace slot whose marker
+/// survived the measured command without any Trace2 event. It is not a
 /// synonym for zero counters or a parser fallback. `Mixed` preserves the
-/// distinction when concurrent workers do not all invoke Git.
+/// distinction when concurrent workers do not all emit Trace2 evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GitEvidence {
@@ -156,7 +158,7 @@ pub enum GitEvidence {
     NotMeasured,
     /// The measured command produced no Git process trace after trace setup
     /// had been validated.
-    NoGitProcess,
+    NoGitTraceObserved,
     /// One or more Git processes emitted complete trace evidence.
     Observed {
         counters: GitCounters,
@@ -174,13 +176,29 @@ pub enum GitEvidence {
 }
 
 impl GitEvidence {
+    /// Whether this value satisfies the structural invariants guaranteed by
+    /// the trace reader.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        match self {
+            Self::NotMeasured | Self::NoGitTraceObserved => true,
+            Self::Observed { counters, .. } => counters.processes > 0,
+            Self::Mixed {
+                counters,
+                observed_workers,
+                no_git_workers,
+                ..
+            } => counters.processes > 0 && *observed_workers > 0 && *no_git_workers > 0,
+        }
+    }
+
     /// Bytes received by observed Git processes, or zero when none were
     /// observed. The evidence variant remains available to distinguish zero
     /// bytes from no measurement.
     #[must_use]
     pub const fn received_bytes(&self) -> u64 {
         match self {
-            Self::NotMeasured | Self::NoGitProcess => 0,
+            Self::NotMeasured | Self::NoGitTraceObserved => 0,
             Self::Observed { counters, .. } | Self::Mixed { counters, .. } => {
                 counters.received_bytes
             }
