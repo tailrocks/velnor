@@ -76,6 +76,14 @@ slot count, trust scope, capability validation, and work directory. Capability
 validation must be `strict`. Organization and enterprise scopes require an
 explicit runner group and a matching desired routing policy.
 
+`VELNOR_TRUST_SCOPE` defaults to `untrusted` and fails closed. A node upgraded
+from a build that defaulted to `trusted` loses the host Docker socket,
+privileged container and service options, host port publishing, and the right
+to run a job carrying user secrets, and its persistent stores move to the
+`untrusted` namespace so the first job rebuilds its caches once. Set
+`VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the pool is for. See
+[Trust scope](/reference/trust-scope).
+
 Start the services explicitly:
 
 ```sh
@@ -142,8 +150,14 @@ Its container store is `/var/cache/mbx` (managed targets are below
 an invalid repository ID uses job-ephemeral storage instead. Do not merge trust
 class or repository directories while diagnosing disk use. Mr Boxington's
 internal 20 GiB cache, 30 GiB target, and 50 GiB combined GC limits remain
-subject to Velnor's global disk-capacity controls. Cargo registry and Git
-source caches are independent and must be inspected separately.
+subject to Velnor's host disk accounting. Cargo registry and Git source caches
+are independent and must be inspected separately.
+
+`VELNOR_JOB_BUDGET` in a job's environment names the derived host budget, its
+sources, the slot count, the share this job received, and any workflow-set
+resource variable the daemon overrode. Read it before diagnosing a build that
+looks under-parallelized:
+[Storage and resource budgets](/operations/storage-and-resources).
 
 ## Daily inspection
 

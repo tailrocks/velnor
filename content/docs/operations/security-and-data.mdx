@@ -13,6 +13,17 @@ limit” means the reviewed implementation does not prove the stronger property.
 
 ## Security boundary
 
+- Trust scope is operator configuration, never job payload. It defaults to
+  `untrusted` and fails closed: absent, empty, and unrecognized values all
+  resolve to `untrusted`, and only the exact value `trusted` grants the host
+  Docker socket, privileged container and service options, host port
+  publishing, BuildKit secrets, and the right to run a job carrying user
+  secrets. One write-once resolution serves both binaries, so a flag and an
+  environment variable can no longer disagree and let a fork's job resolve into
+  a hardened pool's stores. See [Trust scope](/reference/trust-scope).
+  `crates/velnor-runner/src/trust_scope.rs:39-66`,
+  `crates/velnor-runner/src/github_adapter.rs:221-235`,
+  `crates/velnor-runner/src/runner.rs:6347-6361`
 - Every job is admitted transitively before container, checkout, cache mutation,
   runtime credential injection, service, or download side effects. The
   run-service access token needed to acquire and renew the job is extracted

@@ -1,0 +1,73 @@
+---
+title: "Trust scope"
+---
+
+# Trust scope
+
+Trust scope is the operator-selected boundary that decides what a job on this
+node may reach and which persistent stores it shares. It is set once, by the
+operator, for the whole pool. It is never derived from the job payload, the
+repository, or the workflow, so a fork pull request cannot widen it.
+
+## The default is `untrusted`, and it fails closed
+
+`VELNOR_TRUST_SCOPE` (or `--trust-scope`) defaults to `untrusted`. Absent,
+empty, or unrecognized values all resolve to `untrusted`. Only the exact value
+`trusted` grants capability; `release` selects the `release` store namespace
+with the same capability as `untrusted`.
+
+### Breaking change for existing deployments
+
+The default used to be
+`trusted`, and the two binaries disagreed about which value was in force. A
+node upgraded without changing its configuration loses the host Docker socket,
+privileged container options, privileged service containers, host port
+publishing, and the right to run a job carrying user secrets. Its persistent
+stores also move into the `untrusted` namespace, so the first job after the
+upgrade rebuilds its caches once.
+
+**What an operator must do:** if the pool is meant to run trusted work, set
+`VELNOR_TRUST_SCOPE=trusted` in `/etc/velnor/velnor.env` explicitly and restart
+the daemon. If it is meant to run fork or public work, change nothing — the new
+default is the correct one.
+
+## What `trusted` unlocks
+
+| Capability | `untrusted` / `release` | `trusted` |
+| --- | --- | --- |
+| Host Docker socket mounted into the job | refused | allowed |
+| Privileged job-container options | refused | allowed |
+| Privileged service containers | refused | allowed |
+| Host port publishing | refused | allowed |
+| A job carrying GitHub user secrets | job refused before execution | allowed |
+| BuildKit secrets for `docker/build-push-action` | refused | allowed |
+
+A job that arrives with user secrets in a non-`trusted` scope is refused by
+name before any side effect, not silently stripped.
+
+## Store partitioning
+
+Every executable or build store Velnor persists across jobs is partitioned
+first by trust class and then, where a repository identity applies, by numeric
+GitHub repository ID:
+
+```text
+<storage root>/cache/velnor/v1/<untrusted|trusted|release>/<class>[/<repository id>]
+```
+
+With the packaged storage root that is `/var/cache/velnor/v1/...`. The
+partitioned classes are the Mr Boxington store (`compiler/mbx`), the sccache
+store (`compiler/sccache`), `$CARGO_HOME/bin`, the mise install and binary
+stores, the Cargo target generation store, and the Playwright browser store.
+
+Partitioning exists so compiled state, installed toolchains, and anything else
+on a later job's `PATH` cannot cross a trust boundary. It is a cache-reuse
+boundary. It is not encryption, and it is not protection from a compromised
+host.
+
+Daemon-shared stores that hold no executable content — the Cargo registry
+cache, registry index, and Git database — are deliberately not partitioned, so
+they stay warm across scopes.
+
+A missing or invalid repository identity fails closed to a job-ephemeral store
+rather than sharing one.

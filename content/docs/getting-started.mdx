@@ -85,9 +85,17 @@ VELNOR_NAME=velnor
 VELNOR_LABELS=velnor,velnor-target-mvp
 VELNOR_SLOTS=1
 VELNOR_WORK_DIR=/var/lib/velnor/work
-VELNOR_TRUST_SCOPE=trusted
+VELNOR_TRUST_SCOPE=untrusted
 VELNOR_CAPABILITY_VALIDATION=strict
 ```
+
+`VELNOR_TRUST_SCOPE` defaults to `untrusted` and fails closed: an absent,
+empty, or unrecognized value resolves to `untrusted`. In that scope the job
+gets no host Docker socket, no privileged container options, no host port
+publishing, and a job carrying GitHub user secrets is refused. Set `trusted`
+only if this pool is meant to run trusted work; if you are upgrading a node
+that relied on the old default, read [Trust scope](/reference/trust-scope)
+first.
 
 Set exactly one backend in `execution.toml`:
 
