@@ -359,15 +359,35 @@ pub fn disk_usage_percent(path: &Path) -> Option<u8> {
     } else {
         path.parent().filter(|parent| parent.exists())?
     };
-    let output = std::process::Command::new("df")
-        .arg("-Pk")
-        .arg(probe)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    #[cfg(unix)]
+    {
+        let stat = rustix::fs::statvfs(probe).ok()?;
+        return disk_usage_percent_from_statvfs(stat.f_blocks, stat.f_bavail);
+    }
+    #[cfg(not(unix))]
+    {
+        let output = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(probe)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        disk_usage_percent_from_df(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+fn disk_usage_percent_from_statvfs(total_blocks: u64, available_blocks: u64) -> Option<u8> {
+    if total_blocks == 0 {
         return None;
     }
-    disk_usage_percent_from_df(&String::from_utf8_lossy(&output.stdout))
+    let used_blocks = total_blocks.saturating_sub(available_blocks);
+    let percent = used_blocks
+        .saturating_mul(100)
+        .saturating_div(total_blocks)
+        .min(100);
+    u8::try_from(percent).ok()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -820,6 +840,25 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
         assert_eq!(
             disk_usage_percent_from_df(stdout),
             Some(HARD_PRESSURE_PERCENT)
+        );
+    }
+
+    #[test]
+    fn statvfs_capacity_uses_unprivileged_available_blocks() {
+        assert_eq!(disk_usage_percent_from_statvfs(100, 11), Some(89));
+        assert_eq!(disk_usage_percent_from_statvfs(100, 10), Some(90));
+        assert_eq!(disk_usage_percent_from_statvfs(0, 0), None);
+        assert_eq!(disk_usage_percent_from_statvfs(100, 101), Some(0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_usage_probe_reads_the_platform_filesystem_without_df() {
+        let path = std::env::temp_dir();
+        let stat = rustix::fs::statvfs(&path).unwrap();
+        assert_eq!(
+            disk_usage_percent(&path),
+            disk_usage_percent_from_statvfs(stat.f_blocks, stat.f_bavail)
         );
     }
 
