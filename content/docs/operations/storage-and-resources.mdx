@@ -1,0 +1,153 @@
+---
+title: "Storage and resource budgets"
+---
+
+# Storage and resource budgets
+
+Velnor derives what a job may use from what the machine actually has, rather
+than letting each tool assume it owns the host. This page describes the store
+catalog, the host budget and the per-slot share derived from it, and how disk
+pressure is handled.
+
+> Navigation: [← Observability](/operations/observability) · [Index](/) · [Security and data →](/operations/security-and-data)
+
+## The store catalog
+
+Every persistent store Velnor owns has exactly one path expression, published
+in one catalog. Writers and both garbage collectors resolve through it, so a
+store cannot be written at one path and reclaimed at another.
+
+| Class | Contents | Reclaimable |
+| --- | --- | --- |
+| `cargo` | Cargo registry cache, registry index, Git database, and `$CARGO_HOME/bin` | yes |
+| `mise` | mise download cache, tool installs, and per-version binaries | yes |
+| `targets` | Host-persistent Cargo target generations | yes |
+| `actions-cache` | `actions/cache` storage | yes |
+| `artifacts` | Local artifact store, bucketed per workflow run | yes |
+| `mbx` | Mr Boxington cache and managed targets | yes |
+| `sccache` | Explicit `sccache-action` store | yes |
+| `gha-cache` | Hosted GitHub Actions cache service storage | yes |
+| `docker` | Docker's own image, container, volume, and build storage | no |
+
+Each reclaimable class declares a lease class a running job publishes to mark
+the store live, so a reclaimer cannot delete a class it does not own, and
+cannot delete a store a job is using. `docker` declares none: Velnor never
+reclaims Docker's storage by scope, but the host budget must account for it,
+because it consumes the same filesystem.
+
+Stores resolve to the daemon-shared work root, never to a per-slot root. A
+per-slot path is lifted to the shared root by construction, so slots share one
+warm cache rather than fragmenting it.
+
+## The host budget
+
+Velnor, Cargo, Mr Boxington, Docker and BuildKit each default to assuming they
+own the machine. Four slots on a sixteen-core host would therefore run four
+builds that each pick `-j16` inside one `velnor-jobs.slice` whose aggregate
+quota is 15.2 cores: everything runnable, nothing progressing.
+
+The budget is derived, not assumed. CPU capacity is the smallest of every
+constraint that actually applies:
+
+- `available_parallelism`;
+- every cgroup v2 `cpu.max` between the cgroup root and this process;
+- the effective cpuset;
+- the aggregate quota on `velnor-jobs.slice`, which the package pins to 95% of
+  the host's online CPUs.
+
+Memory is the smallest of `/proc/meminfo` `MemTotal` and every applicable
+`memory.max`.
+
+A value that cannot be read is *unobservable* and carries the reason. It is
+never cached and never replaced by a guess. An unobservable CPU budget produces
+no `CARGO_BUILD_JOBS`, no `--cpus`, and no sizing at all.
+
+## The per-slot share
+
+The slice quota is an aggregate ceiling for every job on the host, not a
+per-slot allowance, so a slot gets `budget / slots`. CPUs are floored, never
+rounded up into the next slot, and floor at one — a slot that is admitted at
+all must be able to run one compiler process. Memory is taken at 85% of the
+share, the same headroom Mr Boxington documents for its own default.
+
+The share is capped, never widened, by an explicit operator limit
+(`VELNOR_JOB_CPUS`) or a workflow `createOptions` `--cpus`.
+
+The job then receives:
+
+| Variable | Value |
+| --- | --- |
+| `CARGO_BUILD_JOBS` | the slot's whole-CPU share |
+| `MAKEFLAGS` | `-j<share>`, for the `make` invoked by `-sys` build scripts |
+| `MBX_SCHEDULER_CPUS` | the same share |
+| `MBX_SCHEDULER_MEMORY` | the slot's memory share, in MiB |
+| `VELNOR_JOB_BUDGET` | one line naming the budget, its sources, the slot count, and any workflow value it overrode |
+
+The container also gets `--cpus`, unless an explicit limit is already in force.
+
+These four resource variables are appended after the workflow's own
+environment, so a workflow that sets them cannot widen its share. The override
+is named in `VELNOR_JOB_BUDGET` rather than applied silently.
+
+## Mr Boxington store limits
+
+On the Docker backend the Mr Boxington store is mounted at `/var/cache/mbx`
+with managed targets below `/var/cache/mbx/targets`. Mr Boxington owns garbage
+collection inside it; Velnor supplies the limits:
+
+```text
+MBX_GC_AUTO=true
+MBX_GC_MAX_SIZE=20GiB
+MBX_TARGET_MAX_SIZE=30GiB
+MBX_GC_MAX_TOTAL_SIZE=50GiB
+```
+
+These operate inside Velnor's host disk accounting; they do not increase host
+capacity. Cargo registry and Git source persistence are separate stores and are
+unaffected by Mr Boxington's GC.
+
+## Disk pressure
+
+Free space is measured with `statvfs` on the filesystem that actually holds the
+work root, using the unprivileged figure (`f_bavail`), not the root-reserved
+one. Docker's own usage is measured and subtracted from the headroom Velnor is
+willing to promise; when it cannot be measured it is treated as unknown, never
+as zero.
+
+The free-space floor is 2 GiB. Below it, a slot must not admit a job. Pressure
+is handled as a total state machine — every state has a defined successor and
+none of them means "sleep and try again forever":
+
+| State | Meaning | Action |
+| --- | --- | --- |
+| `Healthy` | at or above the floor | admit jobs |
+| `Reclaiming` | below the floor, reclaim not yet attempted this episode | run the bounded reclaimer, re-evaluate |
+| `Degraded` | reclaim ran, still below the floor | refuse admission, with the time left before escalation |
+| `Draining` | the degraded deadline expired | stop accepting work, shed the slot |
+| `Deregistered` | terminal | delete the registration and exit |
+
+The degraded deadline is 10 minutes and the drain deadline a further 5. Any
+non-terminal state returns to `Healthy` the moment space appears; recovery is
+checked before escalation. `Deregistered` is terminal and requires an operator
+or the fleet controller to act.
+
+Admission is evaluated *before* a job is acquired. Acquiring first and
+discovering afterwards that the host cannot hold the job is what produced
+doomed jobs and the indefinite park.
+
+What a node does today when it is below the floor is measure, run the bounded
+reclaimer, re-measure, and — if it is still below the floor — refuse readiness
+with a `low disk space` reason naming the free and required bytes. That is
+bounded and fail-closed. The escalation past `Degraded` into `Draining` and
+`Deregistered` is defined but is not yet driven from the slot loop, so a host
+that stays full holds a refusing slot instead of shedding it.
+
+The reclaimer is bounded: it takes a leader lock so two daemons do not reclaim
+concurrently, targets a byte goal rather than running to completion, skips any
+class a live lease covers, and reports what it freed. It reclaims UUID job
+workspaces and dangling untagged images; warm caches, volumes, builders, and
+shared microVM work roots are protected or skipped. It does not scrub bytes.
+
+`velnorctl storage paths` and `velnorctl storage status` report the resolved
+roots and the per-class byte totals. `velnorctl storage explain-pressure` is
+not available.
