@@ -2063,3 +2063,73 @@ This is the shared-tree hazard in its most damaging form: not a lost edit, but a
 individually correct and collectively broken, because the index and the working tree disagree
 about what exists. It is also an argument for the pin-integrity discipline being extended to a
 "HEAD must compile" check.
+
+### BC-11 closed — expressions are parsed, and every recorded divergence is fixed
+
+`c4afada`, `5efb20d`, `7c0e201`, `c0338f5`, `26002ce`. A real lexer, parser and evaluator now
+live in `crates/velnor-runner/src/expression/`, transcribed from upstream. **Correction to this
+plan's own citations: the upstream path is `src/Sdk/DTExpressions2/Expressions2/`, not
+`DTExpressions/`.** The code carries the corrected citations.
+
+| | Before | After (matches GitHub) |
+| --- | --- | --- |
+| D-3 | `if: steps.x.outputs.count` with `count=0` skipped the step | runs; only the empty string is falsy |
+| D-4 | `if: env.UNSET == ''` was false, because the expression became its own source text | true; a missing value is null and coerces to `""` |
+| D-5 | `if: github.run_number > 5` on run 1 **ran** | skipped |
+| D-6 | `if: startsWith(github.ref, 'refs/tags/')` on a branch push **ran the release step** | skipped |
+| D-7 | an unevaluatable condition ran the step | typed error; the step fails, the job continues |
+
+The semantics were taken from source rather than intuition, and several are surprising enough
+that only source would give them: mismatched coerced kinds and NaN compare false in *both*
+directions, so `1 > 'a'` and `1 < 'a'` are both false while `null >= 0` is true, because `>=` is
+literally "equal or greater"; strings compare `OrdinalIgnoreCase`; objects and arrays compare by
+reference and are never coerced, and are always truthy even when empty; objects are ordered and
+case-insensitive except `env`, which is case-sensitive off Windows; `And`/`Or` return the operand
+value rather than a boolean; numbers accept `0x`/`0o` and `Infinity` but reject `"infinity"` and
+`"nan"` because .NET's `Double.TryParse` is stricter; and rendering is `G15`.
+
+Two further upstream behaviours were restored along the way: `toJSON` is pretty-printed to
+upstream's exact layout, and status-check detection now walks the parsed tree instead of matching
+a substring, so `if: env.X == 'always()'` is no longer mistaken for a status check.
+
+**A regression the agent caused and then fixed, worth recording as a design constraint.** Velnor
+renders `${{ }}` twice — at plan time from the job message, then at step time. Once missing values
+correctly became null, plan-time rendering collapsed not-yet-known values such as
+`${{ env.EDIT_URL }}` to `""`. `resolve_job_context_expressions` now parses each span and defers it
+verbatim when the tree reads a runtime context or a runner function, which also subsumes an ad-hoc
+`steps.*.outputs.*` substring check that was in `action.rs`. Any future change to two-phase
+rendering has to preserve that property.
+
+The old path was deleted entirely — twenty-two functions, listed in the commit — with nothing left
+alongside it. Gates: `cargo fmt` clean, and `cargo nextest run --locked -p velnor-runner --features
+test-support` reports **1564 passed, 1 skipped, 0 failed**, including 35 expression tests and the
+five condition regressions.
+
+### Still divergent after T-004, and now precisely located
+
+1. **A second, independent string-rewriting evaluator survives** at
+   `script_step.rs:392 evaluate_format_expr_with_lazy_args` together with `resolve_context_path`,
+   used to render composite and local-action inputs at setup time. Same bug class, different
+   boundary. This is the third implementation the red team predicted; two are now gone and this
+   one needs its own package.
+2. **`${{ }}` interpolation is not fail-closed.** Upstream fails template evaluation, and therefore
+   the step, when a span cannot be evaluated; Velnor keeps the raw span. Step *conditions* are now
+   fail-closed, which is what D-7 required, but interpolation is not. Documented at the call site.
+3. `hashFiles`' `--follow-symbolic-links` is parsed and ignored — Velnor's `hash_files` has no
+   symlink mode.
+4. Upstream's evaluation-memory accounting (`MemoryCounter`, `ResultMemory`) and condition trace
+   rendering are not implemented; only the depth and length limits are.
+
+Pre/post conditions are fail-*closed* and reported, where upstream fails the owning step. That
+difference is deliberate and named: Velnor's pre/post steps have no result row to fail, so the
+lifecycle package owns it.
+
+### Provenance note
+
+`executor.rs` was staged wholesale during this package while another agent was editing it, so two
+commits also carry roughly 120 lines of that agent's in-flight work. Nothing was lost, but the
+provenance is mixed. This is the same shared-index hazard as before, and it is the reason the
+commit rule is now an explicit pathspec.
+
+One commit (`f87b977`) appeared unpushed from the agent's stale local branch; it landed as its
+rebased twin `26002ce`, and the deleted symbol is absent from the tree — verified, nothing missing.
