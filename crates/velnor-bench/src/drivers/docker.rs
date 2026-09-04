@@ -19,7 +19,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Rusage},
+    sys::{tree_bytes, Invocation, Rusage},
 };
 
 /// Shape of the container workload.
@@ -87,6 +87,29 @@ fn timed<T>(body: impl FnOnce() -> T) -> (T, u64) {
     (value, elapsed)
 }
 
+fn require_success(invocation: &Invocation, operation: &str) -> Result<()> {
+    if invocation.ok() {
+        return Ok(());
+    }
+    bail!(
+        "{operation} failed with exit code {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    );
+}
+
+fn inspect_container_state(context: &mut Context, name: &str) -> Result<()> {
+    let invocation = context.runner.run(
+        "docker",
+        &["inspect", "--format", "{{.State.Status}}", name],
+    )?;
+    require_success(invocation, "docker inspect completion")?;
+    if invocation.stdout.trim().is_empty() {
+        bail!("docker inspect completion returned no container state");
+    }
+    Ok(())
+}
+
 impl DockerWorkload {
     fn container_name(&self, prefix: &str) -> String {
         format!(
@@ -116,10 +139,11 @@ impl Workload for DockerWorkload {
             }
             Kind::ServiceContainer => {
                 let image = SERVICE_IMAGE.to_owned();
-                context
+                let pulled = context
                     .runner
                     .run("docker", &["pull", &image])
                     .context("pulling the service image")?;
+                require_success(pulled, "docker pull service image")?;
                 self.notes
                     .push(format!("service container image is {SERVICE_IMAGE}"));
             }
@@ -131,10 +155,11 @@ impl Workload for DockerWorkload {
                     .map(|invocation| invocation.ok())
                     .unwrap_or(false);
                 if !present {
-                    context
+                    let pulled = context
                         .runner
                         .run("docker", &["pull", &image])
                         .context("pulling the job image")?;
+                    require_success(pulled, "docker pull job image")?;
                 }
             }
         }
@@ -147,7 +172,7 @@ impl Workload for DockerWorkload {
             write_build_context(&dir, &context.job_image)?;
             if self.kind == Kind::BuildCached {
                 // Warm the layer cache once, outside the measurement.
-                let _ = context.runner.run(
+                let warmed = context.runner.run(
                     "docker",
                     &[
                         "build",
@@ -155,7 +180,8 @@ impl Workload for DockerWorkload {
                         "velnor-bench-cached:latest",
                         &dir.display().to_string(),
                     ],
-                );
+                )?;
+                require_success(warmed, "docker cached-build warmup")?;
             }
         }
         Ok(())
@@ -275,7 +301,7 @@ impl DockerWorkload {
         // separately observable, exactly as the runner keeps a job container.
         create_args.push("sleep 30".to_owned());
 
-        let (created, create_ms) = timed(|| context.runner.run("docker", &create_args));
+        let (created, create_ms) = timed(|| context.runner.run("docker", &create_args).cloned());
         let created = created?;
         if !created.ok() {
             let stderr = created.stderr.clone();
@@ -284,7 +310,8 @@ impl DockerWorkload {
         }
         stages.insert(Stage::ContainerCreate, create_ms);
 
-        let (started, start_ms) = timed(|| context.runner.run("docker", &["start", &name]));
+        let (started, start_ms) =
+            timed(|| context.runner.run("docker", &["start", &name]).cloned());
         let started = started?;
         if !started.ok() {
             let stderr = started.stderr.clone();
@@ -297,6 +324,7 @@ impl DockerWorkload {
             context
                 .runner
                 .run("docker", &["exec", &name, "/bin/sh", "-c", USER_COMMAND])
+                .cloned()
         });
         let executed = executed?;
         if !executed.ok() {
@@ -308,15 +336,21 @@ impl DockerWorkload {
 
         // What a runner does after the last step and before teardown: read the
         // exit state back out of the daemon.
-        let (_, completion_ms) = timed(|| {
-            context.runner.run(
-                "docker",
-                &["inspect", "--format", "{{.State.Status}}", &name],
-            )
-        });
+        let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
+        if let Err(error) = completion {
+            Self::force_remove(context, &name);
+            return Err(error);
+        }
         stages.insert(Stage::CompletionOverhead, completion_ms);
 
-        let (_, teardown_ms) = timed(|| context.runner.run("docker", &["rm", "-f", &name]));
+        let (removed, teardown_ms) =
+            timed(|| context.runner.run("docker", &["rm", "-f", &name]).cloned());
+        let removed = removed?;
+        if !removed.ok() {
+            let stderr = removed.stderr.clone();
+            Self::force_remove(context, &name);
+            bail!("docker container teardown failed: {}", stderr.trim());
+        }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
     }
@@ -330,7 +364,7 @@ impl DockerWorkload {
         let image = context.job_image.clone();
         let _ = context.runner.run("docker", &["image", "rm", "-f", &image]);
 
-        let (pulled, pull_ms) = timed(|| context.runner.run("docker", &["pull", &image]));
+        let (pulled, pull_ms) = timed(|| context.runner.run("docker", &["pull", &image]).cloned());
         let pulled = pulled?;
         if !pulled.ok() {
             bail!("docker pull failed: {}", pulled.stderr.trim());
@@ -355,32 +389,68 @@ impl DockerWorkload {
         let name = self.container_name("pull");
         let image = context.job_image.clone();
         let (created, create_ms) = timed(|| {
-            context.runner.run(
-                "docker",
-                &[
-                    "create",
-                    "--name",
-                    &name,
-                    "--entrypoint",
-                    "/bin/sh",
-                    &image,
-                    "-c",
-                    "sleep 30",
-                ],
-            )
+            context
+                .runner
+                .run(
+                    "docker",
+                    &[
+                        "create",
+                        "--name",
+                        &name,
+                        "--entrypoint",
+                        "/bin/sh",
+                        &image,
+                        "-c",
+                        "sleep 30",
+                    ],
+                )
+                .cloned()
         });
-        created?;
+        let created = created?;
+        if !created.ok() {
+            Self::force_remove(context, &name);
+            bail!("docker create after pull failed: {}", created.stderr.trim());
+        }
         stages.insert(Stage::ContainerCreate, create_ms);
-        let (_, start_ms) = timed(|| context.runner.run("docker", &["start", &name]));
+        let (started, start_ms) =
+            timed(|| context.runner.run("docker", &["start", &name]).cloned());
+        let started = started?;
+        if !started.ok() {
+            Self::force_remove(context, &name);
+            bail!("docker start after pull failed: {}", started.stderr.trim());
+        }
         stages.insert(Stage::ContainerStart, start_ms);
-        let (_, exec_ms) = timed(|| {
+        let (executed, exec_ms) = timed(|| {
             context
                 .runner
                 .run("docker", &["exec", &name, "/bin/sh", "-c", USER_COMMAND])
+                .cloned()
         });
+        let executed = executed?;
+        if !executed.ok() {
+            Self::force_remove(context, &name);
+            bail!(
+                "first user command after pull failed: {}",
+                executed.stderr.trim()
+            );
+        }
         stages.insert(Stage::FirstUserCommand, exec_ms);
-        stages.insert(Stage::CompletionOverhead, 0);
-        let (_, teardown_ms) = timed(|| context.runner.run("docker", &["rm", "-f", &name]));
+        let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
+        if let Err(error) = completion {
+            Self::force_remove(context, &name);
+            return Err(error);
+        }
+        stages.insert(Stage::CompletionOverhead, completion_ms);
+        let (removed, teardown_ms) =
+            timed(|| context.runner.run("docker", &["rm", "-f", &name]).cloned());
+        let removed = removed?;
+        if !removed.ok() {
+            Self::force_remove(context, &name);
+            bail!(
+                "docker teardown after pull failed: {}",
+                removed.stderr.trim()
+            );
+        }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
     }
@@ -395,23 +465,45 @@ impl DockerWorkload {
         let job = self.container_name("job");
         let image = context.job_image.clone();
 
-        let (_, setup_ms) = timed(|| {
-            let _ = context
+        let (network_created, network_ms) = timed(|| {
+            context
                 .runner
-                .run("docker", &["network", "create", &network]);
-            context.runner.run(
-                "docker",
-                &[
-                    "run",
-                    "-d",
-                    "--name",
-                    &service,
-                    "--network",
-                    &network,
-                    SERVICE_IMAGE,
-                ],
-            )
+                .run("docker", &["network", "create", &network])
+                .cloned()
         });
+        let network_created = network_created?;
+        if !network_created.ok() {
+            bail!(
+                "docker network create failed: {}",
+                network_created.stderr.trim()
+            );
+        }
+        let (service_started, service_ms) = timed(|| {
+            context
+                .runner
+                .run(
+                    "docker",
+                    &[
+                        "run",
+                        "-d",
+                        "--name",
+                        &service,
+                        "--network",
+                        &network,
+                        SERVICE_IMAGE,
+                    ],
+                )
+                .cloned()
+        });
+        let service_started = service_started?;
+        if !service_started.ok() {
+            let _ = context.runner.run("docker", &["network", "rm", &network]);
+            bail!(
+                "docker service start failed: {}",
+                service_started.stderr.trim()
+            );
+        }
+        let setup_ms = network_ms.saturating_add(service_ms);
         stages.insert(Stage::DockerSetup, setup_ms);
 
         // Readiness wait is part of container start from a job's perspective.
@@ -424,39 +516,82 @@ impl DockerWorkload {
         }
 
         let (created, create_ms) = timed(|| {
-            context.runner.run(
-                "docker",
-                &[
-                    "create",
-                    "--name",
-                    &job,
-                    "--network",
-                    &network,
-                    "--entrypoint",
-                    "/bin/sh",
-                    &image,
-                    "-c",
-                    "sleep 30",
-                ],
-            )
-        });
-        created?;
-        stages.insert(Stage::ContainerCreate, create_ms);
-
-        let (_, exec_ms) = timed(|| {
-            let _ = context.runner.run("docker", &["start", &job]);
             context
                 .runner
-                .run("docker", &["exec", &job, "/bin/sh", "-c", USER_COMMAND])
+                .run(
+                    "docker",
+                    &[
+                        "create",
+                        "--name",
+                        &job,
+                        "--network",
+                        &network,
+                        "--entrypoint",
+                        "/bin/sh",
+                        &image,
+                        "-c",
+                        "sleep 30",
+                    ],
+                )
+                .cloned()
         });
-        stages.insert(Stage::FirstUserCommand, exec_ms);
-        stages.insert(Stage::CompletionOverhead, 0);
-
-        let (_, teardown_ms) = timed(|| {
-            let _ = context.runner.run("docker", &["rm", "-f", &job]);
+        let created = created?;
+        if !created.ok() {
+            Self::force_remove(context, &job);
             let _ = context.runner.run("docker", &["rm", "-f", &service]);
-            context.runner.run("docker", &["network", "rm", &network])
+            let _ = context.runner.run("docker", &["network", "rm", &network]);
+            bail!(
+                "docker service job create failed: {}",
+                created.stderr.trim()
+            );
+        }
+        stages.insert(Stage::ContainerCreate, create_ms);
+
+        let (executed, exec_ms) = timed(|| -> Result<()> {
+            let started = context.runner.run("docker", &["start", &job])?;
+            require_success(started, "docker service job start")?;
+            let executed = context
+                .runner
+                .run("docker", &["exec", &job, "/bin/sh", "-c", USER_COMMAND])?;
+            require_success(executed, "docker service first user command")?;
+            Ok(())
         });
+        if let Err(error) = executed {
+            Self::force_remove(context, &job);
+            let _ = context.runner.run("docker", &["rm", "-f", &service]);
+            let _ = context.runner.run("docker", &["network", "rm", &network]);
+            return Err(error);
+        }
+        stages.insert(Stage::FirstUserCommand, exec_ms);
+        let (completion, completion_ms) = timed(|| inspect_container_state(context, &job));
+        if let Err(error) = completion {
+            Self::force_remove(context, &job);
+            let _ = context.runner.run("docker", &["rm", "-f", &service]);
+            let _ = context.runner.run("docker", &["network", "rm", &network]);
+            return Err(error);
+        }
+        stages.insert(Stage::CompletionOverhead, completion_ms);
+
+        let (removed, teardown_ms) = timed(|| -> Result<(Invocation, Invocation, Invocation)> {
+            let job = context.runner.run("docker", &["rm", "-f", &job])?.clone();
+            let service = context
+                .runner
+                .run("docker", &["rm", "-f", &service])?
+                .clone();
+            let network = context
+                .runner
+                .run("docker", &["network", "rm", &network])?
+                .clone();
+            Ok((job, service, network))
+        });
+        let (job_removed, service_removed, network_removed) = removed?;
+        for (operation, invocation) in [
+            ("docker service job teardown", job_removed),
+            ("docker service teardown", service_removed),
+            ("docker network teardown", network_removed),
+        ] {
+            require_success(&invocation, operation)?;
+        }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
     }
@@ -617,5 +752,20 @@ mod tests {
         let (value, elapsed) = timed(|| 7_u32);
         assert_eq!(value, 7);
         assert!(elapsed < 10_000);
+    }
+
+    #[test]
+    fn failed_docker_invocations_are_not_accepted_as_measurements() {
+        let invocation = Invocation {
+            program: "docker".into(),
+            args: vec!["exec".into()],
+            code: 17,
+            stdout: String::new(),
+            stderr: "container failed".into(),
+            wall: Duration::ZERO,
+        };
+        let error = require_success(&invocation, "docker exec").expect_err("must fail closed");
+        assert!(error.to_string().contains("exit code 17"));
+        assert!(error.to_string().contains("container failed"));
     }
 }
