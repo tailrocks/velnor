@@ -195,6 +195,10 @@ pub enum RecordError {
         driver: Driver,
         runnability_driver: Option<Driver>,
     },
+    DeclaredDriverMismatch {
+        runnability_driver: Option<Driver>,
+        declared_driver: Option<Driver>,
+    },
     ScenarioFamilyMismatch,
     WrongSchema(String),
     InsufficientObservations {
@@ -224,6 +228,15 @@ impl std::fmt::Display for RecordError {
                 "record driver {} contradicts runnability driver {}",
                 driver.as_str(),
                 runnability_driver.map_or("unrunnable", Driver::as_str)
+            ),
+            Self::DeclaredDriverMismatch {
+                runnability_driver,
+                declared_driver,
+            } => write!(
+                formatter,
+                "record runnability driver {} contradicts declared scenario driver {}",
+                runnability_driver.map_or("unrunnable", Driver::as_str),
+                declared_driver.map_or("unrunnable", Driver::as_str)
             ),
             Self::ScenarioFamilyMismatch => {
                 write!(
@@ -268,6 +281,17 @@ impl BenchRecord {
             return Err(RecordError::DriverRunnabilityMismatch {
                 driver: self.driver,
                 runnability_driver: self.runnability.driver(),
+            });
+        }
+        let declared_driver = match &self.runnability {
+            Runnability::Preferred { .. } => Some(scenario.preferred),
+            Runnability::Degraded { .. } => scenario.fallback,
+            Runnability::Unrunnable { .. } => None,
+        };
+        if self.runnability.driver() != declared_driver && self.runnability.driver().is_some() {
+            return Err(RecordError::DeclaredDriverMismatch {
+                runnability_driver: self.runnability.driver(),
+                declared_driver,
             });
         }
         let observable = self.driver.observable_stages();
@@ -413,6 +437,23 @@ mod tests {
             Err(RecordError::DriverRunnabilityMismatch {
                 driver: Driver::DockerDirect,
                 runnability_driver: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_disabled_image_pull_cannot_claim_a_docker_fallback() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.scenario = "docker/image-pull".to_owned();
+        record.runnability = Runnability::Degraded {
+            driver: Driver::DockerDirect,
+            missing_for_preferred: vec![crate::scenario::Requirement::VelnorJobDriver],
+        };
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::DeclaredDriverMismatch {
+                runnability_driver: Some(Driver::DockerDirect),
+                declared_driver: None,
             })
         );
     }
