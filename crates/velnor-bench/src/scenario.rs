@@ -109,6 +109,10 @@ pub enum Requirement {
     LinuxHost,
 }
 
+// This flips only when `drivers::build` contains the runner-owned dispatch
+// implementation. It is not an operator-provided host fact.
+const VELNOR_JOB_DRIVER_AVAILABLE: bool = false;
+
 impl Requirement {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -176,9 +180,6 @@ impl Runnability {
 pub struct Capabilities {
     pub docker_daemon: bool,
     pub buildx: bool,
-    /// Whether this build includes the real Velnor job benchmark driver.
-    /// This is deliberately false until that driver is implemented.
-    pub velnor_job_driver: bool,
     pub registered_runner: bool,
     pub github_credentials: bool,
     pub actions_fixture: bool,
@@ -202,7 +203,6 @@ impl Capabilities {
         Self {
             docker_daemon: environment.has_docker(),
             buildx: environment.buildkit_version.is_known(),
-            velnor_job_driver: false,
             registered_runner: environment.has_runner(),
             github_credentials,
             actions_fixture: environment.fixture_commit.is_known(),
@@ -218,7 +218,7 @@ impl Capabilities {
         match requirement {
             Requirement::DockerDaemon => self.docker_daemon,
             Requirement::Buildx => self.buildx,
-            Requirement::VelnorJobDriver => self.velnor_job_driver,
+            Requirement::VelnorJobDriver => VELNOR_JOB_DRIVER_AVAILABLE,
             Requirement::RegisteredRunner => self.registered_runner,
             Requirement::GithubCredentials => self.github_credentials,
             Requirement::ActionsFixture => self.actions_fixture,
@@ -543,7 +543,6 @@ mod tests {
         let capabilities = Capabilities {
             docker_daemon: true,
             buildx: true,
-            velnor_job_driver: false,
             registered_runner: true,
             github_credentials: true,
             actions_fixture: true,
