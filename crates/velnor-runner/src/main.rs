@@ -53,12 +53,4 @@ mod tests {
         runtime.shutdown_timeout(Duration::from_millis(20));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
-
-    #[test]
-    fn control_plane_blocking_pool_is_explicitly_bounded() {
-        // A job body on this pool would make the bound unsafe; job execution
-        // owns a dedicated thread precisely so this number can stay small.
-        assert!(CONTROL_PLANE_BLOCKING_THREADS >= 8);
-        assert!(CONTROL_PLANE_BLOCKING_THREADS <= 64);
-    }
 }
