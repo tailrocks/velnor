@@ -249,17 +249,16 @@ pub fn monitor_workflow_run<'a>(
         .context("monitor timeout exceeds instant range")?;
     let evidence_path = config.evidence_path();
     let mut observations: Vec<WorkflowRunObservation> = Vec::new();
-    let mut timed_out = false;
     let mut observation_count = 0;
 
     let mut first_poll = true;
-    let final_run = loop {
+    let (final_run, timed_out) = loop {
         if !first_poll && Instant::now() >= deadline {
-            timed_out = true;
-            break observations
+            let final_run = observations
                 .last()
                 .map(|observation| observation.run.clone())
                 .context("monitor timed out before observing a run")?;
+            break (final_run, true);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let run = fetch_run(&config.repo, config.run_id, remaining)?;
@@ -295,12 +294,10 @@ pub fn monitor_workflow_run<'a>(
             &mut observations,
         )?;
         if current.is_terminal() {
-            timed_out = response_acquired_at >= deadline;
-            break current;
+            break (current, response_acquired_at >= deadline);
         }
         if observation_count >= MAX_MONITOR_OBSERVATIONS || Instant::now() >= deadline {
-            timed_out = true;
-            break current;
+            break (current, true);
         }
         thread::sleep(
             config
