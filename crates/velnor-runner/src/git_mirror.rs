@@ -101,10 +101,10 @@ pub struct MirrorCheckout {
 
 /// Bring the shared mirror up to date for `want` and return the commit.
 ///
-/// Locking: the exclusive lock is taken only to create or rebuild the mirror.
-/// The network fetch runs under a shared lock, so concurrent jobs fetch in
-/// parallel instead of serializing behind one another, and a job whose commit
-/// is already mirrored returns without any lock upgrade or network traffic.
+/// Locking: health probing runs under a shared lock. All mirror mutations —
+/// including ref publication, fetch, pinning, and requested-SHA resolution —
+/// run under one exclusive lock. Workspace hydration happens after this
+/// function returns and remains independent of the mirror writer lease.
 ///
 /// # Errors
 /// Store or lock cannot be created, the mirror cannot be repaired, or the
@@ -132,20 +132,22 @@ pub fn ensure_mirror<R: CommandRunner>(
     flock(&lock, FlockOperation::LockShared)
         .with_context(|| format!("share-lock git mirror {}", mirror.display()))?;
 
+    let initially_healthy = mirror_is_healthy(runner, &mirror);
+    flock(&lock, FlockOperation::Unlock)
+        .with_context(|| format!("unlock git mirror {}", mirror.display()))?;
+    flock(&lock, FlockOperation::LockExclusive)
+        .with_context(|| format!("lock git mirror {}", mirror.display()))?;
+
+    // The shared read phase is only a fast preflight. A writer may have
+    // repaired or changed the mirror after it released the shared lock, so the
+    // exclusive owner must always recheck before mutating it.
     let mut repaired = false;
-    if !mirror_is_healthy(runner, &mirror) {
-        flock(&lock, FlockOperation::LockExclusive)
-            .with_context(|| format!("lock git mirror {}", mirror.display()))?;
-        // Another job may have repaired it while we waited for the upgrade.
-        if !mirror_is_healthy(runner, &mirror) {
-            if mirror.exists() {
-                quarantine_mirror(&mirror)?;
-                repaired = true;
-            }
-            initialize_mirror(runner, &mirror)?;
+    if !initially_healthy || !mirror_is_healthy(runner, &mirror) {
+        if mirror.exists() {
+            quarantine_mirror(&mirror)?;
+            repaired = true;
         }
-        flock(&lock, FlockOperation::LockShared)
-            .with_context(|| format!("share-lock git mirror {}", mirror.display()))?;
+        initialize_mirror(runner, &mirror)?;
     }
 
     if let Some(sha) = short_circuit_sha(runner, &mirror, want) {
@@ -522,8 +524,15 @@ fn ensure_success(code: i32, operation: &str, stderr: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
+        },
+    };
+
     use super::*;
-    use crate::executor::ProcessCommandRunner;
+    use crate::executor::{CommandRunner, ProcessCommandRunner};
 
     fn want(git_ref: &str) -> MirrorWant {
         MirrorWant {
@@ -634,6 +643,47 @@ mod tests {
         let config = fs::read_to_string(mirror.path.join("config")).unwrap();
         assert!(!config.contains("token"));
         assert!(!config.contains("url ="));
+    }
+
+    #[test]
+    fn concurrent_cold_fetches_serialize_mirror_writers() {
+        let fixture = Fixture::new();
+        let first = fixture.commit("one");
+        let second = fixture.commit("two");
+        let clone_url = fixture.clone_url();
+        let gate = Arc::new(Barrier::new(2));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let first_handle = spawn_mirror_fetch(
+            fixture.store.clone(),
+            clone_url.clone(),
+            first.clone(),
+            gate.clone(),
+            in_flight.clone(),
+            max_in_flight.clone(),
+        );
+        let second_handle = spawn_mirror_fetch(
+            fixture.store.clone(),
+            clone_url,
+            second.clone(),
+            gate,
+            in_flight,
+            max_in_flight.clone(),
+        );
+
+        let first_result = first_handle
+            .join()
+            .expect("first mirror fetch thread panicked")
+            .expect("first mirror fetch failed");
+        let second_result = second_handle
+            .join()
+            .expect("second mirror fetch thread panicked")
+            .expect("second mirror fetch failed");
+
+        assert_eq!(first_result, first);
+        assert_eq!(second_result, second);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -812,5 +862,55 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0, "{stderr}");
         stdout.trim().to_string()
+    }
+
+    fn spawn_mirror_fetch(
+        store: PathBuf,
+        clone_url: String,
+        sha: String,
+        gate: Arc<Barrier>,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    ) -> std::thread::JoinHandle<Result<String>> {
+        std::thread::spawn(move || {
+            gate.wait();
+            let mut runner = CoordinatedFetchRunner {
+                inner: ProcessCommandRunner,
+                in_flight,
+                max_in_flight,
+            };
+            ensure_mirror(&mut runner, &store, &clone_url, None, &want(&sha))
+                .map(|checkout| checkout.sha)
+        })
+    }
+
+    struct CoordinatedFetchRunner {
+        inner: ProcessCommandRunner,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+
+    impl CommandRunner for CoordinatedFetchRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.inner.run(program, args)
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            let is_fetch = program == "git" && args.iter().any(|arg| arg == "fetch");
+            if !is_fetch {
+                return self.inner.run_with_env(program, args, env);
+            }
+
+            let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(active, Ordering::SeqCst);
+            let result = self.inner.run_with_env(program, args, env);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
     }
 }
