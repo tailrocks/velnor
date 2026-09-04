@@ -678,6 +678,7 @@ mod tests {
             "::stop-commands::pause-logging\n::add-mask::hidden\n::pause-logging::\n\
              ::add-mask::seen\n",
             CommandPolicy {
+                allow_unsecure_commands: false,
                 allow_unsecure_stop_command_tokens: true,
             },
         );
