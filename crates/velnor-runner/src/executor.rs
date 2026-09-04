@@ -403,9 +403,36 @@ pub struct ProcessCommandRunner;
 
 const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
-fn record_docker_result(program: &str, result: &CommandResult) {
-    if program == "docker" && result.code != 0 {
-        crate::execution::invalidate_docker_job_cgroup_boundary();
+/// Deadline and operation class for one host process invocation.
+///
+/// A non-`docker` program keeps the caller's deadline. A `docker` invocation
+/// gets the deadline its operation class earns: control-plane classes are
+/// bounded by the class, and only the payload class — the job's own work —
+/// takes the caller's step deadline. This is the single place a host `docker`
+/// deadline is decided.
+fn docker_deadline(
+    program: &str,
+    args: &[String],
+    requested: Duration,
+) -> (Option<crate::docker::DockerOp>, Duration) {
+    if program != "docker" {
+        return (None, requested);
+    }
+    let (op, deadline) = crate::docker::deadline_for(args, requested);
+    (Some(op), deadline)
+}
+
+/// Record one completed host `docker` invocation against the running job.
+///
+/// This is the only invocation counter: `CommandRunner` is the single seam
+/// every host process spawn passes through, so no call site carries one.
+fn record_docker_result(
+    op: Option<crate::docker::DockerOp>,
+    started: std::time::Instant,
+    result: &CommandResult,
+) {
+    if let Some(op) = op {
+        crate::docker::observe(op, started.elapsed(), result.code, result.code == 124);
     }
 }
 
@@ -549,11 +576,8 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
     ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
-        let timeout = if program == "docker" {
-            crate::docker_lease::docker_cli_timeout(args, timeout)
-        } else {
-            timeout
-        };
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let rm_claim = if program == "docker" {
             crate::docker_lease::claim_docker_container_rm(args)
         } else {
@@ -596,7 +620,7 @@ impl CommandRunner for ProcessCommandRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(output.status)?,
@@ -604,7 +628,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 
@@ -635,6 +659,8 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
@@ -686,7 +712,7 @@ impl CommandRunner for ProcessCommandRunner {
             let _ = watchdog.join();
         }
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(status)?,
@@ -694,7 +720,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 
@@ -704,6 +730,12 @@ impl CommandRunner for ProcessCommandRunner {
         args: &[String],
         env: &[(String, String)],
     ) -> Result<CommandResult> {
+        if program == "docker" {
+            // No host Docker invocation runs unbounded. The step default is
+            // only ever reachable by the payload class; every control-plane
+            // class is bounded by its own deadline inside `run_timeout_with_env`.
+            return self.run_timeout_with_env(program, args, env, DEFAULT_STEP_TIMEOUT);
+        }
         let mut command = Command::new(program);
         command.args(args);
         for (name, value) in env {
@@ -719,7 +751,6 @@ impl CommandRunner for ProcessCommandRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         };
-        record_docker_result(program, &result);
         Ok(result)
     }
 
@@ -750,6 +781,8 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
@@ -780,7 +813,7 @@ impl CommandRunner for ProcessCommandRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(output.status)?,
@@ -788,7 +821,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 }
@@ -12837,11 +12870,30 @@ fn effective_step_timeout(
     )
 }
 
-fn timeout_command_result(stdout: String, mut stderr: String) -> CommandResult {
+/// Result of an invocation the watchdog killed.
+///
+/// A control-plane `docker` call that expired is a daemon fault, not the
+/// workflow exceeding its own `timeout-minutes`, and says so: reporting the
+/// workflow message for a wedged daemon sent operators looking at the wrong
+/// thing.
+fn timeout_command_result(
+    op: Option<crate::docker::DockerOp>,
+    deadline: Duration,
+    stdout: String,
+    mut stderr: String,
+) -> CommandResult {
     if !stderr.is_empty() {
         stderr.push('\n');
     }
-    stderr.push_str("##[error]The operation was canceled because it exceeded timeout-minutes.\n");
+    match op.filter(|op| op.is_control_plane()) {
+        Some(op) => {
+            stderr.push_str("##[error]");
+            stderr.push_str(&crate::docker::DockerTimeout::new(op, deadline).to_string());
+            stderr.push('\n');
+        }
+        None => stderr
+            .push_str("##[error]The operation was canceled because it exceeded timeout-minutes.\n"),
+    }
     CommandResult {
         code: 124,
         stdout,
@@ -13610,12 +13662,62 @@ mod tests {
 
     #[test]
     fn timeout_step_returns_failure_not_hang() {
-        let result = timeout_command_result("stdout\n".into(), "stderr\n".into());
+        let result = timeout_command_result(
+            Some(crate::docker::DockerOp::Payload),
+            Duration::from_secs(60),
+            "stdout\n".into(),
+            "stderr\n".into(),
+        );
 
         assert_eq!(result.code, 124);
         assert_eq!(result.stdout, "stdout\n");
         assert!(result.stderr.contains("timeout-minutes"));
         assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[test]
+    fn control_plane_timeout_names_the_daemon_not_the_workflow() {
+        let result = timeout_command_result(
+            Some(crate::docker::DockerOp::Remove),
+            Duration::from_secs(20),
+            String::new(),
+            String::new(),
+        );
+
+        assert_eq!(result.code, 124);
+        assert!(
+            result.stderr.contains("docker remove operation"),
+            "{result:?}"
+        );
+        assert!(result.stderr.contains("20s"), "{result:?}");
+        assert!(!result.stderr.contains("timeout-minutes"), "{result:?}");
+    }
+
+    #[test]
+    fn no_control_plane_docker_call_inherits_the_step_default() {
+        for args in [
+            vec![
+                "info".to_string(),
+                "--format".to_string(),
+                "{{.ID}}".to_string(),
+            ],
+            vec!["rm".to_string(), "--force".to_string(), "job".to_string()],
+            vec!["kill".to_string(), "job".to_string()],
+            vec!["inspect".to_string(), "job".to_string()],
+        ] {
+            let (op, deadline) = docker_deadline("docker", &args, DEFAULT_STEP_TIMEOUT);
+            assert!(
+                op.is_some_and(crate::docker::DockerOp::is_control_plane),
+                "{args:?}"
+            );
+            assert!(
+                deadline < DEFAULT_STEP_TIMEOUT,
+                "{args:?} inherited the step default"
+            );
+        }
+        let (op, deadline) = docker_deadline("git", &["status".to_string()], DEFAULT_STEP_TIMEOUT);
+        assert!(op.is_none());
+        assert_eq!(deadline, DEFAULT_STEP_TIMEOUT);
     }
 
     #[test]
