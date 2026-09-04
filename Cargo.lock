@@ -3668,6 +3668,7 @@ dependencies = [
 name = "velnor-model"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "noyalib",
  "rustix",
  "serde",
@@ -3752,6 +3753,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "velnor-model",
  "zip",
 ]
 

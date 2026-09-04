@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
+use velnor_model::redaction::{is_redaction, REDACTION};
 use velnor_model::{
     slot_transition_allowed, transition_target, EventReason, ExitClass, Generation,
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobState,
@@ -1771,9 +1772,7 @@ fn json_contains_secret(value: &serde_json::Value) -> bool {
 }
 
 fn json_value_is_exact_redaction(value: &serde_json::Value) -> bool {
-    value
-        .as_str()
-        .is_some_and(|text| text.eq_ignore_ascii_case("[REDACTED]"))
+    value.as_str().is_some_and(is_redaction)
 }
 
 fn secret_key_has_value(text: &str, key: &str) -> bool {
@@ -1834,7 +1833,10 @@ fn is_exact_redaction(value: &str) -> bool {
     if quote.is_some() {
         suffix = &suffix[1..];
     }
-    let Some(rest) = suffix.strip_prefix("[redacted]") else {
+    // One sentinel for the whole system (velnor_model::redaction). The
+    // validator previously accepted only `[REDACTED]`, so a string the runner
+    // had already masked with `***` was rejected as unredacted.
+    let Some(rest) = suffix.strip_prefix(REDACTION) else {
         return false;
     };
     let mut rest = rest;
@@ -2616,8 +2618,11 @@ mod event_tests {
         assert!(validate_event_row(&valid).is_ok());
 
         for detail in [
-            "token=[REDACTED]LEAK",
-            "{\"token\":\"[REDACTED]LEAK\"}",
+            "token=***LEAK",
+            "{\"token\":\"***LEAK\"}",
+            // The old sentinels are no longer redaction: only `***` is.
+            "token=[REDACTED]",
+            "token=[redacted]",
             "api-key=REAL_SECRET",
             "access-token: REAL_SECRET",
             "client-secret=REAL_SECRET",
@@ -2636,7 +2641,7 @@ mod event_tests {
         }
 
         let mut redacted = valid;
-        redacted.detail = Some("{\"token\":\"[REDACTED]\"}".to_owned());
+        redacted.detail = Some("{\"token\":\"***\"}".to_owned());
         assert!(validate_event_row(&redacted).is_ok());
 
         for detail in [
@@ -2651,8 +2656,32 @@ mod event_tests {
         }
 
         let mut escaped_redacted = event("a", "job-a", "job.started");
-        escaped_redacted.detail = Some(r"tok\u0065n=[REDACTED]".to_owned());
+        escaped_redacted.detail = Some(r"tok\u0065n=***".to_owned());
         assert!(validate_event_row(&escaped_redacted).is_ok());
+    }
+
+    /// The runner masks with `velnor_model::redaction`. Whatever that
+    /// produces must survive this validator: when the two disagree, a
+    /// correctly masked string is rejected as if it still carried a
+    /// credential, and the operator loses the event.
+    #[test]
+    fn the_shared_maskers_output_is_accepted_by_the_event_validator() {
+        let masker = velnor_model::redaction::SecretMasker::new(["ghs_realcredential"]);
+        for raw in [
+            "token=ghs_realcredential",
+            "{\"token\":\"ghs_realcredential\"}",
+            "access-token: ghs_realcredential",
+            "client-secret=ghs_realcredential",
+        ] {
+            let masked = masker.mask(raw);
+            assert!(!masked.contains("ghs_realcredential"), "{masked}");
+            let mut candidate = event("a", "job-a", "job.started");
+            candidate.detail = Some(masked.clone());
+            assert!(
+                validate_event_row(&candidate).is_ok(),
+                "validator rejected a correctly masked detail: {masked}"
+            );
+        }
     }
 
     #[test]
