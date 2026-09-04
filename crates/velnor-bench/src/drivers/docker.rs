@@ -105,6 +105,9 @@ fn parse_owned_image_inspect(output: &str, expected_owner: &str) -> Result<Strin
     if owner != expected_owner {
         bail!("Docker image owner label mismatch: expected {expected_owner:?}, got {owner:?}");
     }
+    if fields.next().is_some() {
+        bail!("Docker image inspect returned extra fields");
+    }
     let id = raw_id.strip_prefix("sha256:").unwrap_or(raw_id);
     let id = parse_docker_id(id)?;
     Ok(format!("sha256:{id}"))
@@ -1641,6 +1644,11 @@ mod tests {
             parse_owned_image_inspect(&format!("sha256:{id} other-owner"), "owner-token").is_err()
         );
         assert!(parse_owned_image_inspect("sha256:not-an-id owner-token", "owner-token").is_err());
+        assert!(parse_owned_image_inspect(
+            &format!("sha256:{id} owner-token trailing"),
+            "owner-token"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1696,11 +1704,13 @@ mod tests {
     }
 
     #[test]
-    fn resource_recovery_validates_image_for_containers() {
+    fn resource_recovery_requires_exact_ownership_and_resource_shape() {
         let id = "2".repeat(64);
+        let wrong_id = "3".repeat(64);
+        let valid_container = format!("{id}\t/name\towner-token\tjob\tsha256:image");
         assert_eq!(
             parse_owned_resource_inspect(
-                &format!("{id}\t/name\towner-token\tjob\tsha256:image"),
+                &valid_container,
                 &id,
                 "name",
                 "owner-token",
@@ -1711,16 +1721,128 @@ mod tests {
             .expect("owned container"),
             id
         );
-        assert!(parse_owned_resource_inspect(
-            &format!("{id}\t/name\towner-token\tjob\tsha256:other"),
-            &id,
-            "name",
-            "owner-token",
-            "job",
-            Some("sha256:image"),
-            ResourceKind::Container,
-        )
-        .is_err());
+        let valid_network = format!("{id}\tnetwork-name\towner-token\tnetwork");
+        assert_eq!(
+            parse_owned_resource_inspect(
+                &valid_network,
+                &id,
+                "network-name",
+                "owner-token",
+                "network",
+                None,
+                ResourceKind::Network,
+            )
+            .expect("owned network"),
+            id
+        );
+
+        let cases = [
+            (
+                "wrong immutable ID",
+                format!("{wrong_id}\t/name\towner-token\tjob\tsha256:image"),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                Some("sha256:image"),
+                ResourceKind::Container,
+            ),
+            (
+                "wrong name",
+                format!("{id}\t/other-name\towner-token\tjob\tsha256:image"),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                Some("sha256:image"),
+                ResourceKind::Container,
+            ),
+            (
+                "wrong owner",
+                format!("{id}\t/name\tother-owner\tjob\tsha256:image"),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                Some("sha256:image"),
+                ResourceKind::Container,
+            ),
+            (
+                "wrong role",
+                format!("{id}\t/name\towner-token\tservice\tsha256:image"),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                Some("sha256:image"),
+                ResourceKind::Container,
+            ),
+            (
+                "wrong image",
+                format!("{id}\t/name\towner-token\tjob\tsha256:other"),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                Some("sha256:image"),
+                ResourceKind::Container,
+            ),
+            (
+                "network image expectation",
+                valid_network.clone(),
+                &id,
+                "network-name",
+                "owner-token",
+                "network",
+                Some("sha256:image"),
+                ResourceKind::Network,
+            ),
+            (
+                "container shape used as network",
+                valid_container.clone(),
+                &id,
+                "name",
+                "owner-token",
+                "job",
+                None,
+                ResourceKind::Network,
+            ),
+            (
+                "network shape used as container",
+                valid_network,
+                &id,
+                "network-name",
+                "owner-token",
+                "network",
+                None,
+                ResourceKind::Container,
+            ),
+        ];
+        for (
+            case,
+            output,
+            expected_id,
+            expected_name,
+            expected_owner,
+            expected_role,
+            expected_image,
+            kind,
+        ) in cases
+        {
+            assert!(
+                parse_owned_resource_inspect(
+                    &output,
+                    expected_id,
+                    expected_name,
+                    expected_owner,
+                    expected_role,
+                    expected_image,
+                    kind,
+                )
+                .is_err(),
+                "accepted invalid recovery case: {case}"
+            );
+        }
     }
 
     #[test]
