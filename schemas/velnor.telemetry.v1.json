@@ -427,7 +427,10 @@
       "required": ["cause", "ms"],
       "properties": {
         "cause": {"type": "string"},
-        "ms": {"type": "integer", "minimum": 0}
+        "ms": {"type": "integer", "minimum": 0},
+        "stage": {"type": "string"},
+        "wait_reason": {"type": "string"},
+        "stage_started_unix_ms": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": true
     },
