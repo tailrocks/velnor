@@ -3801,3 +3801,18 @@ The reaper still has a separate hardening slice: malformed journal content and
 per-entry filesystem failures must not be silently discarded or removed while
 their named credential remains. That work is intentionally not folded into
 this caller-boundary commit.
+
+## 66. Credential journal entries fail closed — 2026-09-05
+
+Commit `294ece6` hardens each stale-credential journal entry. Directory
+iteration, entry reads, journal opens, journal locks, journal content reads,
+JSON parsing, config reads, and journal removal now carry errors instead of
+silently skipping or deleting state that may still name a live credential.
+Only a concurrent `NotFound` disappearance is ignored; `WOULDBLOCK` still
+means a live owner and is skipped. Malformed records remain on disk and abort
+the cleanup pass. The unreadable-config path now also propagates errors.
+
+Format and diff checks pass. Focused cargo execution was attempted twice with
+an isolated target and was stopped after 60 seconds each time because the host
+was saturated by unrelated Rust workloads; no new runtime test pass is
+claimed yet.
