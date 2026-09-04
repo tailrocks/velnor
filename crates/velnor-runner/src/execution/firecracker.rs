@@ -150,6 +150,9 @@ pub struct FirecrackerBackend {
     pub started: bool,
     pub restored: bool,
     pub jailer: Option<SpawnedProcess>,
+    /// Keeps the jailer registered with the job's cancellation fan-out; dropped
+    /// with the session, which deregisters it.
+    pub cancellation_registration: Option<crate::execution::cancel::TargetRegistration>,
     pub(crate) execution: Option<GuestExecutionState>,
     pub(crate) session_challenge: Option<String>,
 }
@@ -258,6 +261,7 @@ impl FirecrackerBackend {
         let identity_ok = snapshot_identity_matches(&set, world, &resources.identity);
         setup_guest_net(resources, world, events)?;
         self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
+        self.register_jailer_with_cancellation();
         if identity_ok && try_restore_snapshot(&set, world, events)? {
             self.restored = true;
             self.guest_cid = FIRECRACKER_GUEST_CID;
@@ -275,6 +279,7 @@ impl FirecrackerBackend {
                 self.jailer = None;
             }
             self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
+            self.register_jailer_with_cancellation();
         }
         cold_configure(self, &set, resources, world, events)
     }
@@ -440,6 +445,33 @@ impl FirecrackerBackend {
                 failures.join("; ")
             )))
         }
+    }
+
+    /// Make the running microVM reachable from the job's cancellation fan-out.
+    ///
+    /// A microVM job used to be entirely uncancellable: the only cancellation
+    /// path killed a host container that does not exist on this backend, so the
+    /// guest and its jailer kept running while GitHub was told the job was
+    /// cancelled. The jailer is an ordinary host process, so registering its pid
+    /// as a termination target puts the microVM on the same ladder as every
+    /// other target, without the fan-out needing to touch session state from
+    /// another thread.
+    ///
+    /// The registration is held for the session's lifetime and released on
+    /// drop, so a completed job leaves nothing registered.
+    fn register_jailer_with_cancellation(&mut self) {
+        let Some(jailer) = self.jailer.as_ref() else {
+            return;
+        };
+        let Some(token) = crate::execution::cancel::active() else {
+            return;
+        };
+        self.cancellation_registration = Some(token.register(
+            crate::execution::cancel::TerminationTarget::ProcessGroup {
+                pgid: jailer.pid,
+                label: "microvm-jailer".to_string(),
+            },
+        ));
     }
 
     fn stop_jailer(
