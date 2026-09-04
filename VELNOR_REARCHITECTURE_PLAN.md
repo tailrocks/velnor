@@ -2929,8 +2929,8 @@ leaving those sections as history. The tested runner source snapshot is
 `6c0c1af6db984e53fa33608a82927cebee1553a4`; it was materialized with
 `git archive 6c0c1af6db984e53fa33608a82927cebee1553a4 | tar -x -C <scratch>`.
 The verifier's current provenance commit is
-`021c31cb6bacf803c5a99df9ee3f32dbd20de6a6`, with the generated baseline present in its
-parent `c79c878a8bec63095a9f8b7d7aa95733197e098e`. Manifest identity is v12, crate `0.1.250`,
+`38e260bb3ec6e3748cb76b4d358b09d4216e725c`, with the generated baseline present in its
+parent `2c2afc987454ea10cffbef6b18f208167479e38b`. Manifest identity is v12, crate `0.1.250`,
 capability ID `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and source
 SHA `6c0c1af6db984e53fa33608a82927cebee1553a4`. No live dual-lane verdict or deployed image
 digest is claimed.
