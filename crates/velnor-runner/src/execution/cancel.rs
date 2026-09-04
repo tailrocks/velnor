@@ -251,9 +251,10 @@ impl std::fmt::Debug for TerminationTarget {
                 .field("name", name)
                 .field("role", role)
                 .finish(),
-            Self::Hook { label, .. } => {
-                formatter.debug_struct("Hook").field("label", label).finish()
-            }
+            Self::Hook { label, .. } => formatter
+                .debug_struct("Hook")
+                .field("label", label)
+                .finish(),
         }
     }
 }
@@ -379,7 +380,9 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
     ];
     match docker_bounded(&args) {
         Ok(_) => Ok(()),
-        Err(detail) if detail.contains("No such container") || detail.contains("is not running") => {
+        Err(detail)
+            if detail.contains("No such container") || detail.contains("is not running") =>
+        {
             Ok(())
         }
         Err(detail) => Err(detail),
@@ -416,9 +419,14 @@ fn wait_until_gone(
 /// leave anything running.
 #[must_use]
 pub fn terminate(target: &TerminationTarget, deadline: Instant) -> TerminationOutcome {
-    terminate_with(target, deadline, TerminationLadder::default(), &|duration| {
-        std::thread::sleep(duration);
-    })
+    terminate_with(
+        target,
+        deadline,
+        TerminationLadder::default(),
+        &|duration| {
+            std::thread::sleep(duration);
+        },
+    )
 }
 
 /// [`terminate`] with an explicit ladder and sleep, so the escalation order is
@@ -527,6 +535,12 @@ fn run_ladder(
 #[derive(Default)]
 struct Registry {
     targets: Vec<(u64, TerminationTarget)>,
+    /// Ids already put through the ladder. Termination is idempotent per
+    /// target: a fan-out triggered by a late registration must not replay the
+    /// ladder against targets an earlier fan-out already terminated, or a
+    /// cancelled job sends a second kill to a container that is already gone
+    /// and records a duplicate outcome.
+    terminated: std::collections::HashSet<u64>,
 }
 
 struct Inner {
@@ -726,12 +740,16 @@ impl JobCancellation {
     }
 
     fn deregister(&self, id: u64) {
-        self.0
+        let mut registry = self
+            .0
             .registry
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .targets
-            .retain(|(existing, _)| *existing != id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.targets.retain(|(existing, _)| *existing != id);
+        // Ids are never reused (`next_id` only increments), so forgetting the
+        // termination mark here keeps the set bounded by the live registry
+        // rather than by the number of targets the job ever created.
+        registry.terminated.remove(&id);
     }
 
     /// Targets currently registered, for tests and forensics.
@@ -787,15 +805,26 @@ impl JobCancellation {
     /// Public so the daemon-shutdown path can drive a synchronous fan-out and
     /// observe the outcome before it exits.
     pub fn fan_out_once(&self) {
-        let targets: Vec<TerminationTarget> = self
-            .0
-            .registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .targets
-            .iter()
-            .map(|(_, target)| target.clone())
-            .collect();
+        // Claim the unterminated targets under one lock, marking them before
+        // the ladder runs, so a concurrent registration cannot select the same
+        // target for a second fan-out.
+        let targets: Vec<TerminationTarget> = {
+            let mut registry = self
+                .0
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pending: Vec<(u64, TerminationTarget)> = registry
+                .targets
+                .iter()
+                .filter(|(id, _)| !registry.terminated.contains(id))
+                .map(|(id, target)| (*id, target.clone()))
+                .collect();
+            for (id, _) in &pending {
+                registry.terminated.insert(*id);
+            }
+            pending.into_iter().map(|(_, target)| target).collect()
+        };
         if targets.is_empty() {
             return;
         }
@@ -1028,7 +1057,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![
                 TerminationSignal::Interrupt,
                 TerminationSignal::Terminate,
@@ -1069,7 +1100,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Interrupt]
         );
         assert!(outcome.gone);
@@ -1101,7 +1134,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Kill]
         );
     }
