@@ -2716,6 +2716,7 @@ fn release_spec(profile: &EstateProfile) -> Option<ReleaseSpec> {
     release_contract_complete(&spec).then_some(spec)
 }
 
+#[cfg(test)]
 fn catalog_config(profile: &'static EstateProfile, runners: RunnerMode) -> ProjectConfig {
     catalog_config_with_default_branch(profile, runners, "main")
 }
