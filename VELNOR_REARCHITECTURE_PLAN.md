@@ -3698,3 +3698,28 @@ capability plus typed runtime evidence (configured and observed cache mode,
 immutable image digest, and opt-out checks), coordinated with the reserved
 VelnorJob driver. Until that boundary exists, the existing unavailable-driver
 gate is the honest result and no host Cargo fallback may certify default MBX.
+
+## 60. Git trace evidence state and worker-slot correction — 2026-09-05
+
+The canonical `perf/docker-rust-mbx` branch now preserves Git evidence as an
+explicit state in benchmark result schema v2. `NotMeasured` is used by Docker
+direct measurements that do not trace Git. Cargo-direct evidence distinguishes
+complete observed Trace2 lifecycles, observed-but-unsuccessful Git commands,
+and marker-only `NoGitTraceObserved` output; zero counters are never used as a
+missing-evidence sentinel. Record validation rejects an observed state whose
+process count is zero.
+
+Each Cargo worker owns a unique trace slot armed with a nonce/worker marker
+before timing. The reader strips and validates that exact marker, parses each
+worker independently, aggregates only complete traces, and retains explicit
+mixed worker counts. Missing, overwritten, empty, malformed, or incomplete
+slots fail closed. A separate `git --version` preflight was considered and
+rejected as insufficient proof of a no-Git measured window: it validates only a
+different process and cannot prove that Cargo did not spawn a child which
+failed before Trace2 initialization. The honest state name is therefore
+`no_git_trace_observed`, not a literal no-process claim.
+
+The six increments are `263ca3e`, `4ddfd13`, `4bba57a`, `fa22d7f`, `6c8ad85`,
+and `382665d`. Focused verification at the canonical tip passes: `velnor-bench`
+package tests `128`, strict package Clippy, format, and diff checks. This does
+not claim live Docker, VelnorJob, child-process census, or default-MBX evidence.
