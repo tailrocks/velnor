@@ -7106,6 +7106,26 @@ fn start_broker_cancellation_poll(
         cancellation,
     } = watch;
     tokio::spawn(async move {
+        // Register the containers the job owns as termination targets, so the
+        // ladder terminates them rather than a separate `docker kill` racing it.
+        //
+        // The eager kill this replaces ran on the line after `request()`, which
+        // SIGKILLed the job container at *request* level — defeating the whole
+        // point of `terminate_at()` sparing it until `Forced` so `always()` and
+        // `cancelled()` post steps can still exec into a live container. Docker
+        // actions run in a sibling sidecar, so both names are registered: the
+        // sidecar first, because it is the current step's own work and dies on
+        // request, while the job container waits for escalation.
+        let _sidecar_target =
+            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+                name: format!("velnor-docker-action-{job_container_name}"),
+                role: crate::execution::cancel::ContainerRole::DockerAction,
+            });
+        let _job_container_target =
+            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+                name: job_container_name.clone(),
+                role: crate::execution::cancel::ContainerRole::Job,
+            });
         let mut broker = broker;
         let mut error_streak: u32 = 0;
         loop {
@@ -7134,7 +7154,6 @@ fn start_broker_cancellation_poll(
                         canceled.store(true, Ordering::SeqCst);
                         cancellation
                             .request(crate::execution::cancel::CancelReason::RegistrationLost);
-                        kill_job_container(&job_container_name);
                         break;
                     }
                     if is_credential_poll_error(&error) {
@@ -7221,7 +7240,6 @@ fn start_broker_cancellation_poll(
                 cancellation.set_forced_after(grace);
             }
             cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
-            kill_job_container(&job_container_name);
             break;
         }
     })
@@ -8004,44 +8022,6 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
         }
     }
 }
-
-fn kill_job_container(container_name: &str) {
-    // Docker actions run in a sibling sidecar, so killing only the long-lived
-    // job container leaves `docker run` blocked until the action exits. Stop
-    // the exact job-owned sidecar first, then the job container.
-    for name in [
-        format!("velnor-docker-action-{container_name}"),
-        container_name.to_string(),
-    ] {
-        // Bounded: an unbounded kill against a wedged daemon voids cancellation
-        // while the job is still reported as canceled. A kill that does not
-        // land is reported, never swallowed.
-        let args = vec!["kill".to_string(), name.clone()];
-        let (_, deadline) = crate::docker::deadline_for(&args, KILL_FALLBACK_DEADLINE);
-        match crate::docker_lease::run_host_docker_bounded(&args, deadline) {
-            Ok(_) => {
-                println!("Killed Docker container {name} after GitHub cancellation.");
-            }
-            Err(error) => {
-                let detail = format!("{error:#}");
-                if detail.contains("No such container") {
-                    continue;
-                }
-                eprintln!("Failed to kill Docker container {name}: {detail}");
-                tracing::warn!(
-                    target: "velnor.docker",
-                    docker_op = crate::docker::DockerOp::Kill.label(),
-                    container = name.as_str(),
-                    "cancellation kill did not land; the job container may still be running"
-                );
-            }
-        }
-    }
-}
-
-/// `docker kill` classifies as a control-plane operation, so this never
-/// applies; it exists so the call names a finite deadline at every seam.
-const KILL_FALLBACK_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Counters for the mutable side-effect classes that plan 009 requires to occur
 /// strictly after a job's action closure has been admitted. They start at zero

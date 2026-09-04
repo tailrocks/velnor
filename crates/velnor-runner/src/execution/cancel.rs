@@ -287,6 +287,19 @@ impl TerminationTarget {
         }
     }
 
+    /// Ordering within one fan-out pass: lower runs first.
+    ///
+    /// A hook is how a target is asked to stop *itself* — the microVM guest's
+    /// vsock `Cancel` is one — so hooks precede the process and container
+    /// terminations that take the decision away from it.
+    #[must_use]
+    pub const fn termination_rank(&self) -> u8 {
+        match self {
+            Self::Hook { .. } => 0,
+            _ => 1,
+        }
+    }
+
     /// Stable identity used for deduplication and log lines.
     #[must_use]
     pub fn key(&self) -> String {
@@ -912,7 +925,7 @@ impl JobCancellation {
                 CancelLevel::None => CancelLevel::Requested,
                 level => level,
             };
-            let pending: Vec<(u64, TerminationTarget)> = registry
+            let mut pending: Vec<(u64, TerminationTarget)> = registry
                 .targets
                 .iter()
                 .filter(|(id, target)| {
@@ -921,6 +934,14 @@ impl JobCancellation {
                 })
                 .map(|(id, target)| (*id, target.clone()))
                 .collect();
+            // Graceful targets run before bounded ones, regardless of the order
+            // they were registered in. Registration order is an accident of
+            // startup sequencing: the microVM jailer is registered when the VM
+            // is created and the guest's own `Cancel` hook only once the
+            // session exists, so ordering by registration killed the VM before
+            // asking it to stop — inverting the design. `sort_by_key` is
+            // stable, so targets of equal rank keep their registration order.
+            pending.sort_by_key(|(_, target)| target.termination_rank());
             for (id, _) in &pending {
                 registry.terminated.insert(*id);
             }
@@ -1123,9 +1144,11 @@ mod tests {
         assert_eq!(
             after_request,
             vec![
+                // Hooks first: a hook asks a target to stop itself, so it must
+                // precede the terminations that take the decision away.
+                "hook:vsock-cancel".to_string(),
                 "container:velnor-buildkit-1".to_string(),
                 "pgid:4242".to_string(),
-                "hook:vsock-cancel".to_string(),
             ],
             "a cancellation request must not destroy the job or service containers"
         );
@@ -1139,9 +1162,9 @@ mod tests {
         assert_eq!(
             reached,
             vec![
+                "hook:vsock-cancel",
                 "container:velnor-buildkit-1",
                 "pgid:4242",
-                "hook:vsock-cancel",
                 "container:velnor-job-1",
                 "container:velnor-service-1-postgres",
             ],
@@ -1259,6 +1282,34 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Kill]
+        );
+    }
+
+    /// Registration order must not decide termination order. The microVM
+    /// registers its jailer when the VM is created and the guest's `Cancel`
+    /// hook only once the session exists, so ordering by registration killed
+    /// the VM before asking it to stop.
+    #[test]
+    fn a_hook_runs_before_terminations_registered_earlier() {
+        let token = JobCancellation::recording(None);
+        let _jailer = token.register(TerminationTarget::ProcessGroup {
+            pgid: 4242,
+            label: "microvm-jailer".into(),
+        });
+        let _guest = token.register(TerminationTarget::Hook {
+            label: "microvm-guest-cancel".into(),
+            run: Arc::new(|_| Ok(())),
+        });
+        token.request(CancelReason::ServerRequested);
+        token.fan_out_once();
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec!["hook:microvm-guest-cancel", "pgid:4242"],
+            "the guest is asked to stop before its VM is killed, though it registered second"
         );
     }
 
