@@ -30,8 +30,6 @@ enum Kind {
     ExistingImage,
     /// Job-shaped container: workspace mount plus a user command.
     JobContainer,
-    /// Removes the image first, so the pull is inside the measurement.
-    ImagePull,
     /// Job container plus a linked service container and a readiness wait.
     ServiceContainer,
     /// `docker build` with every layer cached.
@@ -161,7 +159,10 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     let kind = match scenario.id {
         "docker/existing-image" => Kind::ExistingImage,
         "docker/simple-job-container" => Kind::JobContainer,
-        "docker/image-pull" => Kind::ImagePull,
+        "docker/image-pull" => bail!(
+            "docker/image-pull is disabled: an isolated Docker daemon/data root is required; \
+             refusing to mutate the shared Docker daemon"
+        ),
         "docker/service-container" => Kind::ServiceContainer,
         "docker/build-cached" => Kind::BuildCached,
         "docker/build-uncached" => Kind::BuildUncached,
@@ -298,15 +299,6 @@ impl Workload for DockerWorkload {
         }
         self.scratch.allocate(&context.work_root)?;
         match self.kind {
-            Kind::ImagePull => {
-                // Nothing to warm: the pull is the measurement.
-                self.notes.push(
-                    "bytes_downloaded is the uncompressed image size the daemon reports after \
-                     the pull, not the compressed bytes moved over the wire; the Docker CLI \
-                     does not expose the latter"
-                        .to_owned(),
-                );
-            }
             Kind::ServiceContainer => {
                 let image = SERVICE_IMAGE.to_owned();
                 let pulled = context
@@ -369,9 +361,6 @@ impl Workload for DockerWorkload {
         match self.kind {
             Kind::ExistingImage | Kind::JobContainer => {
                 self.run_container_lifecycle(context, &mut stages)?;
-            }
-            Kind::ImagePull => {
-                self.run_image_pull(context, &mut stages, &mut resources)?;
             }
             Kind::ServiceContainer => {
                 self.run_service_container(context, &mut stages)?;
@@ -554,108 +543,6 @@ impl DockerWorkload {
         if !removed.ok() {
             let stderr = removed.stderr.clone();
             let primary = anyhow::anyhow!("docker container teardown failed: {}", stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
-        }
-        stages.insert(Stage::Teardown, teardown_ms);
-        Ok(())
-    }
-
-    fn run_image_pull(
-        &mut self,
-        context: &mut Context,
-        stages: &mut BTreeMap<Stage, u64>,
-        resources: &mut Resources,
-    ) -> Result<()> {
-        let image = context.job_image.clone();
-        remove_image_if_missing(context, &image).context("removing image for cold pull")?;
-
-        let (pulled, pull_ms) = timed(|| context.runner.run("docker", &["pull", &image]).cloned());
-        let pulled = pulled?;
-        if !pulled.ok() {
-            bail!("docker pull failed: {}", pulled.stderr.trim());
-        }
-        stages.insert(Stage::DockerSetup, pull_ms);
-
-        if let Ok(size) = context.runner.capture(
-            "docker",
-            &["image", "inspect", &image, "--format", "{{.Size}}"],
-        ) && let Ok(bytes) = size.parse::<u64>()
-        {
-            resources.bytes_downloaded = bytes;
-        }
-        self.run_container_lifecycle_after_pull(context, stages)
-    }
-
-    fn run_container_lifecycle_after_pull(
-        &mut self,
-        context: &mut Context,
-        stages: &mut BTreeMap<Stage, u64>,
-    ) -> Result<()> {
-        let name = self.container_name("pull");
-        let image = context.job_image.clone();
-        self.own_container(&name);
-        let (created, create_ms) = timed(|| {
-            context
-                .runner
-                .run(
-                    "docker",
-                    &[
-                        "create",
-                        "--name",
-                        &name,
-                        "--entrypoint",
-                        "/bin/sh",
-                        &image,
-                        "-c",
-                        "sleep 30",
-                    ],
-                )
-                .cloned()
-        });
-        let created = created?;
-        if !created.ok() {
-            let primary =
-                anyhow::anyhow!("docker create after pull failed: {}", created.stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
-        }
-        stages.insert(Stage::ContainerCreate, create_ms);
-        let (started, start_ms) =
-            timed(|| context.runner.run("docker", &["start", &name]).cloned());
-        let started = started?;
-        if !started.ok() {
-            let primary =
-                anyhow::anyhow!("docker start after pull failed: {}", started.stderr.trim());
-            return Err(with_cleanup(primary, force_remove(context, &name)));
-        }
-        stages.insert(Stage::ContainerStart, start_ms);
-        let (executed, exec_ms) = timed(|| {
-            context
-                .runner
-                .run("docker", &["exec", &name, "/bin/sh", "-c", USER_COMMAND])
-                .cloned()
-        });
-        let executed = executed?;
-        if !executed.ok() {
-            let primary = anyhow::anyhow!(
-                "first user command after pull failed: {}",
-                executed.stderr.trim()
-            );
-            return Err(with_cleanup(primary, force_remove(context, &name)));
-        }
-        stages.insert(Stage::FirstUserCommand, exec_ms);
-        let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
-        if let Err(error) = completion {
-            return Err(with_cleanup(error, force_remove(context, &name)));
-        }
-        stages.insert(Stage::CompletionOverhead, completion_ms);
-        let (removed, teardown_ms) =
-            timed(|| context.runner.run("docker", &["rm", "-f", &name]).cloned());
-        let removed = removed?;
-        if !removed.ok() {
-            let primary = anyhow::anyhow!(
-                "docker teardown after pull failed: {}",
-                removed.stderr.trim()
-            );
             return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::Teardown, teardown_ms);
@@ -969,10 +856,23 @@ mod tests {
         for scenario in crate::scenario::MATRIX {
             if scenario.family == crate::scenario::Family::Docker
                 && scenario.fallback == Some(crate::scenario::Driver::DockerDirect)
+                && scenario.id != "docker/image-pull"
             {
                 assert!(build(scenario).is_ok(), "{} has no workload", scenario.id);
             }
         }
+    }
+
+    #[test]
+    fn image_pull_is_refused_before_workload_construction() {
+        let scenario = crate::scenario::find("docker/image-pull").expect("scenario");
+        let error = build(scenario).map(|_| ()).expect_err("must refuse");
+        let message = error.to_string();
+        assert!(
+            message.contains("isolated Docker daemon/data root"),
+            "{message}"
+        );
+        assert!(message.contains("shared Docker daemon"), "{message}");
     }
 
     #[test]
