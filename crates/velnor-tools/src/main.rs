@@ -2122,6 +2122,18 @@ struct TargetSurface {
     unsupported: Vec<String>,
 }
 
+const CHECKOUT_SUPPORTED_INPUTS: &[&str] = &[
+    "repository",
+    "ref",
+    "token",
+    "path",
+    "fetch-depth",
+    "clean",
+    "fetch-tags",
+    "persist-credentials",
+    "lfs",
+];
+
 fn target_audit(args: TargetAuditArgs) -> Result<()> {
     if !args.check_target_mvp && !args.self_test {
         bail!("pass --check-target-mvp or --self-test");
@@ -2365,18 +2377,7 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
         && let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping())
     {
         for input in with.keys() {
-            let supported = matches!(
-                input.as_str(),
-                "repository"
-                    | "ref"
-                    | "token"
-                    | "path"
-                    | "fetch-depth"
-                    | "persist-credentials"
-                    | "clean"
-                    | "fetch-tags"
-                    | "lfs"
-            );
+            let supported = CHECKOUT_SUPPORTED_INPUTS.contains(&input.as_str());
             if !supported {
                 surface.unsupported.push(format!(
                     "{workflow_path}: unsupported actions/checkout input {input}"
@@ -4733,41 +4734,88 @@ jobs:
     }
 
     #[test]
-    fn target_audit_checkout_inputs_match_admitted_surface() {
-        for (input, expected_unsupported) in [
-            ("clean", false),
-            ("fetch-tags", false),
-            ("submodules", true),
-        ] {
-            let step = serde_yaml::from_str::<serde_yaml::Value>(&format!(
-                "uses: actions/checkout@v7\nwith:\n  {input}: \"true\"\n"
-            ))
-            .unwrap();
-            let mut surface = TargetSurface::default();
-            collect_step(&mut surface, ".github/workflows/test.yml", &step);
+    fn target_capability_surface_stays_backed_by_runner_manifest() {
+        const MANIFEST_SOURCE: &str = include_str!("../../velnor-runner/src/manifest.rs");
+        let manifest_actions = MANIFEST_SOURCE
+            .split_once("pub static ACTIONS: &[ActionCapability] = &[")
+            .and_then(|(_, source)| source.split_once("\n];\n\n/// Exact"))
+            .map(|(source, _)| source)
+            .expect("runner manifest action table must have its expected shape");
+        let manifest_actions_lower = manifest_actions.to_ascii_lowercase();
 
-            assert_eq!(
-                !surface.unsupported.is_empty(),
-                expected_unsupported,
-                "checkout input {input} drifted from the admitted surface: {:?}",
-                surface.unsupported
-            );
-        }
-    }
-
-    #[test]
-    fn target_audit_does_not_advertise_unadmitted_action_families() {
-        let expected = expected_target_uses();
-        for action in [
-            "actions/setup-python",
-            "baptiste0928/cargo-install",
-            "dtolnay/rust-toolchain",
-        ] {
+        for repository in expected_target_uses()
+            .keys()
+            .filter(|repository| !repository.starts_with("./"))
+        {
+            let needle = format!("\"{}\"", repository.to_ascii_lowercase());
             assert!(
-                !expected.contains_key(action),
-                "{action} has no manifest capability and must not be advertised"
+                manifest_actions_lower.contains(&needle),
+                "target audit advertises {repository}, but runner manifest does not admit it"
             );
         }
+
+        let checkout_manifest = manifest_actions
+            .split_once("capability!(\n        \"actions/checkout\",")
+            .and_then(|(_, source)| {
+                source.split_once("capability!(\n        \"actions/cache\",")
+            })
+            .map(|(source, _)| source)
+            .expect("runner manifest must contain the checkout capability before cache");
+        let input_pattern = Regex::new(
+            r#"InputRule::(?:Any|Literal|RequiredLiteral|Forbidden|Predicate)\(\s*"([^"]+)""#,
+        )
+        .expect("manifest input rule pattern must compile");
+        let manifest_inputs = input_pattern
+            .captures_iter(checkout_manifest)
+            .map(|capture| capture[1].to_string())
+            .collect::<BTreeSet<_>>();
+        let advertised_inputs = CHECKOUT_SUPPORTED_INPUTS
+            .iter()
+            .map(|input| (*input).to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            advertised_inputs, manifest_inputs,
+            "target audit checkout inputs must match the runner manifest"
+        );
+
+        let supported_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  repository: owner/repository
+  ref: main
+  token: token
+  path: checkout
+  fetch-depth: 0
+  clean: "true"
+  fetch-tags: "true"
+  persist-credentials: "false"
+  lfs: "false"
+"#,
+        )
+        .expect("supported checkout inputs must parse");
+        let mut supported_surface = TargetSurface::default();
+        collect_step(&mut supported_surface, "fixture.yml", &supported_step);
+        assert!(
+            supported_surface.unsupported.is_empty(),
+            "manifest-backed checkout inputs must be accepted: {:?}",
+            supported_surface.unsupported
+        );
+
+        let submodules_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  submodules: recursive
+"#,
+        )
+        .expect("checkout submodules input must parse");
+        let mut submodules_surface = TargetSurface::default();
+        collect_step(&mut submodules_surface, "fixture.yml", &submodules_step);
+        assert_eq!(
+            submodules_surface.unsupported,
+            vec!["fixture.yml: unsupported actions/checkout input submodules"]
+        );
     }
 
     #[test]
