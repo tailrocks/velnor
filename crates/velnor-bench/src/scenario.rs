@@ -288,6 +288,17 @@ const VELNOR_JOB: &[Requirement] = &[
     Requirement::DockerDaemon,
     Requirement::NetworkEgress,
 ];
+// Rust rows also require MBX: without the artifact store, a result cannot
+// establish the default Rust path this matrix is intended to measure.
+const VELNOR_RUST_JOB: &[Requirement] = &[
+    Requirement::VelnorJobDriver,
+    Requirement::RegisteredRunner,
+    Requirement::GithubCredentials,
+    Requirement::ActionsFixture,
+    Requirement::DockerDaemon,
+    Requirement::NetworkEgress,
+    Requirement::Mbx,
+];
 const CONTAINER: &[Requirement] = &[Requirement::DockerDaemon];
 /// The cargo fallback runs on the host with no container and no runner: it
 /// measures the build alone, which is precisely the scope of the bash script
@@ -320,41 +331,41 @@ scenarios! {
     "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
         "Stage breakdown while every configured slot is busy";
 
-    // Rust cache behaviour. These rows require a real Velnor job: host Cargo
-    // can measure compilation, but cannot establish Velnor acceleration.
-    "rust/cold", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    // Rust cache behaviour. These rows require a real Velnor job and MBX: host
+    // Cargo can measure compilation, but cannot establish Velnor acceleration.
+    "rust/cold", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Fully cold: no target dir, no shared cache, no mbx store";
-    "rust/warm", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/warm", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Warm caches from an immediately preceding identical job";
-    "rust/noop", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/noop", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Re-run with no input change; measures pure fingerprint overhead";
-    "rust/fresh-worktree-same-commit", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/fresh-worktree-same-commit", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "New worktree at the same commit; isolates path and mtime sensitivity";
-    "rust/small-source-edit", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/small-source-edit", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "One-line edit in a leaf crate";
-    "rust/lockfile-update", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST_ONLINE,
+    "rust/lockfile-update", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST_ONLINE,
         "Cargo.lock changes; measures dependency rebuild blast radius";
-    "rust/manifest-touch", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/manifest-touch", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Manifest mtime changes with no content change; isolates manifest-driven invalidation";
-    "rust/feature-set-change", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/feature-set-change", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Different feature set for the same dependency graph";
-    "rust/build-script-change", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/build-script-change", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "build.rs edit; measures rerun-if invalidation";
-    "rust/native-sys", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/native-sys", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Native -sys crate with a C toolchain dependency";
-    "rust/proc-macro", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/proc-macro", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Proc-macro crate rebuild and its downstream invalidation";
-    "rust/cargo-check", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/cargo-check", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "cargo check over the workspace";
-    "rust/cargo-build", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/cargo-build", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "cargo build over the workspace";
-    "rust/nextest", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/nextest", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "cargo nextest run over the workspace";
-    "rust/clippy", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/clippy", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "cargo clippy --all-targets over the workspace";
-    "rust/doc", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/doc", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "cargo doc over the workspace";
-    "rust/concurrent-jobs", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_JOB, HOST_RUST,
+    "rust/concurrent-jobs", Rust, VelnorJob, Some(Driver::CargoDirect), VELNOR_RUST_JOB, HOST_RUST,
         "Concurrent Rust jobs contending for one shared cache and mbx store";
 
     // Docker behaviour.
@@ -453,6 +464,61 @@ mod tests {
             "persistent-host/after-gc",
         ] {
             assert!(find(id).is_some(), "matrix is missing {id}");
+        }
+    }
+
+    #[test]
+    fn rust_rows_share_mbx_gated_requirements_without_changing_other_rows() {
+        for scenario in MATRIX {
+            if scenario.family == Family::Rust {
+                assert_eq!(
+                    scenario.requires, VELNOR_RUST_JOB,
+                    "{} must use the shared Rust requirements",
+                    scenario.id
+                );
+                assert!(scenario.requires.contains(&Requirement::Mbx));
+            } else {
+                assert_eq!(
+                    scenario.requires, VELNOR_JOB,
+                    "{} must keep the common Velnor job requirements",
+                    scenario.id
+                );
+                assert!(!scenario.requires.contains(&Requirement::Mbx));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_mbx_keeps_rust_rows_unavailable() {
+        let capabilities = Capabilities {
+            docker_daemon: true,
+            registered_runner: true,
+            github_credentials: true,
+            actions_fixture: true,
+            network_egress: true,
+            ..Capabilities::default()
+        };
+        let expected_missing = vec![Requirement::VelnorJobDriver, Requirement::Mbx];
+
+        for scenario in MATRIX
+            .iter()
+            .filter(|scenario| scenario.family == Family::Rust)
+        {
+            assert_eq!(
+                scenario.missing(capabilities),
+                expected_missing,
+                "{} must report the missing MBX requirement",
+                scenario.id
+            );
+            assert!(
+                matches!(
+                    scenario.runnability(capabilities),
+                    Runnability::Unrunnable { ref missing }
+                        if missing == &expected_missing
+                ),
+                "{} must not fall back to host Cargo without MBX",
+                scenario.id
+            );
         }
     }
 
