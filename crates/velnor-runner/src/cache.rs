@@ -621,6 +621,32 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
     reclaim_for_disk_pressure_with_context(target_bytes, &roots, layout.as_ref())
 }
 
+/// Reclaim one work root using the current process storage layout.
+///
+/// The explicit-layout variant below is the implementation seam used by
+/// callers that already hold a configuration snapshot. This wrapper preserves
+/// the existing crate-local test and operator entry point for callers that
+/// provide only filesystem roots.
+pub(crate) fn reclaim_work_root(
+    work_root: &Path,
+    run_root: &Path,
+    log_root: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+    emergency: bool,
+) -> Result<ReclaimReport> {
+    let layout = crate::storage::StorageLayout::resolve();
+    reclaim_work_root_with_layout(
+        work_root,
+        run_root,
+        log_root,
+        target_bytes,
+        in_use_scopes,
+        emergency,
+        layout.as_ref(),
+    )
+}
+
 fn reclaim_for_disk_pressure_with_context(
     target_bytes: u64,
     roots: &[PathBuf],
