@@ -158,6 +158,9 @@ pub enum GitEvidence {
     NotMeasured,
     /// The measured command produced no Git process trace after trace setup
     /// had been validated.
+    /// Historical v2 input `no_git_process` is accepted as a deserialization
+    /// alias; new output always uses `no_git_trace_observed`.
+    #[serde(alias = "no_git_process")]
     NoGitTraceObserved,
     /// One or more Git processes emitted complete trace evidence.
     Observed {
@@ -212,7 +215,11 @@ impl GitEvidence {
 }
 
 impl GitCounters {
-    /// Read a trace2 event file written by `GIT_TRACE2_EVENT`.
+    /// Read a trace2 event file written by `GIT_TRACE2_EVENT` and return its
+    /// aggregate counters.
+    ///
+    /// The returned counters do not retain process completion status; use
+    /// [`GitTrace::from_event_file`] when that status is needed.
     ///
     /// # Errors
     /// The file could not be read or its event stream is incomplete/invalid.
@@ -220,10 +227,14 @@ impl GitCounters {
         GitTrace::from_event_file(path).map(|trace| trace.counters)
     }
 
-    /// Parse a trace2 event stream and retain its completion status.
+    /// Parse a trace2 event stream and return its aggregate counters.
+    ///
+    /// The returned counters do not retain process completion status; use
+    /// [`GitTrace::from_events`] when that status is needed.
     ///
     /// # Errors
-    /// The file could not be read or its event stream is incomplete/invalid.
+    /// The stream is empty, malformed, incomplete, or has mismatched
+    /// completion codes.
     pub fn from_events(stream: &str) -> Result<Self, TraceError> {
         GitTrace::from_events(stream).map(|trace| trace.counters)
     }
