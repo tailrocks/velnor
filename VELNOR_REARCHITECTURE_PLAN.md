@@ -3841,3 +3841,28 @@ advanced. The exact requested branches now resolve to Velnor
 `04322d5c7e7e11f37a312e084fc354cf54dc80da`. Each canonical worktree is clean
 and matches its corresponding `origin/<branch>` tip. No branch substitution
 occurred; subsequent audits and implementation use these newer heads.
+
+## 69. Shared branch convergence and worker trust boundary — 2026-09-05
+
+The canonical Velnor branch is now `1a4e3791f14e8faa2547367365b04d598c27d4eb`
+and equals `origin/perf/docker-rust-mbx`. The action Unicode fix is active in
+`110762f`; the child-worker trust-boundary fix is active in `09df833`. The
+worker boundary resolves `DaemonArgs.trust_scope` before any trust-scoped
+store path is derived, while preserving the process-local write-once winner.
+
+The stale benchmark branches whose patches are already represented by newer
+target commits were recorded as ancestry-only merges through `1a4e379`; their
+older trees were not replayed over current code. The MBX scenario branch remains
+parked because its `Requirement::Mbx` evidence is a host probe and cannot prove
+the default Docker job image's MBX path.
+
+## 70. Historical journal poison remains a migration gate — 2026-09-05
+
+Current migrations stamp their own versions and repair fresh v2–v5 upgrades,
+but a historically poisoned journal can carry a v4 `jobs` shape under
+`PRAGMA user_version=5`. The current v6 opener adds v6 columns and stamps 6
+without adding `jobs.provisional`; `Journal::open` then succeeds while
+materialization fails on the missing column. The exact v6-after-open poison has
+the same defect. A narrow transactional repair and regression coverage remain
+required: repair only the known v4-shaped `jobs` table at version 5 or 6, and
+refuse unrelated or partial shapes without stamping them.
