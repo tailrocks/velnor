@@ -171,9 +171,7 @@ where
 {
     // Any credential an aborted job left on this host is unowned once its
     // process is gone; take it out before adding another one.
-    if let Err(error) = reap_stale_checkout_credentials() {
-        eprintln!("Warning: could not reap stale checkout credentials: {error:#}");
-    }
+    reap_stale_checkout_credentials().context("reap stale checkout credentials")?;
     let mirror = match mirror_store {
         // A mirror failure used to warn and fall back to a direct checkout,
         // which turned one broken mirror into a permanent, silent slowdown for
@@ -1955,6 +1953,34 @@ mod tests {
         assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
         assert!(config_has_credential(&config));
         assert!(journal.join(".new-credential.pending").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkout_fails_closed_when_the_credential_journal_cannot_be_read() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&journal, "not a directory").unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(journal));
+
+        let mut runner = RecordingRunner::default();
+        let error = execute_checkout(
+            &mut runner,
+            &test_checkout_plan(root.join("workspace")),
+            &mut Vec::new(),
+        )
+        .expect_err("checkout must stop when stale credentials cannot be inspected");
+
+        assert!(
+            format!("{error:#}").contains("reap stale checkout credentials"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "checkout ran Git after credential reaper failure"
+        );
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
         std::fs::remove_dir_all(root).ok();
     }
 
