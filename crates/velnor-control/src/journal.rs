@@ -33,6 +33,8 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 pub const JOURNAL_SCHEMA_VERSION: u32 = 6;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const SETUP_RETRIES: u32 = 5;
+const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
 
 /// Durable send attempts a completion may burn before it is unresolvable.
@@ -1390,40 +1392,17 @@ impl Journal {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // Inspect before enabling WAL or mutating schema. This transaction is
-        // read-only and preserves future, legacy, and malformed journals.
-        preflight_schema(&conn)?;
-        let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-        if !wal.eq_ignore_ascii_case("wal") {
-            return Err(StoreError::new(
-                velnor_model::ExitClass::Operation,
-                "journal.wal.unavailable",
-            )
-            .with_remediation("the filesystem must support WAL journaling"));
+        let mut attempt = 0;
+        loop {
+            match setup_journal(&mut conn) {
+                Ok(()) => break,
+                Err(error) if is_transient_contention(&error) && attempt < SETUP_RETRIES => {
+                    attempt += 1;
+                    std::thread::sleep(SETUP_BACKOFF_STEP * attempt);
+                }
+                Err(error) => return Err(error),
+            }
         }
-        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-        assert_sqlite_version(&conn)?;
-        // One immediate transaction owns the complete setup sequence. The
-        // physical DDL and every version stamp become visible together, so a
-        // concurrent opener cannot combine an old user_version with a newer
-        // table shape. The second preflight is inside that write transaction:
-        // another opener may have completed setup after the first read-only
-        // preflight, and its current state is the only state we may migrate.
-        let transaction =
-            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let (_, outbox_shape) = preflight_schema_snapshot(&transaction)?;
-        transaction.execute_batch(SCHEMA)?;
-        if matches!(outbox_shape, OutboxSchema::V2) {
-            migrate_v2_to_v3(&transaction)?;
-        }
-        // Upgrade the physical shape and stamp the current version *before*
-        // any event may be written. An older binary that reopens this file
-        // then hits `journal.schema.newer` and refuses it, instead of
-        // decoding it with an incomplete event vocabulary.
-        migrate_v3_to_v4(&transaction)?;
-        migrate_v4_to_v5(&transaction)?;
-        migrate_v5_to_v6(&transaction)?;
-        transaction.commit()?;
         let journal = Self {
             conn,
             path: path.to_path_buf(),
@@ -1682,6 +1661,49 @@ impl Journal {
             .filter(OutboxRecord::is_pending)
             .collect())
     }
+}
+
+fn is_transient_contention(error: &StoreError) -> bool {
+    error.envelope.reason == "store.locked"
+}
+
+/// Run the complete cold-start setup once. The caller retries only SQLite
+/// contention; schema, WAL, and integrity errors remain fail-closed.
+fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
+    // Inspect before enabling WAL or mutating schema. This transaction is
+    // read-only and preserves future, legacy, and malformed journals.
+    preflight_schema(conn)?;
+    let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    if !wal.eq_ignore_ascii_case("wal") {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.wal.unavailable",
+        )
+        .with_remediation("the filesystem must support WAL journaling"));
+    }
+    conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+    assert_sqlite_version(conn)?;
+    // One immediate transaction owns the complete setup sequence. The
+    // physical DDL and every version stamp become visible together, so a
+    // concurrent opener cannot combine an old user_version with a newer
+    // table shape. The second preflight is inside that write transaction:
+    // another opener may have completed setup after the first read-only
+    // preflight, and its current state is the only state we may migrate.
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let (_, outbox_shape) = preflight_schema_snapshot(&transaction)?;
+    transaction.execute_batch(SCHEMA)?;
+    if matches!(outbox_shape, OutboxSchema::V2) {
+        migrate_v2_to_v3(&transaction)?;
+    }
+    // Upgrade the physical shape and stamp the current version *before* any
+    // event may be written. An older binary that reopens this file then hits
+    // `journal.schema.newer` and refuses it, instead of decoding it with an
+    // incomplete event vocabulary.
+    migrate_v3_to_v4(&transaction)?;
+    migrate_v4_to_v5(&transaction)?;
+    migrate_v5_to_v6(&transaction)?;
+    transaction.commit()?;
+    Ok(())
 }
 
 /// Validate the journal's recorded version and physical migration shape.
