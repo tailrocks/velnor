@@ -334,6 +334,7 @@ pub fn orphan_job_workspace_paths(
     )
 }
 
+#[cfg(any(not(unix), test))]
 pub fn disk_usage_percent_from_df(stdout: &str) -> Option<u8> {
     let line = stdout.lines().nth(1)?;
     let cols: Vec<&str> = line.split_whitespace().collect();
@@ -362,7 +363,7 @@ pub fn disk_usage_percent(path: &Path) -> Option<u8> {
     #[cfg(unix)]
     {
         let stat = rustix::fs::statvfs(probe).ok()?;
-        return disk_usage_percent_from_statvfs(stat.f_blocks, stat.f_bavail);
+        disk_usage_percent_from_statvfs(stat.f_blocks, stat.f_bavail)
     }
     #[cfg(not(unix))]
     {
