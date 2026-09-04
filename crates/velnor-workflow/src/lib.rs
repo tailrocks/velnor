@@ -7393,6 +7393,13 @@ path-only = { path = "../path-only" }
             "write valid workflow",
         );
         must(
+            fs::write(
+                workflows.join("ci-policy.yml"),
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc\n    permissions:\n      contents: read\n",
+            ),
+            "write policy entrypoint",
+        );
+        must(
             runtime::enforce_policy(&root),
             "run policy on valid workflow",
         );
