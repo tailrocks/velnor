@@ -1557,9 +1557,7 @@ fn render_composite_expression(
     if expression.eq_ignore_ascii_case("github.workspace") {
         return workspace_container.to_string();
     }
-    if expression.len() >= "inputs.".len()
-        && expression[.."inputs.".len()].eq_ignore_ascii_case("inputs.")
-        && let Some(name) = expression.get("inputs.".len()..)
+    if let Some(name) = ascii_strip_prefix_case_insensitive(expression, "inputs.")
         && let Some(value) = input_value_case_insensitive(inputs, name)
     {
         return value.clone();
@@ -1626,14 +1624,15 @@ fn composite_expression_token_at(
     action_path: &str,
     workspace_container: &str,
 ) -> Option<(usize, String)> {
-    if ascii_starts_with_case_insensitive(value, "inputs.") {
-        let name_end = value["inputs.".len()..]
+    if let Some(input_name) = ascii_strip_prefix_case_insensitive(value, "inputs.") {
+        let name_length = input_name
             .bytes()
             .position(|byte| !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-')
-            .map_or(value.len(), |offset| offset + "inputs.".len());
-        if name_end > "inputs.".len()
-            && let Some(input) =
-                input_value_case_insensitive(inputs, &value["inputs.".len()..name_end])
+            .unwrap_or(input_name.len());
+        let name_end = "inputs.".len() + name_length;
+        if name_length > 0
+            && let Some(name) = input_name.get(..name_length)
+            && let Some(input) = input_value_case_insensitive(inputs, name)
             && token_boundary_after(value, name_end)
         {
             return Some((name_end, expression_single_quote(input)));
@@ -1656,11 +1655,16 @@ fn composite_expression_token_at(
 }
 
 fn ascii_starts_with_case_insensitive(value: &str, prefix: &str) -> bool {
-    value.len() >= prefix.len()
-        && value.as_bytes()[..prefix.len()]
-            .iter()
-            .zip(prefix.as_bytes())
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    ascii_strip_prefix_case_insensitive(value, prefix).is_some()
+}
+
+fn ascii_strip_prefix_case_insensitive<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let candidate = value.get(..prefix.len())?;
+    if candidate.eq_ignore_ascii_case(prefix) {
+        value.get(prefix.len()..)
+    } else {
+        None
+    }
 }
 
 fn token_boundary_after(value: &str, length: usize) -> bool {
@@ -2005,6 +2009,29 @@ runs:
                 "/__w"
             ),
             "echo inputs.name; echo ${{ format('inputs.name', 'velnor') }}"
+        );
+    }
+
+    #[test]
+    fn composite_expression_rendering_is_utf8_safe() {
+        let inputs = [("name".to_string(), "velnor".to_string())]
+            .into_iter()
+            .collect();
+
+        for expression in ["日本語です", "αααα", "ünïcödé"] {
+            assert_eq!(
+                render_composite_value(
+                    &format!("${{{{ {expression} }}}}"),
+                    &inputs,
+                    "/__a",
+                    "/__w"
+                ),
+                format!("${{{{ {expression} }}}}")
+            );
+        }
+        assert_eq!(
+            render_composite_value("${{ 日本語 inputs.name }}", &inputs, "/__a", "/__w"),
+            "${{ 日本語 'velnor' }}"
         );
     }
 
