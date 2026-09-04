@@ -3785,3 +3785,18 @@ object-directory contract now repaired here; the two lease failures passed
 when run individually and are host lock contention. Re-running the repaired
 executor test was blocked twice by 60 seconds of silence from unrelated
 concurrent Rust workloads, so no full-suite pass is claimed yet.
+
+## 65. Credential reaper failure boundary — 2026-09-05
+
+Commit `c329796` makes `execute_checkout_with_mirror` propagate stale
+credential-journal inspection failures before it prepares a mirror or runs any
+Git command. The regression test uses an unreadable journal path and asserts
+both the contextual error and zero checkout commands. Format and diff checks
+pass; focused cargo execution was attempted against both the shared and an
+isolated target but was starved by unrelated host workloads, so execution is
+not claimed here.
+
+The reaper still has a separate hardening slice: malformed journal content and
+per-entry filesystem failures must not be silently discarded or removed while
+their named credential remains. That work is intentionally not folded into
+this caller-boundary commit.
