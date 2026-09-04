@@ -510,7 +510,7 @@ fn store_roots_with_layout(
     // The hosted actions-cache service is durable storage like any other class.
     // It was previously invisible to `cache du` and to every collector, so each
     // tenant accumulated its own budget outside the ledger.
-    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+    if let Some(layout) = layout {
         stores.push(StoreRoot {
             kind: CacheStore::GhaCache,
             path: crate::store_catalog::gha_cache_root(&layout).join("tenants"),
@@ -627,6 +627,7 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
 /// callers that already hold a configuration snapshot. This wrapper preserves
 /// the existing crate-local test and operator entry point for callers that
 /// provide only filesystem roots.
+#[allow(dead_code, reason = "crate-local tests exercise the wrapper")]
 pub(crate) fn reclaim_work_root(
     work_root: &Path,
     run_root: &Path,

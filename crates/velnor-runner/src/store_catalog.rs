@@ -100,6 +100,10 @@ pub(crate) struct StoreCatalog {
 impl StoreCatalog {
     /// Catalog for a work root. A per-slot root (`…/work/slot-N`) is lifted to
     /// the daemon-shared root, so a slot-local caller and the GC agree.
+    #[allow(
+        dead_code,
+        reason = "crate-local catalog tests exercise this constructor"
+    )]
     pub(crate) fn for_work_root(root: impl Into<PathBuf>) -> Self {
         let layout = crate::storage::StorageLayout::resolve();
         Self::for_work_root_with_layout(root, layout.as_ref())
