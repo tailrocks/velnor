@@ -3,6 +3,24 @@ use std::time::Duration;
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Tokio's blocking pool is the control plane's pool, and nothing else.
+///
+/// Every task submitted to it is short and bounded: SQLite admission and
+/// retention writes (milliseconds), Docker network sweeps, slot teardown
+/// joins, and the read-only Contents-API metadata fetches of action
+/// admission. The job body is minutes to hours and runs on its own OS thread
+/// (the runner's `run_on_job_execution_thread`), so it can never occupy a
+/// thread this pool needs.
+///
+/// Sizing: one slot process admits one job at a time, so steady-state demand
+/// is a handful of threads — the action-admission limiter caps its own
+/// concurrency, retention and the Docker sweep are one task each, and the
+/// teardown joins are bounded by the number of displaced slots. Sixteen
+/// leaves roughly a 2x headroom over that peak while keeping the bound
+/// explicit: the default of 512 is not a budget, it is the absence of one,
+/// and it is what made fail-closed permits look necessary.
+const CONTROL_PLANE_BLOCKING_THREADS: usize = 16;
+
 fn main() -> Result<()> {
     let runtime = build_runtime()?;
     let result = runtime.block_on(velnor_runner::service::execute());
@@ -15,6 +33,7 @@ fn main() -> Result<()> {
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(CONTROL_PLANE_BLOCKING_THREADS)
         .enable_all()
         .build()
 }
@@ -33,5 +52,13 @@ mod tests {
         let started = std::time::Instant::now();
         runtime.shutdown_timeout(Duration::from_millis(20));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn control_plane_blocking_pool_is_explicitly_bounded() {
+        // A job body on this pool would make the bound unsafe; job execution
+        // owns a dedicated thread precisely so this number can stay small.
+        assert!(CONTROL_PLANE_BLOCKING_THREADS >= 8);
+        assert!(CONTROL_PLANE_BLOCKING_THREADS <= 64);
     }
 }

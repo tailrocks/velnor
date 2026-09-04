@@ -143,6 +143,38 @@ fn action_admission_permits() -> Arc<Semaphore> {
     )
 }
 
+/// Run one job body on a dedicated OS thread owned by this slot.
+///
+/// A job runs for minutes to hours. Tokio's blocking pool is sized for the
+/// control plane — millisecond SQLite writes, Docker sweeps, teardown joins,
+/// read-only admission fetches — and a job body parked there is
+/// indistinguishable from a hung control-plane worker. That shared pool is
+/// what made fail-closed admission permits look like the only defence against
+/// queueing behind long work; giving execution its own thread removes the
+/// condition instead of rationing the symptom.
+///
+/// One slot process executes one job at a time, so this is exactly one thread
+/// per slot. The thread outlives an aborted await the same way an in-flight
+/// `spawn_blocking` task does; `Runtime::shutdown_timeout` in `main` still
+/// bounds daemon shutdown, and a lost sender surfaces here as an error rather
+/// than a hang.
+async fn run_on_job_execution_thread<F, T>(job_id: &str, body: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (sender, receiver) = oneshot::channel();
+    std::thread::Builder::new()
+        .name(format!("velnor-job-{job_id}"))
+        .spawn(move || {
+            let _ = sender.send(body());
+        })
+        .context("spawn the dedicated job execution thread")?;
+    receiver
+        .await
+        .context("job execution thread ended without a result (panicked or was killed)")
+}
+
 async fn persist_admission_on_blocking_pool(
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
@@ -5880,7 +5912,7 @@ async fn handle_job_request(
         // here so this async control path can emit its one post-execution
         // PlanSummary before sending run-service completion.
         let execution_telemetry_admission = telemetry_admission.clone();
-        let job_result = tokio::task::spawn_blocking(move || {
+        let job_result = run_on_job_execution_thread(&job.job_id, move || {
             execute_script_job(
                 &config_dir,
                 work_dir,
@@ -5919,7 +5951,7 @@ async fn handle_job_request(
                 completion?;
                 clear_in_flight_job(&teardown_config_dir)
                     .context("failed to clear acknowledged in-flight job")?;
-                return Err(join_error).context("join Docker job execution task");
+                return Err(join_error).context("join Docker job execution thread");
             }
         };
         // Deliberately NOT aborting lock renewal yet: the job lock must stay
