@@ -4756,9 +4756,7 @@ jobs:
 
         let checkout_manifest = manifest_actions
             .split_once("capability!(\n        \"actions/checkout\",")
-            .and_then(|(_, source)| {
-                source.split_once("capability!(\n        \"actions/cache\",")
-            })
+            .and_then(|(_, source)| source.split_once("capability!(\n        \"actions/cache\","))
             .map(|(source, _)| source)
             .expect("runner manifest must contain the checkout capability before cache");
         let input_pattern = Regex::new(
