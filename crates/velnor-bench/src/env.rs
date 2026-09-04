@@ -21,6 +21,7 @@ use crate::{fact::Fact, sys::Runner};
 /// Stable discriminator for the environment block.
 pub const ENVIRONMENT_SCHEMA: &str = "velnor.bench.environment.v1";
 const DOCKER_SERVER_API_VERSION_FORMAT: &str = "{{.Server.APIVersion}}";
+const ACTIONS_FIXTURE_REPOSITORY: &str = "tailrocks/velnor-actions-fixture";
 
 /// Runner configuration under which the measurement was taken.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +108,7 @@ impl EnvironmentIdentity {
             velnor_commit: git_commit(&inputs.velnor_repo, runner).into(),
             fixture_commit: inputs.fixture_repo.as_ref().map_or_else(
                 || Fact::unavailable("no actions fixture checkout was supplied"),
-                |repo| git_commit(repo, runner).into(),
+                |repo| fixture_commit(repo, runner).into(),
             ),
             rustc_version: runner.capture("rustc", &["--version"]).into(),
             cargo_version: runner.capture("cargo", &["--version"]).into(),
@@ -266,6 +267,40 @@ fn git_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
     )
 }
 
+fn fixture_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
+    let remote = runner
+        .capture(
+            "git",
+            &[
+                "-C",
+                &repo.display().to_string(),
+                "remote",
+                "get-url",
+                "origin",
+            ],
+        )
+        .map_err(|error| format!("{} has no readable origin remote: {error}", repo.display()))?;
+    if parse_actions_fixture_remote(&remote).is_none() {
+        return Err(format!(
+            "{} origin remote is not the canonical github.com/{ACTIONS_FIXTURE_REPOSITORY} repository",
+            repo.display()
+        ));
+    }
+    git_commit(repo, runner)
+}
+
+fn parse_actions_fixture_remote(remote: &str) -> Option<&str> {
+    let path = if let Some(path) = remote.strip_prefix("https://github.com/") {
+        path
+    } else if let Some(path) = remote.strip_prefix("ssh://git@github.com/") {
+        path
+    } else {
+        remote.strip_prefix("git@github.com:")?
+    };
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    (path == ACTIONS_FIXTURE_REPOSITORY).then_some(path)
+}
+
 fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
     // Identity probing is read-only. Workload preparation owns image
     // acquisition; pulling here would contaminate cold-pull measurements.
@@ -383,6 +418,12 @@ fn parse_toml_string(text: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
 
     fn inputs() -> ProbeInputs {
@@ -393,6 +434,168 @@ mod tests {
             job_image: None,
             runner_config_dir: None,
         }
+    }
+
+    fn fixture_repo(remote: Option<&str>, with_commit: bool) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("velnor-bench-fixture-{suffix}"));
+        std::fs::create_dir_all(&path).expect("create fixture repo");
+        run_git(&path, &["init", "--quiet"]);
+        if let Some(remote) = remote {
+            run_git(&path, &["remote", "add", "origin", remote]);
+        }
+        if with_commit {
+            run_git(
+                &path,
+                &["commit", "--quiet", "--allow-empty", "--message", "fixture"],
+            );
+        }
+        path
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(["-C", repo.to_str().expect("temporary path is valid UTF-8")])
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "velnor-bench test")
+            .env("GIT_AUTHOR_EMAIL", "velnor-bench@example.invalid")
+            .env("GIT_COMMITTER_NAME", "velnor-bench test")
+            .env("GIT_COMMITTER_EMAIL", "velnor-bench@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn remove_fixture_repo(path: &Path) {
+        std::fs::remove_dir_all(path).expect("remove fixture repo");
+    }
+
+    #[test]
+    fn actions_fixture_remote_parser_accepts_canonical_https_and_ssh_forms() {
+        for remote in [
+            "https://github.com/tailrocks/velnor-actions-fixture",
+            "https://github.com/tailrocks/velnor-actions-fixture.git",
+            "git@github.com:tailrocks/velnor-actions-fixture",
+            "git@github.com:tailrocks/velnor-actions-fixture.git",
+            "ssh://git@github.com/tailrocks/velnor-actions-fixture",
+            "ssh://git@github.com/tailrocks/velnor-actions-fixture.git",
+        ] {
+            assert_eq!(
+                parse_actions_fixture_remote(remote),
+                Some(ACTIONS_FIXTURE_REPOSITORY),
+                "{remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn actions_fixture_remote_parser_rejects_noncanonical_remotes() {
+        for remote in [
+            "http://github.com/tailrocks/velnor-actions-fixture",
+            "https://gitlab.com/tailrocks/velnor-actions-fixture",
+            "https://github.com/other/velnor-actions-fixture",
+            "https://github.com/tailrocks/velnor-actions-fixture-fork",
+            "https://github.com/tailrocks/velnor-actions-fixture/",
+            "git://github.com/tailrocks/velnor-actions-fixture",
+            "git@github.com:tailrocks/velnor-actions-fixture.git.git",
+        ] {
+            assert_eq!(parse_actions_fixture_remote(remote), None, "{remote}");
+        }
+    }
+
+    #[test]
+    fn probe_requires_a_canonical_fixture_origin() {
+        let repo = fixture_repo(Some("https://github.com/tailrocks/velnor.git"), true);
+        let mut probe_inputs = inputs();
+        probe_inputs.fixture_repo = Some(repo.clone());
+        let mut runner = Runner::new();
+
+        let identity = EnvironmentIdentity::probe(&probe_inputs, &mut runner);
+
+        let reason = identity
+            .fixture_commit
+            .reason()
+            .expect("wrong fixture origin must be unavailable");
+        assert!(reason.contains("origin remote"), "{reason}");
+        assert!(reason.contains("canonical"), "{reason}");
+        let capabilities = crate::scenario::Capabilities::from_environment(&identity, false, false);
+        assert!(!capabilities.actions_fixture);
+        assert!(runner.invocations().iter().any(|invocation| {
+            invocation.program == "git"
+                && invocation.args.ends_with(&[
+                    "remote".to_owned(),
+                    "get-url".to_owned(),
+                    "origin".to_owned(),
+                ])
+        }));
+
+        remove_fixture_repo(&repo);
+    }
+
+    #[test]
+    fn probe_records_a_clear_gap_when_fixture_origin_is_missing() {
+        let repo = fixture_repo(None, true);
+        let mut probe_inputs = inputs();
+        probe_inputs.fixture_repo = Some(repo.clone());
+        let mut runner = Runner::new();
+
+        let identity = EnvironmentIdentity::probe(&probe_inputs, &mut runner);
+
+        let reason = identity
+            .fixture_commit
+            .reason()
+            .expect("missing fixture origin must be unavailable");
+        assert!(reason.contains("origin"), "{reason}");
+        assert!(!identity.fixture_commit.is_known());
+        let capabilities = crate::scenario::Capabilities::from_environment(&identity, false, false);
+        assert!(!capabilities.actions_fixture);
+
+        remove_fixture_repo(&repo);
+    }
+
+    #[test]
+    fn probe_accepts_a_canonical_fixture_origin_before_recording_commit() {
+        let repo = fixture_repo(
+            Some("git@github.com:tailrocks/velnor-actions-fixture.git"),
+            true,
+        );
+        let mut probe_inputs = inputs();
+        probe_inputs.fixture_repo = Some(repo.clone());
+        let mut runner = Runner::new();
+
+        let identity = EnvironmentIdentity::probe(&probe_inputs, &mut runner);
+
+        assert!(identity.fixture_commit.is_known());
+        let capabilities = crate::scenario::Capabilities::from_environment(&identity, false, false);
+        assert!(capabilities.actions_fixture);
+
+        remove_fixture_repo(&repo);
+    }
+
+    #[test]
+    fn probe_without_a_fixture_preserves_the_explicit_absence() {
+        let mut runner = Runner::new();
+        let identity = EnvironmentIdentity::probe(&inputs(), &mut runner);
+
+        assert_eq!(
+            identity.fixture_commit.reason(),
+            Some("no actions fixture checkout was supplied")
+        );
+        assert!(!runner.invocations().iter().any(|invocation| {
+            invocation.program == "git"
+                && invocation.args.ends_with(&[
+                    "remote".to_owned(),
+                    "get-url".to_owned(),
+                    "origin".to_owned(),
+                ])
+        }));
     }
 
     #[test]
