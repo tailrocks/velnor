@@ -3723,3 +3723,40 @@ The six increments are `263ca3e`, `4ddfd13`, `4bba57a`, `fa22d7f`, `6c8ad85`,
 and `382665d`. Focused verification at the canonical tip passes: `velnor-bench`
 package tests `128`, strict package Clippy, format, and diff checks. This does
 not claim live Docker, VelnorJob, child-process census, or default-MBX evidence.
+
+## 61. Benchmark evidence and isolated image-pull convergence — 2026-09-05
+
+The benchmark evidence path received five focused corrections after the prior
+checkpoint. `3a4bdb3` rejects Trace2 events after `exit` and before `atexit`;
+`3f1ca62` binds observed Git received bytes to `resources.bytes_downloaded`;
+`eb2a374` rejects impossible mixed-worker process counts; and `9819790`
+accepts the historical `no_git_process` discriminator as v2 input while
+emitting only the honest `no_git_trace_observed` state. The UTF-8 prefix fix in
+`d50b8a4` removes composite-expression panic paths in the runner. The focused
+benchmark gate passed `135` tests with strict Clippy, format, and diff checks.
+
+`f6f29ac` implements the previously deferred `docker/image-pull` fallback with
+one disposable daemon per measured iteration. Its private data-root, exec-root,
+pidfile, Unix socket, exact `DOCKER_HOST`, readiness proof, and cleanup are
+owned by the benchmark helper; cold pulls also require network egress. The
+isolated helper tests and benchmark gate passed, but this host has no `dockerd`,
+so live pull, daemon-failure, and recovery evidence remain unclaimed. The old
+shared-daemon path is not restored.
+
+## 62. Final worker-branch preservation audit — 2026-09-05
+
+The canonical target is `/Users/donbeave/Projects/tailrocks/velnor-project/velnor`
+on `perf/docker-rust-mbx`, currently `f6f29ac`, and it is equal to
+`origin/perf/docker-rust-mbx`. The old clone at
+`/Users/donbeave/Projects/donbeave/velnor` remains untouched, clean, and at
+`ae72e3a`; that tip is an ancestor of the canonical history. Its sole branch,
+all canonical WIP stash parents, standalone objects, and audit merge objects
+remain retained by the archive refs recorded in §§53–56.
+
+The worker branches for action UTF-8, benchmark Git evidence/record/Docker
+ownership, isolated image-pull, Mixed evidence, and wire compatibility are
+patch-equivalent or superseded by the canonical commits above. The workflow
+fix, detached performance backup, and every other worktree remain present and
+clean. The MBX candidate `88218d4` remains preserved but unpromoted because a
+host `mbx --version` probe cannot establish capability inside the default Rust
+job image. No branch or worktree was reset, pruned, force-pushed, or discarded.
