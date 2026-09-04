@@ -6079,6 +6079,11 @@ async fn handle_job_request(
         // here so this async control path can emit its one post-execution
         // PlanSummary before sending run-service completion.
         let execution_telemetry_admission = telemetry_admission.clone();
+        // Recorded the moment the job container exists, so the containers are
+        // torn down however execution ends — including the cancellation path,
+        // which previously produced `teardown: None` and left them running.
+        let teardown_slot: TeardownSlot = Arc::new(Mutex::new(None));
+        let execution_teardown_slot = Arc::clone(&teardown_slot);
         let job_result = run_on_job_execution_thread(&job.job_id, move || {
             execute_script_job(
                 &config_dir,
@@ -6098,6 +6103,7 @@ async fn handle_job_request(
                 daemon_id,
                 reserved_bytes,
                 execution_telemetry_admission,
+                &execution_teardown_slot,
             )
         })
         .await;
@@ -6143,7 +6149,12 @@ async fn handle_job_request(
                         // mirror after the step publishers drain below, so a
                         // canceled job still persists its partial log.
                         step_logs: Vec::new(),
-                        teardown: None,
+                        // The recorded owner, not `None`: a cancelled job still
+                        // has containers to tear down.
+                        teardown: teardown_slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone(),
                         timings: ExecutionTimings::default(),
                         executed_physical_actions: None,
                     }
@@ -7679,6 +7690,7 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -7702,6 +7714,7 @@ fn execute_script_job(
         reserved_bytes,
         telemetry_admission,
         execution_backend,
+        teardown_slot,
     );
     if result.is_err()
         && let Err(e) = fs::remove_dir_all(&job_dir)
@@ -8192,6 +8205,7 @@ fn execute_script_job_inner(
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         return execute_microvm_script_job(
@@ -8792,11 +8806,14 @@ fn execute_script_job_inner(
                 .saturating_add(eager_checkout_plans.len()),
         ),
         step_logs: all_step_logs,
-        teardown: Some(TeardownHandle {
-            container: plan.execution.job_container,
-            job_dir: job_dir.to_path_buf(),
-            services_removed,
-        }),
+        teardown: record_teardown_owner(
+            teardown_slot,
+            TeardownHandle {
+                container: plan.execution.job_container,
+                job_dir: job_dir.to_path_buf(),
+                services_removed,
+            },
+        ),
         timings: ExecutionTimings {
             first_step_ms: Some(first_step_ms),
             checkout_ms: Some(duration_ms(checkout_duration)),
@@ -8899,6 +8916,25 @@ struct TeardownHandle {
     container: crate::container::JobContainerSpec,
     job_dir: PathBuf,
     services_removed: bool,
+}
+
+/// Where the teardown owner is recorded the moment the job container exists.
+///
+/// Returning the handle only in `Ok` made cleanup a property of *succeeding*:
+/// a cancelled or failed job took the error path, `teardown` was `None`, and
+/// `start_post_completion_teardown` was never called, so the workspace and its
+/// containers leaked. Recording it in a cell the caller also holds makes the
+/// cleanup contract independent of how execution ends.
+type TeardownSlot = Arc<Mutex<Option<TeardownHandle>>>;
+
+/// Record the teardown owner and hand back the same handle for the success
+/// path. The caller reads the slot on every other path, so cleanup runs whether
+/// the job succeeded, failed or was cancelled.
+fn record_teardown_owner(slot: &TeardownSlot, handle: TeardownHandle) -> Option<TeardownHandle> {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle.clone());
+    Some(handle)
 }
 
 impl TeardownHandle {
@@ -13706,6 +13742,40 @@ mod tests {
         assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
         assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
         assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
+    }
+
+    /// A cancelled or failed job still owns containers. Recording the teardown
+    /// owner when the container exists — rather than returning it only from the
+    /// success path — is what keeps cleanup independent of how the job ended.
+    #[cfg(unix)]
+    #[test]
+    fn the_teardown_owner_survives_a_failed_execution() {
+        let slot: TeardownSlot = Arc::new(Mutex::new(None));
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "nothing owns teardown before the container exists"
+        );
+
+        let temp =
+            std::env::temp_dir().join(format!("velnor-teardown-owner-{}", uuid::Uuid::new_v4()));
+        let handle = TeardownHandle {
+            container: lease_test_container_spec(&temp),
+            job_dir: temp.join("job"),
+            services_removed: false,
+        };
+        let returned = record_teardown_owner(&slot, handle.clone());
+
+        // The success path still gets the handle back...
+        assert_eq!(
+            returned.map(|owned| owned.job_dir),
+            Some(handle.job_dir.clone())
+        );
+        // ...and every other path can recover the same owner from the slot,
+        // which is what the cancellation path reads instead of `None`.
+        assert_eq!(
+            slot.lock().unwrap().clone().map(|owned| owned.job_dir),
+            Some(handle.job_dir)
+        );
     }
 
     /// The server's grace is honoured, and the shapes upstream can send are
