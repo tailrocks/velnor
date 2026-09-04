@@ -78,15 +78,18 @@ review of the synthesized target architecture, before any broad implementation.
 
 ## 4. Current architecture
 
-_Pending wave 1 reports._
+Described through the bug classes in §8 and consolidated in
+`.rearch/reports/20-synthesis.md`. The sixteen investigation reports are in
+`.rearch/reports/`.
 
 ## 5. Target architecture
 
-_Pending synthesis._
+See §5 (synthesized) below, and `.rearch/reports/20-synthesis.md`.
 
 ## 6. Architectural invariants
 
-_Pending synthesis._
+28 invariants with their enforcing mechanism are stated in
+`.rearch/reports/20-synthesis.md`; 11 are compiler-checked. Summarized in §5 below.
 
 ## 7. Ownership claims
 
