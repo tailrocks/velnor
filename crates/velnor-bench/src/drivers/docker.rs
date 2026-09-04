@@ -16,7 +16,7 @@ use anyhow::{bail, Context as _, Result};
 
 use crate::{
     drivers::{Context, Workload},
-    gittrace::GitCounters,
+    gittrace::GitEvidence,
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
@@ -990,7 +990,7 @@ impl Workload for DockerWorkload {
             stages_ms: stages,
             checkout_phases_ms: BTreeMap::new(),
             resources,
-            git: GitCounters::default(),
+            git: GitEvidence::NotMeasured,
         })
     }
 
