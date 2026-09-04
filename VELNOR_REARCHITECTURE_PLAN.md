@@ -3617,3 +3617,17 @@ This is preservation and ancestry proof, not a claim that every archived WIP
 is correct or belongs in the final branch. Canonical `perf/docker-rust-mbx`
 contains all live branch/worktree content; archive refs retain every discarded
 or uncommitted historical input without introducing unreviewed regressions.
+
+## 54. Canonical object retention proof — 2026-09-05
+
+The canonical object scan initially found `739` unreachable commits. They were
+covered by `178` maximal-tip refs under
+`refs/archive/canonical/fsck-tip-20260905-*`, preserving every intermediate
+ancestor without adding stale history to the working branch. The same scan
+found `97` standalone blobs and `152` standalone trees; all `249` exact objects
+are retained under `refs/archive/canonical/fsck-object-*`.
+
+After publication, `git fsck --no-reflogs --unreachable` reports no unreachable
+objects in the canonical repository. These refs are retention safety rails,
+not merge candidates: live branch/worktree ancestry remains unchanged and no
+unreviewed snapshot was promoted into `perf/docker-rust-mbx`.
