@@ -13,9 +13,10 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-// Approved composites introduced v8; the native GitHub App token adapter is v9;
-// Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11.
-pub const MANIFEST_VERSION: u32 = 11;
+// Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
+// Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11;
+// explicit generic action runtime kinds are v12.
+pub const MANIFEST_VERSION: u32 = 12;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
@@ -411,7 +412,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "fsfe/reuse-action",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: NativeActionAdapter::ApprovedDocker,
         allowed_refs: &[allowed(
             "676e2d560c9a403aa252096d99fcab3e1132b0f5",
             "pinned REUSE compliance Docker action",
@@ -422,7 +423,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "jdx/mr-boxington-action",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: NativeActionAdapter::ApprovedJavaScript,
         allowed_refs: &[allowed(
             "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
             "v1.2.0",
@@ -1821,12 +1822,34 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_eleven_and_structurally_immutable() {
-        // Mr Boxington action admission changes the accepted capability surface
-        // and requires a new version so stale workflow inputs fail closed.
-        assert_eq!(MANIFEST_VERSION, 11);
-        assert_eq!(MANIFEST.version, 11);
+    fn compiled_manifest_is_version_twelve_and_structurally_immutable() {
+        // Generic remote action runtime kinds change the exported capability
+        // surface and require a new version so stale consumers fail closed.
+        assert_eq!(MANIFEST_VERSION, 12);
+        assert_eq!(MANIFEST.version, 12);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn admitted_remote_actions_declare_their_actual_runtime_kind() {
+        let expected = [
+            (
+                "tailrocks/velnor-actions",
+                NativeActionAdapter::ApprovedComposite,
+            ),
+            (
+                "jackin-project/jackin-role-action",
+                NativeActionAdapter::ApprovedComposite,
+            ),
+            ("fsfe/reuse-action", NativeActionAdapter::ApprovedDocker),
+            (
+                "jdx/mr-boxington-action",
+                NativeActionAdapter::ApprovedJavaScript,
+            ),
+        ];
+        for (repository, adapter) in expected {
+            assert_eq!(find(repository).map(|item| item.adapter), Some(adapter));
+        }
     }
 
     #[test]
@@ -2591,6 +2614,8 @@ mod tests {
     fn manifest_covers_every_native_adapter() {
         let expected = [
             NativeActionAdapter::ApprovedComposite,
+            NativeActionAdapter::ApprovedDocker,
+            NativeActionAdapter::ApprovedJavaScript,
             NativeActionAdapter::Checkout,
             NativeActionAdapter::Cache,
             NativeActionAdapter::UploadArtifact,

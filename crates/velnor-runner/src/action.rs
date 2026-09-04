@@ -113,6 +113,10 @@ pub enum ActionRuntime {
 pub enum NativeActionAdapter {
     /// Strictly approved remote composite expanded from its pinned metadata.
     ApprovedComposite,
+    /// Strictly approved remote Docker action executed by the generic Docker path.
+    ApprovedDocker,
+    /// Strictly approved remote JavaScript action executed by the generic fetched-action path.
+    ApprovedJavaScript,
     Checkout,
     Cache,
     UploadArtifact,
