@@ -18,6 +18,7 @@ const PAGE_PREFIX: &str = "v1:";
 #[derive(Clone)]
 pub struct QueryService {
     state: Arc<RwLock<QueryState>>,
+    supported: bool,
 }
 
 impl Default for QueryService {
@@ -36,13 +37,28 @@ impl QueryService {
     /// Create an empty projection.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_support(true)
+    }
+
+    /// Create the production placeholder until normalized Store readers are
+    /// wired. It fails closed rather than returning a false empty projection.
+    #[must_use]
+    pub(crate) fn unsupported() -> Self {
+        Self::with_support(false)
+    }
+
+    fn with_support(supported: bool) -> Self {
         Self {
             state: Arc::new(RwLock::new(QueryState::default())),
+            supported,
         }
     }
 
     /// Replace the projection and advance its cursor generation.
     pub fn replace(&self, mut resources: Vec<AnyResource>) -> Result<(), PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if resources.iter().any(|resource| {
             resource.meta().name.trim().is_empty() || resource.meta().name.len() > 512
         }) {
@@ -66,6 +82,9 @@ impl QueryService {
 
     /// Current projection generation used by watch/read consumers.
     pub fn generation(&self) -> Result<u64, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         self.state
             .read()
             .map(|state| state.generation)
@@ -77,6 +96,9 @@ impl QueryService {
 
 impl QueryPort for QueryService {
     fn query(&self, request: QueryRequest) -> Result<QueryPage, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if request.limit == 0 || request.limit > MAX_PAGE_SIZE {
             return Err(PortError::Invalid {
                 field: "limit".to_owned(),
@@ -152,6 +174,12 @@ impl QueryPort for QueryService {
             resources: page,
             next_page_token,
         })
+    }
+}
+
+fn unsupported() -> PortError {
+    PortError::Unsupported {
+        operation: "query resources".to_owned(),
     }
 }
 

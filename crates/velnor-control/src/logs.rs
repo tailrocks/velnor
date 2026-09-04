@@ -23,16 +23,37 @@ struct LogState {
 }
 
 /// One bounded log stream. Raw input is redacted before it enters state.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LogService {
     state: Arc<RwLock<LogState>>,
+    supported: bool,
+}
+
+impl Default for LogService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LogService {
     /// Create an empty log service.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_support(true)
+    }
+
+    /// Create the production placeholder until durable log storage is wired.
+    /// It fails closed rather than reporting an empty stream.
+    #[must_use]
+    pub(crate) fn unsupported() -> Self {
+        Self::with_support(false)
+    }
+
+    fn with_support(supported: bool) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(LogState::default())),
+            supported,
+        }
     }
 
     /// Append a line after replacing known secrets and path-like internals.
@@ -43,6 +64,9 @@ impl LogService {
         message: &str,
         secrets: &[&str],
     ) -> Result<String, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if !valid_identity(subject) || !valid_identity(source) {
             return Err(PortError::Invalid {
                 field: "subject/source".to_owned(),
@@ -107,6 +131,9 @@ impl LogService {
 
 impl LogPort for LogService {
     fn logs(&self, request: LogRequest) -> Result<Vec<LogItem>, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if !valid_identity(&request.subject)
             || request
                 .source
@@ -325,6 +352,12 @@ fn cursor_fingerprint(subject: &str, source: &str) -> String {
 fn unavailable() -> PortError {
     PortError::Unavailable {
         resource: "log stream".to_owned(),
+    }
+}
+
+fn unsupported() -> PortError {
+    PortError::Unsupported {
+        operation: "read logs".to_owned(),
     }
 }
 

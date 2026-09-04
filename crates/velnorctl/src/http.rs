@@ -27,7 +27,7 @@ use velnor_model::{
 };
 
 use velnor_control::ports::{
-    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest,
+    LogPort, LogRequest, MutationKind, MutationPort, PortError, QueryPage, QueryPort, QueryRequest,
     TelemetryPort, TelemetryRequest, WatchPort, WatchRequest,
 };
 
@@ -692,6 +692,11 @@ async fn query_resource(
     AxumPath(resource_kind): AxumPath<String>,
     query: Result<Query<QueryParams>, QueryRejection>,
 ) -> Result<Json<QueryPage>, ApiError> {
+    if resource_kind.eq_ignore_ascii_case("storage") {
+        return Err(ApiError::from(PortError::Unsupported {
+            operation: "storage catalog query".to_owned(),
+        }));
+    }
     let Query(params) = query.map_err(|_| {
         ApiError::bad_request("query", "query parameters are malformed or unsupported")
     })?;
@@ -1316,6 +1321,10 @@ mod tests {
         let info = socket_request(&path, "GET", "/v1/info", b"").await;
         assert_eq!(response_status(&info), 200);
         assert!(String::from_utf8_lossy(&info).contains("\"mutations\":false"));
+
+        let storage = socket_request(&path, "GET", "/v1/storage", b"").await;
+        assert_eq!(response_status(&storage), 501);
+        assert!(String::from_utf8_lossy(&storage).contains("operation.unsupported"));
 
         let mutation = socket_request(
             &path,

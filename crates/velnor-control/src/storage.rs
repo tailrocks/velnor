@@ -21,6 +21,7 @@ const MAX_RETAINED_PLANS: usize = 1_024;
 #[derive(Clone)]
 pub struct StorageService {
     state: Arc<Mutex<StorageState>>,
+    supported: bool,
 }
 
 impl Default for StorageService {
@@ -41,13 +42,28 @@ impl StorageService {
     /// Create an empty catalog.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_support(true)
+    }
+
+    /// Create the production placeholder until the durable storage catalog is
+    /// wired. It fails closed rather than reporting empty accounting.
+    #[must_use]
+    pub(crate) fn unsupported() -> Self {
+        Self::with_support(false)
+    }
+
+    fn with_support(supported: bool) -> Self {
         Self {
             state: Arc::new(Mutex::new(StorageState::default())),
+            supported,
         }
     }
 
     /// Insert or refresh one catalog object.
     pub fn upsert(&self, mut object: StorageObject) -> Result<u64, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if object.id.is_empty() || object.owner.is_empty() || object.scope.is_empty() {
             return Err(PortError::Invalid {
                 field: "storage_object".to_owned(),
@@ -69,6 +85,9 @@ impl StorageService {
     /// Produce truthful accounting for one scope. Unknown physical bytes stay
     /// unknown rather than being replaced with logical size.
     pub fn snapshot(&self, scope: &str) -> Result<StorageSnapshot, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         let state = self.state.lock().map_err(|_| unavailable())?;
         let mut objects = Vec::new();
         let mut logical_bytes = 0_u64;
@@ -96,6 +115,9 @@ impl StorageService {
 
     /// Build an immutable dry-run GC plan for inactive objects in one scope.
     pub fn plan_gc(&self, scope: &str) -> Result<GcPlan, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         let mut state = self.state.lock().map_err(|_| unavailable())?;
         purge_expired_plans(&mut state);
         let candidates = state
@@ -162,6 +184,9 @@ impl StorageService {
         digest: &str,
         confirmed: bool,
     ) -> Result<u64, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if !confirmed {
             return Err(PortError::Invalid {
                 field: "confirmed".to_owned(),
@@ -240,6 +265,12 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn unavailable() -> PortError {
     PortError::Unavailable {
         resource: "storage catalog".to_owned(),
+    }
+}
+
+fn unsupported() -> PortError {
+    PortError::Unsupported {
+        operation: "storage catalog".to_owned(),
     }
 }
 

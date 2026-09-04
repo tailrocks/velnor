@@ -32,19 +32,19 @@ impl ApplicationServices {
     pub fn with_store(store: Arc<Store>, instance_slug: impl Into<String>) -> StoreResult<Self> {
         let instance_slug = instance_slug.into();
         Ok(Self {
-            // Query resources are rebuilt from authoritative normalized rows
-            // by the Plan 067 adapter; never persist a whole projection blob.
-            query: Arc::new(QueryService::new()),
+            // Normalized Store readers are not wired yet; never expose an
+            // empty projection as if it were authoritative.
+            query: Arc::new(QueryService::unsupported()),
             events: Arc::new(EventStream::with_store(Arc::clone(&store), &instance_slug)?),
-            // Raw job logs remain outside the operational database. Plan 070
-            // owns their log-access persistence path.
-            logs: Arc::new(LogService::new()),
+            // Raw job logs remain outside the operational database; fail
+            // closed until their durable access path is wired.
+            logs: Arc::new(LogService::unsupported()),
             lifecycle: Arc::new(LifecycleService::with_store_for_instance(
                 Arc::clone(&store),
                 &instance_slug,
             )?),
-            // Storage catalog durability belongs to Plan 075.
-            storage: Arc::new(StorageService::new()),
+            // Storage catalog durability is not wired to this bundle yet.
+            storage: Arc::new(StorageService::unsupported()),
             telemetry: Arc::new(TelemetryService::new(path_for_instance(
                 store.path(),
                 &instance_slug,
@@ -108,9 +108,7 @@ mod tests {
 
     use super::*;
     use crate::ports::{LogPort, QueryPort, TelemetryPort, WatchPort};
-    use velnor_model::{
-        AnyResource, Event, ResourceMeta, Source, StorageClass, StorageObject, Timestamp,
-    };
+    use velnor_model::{Event, ResourceMeta, Source, Timestamp};
 
     struct TempDb {
         dir: PathBuf,
@@ -176,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn production_bundle_reopens_normalized_event_store() {
+    fn production_bundle_fails_closed_for_undurable_projections() {
         let database = TempDb::new();
         let services = ApplicationServices::with_store(
             Arc::new(Store::open(&database.path).expect("open store")),
@@ -184,32 +182,29 @@ mod tests {
         )
         .expect("compose services");
 
-        services
-            .query()
-            .replace(vec![AnyResource::Event(event())])
-            .expect("query projection");
+        assert!(matches!(
+            services
+                .query()
+                .query(crate::ports::QueryRequest::default()),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
         services
             .events()
             .publish(event())
             .expect("event projection");
-        services
-            .logs()
-            .append("instance/default", "daemon", "ready", &[])
-            .expect("log projection");
-        services
-            .storage()
-            .upsert(StorageObject {
-                id: "cache/default".to_owned(),
-                class: StorageClass::Cache,
-                scope: "default".to_owned(),
-                owner: "daemon".to_owned(),
-                logical_bytes: 10,
-                physical_bytes: Some(10),
-                active: true,
-                resource_version: 0,
-                observed_at: Timestamp::UNIX_EPOCH,
-            })
-            .expect("storage projection");
+        assert!(matches!(
+            services.logs().logs(crate::ports::LogRequest {
+                subject: "instance/default".to_owned(),
+                source: None,
+                cursor: None,
+                limit: 10,
+            }),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            services.storage().snapshot("default"),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
         drop(services);
 
         let reopened = ApplicationServices::with_store(
@@ -217,16 +212,6 @@ mod tests {
             "default",
         )
         .expect("recompose services");
-        assert_eq!(
-            reopened
-                .query()
-                .query(crate::ports::QueryRequest::default())
-                .expect("query after reopen")
-                .resources
-                .len(),
-            0,
-            "query projection remains in-memory until Plan 067 normalized readers"
-        );
         assert_eq!(
             reopened
                 .events()
@@ -239,29 +224,24 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
+        assert!(matches!(
             reopened
-                .logs()
-                .logs(crate::ports::LogRequest {
-                    subject: "instance/default".to_owned(),
-                    source: None,
-                    cursor: None,
-                    limit: 10,
-                })
-                .expect("logs after reopen")
-                .len(),
-            0,
-            "raw logs remain in-memory until Plan 070"
-        );
-        assert_eq!(
-            reopened
-                .storage()
-                .snapshot("default")
-                .expect("storage after reopen")
-                .objects
-                .len(),
-            0,
-            "storage catalog remains in-memory until Plan 075"
-        );
+                .query()
+                .query(crate::ports::QueryRequest::default()),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            reopened.logs().logs(crate::ports::LogRequest {
+                subject: "instance/default".to_owned(),
+                source: None,
+                cursor: None,
+                limit: 10,
+            }),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            reopened.storage().snapshot("default"),
+            Err(crate::ports::PortError::Unsupported { .. })
+        ));
     }
 }
