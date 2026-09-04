@@ -3831,3 +3831,13 @@ Connectivity and no-reflog unreachable-object scans are clean, and
 `git worktree prune --dry-run --verbose` reports no candidates. No branch,
 worktree, stash, or archived object was reset, deleted, pruned, or
 force-pushed during this continuation.
+
+## 68. Exact branch heads re-resolved — 2026-09-05
+
+The goal's recorded starting SHAs are historical: both requested branches have
+advanced. The exact requested branches now resolve to Velnor
+`perf/docker-rust-mbx` at `40898afdd1950c7a543a22f3fe5f0dec713c266d` and
+`velnor-actions-fixture` `codex/verifier-completion-fixes` at
+`04322d5c7e7e11f37a312e084fc354cf54dc80da`. Each canonical worktree is clean
+and matches its corresponding `origin/<branch>` tip. No branch substitution
+occurred; subsequent audits and implementation use these newer heads.
