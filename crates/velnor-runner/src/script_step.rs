@@ -846,7 +846,7 @@ impl CommandFileSet {
     }
 
     fn collect_state(&self) -> Result<StepCommandState> {
-        Ok(StepCommandState {
+        let mut state = StepCommandState {
             outputs: commands_to_map(parse_command_file(&self.output.host)?),
             env: env_commands_to_map(parse_command_file(&self.env.host)?),
             path: fs::read_to_string(&self.path.host)?
@@ -855,15 +855,71 @@ impl CommandFileSet {
                 .map(ToOwned::to_owned)
                 .collect(),
             state: commands_to_map(parse_command_file(&self.state.host)?),
-            summary: fs::read_to_string(&self.summary.host)?,
+            summary: String::new(),
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
-        })
+        };
+        self.collect_summary(&mut state)?;
+        Ok(state)
     }
+
+    /// Read `GITHUB_STEP_SUMMARY`, refusing anything over the upload limit.
+    ///
+    /// Mirrors `CreateStepSummaryCommand.ProcessCommand` in actions/runner
+    /// `src/Runner.Worker/FileCommandManager.cs`: a missing or empty file
+    /// attaches nothing, and a file larger than `AttachmentSizeLimit` is not
+    /// uploaded at all — the step is failed with `UnsupportedSummarySize`
+    /// instead, so an oversized summary can never reach the durable blob.
+    fn collect_summary(&self, state: &mut StepCommandState) -> Result<()> {
+        let size = match fs::metadata(&self.summary.host) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("stat {}", self.summary.host.display()))
+            }
+        };
+        if size == 0 {
+            return Ok(());
+        }
+        if size > STEP_SUMMARY_SIZE_LIMIT {
+            state.error_count += 1;
+            state.annotations.push(StepAnnotation {
+                level: StepAnnotationLevel::Failure,
+                message: unsupported_summary_size_message(size),
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            });
+            return Ok(());
+        }
+        state.summary = fs::read_to_string(&self.summary.host)
+            .with_context(|| format!("read {}", self.summary.host.display()))?;
+        Ok(())
+    }
+}
+
+/// `CreateStepSummaryCommand.AttachmentSizeLimit` in actions/runner
+/// `src/Runner.Worker/FileCommandManager.cs`: 1 MiB.
+pub const STEP_SUMMARY_SIZE_LIMIT: u64 = 1024 * 1024;
+
+/// `Constants.Runner.UnsupportedSummarySize` in actions/runner
+/// `src/Runner.Common/Constants.cs`, formatted with the same two operands:
+/// the limit and the observed size, both in whole kibibytes.
+fn unsupported_summary_size_message(size: u64) -> String {
+    format!(
+        "$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of {}k, got {}k. \
+         For more information see: \
+         https://docs.github.com/actions/using-workflows/workflow-commands-for-github-actions#adding-a-markdown-summary",
+        STEP_SUMMARY_SIZE_LIMIT / 1024,
+        size / 1024
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -923,12 +979,6 @@ pub enum StepAnnotationLevel {
 }
 
 impl StepCommandState {
-    pub(crate) fn set_env(&mut self, name: String, value: String) {
-        if !is_blocked_env_mutation(&name) {
-            self.env.insert(name, value);
-        }
-    }
-
     pub fn merge(&mut self, other: StepCommandState) {
         self.outputs.extend(other.outputs);
         self.env.extend(other.env);
@@ -1090,6 +1140,45 @@ mod tests {
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn oversized_step_summary_is_refused_and_fails_the_step() {
+        let temp = temp_step_dir();
+        let step = ScriptStep {
+            id: "step1".into(),
+            display_name: String::new(),
+            script: "echo test".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
+
+        // Exactly at the limit is still uploaded.
+        let at_limit = "a".repeat(STEP_SUMMARY_SIZE_LIMIT as usize);
+        fs::write(temp.join("step1_summary"), &at_limit).unwrap();
+        let state = plan.collect_state().unwrap();
+        assert_eq!(state.summary.len(), STEP_SUMMARY_SIZE_LIMIT as usize);
+        assert_eq!(state.error_count, 0);
+        assert!(state.annotations.is_empty());
+
+        // One byte over is dropped entirely and reported as a step error,
+        // matching CreateStepSummaryCommand.ProcessCommand.
+        fs::write(temp.join("step1_summary"), format!("{at_limit}a")).unwrap();
+        let state = plan.collect_state().unwrap();
+        assert_eq!(state.summary, "");
+        assert_eq!(state.error_count, 1);
+        assert_eq!(state.annotations.len(), 1);
+        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
+        assert!(state.annotations[0]
+            .message
+            .starts_with("$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of 1024k, got 1024k."));
+
         fs::remove_dir_all(temp).unwrap();
     }
 
