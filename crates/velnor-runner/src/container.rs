@@ -1371,20 +1371,18 @@ mod tests {
         out
     }
 
-    fn service_env_dir() -> PathBuf {
-        PathBuf::from("/tmp/temp/_velnor/exec-env")
-    }
-
     fn spec() -> JobContainerSpec {
+        let daemon_root = container_test_temp("spec").join("work");
+        let job_root = daemon_root.join("slot-0/job-1");
         JobContainerSpec {
             name: "velnor-job-1".into(),
             image: "ubuntu:24.04".into(),
             network: "velnor-net-1".into(),
-            workspace_host: "/tmp/work".into(),
-            temp_host: "/tmp/temp".into(),
-            home_host: "/tmp/home".into(),
-            actions_host: "/tmp/actions".into(),
-            tools_host: "/tmp/tools".into(),
+            workspace_host: job_root.join("workspace"),
+            temp_host: job_root.join("temp"),
+            home_host: job_root.join("home"),
+            actions_host: job_root.join("actions"),
+            tools_host: job_root.join("tools"),
             mount_docker_socket: true,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             resource_options: vec!["--memory".into(), "8g".into()],
@@ -1399,9 +1397,21 @@ mod tests {
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
             store_trust_class: StoreTrustClass::Trusted,
-            mbx_store_host: Some(PathBuf::from("/tmp/_velnor_mbx/trusted")),
+            mbx_store_host: Some(daemon_root.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
+    }
+
+    fn service_env_dir() -> PathBuf {
+        container_test_temp("service-env").join("exec-env")
+    }
+
+    fn assert_mount(args: &[String], host: &Path, container: &str) {
+        let expected = mount(host, container);
+        assert!(
+            args.contains(&expected),
+            "expected mount {expected}, got {args:?}"
+        );
     }
 
     #[test]
@@ -1423,9 +1433,14 @@ mod tests {
 
     #[test]
     fn default_job_mounts_only_mbx_with_bounded_gc() {
-        let prepared = spec().start_args().unwrap();
+        let job = spec();
+        let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
-        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
+        assert_mount(
+            &args,
+            job.mbx_store_host.as_deref().expect("mbx store"),
+            "/var/cache/mbx",
+        );
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
@@ -1527,10 +1542,11 @@ mod tests {
     fn explicit_sccache_is_mutually_exclusive_with_mbx() {
         let mut job = spec();
         job.mbx_store_host = None;
-        job.sccache_store_host = Some("/tmp/_velnor_sccache/trusted".into());
+        let sccache = job.temp_host.join("_velnor_sccache/trusted");
+        job.sccache_store_host = Some(sccache.clone());
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert_mount(&args, &sccache, "/var/cache/sccache");
         assert!(args.contains(&"RUSTC_WRAPPER=sccache".into()));
         assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
         assert!(args.contains(&"SCCACHE_GHA_ENABLED=false".into()));
@@ -1539,15 +1555,25 @@ mod tests {
     }
 
     fn container_test_temp(name: &str) -> PathBuf {
-        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "velnor-container-{name}-{}-{counter}",
-            std::process::id()
+            "velnor-container-{name}-{}",
+            uuid::Uuid::new_v4().simple()
         ));
-        let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn container_test_specs_and_service_env_dirs_are_disjoint() {
+        let first = spec();
+        let second = spec();
+        assert_ne!(first.temp_host, second.temp_host);
+        assert_ne!(first.env_dir(), second.env_dir());
+        assert_ne!(first.mbx_store_host, second.mbx_store_host);
+
+        let first_service = service_env_dir();
+        let second_service = service_env_dir();
+        assert_ne!(first_service, second_service);
     }
 
     #[test]
@@ -1682,7 +1708,8 @@ mod tests {
 
     #[test]
     fn builds_start_container_args_with_mounts() {
-        let prepared = spec().start_args().unwrap();
+        let job = spec();
+        let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
 
         assert!(args
@@ -1693,38 +1720,64 @@ mod tests {
                 .any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]),
             "job containers must map the standard host alias for daemon services"
         );
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(
-            &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
-                .into()
-        ));
-        assert!(args
-            .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
-        assert!(
-            args.contains(&"/tmp/temp/_velnor/ephemeral/mise-installs:/opt/mise/installs".into())
+        assert_mount(&args, &job.workspace_host, "/__w");
+        assert_mount(&args, &job.temp_host, "/__t");
+        assert_mount(&args, &job.temp_host, "/tmp");
+        assert_mount(
+            &args,
+            job.mbx_store_host.as_deref().expect("mbx store"),
+            "/var/cache/mbx",
         );
-        assert!(args.contains(
-            &"/tmp/_velnor_mise/binaries/trusted/acme_repo:/opt/velnor/mise-binaries".into()
-        ));
+        assert_mount(&args, &job.home_host, "/github/home");
+        assert_mount(
+            &args,
+            &job.playwright_browser_store_host(),
+            "/github/home/.cache/ms-playwright",
+        );
+        assert_mount(
+            &args,
+            &job.cargo_executable_store_host(),
+            "/github/home/.cargo/bin",
+        );
+        assert_mount(
+            &args,
+            &job.mise_executable_store_host(),
+            "/opt/mise/installs",
+        );
+        assert_mount(
+            &args,
+            &job.mise_binary_store_host(),
+            "/opt/velnor/mise-binaries",
+        );
         assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
-        assert!(args.contains(
-            &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()
-        ));
-        assert!(args.contains(
-            &"/tmp/_velnor_cargo/registry/index:/github/home/.cargo/registry/index".into()
-        ));
-        assert!(args.contains(&"/tmp/_velnor_cargo/git/db:/github/home/.cargo/git/db".into()));
+        let cargo_store = cargo_store_host(&job.temp_host);
+        assert_mount(
+            &args,
+            &cargo_store.join("registry/cache"),
+            "/github/home/.cargo/registry/cache",
+        );
+        assert_mount(
+            &args,
+            &cargo_store.join("registry/index"),
+            "/github/home/.cargo/registry/index",
+        );
+        assert_mount(
+            &args,
+            &cargo_store.join("git/db"),
+            "/github/home/.cargo/git/db",
+        );
         assert!(!args
             .iter()
             .any(|arg| arg.ends_with(":/github/home/.cargo/registry/src")));
         assert!(!args
             .iter()
             .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
-        assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert_mount(
+            &args,
+            &mise_store_host(&job.temp_host).join("cache"),
+            "/opt/mise/cache",
+        );
+        assert_mount(&args, &workflow_host(&job.temp_host), "/github/workflow");
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
@@ -1746,7 +1799,7 @@ mod tests {
         assert!(cpus_pos < memory_pos);
         let lease_mount = format!(
             "{}:/var/run/docker.sock",
-            spec().guest_docker_socket_host().display()
+            job.guest_docker_socket_host().display()
         );
         assert!(
             args.contains(&lease_mount),
@@ -1847,7 +1900,8 @@ mod tests {
 
     #[test]
     fn builds_bash_exec_args() {
-        let prepared = spec()
+        let job = spec();
+        let prepared = job
             .prepare_exec_script_args(
                 "/__t/step.sh",
                 Shell::Bash,
@@ -1856,6 +1910,11 @@ mod tests {
                 &[],
             )
             .unwrap();
+        let temp_env = format!("VELNOR_DOCKER_HOST_TEMP={}", job.temp_host.display());
+        let workspace_env = format!(
+            "VELNOR_DOCKER_HOST_WORKSPACE={}",
+            job.workspace_host.display()
+        );
 
         assert_eq!(
             rendered(&prepared),
@@ -1868,8 +1927,8 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
                 "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
-                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
+                temp_env.as_str(),
+                workspace_env.as_str(),
                 "GITHUB_OUTPUT=/__t/out",
                 "--",
                 "velnor-job-1",
@@ -1886,7 +1945,8 @@ mod tests {
 
     #[test]
     fn builds_process_exec_args() {
-        let prepared = spec()
+        let job = spec();
+        let prepared = job
             .prepare_exec_process_args(
                 "/__w/repo",
                 &[("INPUT_NAME".into(), "value".into())],
@@ -1894,6 +1954,11 @@ mod tests {
                 &["node".into(), "/__a/action/dist/index.js".into()],
             )
             .unwrap();
+        let temp_env = format!("VELNOR_DOCKER_HOST_TEMP={}", job.temp_host.display());
+        let workspace_env = format!(
+            "VELNOR_DOCKER_HOST_WORKSPACE={}",
+            job.workspace_host.display()
+        );
 
         assert_eq!(
             rendered(&prepared),
@@ -1906,8 +1971,8 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
                 "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
-                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
+                temp_env.as_str(),
+                workspace_env.as_str(),
                 "INPUT_NAME=value",
                 "--",
                 "velnor-job-1",
@@ -2126,7 +2191,8 @@ mod tests {
 
     #[test]
     fn builds_node_action_run_args() {
-        let prepared = spec()
+        let job = spec();
+        let prepared = job
             .prepare_run_node_action_args(
                 "/__w",
                 &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
@@ -2145,14 +2211,18 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.windows(2).any(|pair| pair == ["--workdir", "/__w"]));
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/work:/github/workspace".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
-        assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
-        assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert_mount(&args, &job.workspace_host, "/__w");
+        assert_mount(&args, &job.workspace_host, "/github/workspace");
+        assert_mount(&args, &job.temp_host, "/tmp");
+        assert_mount(
+            &args,
+            job.mbx_store_host.as_deref().expect("mbx store"),
+            "/var/cache/mbx",
+        );
+        assert_mount(&args, &job.temp_host, "/github/runner_temp");
+        assert_mount(&args, &job.temp_host, "/github/file_commands");
+        assert_mount(&args, &job.home_host, "/github/home");
+        assert_mount(&args, &workflow_host(&job.temp_host), "/github/workflow");
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -2279,10 +2349,10 @@ mod tests {
 
     #[test]
     fn builds_docker_action_args() {
-        let spec = spec();
+        let job = spec();
 
         assert_eq!(
-            spec.build_docker_action_args(
+            job.build_docker_action_args(
                 "velnor-action-owner-repo-v1-root",
                 Path::new("/tmp/actions/action/Dockerfile"),
                 Path::new("/tmp/actions/action"),
@@ -2301,7 +2371,7 @@ mod tests {
             ]
         );
 
-        let prepared = spec
+        let prepared = job
             .prepare_run_docker_action_args(
                 "/__w",
                 &[("INPUT_NAME".into(), "value".into())],
@@ -2319,14 +2389,18 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/work:/github/workspace".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
-        assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
-        assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert_mount(&args, &job.workspace_host, "/__w");
+        assert_mount(&args, &job.workspace_host, "/github/workspace");
+        assert_mount(&args, &job.temp_host, "/tmp");
+        assert_mount(
+            &args,
+            job.mbx_store_host.as_deref().expect("mbx store"),
+            "/var/cache/mbx",
+        );
+        assert_mount(&args, &job.temp_host, "/github/runner_temp");
+        assert_mount(&args, &job.temp_host, "/github/file_commands");
+        assert_mount(&args, &job.home_host, "/github/home");
+        assert_mount(&args, &workflow_host(&job.temp_host), "/github/workflow");
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
