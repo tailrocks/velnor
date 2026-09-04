@@ -201,7 +201,7 @@ where
     // the remote URL, a config dump, an encoded form — went out in cleartext.
     // Filtering the whole log through the shared masker removes the enabling
     // condition: no site inside this module has to remember to redact.
-    let masks = credential_mask_values(plan.token.as_deref());
+    let masks = checkout_credential_masks(plan);
     let mut raw = Vec::new();
     let result = execute_checkout_unmasked(runner, plan, &mut raw, mirror_store);
     if masks.is_empty() {
