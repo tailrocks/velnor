@@ -25,7 +25,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::{tree_bytes, Rusage},
+    sys::{tree_bytes, Runner, Rusage},
 };
 
 /// How the workspace is prepared before each measured iteration.
@@ -558,41 +558,53 @@ impl CargoWorkload {
             .zip(self.targets.iter().cloned())
             .collect();
         let started = Instant::now();
-        let failures: Vec<String> = std::thread::scope(|scope| {
+        let worker_results: Vec<Result<Runner, String>> = std::thread::scope(|scope| {
             let handles: Vec<_> = pairs
                 .iter()
                 .map(|(workspace, target)| {
                     scope.spawn(move || {
-                        let output = std::process::Command::new("cargo")
-                            .args(args)
-                            .current_dir(workspace)
-                            .env("CARGO_TARGET_DIR", target)
-                            .env("CARGO_TERM_COLOR", "never")
-                            .env("CARGO_INCREMENTAL", "0")
-                            .stdin(std::process::Stdio::null())
-                            .output();
-                        match output {
-                            Ok(output) if output.status.success() => None,
-                            Ok(output) => Some(format!(
+                        let mut runner = Runner::new();
+                        let outcome = match runner.exec(
+                            "cargo",
+                            args,
+                            Some(workspace),
+                            &[
+                                ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
+                                ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
+                                ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
+                            ],
+                        ) {
+                            Ok(invocation) if invocation.ok() => Ok(()),
+                            Ok(invocation) => Err(format!(
                                 "cargo exited {} in {}",
-                                output.status.code().unwrap_or(-1),
+                                invocation.code,
                                 workspace.display()
                             )),
-                            Err(error) => Some(format!("cargo could not be spawned: {error}")),
+                            Err(error) => Err(format!("cargo could not be spawned: {error}")),
+                        };
+                        match outcome {
+                            Ok(()) => Ok(runner),
+                            Err(error) => Err(error),
                         }
                     })
                 })
                 .collect();
             handles
                 .into_iter()
-                .filter_map(|handle| {
+                .map(|handle| {
                     handle
                         .join()
-                        .unwrap_or_else(|_| Some("thread panicked".to_owned()))
+                        .unwrap_or_else(|_| Err("thread panicked".to_owned()))
                 })
                 .collect()
         });
-        let _ = context;
+        let mut failures = Vec::new();
+        for result in worker_results {
+            match result {
+                Ok(worker) => context.runner.merge(worker),
+                Err(error) => failures.push(error),
+            }
+        }
         if !failures.is_empty() {
             bail!("concurrent jobs failed: {}", failures.join("; "));
         }
@@ -757,6 +769,35 @@ mod tests {
             plan_for("rust/concurrent-jobs").unwrap().workspace,
             Workspace::PerConcurrentJob
         );
+    }
+
+    #[test]
+    fn concurrent_workers_are_recorded_by_the_parent_runner() {
+        let worktree = std::env::temp_dir();
+        let harness = CargoWorkload {
+            plan: plan_for("rust/concurrent-jobs").expect("concurrent plan"),
+            scenario: "rust/concurrent-jobs",
+            worktrees: vec![worktree.clone(), worktree.clone()],
+            targets: vec![worktree.clone(), worktree],
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 2,
+            runner: Runner::new(),
+        };
+
+        harness
+            .run_concurrent(&mut context, &["--version".to_owned()])
+            .expect("cargo workers");
+
+        assert_eq!(context.runner.process_count(), 2);
+        assert_eq!(context.runner.count_of("cargo"), 2);
     }
 
     #[test]
