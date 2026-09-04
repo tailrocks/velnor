@@ -2862,3 +2862,23 @@ introduced a divergence rather than closing one.
 
 Three items on the open list turned out to be inherited from audit claims rather than from
 source. The rule that caught all three is the same one: verify before implementing.
+
+## 22. Concurrent hardening — stale fencing and action-tree isolation
+
+The shared branch now contains two bounded follow-ups from the post-handoff audit:
+
+- `111ed1d` hardens the durable journal boundary. `SlotStale` is rejected when any job on the
+  slot is in `Assigned`, `Starting`, `Running`, or `Completing`; the reducer leaves state and
+  commands unchanged. Idle same-generation slots still fence. The test covers all four occupied
+  phases and the persisted journal path.
+- `d8fcfb2` mounts the fetched action tree at `/__a:ro` in the job, Node-action, and Docker-action
+  containers. Workspace, temp, and tool mounts remain writable. Container tests assert both the
+  read-only mount and absence of the old writable form.
+
+The fixture baseline was refreshed to `d8fcfb2637a2fd1882e93777540bc39188ed7a47` and pushed as
+`a1ede53`; its full gate passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
+formatting, workspace, capability, and L2 closure checks.
+
+These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
+mixed native/JavaScript post-action ordering, and the production cancellation-token wiring remain
+in the other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
