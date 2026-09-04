@@ -1390,52 +1390,9 @@ impl Journal {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // A v1 database is still owned by the retired capacity model.  Inspect
-        // it before enabling WAL, creating missing tables, or starting the
-        // migration transaction: contaminated evidence must remain byte
-        // stable and must never reach `persist_state`.
-        let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        let stored = u32::try_from(stored).unwrap_or(0);
-        let outbox_shape = outbox_schema_shape(&conn)?;
-        if stored == 1 {
-            return Err(StoreError::new(
-                velnor_model::ExitClass::Conflict,
-                "journal.legacy.unsafe",
-            )
-            .with_remediation(
-                "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
-            ));
-        }
-        if stored > JOURNAL_SCHEMA_VERSION {
-            return Err(journal_schema_newer());
-        }
-        // Physical shape ahead of the recorded version means a writer mutated
-        // the tables without stamping `PRAGMA user_version`. Refuse rather
-        // than guess which vocabulary wrote the events.
-        if outbox_shape_rank(outbox_shape) > version_outbox_rank(stored) {
-            return Err(outbox_schema_mismatch(stored, outbox_shape));
-        }
-        // The same rule for v5, whose shape change is in `jobs` rather than
-        // `outbox`, so the outbox-only check above cannot see it.
-        //
-        // Scoped to exactly a v4 stamp, written as the literal 4. Older stamps
-        // are not evidence of a mutated shape: a v2 or v3 file opened here may
-        // legitimately carry the current `jobs` shape, because `SCHEMA` creates
-        // that table at the current definition and their own migrations stamp
-        // explicitly. Only the v4-to-v5 step can be silently re-stamped, so
-        // only it needs guarding.
-        //
-        // This was `JOURNAL_SCHEMA_VERSION - 1`, which is the same defect that
-        // bricked every journal on the v5 bump: raising the constant silently
-        // re-aimed the check at a different transition. Version comparisons
-        // name their own version.
-        if stored == 4 && table_has_column(&conn, "jobs", "provisional")? {
-            return Err(outbox_schema_mismatch(stored, outbox_shape));
-        }
-        // And again for v6, whose shape change is also in `jobs`.
-        if stored == 5 && table_has_column(&conn, "jobs", "plan_id")? {
-            return Err(outbox_schema_mismatch(stored, outbox_shape));
-        }
+        // Inspect before enabling WAL or mutating schema. This transaction is
+        // read-only and preserves future, legacy, and malformed journals.
+        preflight_schema(&conn)?;
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
             return Err(StoreError::new(
@@ -1446,18 +1403,27 @@ impl Journal {
         }
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         assert_sqlite_version(&conn)?;
-        conn.execute_batch(SCHEMA)?;
+        // One immediate transaction owns the complete setup sequence. The
+        // physical DDL and every version stamp become visible together, so a
+        // concurrent opener cannot combine an old user_version with a newer
+        // table shape. The second preflight is inside that write transaction:
+        // another opener may have completed setup after the first read-only
+        // preflight, and its current state is the only state we may migrate.
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let (_, outbox_shape) = preflight_schema_snapshot(&transaction)?;
+        transaction.execute_batch(SCHEMA)?;
         if matches!(outbox_shape, OutboxSchema::V2) {
-            migrate_v2_to_v3(&mut conn)?;
+            migrate_v2_to_v3(&transaction)?;
         }
         // Upgrade the physical shape and stamp the current version *before*
         // any event may be written. An older binary that reopens this file
         // then hits `journal.schema.newer` and refuses it, instead of
-        // decoding a newer log with an older event vocabulary and silently
-        // dropping the terminal states it does not know.
-        migrate_v3_to_v4(&mut conn)?;
-        migrate_v4_to_v5(&mut conn)?;
-        migrate_v5_to_v6(&mut conn)?;
+        // decoding it with an incomplete event vocabulary.
+        migrate_v3_to_v4(&transaction)?;
+        migrate_v4_to_v5(&transaction)?;
+        migrate_v5_to_v6(&transaction)?;
+        transaction.commit()?;
         let journal = Self {
             conn,
             path: path.to_path_buf(),
@@ -1716,6 +1682,70 @@ impl Journal {
             .filter(OutboxRecord::is_pending)
             .collect())
     }
+}
+
+/// Validate the journal's recorded version and physical migration shape.
+///
+/// The caller must serialize this read against schema setup. Keeping all
+/// observations in one helper prevents a future caller from accidentally
+/// reintroducing a version/shape race between independent reads.
+fn preflight_schema(conn: &Connection) -> StoreResult<(u32, OutboxSchema)> {
+    let transaction = conn.unchecked_transaction()?;
+    let result = preflight_schema_snapshot(&transaction);
+    if result.is_ok() {
+        transaction.commit()?;
+    }
+    result
+}
+
+fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchema)> {
+    // A v1 database is still owned by the retired capacity model. Inspect it
+    // before enabling WAL, creating missing tables, or starting a migration
+    // transaction: contaminated evidence must remain byte stable and must
+    // never reach `persist_state`.
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let stored = u32::try_from(stored).unwrap_or(0);
+    let outbox_shape = outbox_schema_shape(conn)?;
+    if stored == 1 {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.legacy.unsafe",
+        )
+        .with_remediation(
+            "preserve the schema-v1 journal unchanged for forensics and perform an explicit verified migration",
+        ));
+    }
+    if stored > JOURNAL_SCHEMA_VERSION {
+        return Err(journal_schema_newer());
+    }
+    // Physical shape ahead of the recorded version means a writer mutated
+    // the tables without stamping `PRAGMA user_version`. Refuse rather than
+    // guess which vocabulary wrote the events.
+    if outbox_shape_rank(outbox_shape) > version_outbox_rank(stored) {
+        return Err(outbox_schema_mismatch(stored, outbox_shape));
+    }
+    // The same rule for v5, whose shape change is in `jobs` rather than
+    // `outbox`, so the outbox-only check above cannot see it.
+    //
+    // Scoped to exactly a v4 stamp, written as the literal 4. Older stamps
+    // are not evidence of a mutated shape: a v2 or v3 file opened here may
+    // legitimately carry the current `jobs` shape, because `SCHEMA` creates
+    // that table at the current definition and their own migrations stamp
+    // explicitly. Only the v4-to-v5 step can be silently re-stamped, so only
+    // it needs guarding.
+    //
+    // This was `JOURNAL_SCHEMA_VERSION - 1`, which is the same defect that
+    // bricked every journal on the v5 bump: raising the constant silently
+    // re-aimed the check at a different transition. Version comparisons name
+    // their own version.
+    if stored == 4 && table_has_column(conn, "jobs", "provisional")? {
+        return Err(outbox_schema_mismatch(stored, outbox_shape));
+    }
+    // And again for v6, whose shape change is also in `jobs`.
+    if stored == 5 && table_has_column(conn, "jobs", "plan_id")? {
+        return Err(outbox_schema_mismatch(stored, outbox_shape));
+    }
+    Ok((stored, outbox_shape))
 }
 
 fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
@@ -2306,8 +2336,7 @@ fn outbox_schema_mismatch(version: u32, shape: OutboxSchema) -> StoreError {
 /// a rebuilt table whose `slot_id` is NOT NULL. Owner mismatches fail before
 /// any schema mutation; the transaction is retryable if the process dies
 /// mid-upgrade.
-fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+fn migrate_v2_to_v3(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     let inconsistent_owner: Option<(String, i64)> = tx
         .query_row(
             "SELECT outbox.job_id, outbox.generation
@@ -2363,7 +2392,6 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
     // version. Stamping the current version here would make that step
     // early-return and leave a v3 shape claiming to be v4.
     tx.pragma_update(None, "user_version", 3u32)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -2373,8 +2401,7 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
 /// or the new one, never a partially stamped version. Existing pending rows
 /// inherit a deadline measured from when their intent became durable, so an
 /// upgrade cannot silently extend a completion's budget to infinity.
-fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+fn migrate_v3_to_v4(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     // Gate and stamp on *this* step's own target, never the symbolic current
     // version. When v5 was added, this comparison against
@@ -2386,7 +2413,7 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
     if u32::try_from(stored).unwrap_or(0) >= 4 {
         return Ok(());
     }
-    if !table_has_column(&tx, "outbox", "attempts")? {
+    if !table_has_column(tx, "outbox", "attempts")? {
         tx.execute_batch(
             "ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
              ALTER TABLE outbox ADD COLUMN deadline_unix INTEGER NOT NULL DEFAULT 0;
@@ -2398,12 +2425,11 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
         "UPDATE outbox SET deadline_unix = created_unix + ?1 WHERE deadline_unix = 0",
         params![COMPLETION_RESOLUTION_SECONDS as i64],
     )?;
-    if !table_has_column(&tx, "jobs", "terminal_conclusion")? {
+    if !table_has_column(tx, "jobs", "terminal_conclusion")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN terminal_conclusion TEXT;")?;
     }
     // Stamp exactly v4: `migrate_v4_to_v5` runs next and owns the final version.
     tx.pragma_update(None, "user_version", 4u32)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -2412,13 +2438,12 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
 /// Existing rows migrate to `provisional = 0`: every row written before this
 /// version came from a `JobOwned` event, which only follows a 200 from
 /// `acquirejob`, so they are all genuine ownership and must keep proving it.
-fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+fn migrate_v4_to_v5(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if u32::try_from(stored).unwrap_or(0) >= 5 {
         return Ok(());
     }
-    if !table_has_column(&tx, "jobs", "provisional")? {
+    if !table_has_column(tx, "jobs", "provisional")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;")?;
     }
     // Always stamp, even when the column was already present. Detecting a shape
@@ -2428,7 +2453,6 @@ fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
     // with the v5 column in place — the file then materialized fine but claimed
     // the wrong version forever.
     tx.pragma_update(None, "user_version", 5u32)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -2440,23 +2464,22 @@ fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
 /// Existing rows migrate to empty addressing and a zero budget. Every row
 /// written before this bump is either owned or absent, never provisional, so
 /// nothing probes them and the zeros are never read.
-fn migrate_v5_to_v6(conn: &mut Connection) -> StoreResult<()> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+fn migrate_v5_to_v6(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     // Gate on this step's own target, never `JOURNAL_SCHEMA_VERSION`.
     if u32::try_from(stored).unwrap_or(0) >= 6 {
         return Ok(());
     }
-    if !table_has_column(&tx, "jobs", "plan_id")? {
+    if !table_has_column(tx, "jobs", "plan_id")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN plan_id TEXT NOT NULL DEFAULT '';")?;
     }
-    if !table_has_column(&tx, "jobs", "run_service_url")? {
+    if !table_has_column(tx, "jobs", "run_service_url")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN run_service_url TEXT NOT NULL DEFAULT '';")?;
     }
-    if !table_has_column(&tx, "jobs", "probe_attempts")? {
+    if !table_has_column(tx, "jobs", "probe_attempts")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN probe_attempts INTEGER NOT NULL DEFAULT 0;")?;
     }
-    if !table_has_column(&tx, "jobs", "probe_deadline_unix")? {
+    if !table_has_column(tx, "jobs", "probe_deadline_unix")? {
         tx.execute_batch(
             "ALTER TABLE jobs ADD COLUMN probe_deadline_unix INTEGER NOT NULL DEFAULT 0;",
         )?;
@@ -2465,7 +2488,6 @@ fn migrate_v5_to_v6(conn: &mut Connection) -> StoreResult<()> {
     // refusing to stamp there is what left legitimate upgrades claiming an
     // older version than the shape they carry.
     tx.pragma_update(None, "user_version", 6u32)?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -2625,6 +2647,8 @@ pub fn payload_checksum(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn open_tmp(label: &str) -> (PathBuf, Journal) {
         let nanos = unix_now();
@@ -2636,6 +2660,48 @@ mod tests {
         let path = dir.join("journal.db");
         let journal = Journal::open(&path).unwrap();
         (dir, journal)
+    }
+
+    #[test]
+    fn concurrent_fresh_openers_converge_on_one_schema() {
+        let nanos = unix_now();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-concurrent-open-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = Arc::new(dir.join("journal.db"));
+        let start = Arc::new(Barrier::new(8));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    Journal::open(path.as_path())
+                        .and_then(|journal| journal.load_state().map(|_| ()))
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("concurrent journal opener panicked")
+                .expect("concurrent journal opener failed");
+        }
+
+        let conn = Connection::open(path.as_path()).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn slot(id: &str) -> SlotId {
