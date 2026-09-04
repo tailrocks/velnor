@@ -430,33 +430,58 @@ fn register_credential(destination: &Path) -> Result<()> {
 fn register_credential_in(dir: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(dir)
         .with_context(|| format!("create checkout credential journal {}", dir.display()))?;
-    let journal_path = dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+    // Keep a new record invisible to the reaper until its lock and contents
+    // are ready. Publishing the `.json` path first lets a concurrent reaper
+    // claim and remove the empty file between `open` and `flock`, leaving the
+    // credential write untracked.
+    let id = uuid::Uuid::new_v4().to_string();
+    let journal_path = dir.join(format!("{id}.json"));
+    let pending_path = dir.join(format!(".{id}.pending"));
     let mut journal = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .read(true)
         .write(true)
-        .open(&journal_path)
-        .with_context(|| format!("open checkout credential journal {journal_path:?}"))?;
-    flock(&journal, FlockOperation::NonBlockingLockExclusive)
-        .with_context(|| format!("lock checkout credential journal {journal_path:?}"))?;
+        .open(&pending_path)
+        .with_context(|| format!("open checkout credential journal {pending_path:?}"))?;
+    if let Err(error) = flock(&journal, FlockOperation::NonBlockingLockExclusive)
+        .with_context(|| format!("lock checkout credential journal {pending_path:?}"))
+    {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
     let record = serde_json::json!({
         "config": destination.join(".git/config").display().to_string(),
         "workspace": destination.display().to_string(),
         "pid": std::process::id(),
     });
-    journal
-        .write_all(record.to_string().as_bytes())
-        .and_then(|()| journal.sync_all())
-        .with_context(|| format!("write checkout credential journal {journal_path:?}"))?;
-    active_credentials()
+    let publish = (|| -> Result<()> {
+        journal
+            .write_all(record.to_string().as_bytes())
+            .and_then(|()| journal.sync_all())
+            .with_context(|| format!("write checkout credential journal {pending_path:?}"))?;
+        fs::rename(&pending_path, &journal_path)
+            .with_context(|| format!("publish checkout credential journal {journal_path:?}"))?;
+        Ok(())
+    })();
+    if let Err(error) = publish {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
+    let mut active = match active_credentials()
         .lock()
-        .map_err(|_| anyhow::anyhow!("checkout credential registry poisoned"))?
-        .push(CredentialRegistration {
-            destination: destination.to_path_buf(),
-            journal_path,
-            _journal: journal,
-        });
+        .map_err(|_| anyhow::anyhow!("checkout credential registry poisoned"))
+    {
+        Ok(active) => active,
+        Err(error) => {
+            fs::remove_file(&journal_path).ok();
+            return Err(error);
+        }
+    };
+    active.push(CredentialRegistration {
+        destination: destination.to_path_buf(),
+        journal_path,
+        _journal: journal,
+    });
     Ok(())
 }
 
@@ -1881,6 +1906,30 @@ mod tests {
         assert!(config_has_credential(&live_config));
 
         release_registered_credentials(&live);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_unpublished_credential_journal_is_invisible_to_the_reaper() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        std::fs::write(
+            journal.join(".new-credential.pending"),
+            serde_json::json!({
+                "config": config.display().to_string(),
+                "workspace": workspace.display().to_string(),
+                "pid": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
+        assert!(config_has_credential(&config));
+        assert!(journal.join(".new-credential.pending").exists());
         std::fs::remove_dir_all(root).ok();
     }
 
