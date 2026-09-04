@@ -3192,3 +3192,33 @@ plus optional typed-client Velnor observations and atomic evidence writes.
 Focused proof: workflow-runtime tests `93` passed; tools tests `192` passed; strict
 package Clippy and locked all-target checks passed. Full workspace gates and live
 dual-lane execution remain final verification work, not claimed here.
+
+## 32. Continuation anchor — graph and evidence hardening `ce4bb8b`
+
+The shared source branch now includes `533fe67`, which normalizes Cargo's
+`dependency.workspace = true` keys before affected-unit graph expansion and adds
+coverage that preserves aliases and path dependencies. The parallel lead's
+`ef344c9`, `31e8e02`, and `e204e5f` changes remain preserved through merge
+`ce4bb8b`: trusted self-hosted jobs require an explicit gate even when the
+configuration supports both runner classes, the hosted bootstrap pin is checked,
+and Velnor jobs target the intended runner label.
+
+Final proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2468 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source `ce4bb8b` | pass; 41 Python tests, 51 Rust tests, workflow/capability/L2 audits |
+
+The fixture branch `codex/verifier-completion-fixes` is at `c97ec0e`: duplicate
+lane names are rejected, the L2 verifier expects its actual `produce` job, and
+JSON-loaded provenance enforces the same lane/environment binding as collection.
+The fixture gate now passes against `ce4bb8b`; this is static/fixture proof, not a
+live dual-lane run. No deployed image digest,
+default-mbx end-to-end proof, VelnorJob benchmark, Docker daemon-resource
+accounting, fault/soak result, provisional recovery fix, or mixed post-order fix
+is claimed. Reserved runner/executor ownership and the coordinated checkout
+error-propagation follow-up remain open.
