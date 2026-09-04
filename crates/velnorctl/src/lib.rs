@@ -410,6 +410,9 @@ impl From<velnor_client::ClientError> for CommandError {
             velnor_client::ClientError::UnsupportedApi { .. } => {
                 ("api.version_unsupported".to_owned(), error.to_string())
             }
+            velnor_client::ClientError::Unsupported { .. } => {
+                ("operation.unsupported".to_owned(), error.to_string())
+            }
             velnor_client::ClientError::Authorization => {
                 ("authorization.denied".to_owned(), error.to_string())
             }
