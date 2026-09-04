@@ -1426,7 +1426,7 @@ mod tests {
     use super::*;
 
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
-    const POLICY_REVISION: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
+    const POLICY_REVISION: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
 
     fn policy_fixture(
         name: &str,
@@ -1444,7 +1444,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    with:\n      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@12da6232672f039e42c21fe9dff00085856ef92d\n    with:\n      policy-revision: 12da6232672f039e42c21fe9dff00085856ef92d\n    permissions:\n      contents: read\n",
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1505,9 +1505,9 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@12da6232672f039e42c21fe9dff00085856ef92d
     with:
-      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a
+      policy-revision: 12da6232672f039e42c21fe9dff00085856ef92d
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1558,9 +1558,9 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@12da6232672f039e42c21fe9dff00085856ef92d
     with:
-      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a
+      policy-revision: 12da6232672f039e42c21fe9dff00085856ef92d
     permissions:
       contents: read
 ";
