@@ -343,8 +343,27 @@ fn evaluate_format(
     context: &dyn EvaluationContext,
 ) -> Result<Value, ExpressionError> {
     let format = evaluate_node(&args[0], context)?.convert_to_string();
+    format_template(&format, args.len() - 1, |index| {
+        evaluate_node(&args[index + 1], context)
+    })
+    .map(Value::String)
+}
+
+/// The template half of `format()`, separated from argument evaluation so that
+/// a caller which cannot evaluate every argument — see
+/// [`super::spans`] — still gets upstream's exact brace, escape and
+/// specifier handling.
+///
+/// `resolve` is upstream's lazy argument builder (`Format.cs:215-268`): it is
+/// called at most once per argument, and only for arguments a placeholder
+/// actually references.
+pub fn format_template(
+    format: &str,
+    argument_count: usize,
+    mut resolve: impl FnMut(usize) -> Result<Value, ExpressionError>,
+) -> Result<String, ExpressionError> {
     let chars: Vec<char> = format.chars().collect();
-    let mut cache: Vec<Option<String>> = vec![None; args.len().saturating_sub(1)];
+    let mut cache: Vec<Option<String>> = vec![None; argument_count];
     let mut result = String::new();
     let mut index = 0usize;
 
@@ -383,7 +402,7 @@ fn evaluate_format(
                     return Err(invalid());
                 };
 
-                if arg_index + 1 >= args.len() {
+                if arg_index >= argument_count {
                     return Err(ExpressionError::evaluation(format!(
                         "The following format string references more arguments than were supplied: {format}"
                     )));
@@ -391,7 +410,7 @@ fn evaluate_format(
                 if !specifiers.is_empty() {
                     return Err(ExpressionError::evaluation(format!(
                         "The format specifiers '{specifiers}' are not valid for objects of type '{}'",
-                        evaluate_node(&args[arg_index + 1], context)?.kind().as_str()
+                        resolve(arg_index)?.kind().as_str()
                     )));
                 }
 
@@ -400,8 +419,7 @@ fn evaluate_format(
                 }
 
                 if cache[arg_index].is_none() {
-                    cache[arg_index] =
-                        Some(evaluate_node(&args[arg_index + 1], context)?.convert_to_string());
+                    cache[arg_index] = Some(resolve(arg_index)?.convert_to_string());
                 }
                 result.push_str(cache[arg_index].as_deref().unwrap_or_default());
                 index = rbrace + 1;
@@ -422,7 +440,7 @@ fn evaluate_format(
         }
     }
 
-    Ok(Value::String(result))
+    Ok(result)
 }
 
 /// `Format.ReadArgIndex` (`Format.cs:82-105`) — the index is a `Byte`.

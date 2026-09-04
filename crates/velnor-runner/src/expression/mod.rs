@@ -17,6 +17,7 @@
 pub mod eval;
 pub mod lexer;
 pub mod parser;
+pub mod spans;
 pub mod value;
 
 #[cfg(test)]
@@ -26,9 +27,56 @@ use std::fmt;
 
 pub use eval::{evaluate, evaluate_node, EvaluationContext};
 pub use parser::{parse, ParseEnvironment, MAX_DEPTH, MAX_LENGTH};
+pub use spans::function_call_argument_spans;
 pub use value::{ObjectValue, Value};
 
 use lexer::Token;
+
+/// The root contexts GitHub always defines for a step. Referencing anything
+/// outside this set is a parse error upstream
+/// (`ExpressionParser.cs:144-147`), never a silent null.
+pub const ROOT_CONTEXTS: &[&str] = &[
+    "github", "env", "job", "jobs", "runner", "steps", "secrets", "strategy", "matrix", "needs",
+    "inputs", "vars",
+];
+
+/// The extension functions the worker registers
+/// (`src/Runner.Worker/StepsRunner.cs:92-97`), with upstream's arities.
+pub const RUNNER_FUNCTIONS: &[(&str, usize, usize)] = &[
+    ("success", 0, 0),
+    ("failure", 0, 0),
+    ("always", 0, 0),
+    ("cancelled", 0, 0),
+    ("hashFiles", 1, 255),
+];
+
+/// Whether a tree reads anything that only exists once the job is running.
+///
+/// `env`, `steps`, `job`, `jobs` and `runner` are populated by the executor as
+/// steps run, and every runner extension function answers from live step
+/// state. A tree touching one of them cannot be evaluated at job setup; it has
+/// to be deferred verbatim to the step-time pass.
+pub fn reads_runtime_context(node: &Node) -> bool {
+    match node {
+        Node::NamedValue(name) => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "env" | "steps" | "job" | "jobs" | "runner"
+        ),
+        Node::Function { name, .. } => {
+            RUNNER_FUNCTIONS
+                .iter()
+                .any(|(known, _, _)| known.eq_ignore_ascii_case(name))
+                || node
+                    .children()
+                    .iter()
+                    .any(|child| reads_runtime_context(child))
+        }
+        node => node
+            .children()
+            .iter()
+            .any(|child| reads_runtime_context(child)),
+    }
+}
 
 /// The parsed form of an expression.
 #[derive(Debug, Clone)]
@@ -162,6 +210,8 @@ impl fmt::Display for ParseError {
         f.write_str(&self.message)
     }
 }
+
+impl std::error::Error for ParseError {}
 
 /// A typed expression failure. A condition that produces one of these fails
 /// the step, matching `src/Runner.Worker/StepsRunner.cs:231-242`.
