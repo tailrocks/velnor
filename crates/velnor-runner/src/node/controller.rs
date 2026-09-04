@@ -21,6 +21,7 @@ use crate::config;
 use crate::protocol::{GitHubScope, RegistrationClient};
 
 use super::cleanup;
+use super::complete;
 use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
@@ -818,6 +819,12 @@ async fn reconcile_once(
     }
 
     for row in journal.pending_outbox()? {
+        // A row whose durable budget is spent reaches its bounded terminal
+        // state here even if no replay was ever attempted, so an expired
+        // deadline alone is enough to stop it blocking admission forever.
+        if abandon_if_budget_spent(args, journal, &row)? {
+            continue;
+        }
         preserve_outbox(
             args,
             journal,
@@ -1537,7 +1544,14 @@ async fn reclaim_orphaned_jobs(
                 job.job_id.0
             ));
         }
-        if job.phase == ActorPhase::Completing && !pending_completion {
+        if job.phase == ActorPhase::Completing
+            && !pending_completion
+            // A job whose terminal result is durable but whose payload is not
+            // is the crash window between the two writes, not a lost payload.
+            // Its real conclusion is recorded, so recovery re-drives the
+            // completion instead of failing the whole reconciliation.
+            && job.terminal_conclusion.is_none()
+        {
             return Err(anyhow::anyhow!(
                 "completing job {} has no exact durable completion payload",
                 job.job_id.0
@@ -1546,7 +1560,7 @@ async fn reclaim_orphaned_jobs(
         if let Some(stored) = load_local_runner_config(&slot_dir)? {
             if marker_job_id.is_some() {
                 let cleanup = if pending_completion {
-                    defer_remote_recovery_on_timeout(
+                    match defer_remote_recovery_on_timeout(
                         remaining_remote_budget(remote_deadline),
                         crate::runner::replay_recorded_completion(
                             &slot_dir,
@@ -1555,7 +1569,33 @@ async fn reclaim_orphaned_jobs(
                         ),
                         "replay recorded completion during orphan recovery",
                     )
-                    .await?
+                    .await
+                    {
+                        Ok(cleanup) => cleanup,
+                        Err(error) => {
+                            // A completion that cannot be delivered is not a
+                            // controller failure. The completion path already
+                            // charged this attempt to the row's durable
+                            // budget; propagating instead would re-run the
+                            // same doomed replay on every cycle and never let
+                            // the row terminate.
+                            eprintln!(
+                                "Warning: completion replay for job {} failed: {error:#}",
+                                job.job_id.0
+                            );
+                            if let Some(row) = journal
+                                .materialized_state()?
+                                .outbox
+                                .into_iter()
+                                .find(|row| {
+                                    row.job_id == job.job_id && row.generation == job.generation
+                                })
+                            {
+                                abandon_if_budget_spent(args, journal, &row)?;
+                            }
+                            continue;
+                        }
+                    }
                 } else {
                     defer_remote_recovery_on_timeout(
                         remaining_remote_budget(remote_deadline),
@@ -1927,6 +1967,40 @@ fn recovery_path_has_state(path: &Path) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// Move a completion whose durable attempt or time budget is spent into its
+/// bounded terminal state. Returns whether the row was abandoned.
+///
+/// The journal is the authority: it refuses the terminal state while any
+/// budget remains, so this can only ever ratify what durable state already
+/// proves.
+fn abandon_if_budget_spent(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    row: &velnor_control::journal::OutboxRecord,
+) -> anyhow::Result<bool> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    if !row.budget_exhausted(now) {
+        return Ok(false);
+    }
+    let reason = if row.permanent {
+        "the run service permanently refused this completion payload"
+    } else if row.attempts >= velnor_control::journal::MAX_COMPLETION_ATTEMPTS {
+        "the durable completion send budget is spent"
+    } else {
+        "the completion resolution deadline passed"
+    };
+    complete::abandon_unresolvable_completion(
+        journal,
+        &args.state_dir,
+        &row.job_id,
+        row.generation,
+        reason,
+    )
+}
+
 /// Keep a durable completion payload. Never replace it with the checksum
 /// and never stamp `CompletionSendStarted` without an actual send.
 fn preserve_outbox(
@@ -1985,9 +2059,10 @@ fn slot_has_admission_block(
                     | ActorPhase::Running
                     | ActorPhase::Completing
             )
-    }) || state.outbox.iter().any(|row| {
-        row.is_pending() && row.slot_id == *slot_id && row.generation == generation
-    })
+    }) || state
+        .outbox
+        .iter()
+        .any(|row| row.is_pending() && row.slot_id == *slot_id && row.generation == generation)
 }
 
 fn child_owns_slot(
