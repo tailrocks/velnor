@@ -359,7 +359,7 @@ fn flush_top_end_parameters(context: &mut ParseContext<'_>) -> Result<(), ParseE
             context.expression,
         ));
     }
-    if name.eq_ignore_ascii_case("case") && arg_count % 2 == 0 {
+    if name.eq_ignore_ascii_case("case") && arg_count.is_multiple_of(2) {
         return Err(ParseError::with_token(
             ParseErrorKind::EvenParameters,
             &start,
