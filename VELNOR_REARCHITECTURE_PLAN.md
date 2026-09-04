@@ -3406,3 +3406,21 @@ T-022 source code and is refreshed below for this plan-only source revision.
 No live dual-lane, deployed image identity, default-mbx end-to-end result,
 VelnorJob lifecycle benchmark, fault/soak result, or reserved runner/executor
 change is claimed.
+
+## 44. Benchmark failed-workload cleanup — T-023 `42a3926`
+
+The benchmark workload runner now tears down after preparation failures and
+iteration failures as well as successful runs. A teardown failure is returned
+on its own, and when the workload already failed it is attached to the primary
+error without hiding that primary cause. Probe tests cover both failure paths.
+This is scoped to the benchmark driver boundary; runner, executor, Docker,
+acquisition, recovery, and lifecycle ownership remain unchanged.
+
+Focused source proof at `42a392646f12c098e46c407bf6d4e0c74a26737d`:
+`velnor-bench` nextest passed (`82` tests), strict package Clippy passed, and
+format checks passed. The fixture baseline was refreshed to this source at
+`d606b2e`; its complete gate passed (`44` Python tests, `53` Rust tests,
+workflow/actionlint, capability readiness, format/check, and L2 closure).
+This remains static/fixture proof: no live dual-lane run, deployed image
+identity, default-mbx end-to-end result, VelnorJob lifecycle benchmark,
+fault/soak result, or reserved runner/executor change is claimed.
