@@ -252,7 +252,7 @@ fn slot_has_active_job(state: &FleetState, slot_id: &SlotId) -> bool {
         .any(|job| job.slot_id == *slot_id && job_occupies_slot(job.phase))
 }
 
-fn restore_slot_after_terminal_job(
+fn restore_slot_after_job_removal(
     state: &mut FleetState,
     commands: &mut Vec<SideEffect>,
     job_id: &JobId,
@@ -271,8 +271,8 @@ fn restore_slot_after_terminal_job(
     if state.slots[index].generation != job.generation {
         return;
     }
-    // Fencing is a recovery barrier. Terminal job reconciliation must clear
-    // the job/outbox state, but only controller recovery may reopen the slot.
+    // Fencing is a recovery barrier. Job reconciliation must clear the row,
+    // but only a healthy same-generation actor may reopen the slot.
     if state.slots[index].phase == ActorPhase::Fenced {
         return;
     }
@@ -877,9 +877,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 .iter()
                 .any(|job| job.job_id == job_id && job.generation == generation && job.provisional);
             if droppable {
-                state
-                    .jobs
-                    .retain(|job| !(job.job_id == job_id && job.generation == generation));
+                restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
             } else {
                 rejected = true;
             }
@@ -1072,7 +1070,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         job_id: job_id.clone(),
                         generation,
                     });
-                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                    restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
                 } else {
                     rejected = true;
                 }
@@ -1129,7 +1127,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         job_id: job_id.clone(),
                         generation,
                     });
-                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                    restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
                 } else {
                     rejected = true;
                 }
@@ -1148,7 +1146,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         row.job_id == job_id && row.generation == generation && row.is_pending()
                     });
                     if !pending_outbox {
-                        restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                        restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
                     }
                 }
                 _ => rejected = true,
@@ -5107,13 +5105,17 @@ mod tests {
             })
             .unwrap();
         assert!(!lost.rejected);
-        assert!(
-            journal.load_state().unwrap().jobs.is_empty(),
-            "the slot is freed"
+        assert_eq!(
+            lost.commands,
+            vec![SideEffect::AdvertiseCapacity { permits: 1 }]
         );
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty(), "the slot is freed");
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.advertised_capacity(), 1);
 
         // Now prove ownership and try again: it must be refused.
-        journal
+        let reacquire = journal
             .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-2"),
@@ -5121,7 +5123,8 @@ mod tests {
                 message_id: "msg-2".into(),
             })
             .unwrap();
-        journal
+        assert!(!reacquire.rejected);
+        let owned = journal
             .apply(Event::JobOwned {
                 job_id: job("guid-2"),
                 slot_id: slot("scope-1"),
@@ -5131,6 +5134,7 @@ mod tests {
                 accepted_unix: 0,
             })
             .unwrap();
+        assert!(!owned.rejected);
         let lost = journal
             .apply(Event::JobAcquisitionLost {
                 job_id: job("guid-2"),
