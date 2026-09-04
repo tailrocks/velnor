@@ -1589,6 +1589,19 @@ mod tests {
     }
 
     #[test]
+    fn container_test_specs_and_service_env_dirs_are_disjoint() {
+        let first = spec();
+        let second = spec();
+        assert_ne!(first.temp_host, second.temp_host);
+        assert_ne!(first.env_dir(), second.env_dir());
+        assert_ne!(first.mbx_store_host, second.mbx_store_host);
+
+        let first_service = service_env_dir();
+        let second_service = service_env_dir();
+        assert_ne!(first_service, second_service);
+    }
+
+    #[test]
     fn repairs_orphaned_cargo_git_checkouts_as_one_coherent_store() {
         let root = container_test_temp("cargo-git-repair");
         let cargo = root.join("cargo");
