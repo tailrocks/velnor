@@ -13,7 +13,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 9] = [
+const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnor-model",
     "velnor-control",
     "velnor-client",
@@ -22,6 +22,7 @@ const WORKSPACE_PACKAGES: [&str; 9] = [
     "velnor-runner",
     "velnor-bench",
     "velnor-tools",
+    "velnor-workflow",
     "unit-collector",
 ];
 
