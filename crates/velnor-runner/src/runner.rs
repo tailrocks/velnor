@@ -2730,6 +2730,12 @@ pub(crate) async fn run_daemon_slot(
 
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
+    // Disk pressure is a bounded state machine rather than an indefinite park.
+    // The slot reclaims, then refuses admission against a deadline, then drains
+    // — it never sleeps and retries forever with no terminal state.
+    let disk_root = args.work_dir.clone().unwrap_or_else(|| config_base.clone());
+    let mut disk_pressure =
+        crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
     loop {
         if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
@@ -2750,15 +2756,80 @@ pub(crate) async fn run_daemon_slot(
         }
         if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
             // Registering runners whose jobs are doomed (and whose curl
-            // transport needs temp files) only burns API budget — park.
-            let message = format!("daemon slot-{slot_index} parked: {note}");
-            eprintln!("{message}");
-            crate::sd_notify::status(&message);
-            daemon_forensic_log(&config_base, &message);
-            if sleep_slot_retry_or_drain(Duration::from_secs(60)).await {
-                continue;
+            // transport needs temp files) only burns API budget. Which of
+            // refuse, drain or deregister that means is the policy's decision,
+            // and every one of them is bounded.
+            let action = match crate::host_capacity::HostCapacity::probe(&disk_root) {
+                Ok(capacity) => disk_pressure.observe(
+                    capacity.available_bytes,
+                    unix_millis_now().saturating_div(1_000),
+                ),
+                Err(error) => {
+                    // An unmeasurable host is not a healthy one, and it is also
+                    // not evidence for escalating. Refuse for one interval and
+                    // re-measure.
+                    eprintln!(
+                        "daemon slot-{slot_index}: cannot measure free space, refusing admission for now: {error:#}"
+                    );
+                    crate::host_capacity::DiskAction::RefuseUntil {
+                        remaining: Duration::from_secs(60),
+                    }
+                }
+            };
+            match action {
+                crate::host_capacity::DiskAction::Admit => {}
+                crate::host_capacity::DiskAction::Reclaim => {
+                    let message = format!("daemon slot-{slot_index} reclaiming disk: {note}");
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    let report = crate::cache::reclaim_for_disk_pressure(
+                        crate::host_capacity::DEFAULT_MIN_FREE_BYTES,
+                    );
+                    daemon_forensic_log(
+                        &config_base,
+                        &format!(
+                            "daemon slot-{slot_index} reclaim freed {} bytes",
+                            report.freed_bytes
+                        ),
+                    );
+                    continue;
+                }
+                crate::host_capacity::DiskAction::RefuseUntil { remaining } => {
+                    // The operator is told how long the slot will keep refusing
+                    // before it sheds itself, which is the difference between a
+                    // bounded wait and a mystery.
+                    let message = format!(
+                        "daemon slot-{slot_index} refusing jobs for lack of disk, draining in {}s: {note}",
+                        remaining.as_secs()
+                    );
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    let nap = remaining.min(Duration::from_secs(60));
+                    sleep_slot_retry_or_drain(nap).await;
+                    continue;
+                }
+                crate::host_capacity::DiskAction::Drain
+                | crate::host_capacity::DiskAction::Deregister => {
+                    let message = format!(
+                        "daemon slot-{slot_index} draining: disk stayed below the floor past the deadline: {note}"
+                    );
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    cleanup_failed_daemon_slot(
+                        &args,
+                        &config_base,
+                        slot_index,
+                        slots,
+                        cycle,
+                        &durable_slot,
+                    )
+                    .await;
+                    return Ok(());
+                }
             }
-            continue;
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         if !args.once {
