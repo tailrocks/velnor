@@ -875,3 +875,52 @@ fn property_conversions_are_total() {
         }
     }
 }
+
+/// `function_call_argument_spans` returns the *verbatim* source of each
+/// argument, so a caller that cannot evaluate one yet can hand it on
+/// unchanged. Splitting on commas — what the deleted `split_format_args` did —
+/// cannot do this for nested calls or indexes.
+#[test]
+fn function_call_argument_spans_are_verbatim() {
+    let (name, spans) = super::function_call_argument_spans(
+        "format('a{0}b', join(matrix.list, ', '), steps.build.outputs['sha'])",
+    )
+    .expect("splittable");
+    assert_eq!(name, "format");
+    assert_eq!(
+        spans,
+        vec![
+            "'a{0}b'",
+            "join(matrix.list, ', ')",
+            "steps.build.outputs['sha']",
+        ]
+    );
+}
+
+/// A quoted comma, a nested group and an escaped quote all stay inside their
+/// argument.
+#[test]
+fn function_call_argument_spans_respect_quoting_and_grouping() {
+    let (_, spans) =
+        super::function_call_argument_spans("format('x', 'a,b', ('c' == matrix.d), 'it''s')")
+            .expect("splittable");
+    assert_eq!(spans, vec!["'x'", "'a,b'", "('c' == matrix.d)", "'it''s'"]);
+}
+
+/// Anything that is not exactly one function call is not splittable, so the
+/// caller falls back to whole-tree handling rather than guessing.
+#[test]
+fn function_call_argument_spans_reject_non_calls() {
+    for expression in [
+        "matrix.package",
+        "format('a', matrix.b) == 'x'",
+        "format('a', matrix.b",
+        "'literal'",
+        "",
+    ] {
+        assert!(
+            super::function_call_argument_spans(expression).is_none(),
+            "{expression:?} must not split"
+        );
+    }
+}
