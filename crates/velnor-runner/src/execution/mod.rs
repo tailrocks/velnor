@@ -7,7 +7,7 @@
 mod artifacts;
 mod backend;
 mod cache_transport;
-mod docker;
+pub(crate) mod docker;
 mod firecracker;
 mod guest;
 mod guest_actions;
@@ -497,6 +497,14 @@ pub struct RecordingCommands {
     pub fail_kill: Option<String>,
     pub spawned: Vec<SpawnedProcess>,
     pub killed: Vec<u32>,
+    /// Effective environment of each recorded call: `--env-file` contents
+    /// expanded plus any variable forwarded through the client's process
+    /// environment. Environment never appears in `calls`, by design.
+    pub call_env: Vec<Vec<String>>,
+    /// Stdin delivered to each recorded call (empty when none).
+    pub call_stdin: Vec<String>,
+    pending_env: Vec<(String, String)>,
+    pending_stdin: String,
 }
 
 impl Default for RecordingCommands {
@@ -535,11 +543,38 @@ impl Default for RecordingCommands {
             fail_kill: None,
             spawned: Vec::new(),
             killed: Vec::new(),
+            call_env: Vec::new(),
+            call_stdin: Vec::new(),
+            pending_env: Vec::new(),
+            pending_stdin: String::new(),
         }
     }
 }
 
 impl RecordingCommands {
+    /// Record what the command will actually see: env-file contents (read
+    /// while the file still exists) and process-environment forwards.
+    fn record_environment(&mut self, args: &[String]) {
+        let mut effective = Vec::new();
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--env-file"
+                && let Some(path) = iter.next()
+                && let Ok(contents) = std::fs::read_to_string(path)
+            {
+                effective.extend(contents.lines().map(str::to_owned));
+            }
+        }
+        effective.extend(
+            std::mem::take(&mut self.pending_env)
+                .into_iter()
+                .map(|(name, value)| format!("{name}={value}")),
+        );
+        self.call_env.push(effective);
+        self.call_stdin
+            .push(std::mem::take(&mut self.pending_stdin));
+    }
+
     fn finish_result(&mut self, mut result: CommandResult) -> anyhow::Result<CommandResult> {
         if !self.codes.is_empty() {
             result.code = self.codes.remove(0);
@@ -551,6 +586,7 @@ impl RecordingCommands {
 impl CommandRunner for RecordingCommands {
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
         self.calls.push((program.to_string(), args.to_vec()));
+        self.record_environment(args);
         let mut result = if self.results.is_empty() {
             self.next.clone()
         } else {
@@ -602,6 +638,30 @@ impl CommandRunner for RecordingCommands {
             }
         }
         self.finish_result(result)
+    }
+
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<CommandResult> {
+        self.pending_env = env.to_vec();
+        self.run(program, args)
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        _timeout: std::time::Duration,
+    ) -> anyhow::Result<CommandResult> {
+        self.pending_env = env.to_vec();
+        self.pending_stdin = stdin.to_owned();
+        self.run(program, args)
     }
 
     fn spawn(&mut self, program: &str, args: &[String]) -> anyhow::Result<SpawnedProcess> {

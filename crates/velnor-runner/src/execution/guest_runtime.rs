@@ -11,6 +11,7 @@ use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMes
 use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
+use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference, PreparedDockerArgs};
 use crate::docker_lease::{DAEMON_ID_LABEL, JOB_ID_LABEL};
 use crate::executor::{CommandResult, CommandRunner, JobExecutionState, StepExecutionResult};
 use crate::script_step::StepCommandState;
@@ -351,7 +352,7 @@ pub fn execute_guest_plan(
     let job_label = format!("{JOB_ID_LABEL}={}", plan.job_id);
     let daemon_label = format!("{DAEMON_ID_LABEL}={}", plan.daemon_id);
     let network = format!("velnor-net-{}", plan.isolation_id);
-    docker(
+    docker_operands(
         runner,
         events,
         host_docker,
@@ -364,8 +365,8 @@ pub fn execute_guest_plan(
             &job_label,
             "--label",
             &daemon_label,
-            &network,
         ],
+        &[&network],
     )?;
     let job_name = format!("velnor-job-{}", plan.job_id);
     let mut teardown = GuestDockerTeardown::new(runner, events, host_docker, network);
@@ -436,58 +437,69 @@ impl<'a> GuestDockerTeardown<'a> {
     fn execute_steps(&mut self, plan: &GuestJobPlan, job_name: &str) -> Result<i32, String> {
         let label = plan.isolation_label();
         for service in &plan.services {
-            let mut args = vec![
-                "run".into(),
-                "-d".into(),
-                "--name".into(),
+            let image = parse_image(&service.image)?;
+            let mut command = DockerCommand::new(guest_env_dir(), ["run"]);
+            let args = &mut command;
+            args.flags([
+                "-d".to_owned(),
+                "--name".to_owned(),
                 service.name.clone(),
-                "--network".into(),
+                "--network".to_owned(),
                 self.network.clone(),
-                "--label".into(),
+                "--label".to_owned(),
                 label.clone(),
-            ];
+            ]);
             if !service.network_alias.is_empty() {
-                args.extend(["--network-alias".into(), service.network_alias.clone()]);
+                args.pair("--network-alias", service.network_alias.clone());
             }
             for port in &service.ports {
-                args.extend(["-p".into(), port.clone()]);
+                args.pair("-p", port.clone());
             }
+            // Service credentials never reach argv: /proc/<pid>/cmdline is
+            // world-readable to every co-tenant of this host.
             for env in &service.env {
-                args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+                args.env(env.name.clone(), env.value.clone());
             }
-            args.push(service.image.clone());
-            docker_owned(self.runner, self.events, self.host_docker, args)?;
+            let prepared = command.image(&image).finish().map_err(env_file_error)?;
+            docker_prepared(self.runner, self.events, self.host_docker, &prepared)?;
             self.containers.push(service.name.clone());
         }
         if !plan.image.is_empty() {
-            let mut args = vec![
-                "run".into(),
-                "-d".into(),
-                "--name".into(),
+            let image = parse_image(&plan.image)?;
+            let mut command = DockerCommand::new(guest_env_dir(), ["run"]);
+            let args = &mut command;
+            args.flags([
+                "-d".to_owned(),
+                "--name".to_owned(),
                 job_name.to_string(),
-                "--network".into(),
+                "--network".to_owned(),
                 self.network.clone(),
-                "--label".into(),
+                "--label".to_owned(),
                 label.clone(),
-            ];
+            ]);
+            // Job environment carries the workflow's secrets. It goes to a
+            // mode-0600 env file, never to argv.
             for env in &plan.env {
-                args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+                args.env(env.name.clone(), env.value.clone());
             }
-            args.extend([
-                "-e".into(),
-                "GITHUB_OUTPUT=/github/file_commands/GITHUB_OUTPUT".into(),
-                "-e".into(),
-                "GITHUB_ENV=/github/file_commands/GITHUB_ENV".into(),
-                "-e".into(),
-                "GITHUB_PATH=/github/file_commands/GITHUB_PATH".into(),
-                "-e".into(),
-                "GITHUB_STEP_SUMMARY=/github/file_commands/GITHUB_STEP_SUMMARY".into(),
+            args.envs([
+                ("GITHUB_OUTPUT", "/github/file_commands/GITHUB_OUTPUT"),
+                ("GITHUB_ENV", "/github/file_commands/GITHUB_ENV"),
+                ("GITHUB_PATH", "/github/file_commands/GITHUB_PATH"),
+                (
+                    "GITHUB_STEP_SUMMARY",
+                    "/github/file_commands/GITHUB_STEP_SUMMARY",
+                ),
             ]);
             if !plan.workspace.is_empty() {
-                args.extend(["-w".into(), plan.workspace.clone()]);
+                args.pair("-w", plan.workspace.clone());
             }
-            args.extend([plan.image.clone(), "sleep".into(), "infinity".into()]);
-            docker_owned(self.runner, self.events, self.host_docker, args)?;
+            let prepared = command
+                .image(&image)
+                .operands(["sleep", "infinity"])
+                .finish()
+                .map_err(env_file_error)?;
+            docker_prepared(self.runner, self.events, self.host_docker, &prepared)?;
             self.containers.push(job_name.to_string());
         }
         if plan.buildx {
@@ -499,12 +511,12 @@ impl<'a> GuestDockerTeardown<'a> {
             )?;
         }
         if !plan.image.is_empty() {
-            docker(
+            docker_operands(
                 self.runner,
                 self.events,
                 self.host_docker,
+                &["exec"],
                 &[
-                    "exec",
                     job_name,
                     "sh",
                     "-c",
@@ -604,18 +616,21 @@ impl<'a> GuestDockerTeardown<'a> {
                 .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
                 .collect();
             let script = super::guest_actions::guest_step_script(&resolved_step)?;
-            let mut exec = vec!["exec".into()];
+            let mut command = DockerCommand::new(guest_env_dir(), ["exec"]);
+            let exec = &mut command;
+            // `sh -s` reads the step script from stdin. The resolved script
+            // interpolates workflow expressions, so on argv it would publish
+            // every secret it uses through world-readable /proc.
+            exec.flag("-i");
             if !resolved_step.working_directory.is_empty() {
-                exec.extend(["-w".into(), resolved_step.working_directory.clone()]);
+                exec.pair("-w", resolved_step.working_directory.clone());
             }
             let step_env = step_state.step_env(&[]);
             for (name, value) in &step_env {
-                exec.push("-e".into());
-                exec.push(format!("{name}={value}"));
+                exec.env(name.clone(), value.clone());
             }
             for env in &resolved_step.env {
-                exec.push("-e".into());
-                exec.push(format!("{}={}", env.name, env.value));
+                exec.env(env.name.clone(), env.value.clone());
             }
             if !step_state.path_prepend().is_empty() {
                 let base_path = step_env
@@ -623,12 +638,10 @@ impl<'a> GuestDockerTeardown<'a> {
                     .find(|(name, _)| name == "PATH")
                     .map(|(_, value)| value.as_str())
                     .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-                exec.push("-e".into());
-                exec.push(format!(
-                    "PATH={}:{}",
-                    step_state.path_prepend().join(":"),
-                    base_path
-                ));
+                exec.env(
+                    "PATH",
+                    format!("{}:{base_path}", step_state.path_prepend().join(":")),
+                );
             }
             for input in &resolved_step.inputs {
                 let name = input
@@ -642,15 +655,20 @@ impl<'a> GuestDockerTeardown<'a> {
                         }
                     })
                     .collect::<String>();
-                exec.push("-e".into());
-                exec.push(format!("VELNOR_INPUT_{name}={}", input.value));
+                exec.env(format!("VELNOR_INPUT_{name}"), input.value.clone());
             }
-            exec.extend([job_name.to_string(), "sh".into(), "-c".into(), script]);
-            let result = docker_owned_timeout(
+            let prepared = command
+                .operands()
+                .operand(job_name.to_string())
+                .operands(["sh", "-s"])
+                .finish()
+                .map_err(env_file_error)?;
+            let result = docker_prepared_stdin_timeout(
                 self.runner,
                 self.events,
                 self.host_docker,
-                exec,
+                &prepared,
+                &script,
                 guest_step_timeout(step.timeout_ms),
             )?;
             if !result.stdout.is_empty() {
@@ -734,11 +752,12 @@ impl<'a> GuestDockerTeardown<'a> {
         for attempt in 1..=GUEST_TEARDOWN_ATTEMPTS {
             let mut remaining = Vec::new();
             for name in self.containers.iter().rev() {
-                let gone = docker(
+                let gone = docker_operands(
                     self.runner,
                     self.events,
                     self.host_docker,
-                    &["rm", "-f", name],
+                    &["rm", "-f"],
+                    &[name],
                 )
                 .map(|result| result.code == 0)
                 .unwrap_or(false);
@@ -747,11 +766,12 @@ impl<'a> GuestDockerTeardown<'a> {
                 }
             }
             self.containers = remaining;
-            let network_gone = docker(
+            let network_gone = docker_operands(
                 self.runner,
                 self.events,
                 self.host_docker,
-                &["network", "rm", &self.network],
+                &["network", "rm"],
+                &[&self.network],
             )
             .map(|result| result.code == 0)
             .unwrap_or(false);
@@ -954,11 +974,12 @@ fn cat_guest_file(
     host_docker: bool,
 ) -> Result<String, String> {
     let guest_path = format!("/github/file_commands/{name}");
-    let result = docker(
+    let result = docker_operands(
         runner,
         events,
         host_docker,
-        &["exec", job_name, "cat", &guest_path],
+        &["exec"],
+        &[job_name, "cat", &guest_path],
     )
     .map_err(|error| {
         guest_capability_error(
@@ -1027,12 +1048,12 @@ pub(super) fn apply_step_command_files(
                 bytes: summary_file.into_bytes(),
             });
         }
-        docker(
+        docker_operands(
             runner,
             events,
             host_docker,
+            &["exec"],
             &[
-                "exec",
                 job_name,
                 "sh",
                 "-c",
@@ -1043,12 +1064,12 @@ pub(super) fn apply_step_command_files(
     if !has_output && !has_env && !has_path {
         return Ok(());
     }
-    docker(
+    docker_operands(
         runner,
         events,
         host_docker,
+        &["exec"],
         &[
-            "exec",
             job_name,
             "sh",
             "-c",
@@ -1103,22 +1124,20 @@ fn import_guest_cache(
             cache.path.clone()
         };
         let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
-        docker_owned(
-            runner,
-            events,
-            host_docker,
-            vec![
-                "exec".into(),
-                "-e".into(),
-                format!("VELNOR_CACHE_PATH={path}"),
-                "-e".into(),
-                format!("VELNOR_CACHE_B64={encoded}"),
-                job_name.into(),
-                "sh".into(),
-                "-c".into(),
-                "mkdir -p \"$(dirname \"$VELNOR_CACHE_PATH\")\" && printf '%s' \"$VELNOR_CACHE_B64\" | base64 -d > \"$VELNOR_CACHE_PATH\"".into(),
-            ],
-        )?;
+        let mut command = DockerCommand::new(guest_env_dir(), ["exec"]);
+        command.env("VELNOR_CACHE_PATH", path);
+        command.env("VELNOR_CACHE_B64", encoded);
+        let prepared = command
+            .operands()
+            .operand(job_name.to_owned())
+            .operands([
+                "sh",
+                "-c",
+                "mkdir -p \"$(dirname \"$VELNOR_CACHE_PATH\")\" && printf '%s' \"$VELNOR_CACHE_B64\" | base64 -d > \"$VELNOR_CACHE_PATH\"",
+            ])
+            .finish()
+            .map_err(env_file_error)?;
+        docker_prepared(runner, events, host_docker, &prepared)?;
     }
     Ok(())
 }
@@ -1136,11 +1155,12 @@ fn export_guest_cache(
         } else {
             cache.path.clone()
         };
-        let result = docker(
+        let result = docker_operands(
             runner,
             events,
             host_docker,
-            &["exec", job_name, "cat", &path],
+            &["exec"],
+            &[job_name, "cat", &path],
         )
         .map_err(|error| {
             guest_capability_error(
@@ -1294,23 +1314,81 @@ fn docker_owned_timeout(
     owned: Vec<String>,
     timeout: Duration,
 ) -> Result<CommandResult, String> {
-    if owned.iter().any(|arg| arg.contains("docker.sock")) {
-        return Err("guest plan refused a docker.sock mount".into());
-    }
-    if host_docker {
-        events.push(ExecutionEvent::HostDockerInvoked(format!(
-            "docker {}",
-            owned.join(" ")
-        )));
-    } else {
-        events.push(ExecutionEvent::GuestDocker(format!(
-            "docker {}",
-            owned.join(" ")
-        )));
-    }
+    record_docker_invocation(events, host_docker, &owned)?;
     runner
         .run_timeout("docker", &owned, timeout)
         .map_err(|error| format!("docker {}: {error}", owned.join(" ")))
+}
+
+/// Directory for the mode-0600 env files backing guest Docker commands. The
+/// files are created with `O_EXCL|O_NOFOLLOW` under a unique name and unlinked
+/// when the prepared command is dropped, so a shared `/tmp` is safe.
+fn guest_env_dir() -> PathBuf {
+    std::env::temp_dir().join("velnor-guest-env")
+}
+
+fn env_file_error(error: std::io::Error) -> String {
+    format!("guest docker command could not be prepared: {error}")
+}
+
+fn parse_image(raw: &str) -> Result<ImageReference, String> {
+    ImageReference::parse(raw).map_err(|error| format!("guest plan {error}"))
+}
+
+/// Shared refusal + event record for every guest Docker invocation. The argv
+/// carries no environment values, so recording it cannot leak a secret.
+fn record_docker_invocation(
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    args: &[String],
+) -> Result<(), String> {
+    if args.iter().any(|arg| arg.contains("docker.sock")) {
+        return Err("guest plan refused a docker.sock mount".into());
+    }
+    let rendered = format!("docker {}", args.join(" "));
+    if host_docker {
+        events.push(ExecutionEvent::HostDockerInvoked(rendered));
+    } else {
+        events.push(ExecutionEvent::GuestDocker(rendered));
+    }
+    Ok(())
+}
+
+fn docker_prepared(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    prepared: &PreparedDockerArgs,
+) -> Result<CommandResult, String> {
+    record_docker_invocation(events, host_docker, prepared.args())?;
+    runner
+        .run_timeout_with_env(
+            "docker",
+            prepared.args(),
+            prepared.process_env(),
+            Duration::from_millis(DEFAULT_GUEST_STEP_TIMEOUT_MS),
+        )
+        .map_err(|error| format!("docker {}: {error}", prepared.args().join(" ")))
+}
+
+fn docker_prepared_stdin_timeout(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    prepared: &PreparedDockerArgs,
+    stdin: &str,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
+    record_docker_invocation(events, host_docker, prepared.args())?;
+    runner
+        .run_with_stdin_timeout_with_env(
+            "docker",
+            prepared.args(),
+            prepared.process_env(),
+            stdin,
+            timeout,
+        )
+        .map_err(|error| format!("docker {}: {error}", prepared.args().join(" ")))
 }
 
 fn docker(
@@ -1321,6 +1399,23 @@ fn docker(
 ) -> Result<CommandResult, String> {
     let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     docker_owned(runner, events, host_docker, owned)
+}
+
+/// `docker <flags> -- <operands>`. Container names and paths are plan data,
+/// so they are emitted after the end-of-flags separator and can never be read
+/// as Docker flags.
+fn docker_operands(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    flags: &[&str],
+    operands: &[&str],
+) -> Result<CommandResult, String> {
+    let argv = DockerArgv::new(flags.iter().copied())
+        .operands()
+        .operands(operands.iter().copied())
+        .into_argv();
+    docker_owned(runner, events, host_docker, argv)
 }
 
 fn log_line(line: &str) -> ExecutionEvent {
@@ -1352,6 +1447,29 @@ mod tests {
     use crate::execution::RecordingCommands;
     use crate::executor::CommandResult;
     use velnor_model::{GuestService, GuestStep, JobConclusion};
+
+    /// Effective view of every recorded call: argv, plus the environment the
+    /// command actually receives (env file contents and process-environment
+    /// forwards), plus its stdin. Environment pairs and step scripts are no
+    /// longer on argv — that is the point of the hardening — so behavioral
+    /// assertions read this instead of `calls`.
+    fn effective(runner: &RecordingCommands) -> Vec<Vec<String>> {
+        runner
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(index, (_, args))| {
+                let mut all = args.clone();
+                all.extend(runner.call_env.get(index).cloned().unwrap_or_default());
+                if let Some(stdin) = runner.call_stdin.get(index)
+                    && !stdin.is_empty()
+                {
+                    all.push(stdin.clone());
+                }
+                all
+            })
+            .collect()
+    }
 
     fn sample_plan() -> GuestJobPlan {
         GuestJobPlan {
@@ -1436,10 +1554,9 @@ mod tests {
             args.windows(2)
                 .any(|w| w == ["--network-alias", "postgres"])
         }));
-        assert!(runner
-            .calls
+        assert!(effective(&runner)
             .iter()
-            .any(|(_, args)| args.windows(2).any(|w| w == ["-e", "CI=true"])));
+            .any(|args| args.iter().any(|arg| arg == "CI=true")));
         assert!(runner
             .calls
             .iter()
@@ -1500,12 +1617,12 @@ mod tests {
         let error = execute_guest_plan(&plan, &mut runner, &mut events, true).unwrap_err();
         assert!(error.contains("script"), "{error}");
         assert!(runner.calls.iter().any(|(_, args)| args
-            .windows(3)
-            .any(|w| w == ["rm", "-f", "velnor-job-job-1"])));
+            .windows(4)
+            .any(|w| w == ["rm", "-f", "--", "velnor-job-job-1"])));
         assert!(runner
             .calls
             .iter()
-            .any(|(_, args)| args.windows(3).any(|w| w == ["rm", "-f", "pg"])));
+            .any(|(_, args)| args.windows(4).any(|w| w == ["rm", "-f", "--", "pg"])));
         assert!(runner.calls.iter().any(|(_, args)| args
             .windows(3)
             .any(|w| w == ["network", "rm", "velnor-net-job-1"])));
@@ -1633,7 +1750,7 @@ mod tests {
         let mut events = Vec::new();
         let code = execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
         assert_eq!(code, 0);
-        assert!(runner.calls.iter().any(|(_, args)| {
+        assert!(effective(&runner).iter().any(|args| {
             args.iter()
                 .any(|arg| arg.contains("VELNOR_INPUT_clone_url="))
                 && args.iter().any(|arg| arg.contains("git -C"))
@@ -1664,7 +1781,7 @@ mod tests {
             ..RecordingCommands::default()
         };
         execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
-        assert!(runner.calls.iter().any(|(_, args)| {
+        assert!(effective(&runner).iter().any(|args| {
             args.windows(2).any(|w| w == ["-w", "/__w/src"])
                 && args.iter().any(|arg| arg == "STEP_ENV=from-step")
         }));
@@ -1694,10 +1811,9 @@ mod tests {
             ..RecordingCommands::default()
         };
         execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
-        assert!(runner
-            .calls
+        assert!(effective(&runner)
             .iter()
-            .any(|(_, args)| args.iter().any(|arg| arg == "FOO=bar")));
+            .any(|args| args.iter().any(|arg| arg == "FOO=bar")));
     }
 
     #[test]
@@ -1737,7 +1853,7 @@ mod tests {
         };
         let mut events = Vec::new();
         execute_guest_plan(&plan, &mut runner, &mut events, false).unwrap();
-        assert!(runner.calls.iter().any(|(_, args)| {
+        assert!(effective(&runner).iter().any(|args| {
             args.iter()
                 .any(|arg| arg.starts_with("VELNOR_CACHE_PATH=/__w/.cache/blob"))
         }));
@@ -1801,10 +1917,9 @@ mod tests {
             ..RecordingCommands::default()
         };
         execute_guest_plan(&plan, &mut runner, &mut Vec::new(), false).unwrap();
-        assert!(runner
-            .calls
+        assert!(effective(&runner)
             .iter()
-            .any(|(_, args)| { args.iter().any(|arg| arg == "test \"parity\" = parity") }));
+            .any(|args| { args.iter().any(|arg| arg == "test \"parity\" = parity") }));
     }
 
     #[test]
@@ -1864,23 +1979,21 @@ mod tests {
         assert_eq!(code, 1);
         assert!(runner.results.is_empty(), "unconsumed Docker results");
         assert_eq!(
-            runner
-                .calls
+            effective(&runner)
                 .iter()
-                .filter(|(_, args)| {
+                .filter(|args| {
                     args.iter()
-                        .any(|arg| arg == r#"printf 'first\n' > "$GITHUB_STEP_SUMMARY""#)
+                        .any(|arg| arg.contains(r#"printf 'first\n' > "$GITHUB_STEP_SUMMARY""#))
                 })
                 .count(),
             1
         );
         assert_eq!(
-            runner
-                .calls
+            effective(&runner)
                 .iter()
-                .filter(|(_, args)| {
+                .filter(|args| {
                     args.iter()
-                        .any(|arg| arg == r#"printf 'second\n' > "$GITHUB_STEP_SUMMARY""#)
+                        .any(|arg| arg.contains(r#"printf 'second\n' > "$GITHUB_STEP_SUMMARY""#))
                 })
                 .count(),
             1
@@ -1994,14 +2107,12 @@ mod tests {
                 exit_code: 0,
             } if step_id == "after"
         )));
-        assert!(!runner
-            .calls
+        assert!(!effective(&runner)
             .iter()
-            .any(|(_, args)| args.iter().any(|arg| arg == "GITHUB_ACTION=skipped")));
-        assert!(runner
-            .calls
+            .any(|args| args.iter().any(|arg| arg == "GITHUB_ACTION=skipped")));
+        assert!(effective(&runner)
             .iter()
-            .any(|(_, args)| { args.windows(2).any(|window| window == ["-c", "true"]) }));
+            .any(|args| { args.iter().any(|arg| arg.contains("true")) }));
     }
 
     #[test]

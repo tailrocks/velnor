@@ -175,7 +175,7 @@ pub(crate) fn github_cargo_target_store_host(
     };
     crate::storage::append_legacy_trust(
         crate::container::cargo_target_store_host(temp_host),
-        &cargo_target_trust_scope_from(Some(trust_scope)),
+        crate::trust_scope::resolve(trust_scope).as_str(),
     )
     .join(CARGO_TARGET_GENERATION)
     .join(repository)
@@ -208,20 +208,20 @@ fn target_path_component(value: &str) -> Option<String> {
     Some(key)
 }
 
+/// The pool trust boundary this process resolved at startup.
+///
+/// There is no ambient read here any more: [`crate::trust_scope`] owns the
+/// `VELNOR_TRUST_SCOPE` variable through clap, resolves it against the command
+/// line exactly once, and hands the same answer to the capability gates and to
+/// every trust-scoped store path.
 pub(crate) fn cargo_target_trust_scope() -> String {
-    cargo_target_trust_scope_from(std::env::var("VELNOR_TRUST_SCOPE").ok().as_deref())
-}
-
-fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("untrusted")
-        .to_string()
+    crate::trust_scope::current()
 }
 
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
-    trust_scope.trim().eq_ignore_ascii_case("trusted")
+    trust_scope
+        .trim()
+        .eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
 }
 
 pub(crate) fn store_trust_class(trust_scope: &str) -> crate::container::StoreTrustClass {
@@ -1194,14 +1194,156 @@ mod tests {
         );
     }
 
+    /// The split brain this test exists to keep closed: `VELNOR_TRUST_SCOPE`
+    /// says `trusted` (the value the shipped systemd unit sets) while the
+    /// operator hardens the pool with `--trust-scope public`. Before the fix
+    /// the capability gates read the command line and the store paths read the
+    /// variable, so a fork pull request ran without the Docker socket but wrote
+    /// into the *trusted* cargo/mise stores that the next job mounts read-write
+    /// onto its `PATH`. Every consumer must now observe `public`.
     #[test]
-    fn cargo_target_trust_scope_defaults_and_trims() {
-        assert_eq!(cargo_target_trust_scope_from(None), "untrusted");
-        assert_eq!(cargo_target_trust_scope_from(Some("   ")), "untrusted");
+    fn every_consumer_observes_one_resolved_trust_scope() {
+        let _serial = crate::trust_scope::test_support::serialized();
+
+        let previous_scope = std::env::var_os("VELNOR_TRUST_SCOPE");
+        let previous_persist = std::env::var_os("VELNOR_CARGO_TARGET_PERSIST");
+        // SAFETY: this synchronous test owns the process environment for the
+        // body below (the trust-scope test guard serializes it against the
+        // other tests that care) and restores both values before returning.
+        unsafe {
+            std::env::set_var("VELNOR_TRUST_SCOPE", "trusted");
+            std::env::set_var("VELNOR_CARGO_TARGET_PERSIST", "1");
+        }
+
+        // One parse, one resolution: clap owns the variable and the command
+        // line beats it.
+        let arg = crate::trust_scope::test_support::parse(&["--trust-scope", "public"]);
+        assert_eq!(arg.trust_scope, "public");
+        let resolved = arg.resolve();
+        assert_eq!(resolved.as_str(), "public");
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42,
+            "jobContainer": { "image": "ubuntu:24.04", "options": "--privileged" },
+            "jobServiceContainers": {
+                "redis": {
+                    "image": "redis:7",
+                    "ports": ["6379:6379"],
+                    "options": "--privileged"
+                }
+            },
+            "variables": {
+                "github.workflow": { "value": "CI", "isSecret": false },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false },
+                "github.repository_id": { "value": "42", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let temp = std::path::Path::new("/velnor/work/job/temp");
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/velnor/work/job/workspace".into(),
+                temp_host: temp.into(),
+                home_host: "/velnor/work/job/home".into(),
+                actions_host: "/velnor/work/job/actions".into(),
+                tools_host: "/velnor/work/job/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            resolved.as_str(),
+        )
+        .unwrap();
+
+        // The socket gate.
+        assert!(!github_trust_scope_allows_host_docker(resolved.as_str()));
+        assert!(!spec.mount_docker_socket);
+        // Job container options.
+        assert!(!spec.options.iter().any(|option| option == "--privileged"));
+        // Service container privilege and host port publishing.
+        let service = spec.services.first().expect("one service container");
+        assert!(!service
+            .options
+            .iter()
+            .any(|option| option == "--privileged"));
+        assert!(service.ports.is_empty());
+        // Store trust class.
         assert_eq!(
-            cargo_target_trust_scope_from(Some(" public-forks ")),
-            "public-forks"
+            spec.store_trust_class,
+            crate::container::StoreTrustClass::Untrusted
         );
+
+        // Every trust-scoped store path, including the six that used to read
+        // the environment variable behind the gate's back. Stores named by the
+        // raw scope carry a `public` component; stores named by the derived
+        // trust class carry `untrusted`. Neither may ever carry `trusted`.
+        assert_eq!(cargo_target_trust_scope(), "public");
+        let scoped_by_raw_value = [
+            spec.cargo_target_host.clone().expect("target bucket"),
+            github_cargo_target_store_host(&job, temp, resolved.as_str()),
+            crate::container::cargo_executable_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::mise_executable_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::mise_binary_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::playwright_browser_store_host(temp, "ChainArgos/java-monorepo"),
+            // The persistent actions cache, exactly as `executor.rs` composes it.
+            crate::storage::append_legacy_trust(
+                crate::storage::cache_class_path(temp, "caches", "_velnor_caches"),
+                &cargo_target_trust_scope(),
+            ),
+        ];
+        let scoped_by_trust_class = [spec.mbx_store_host.clone().expect("mbx store")];
+
+        let has_component = |store: &std::path::Path, wanted: &str| {
+            store
+                .components()
+                .any(|component| component.as_os_str() == wanted)
+        };
+        for store in scoped_by_raw_value
+            .iter()
+            .chain(scoped_by_trust_class.iter())
+        {
+            assert!(
+                !has_component(store, "trusted"),
+                "store path leaked the ambient VELNOR_TRUST_SCOPE value: {}",
+                store.display()
+            );
+        }
+        for store in &scoped_by_raw_value {
+            assert!(
+                has_component(store, "public"),
+                "store path is not scoped to the resolved trust scope: {}",
+                store.display()
+            );
+        }
+        for store in &scoped_by_trust_class {
+            assert!(
+                has_component(store, "untrusted"),
+                "store path is not scoped to the resolved trust class: {}",
+                store.display()
+            );
+        }
+
+        // SAFETY: restore the values owned by this synchronous test.
+        unsafe {
+            match previous_scope {
+                Some(value) => std::env::set_var("VELNOR_TRUST_SCOPE", value),
+                None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
+            }
+            match previous_persist {
+                Some(value) => std::env::set_var("VELNOR_CARGO_TARGET_PERSIST", value),
+                None => std::env::remove_var("VELNOR_CARGO_TARGET_PERSIST"),
+            }
+        }
     }
 
     #[test]
