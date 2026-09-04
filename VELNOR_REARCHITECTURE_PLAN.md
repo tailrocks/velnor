@@ -3261,3 +3261,38 @@ or mixed native/JavaScript post-order fix is claimed. Reserved runner/executor
 ownership and checkout traversal error propagation still require coordination;
 the fixture's remaining static-only defaults and no-live-run limitations remain
 explicit rather than promoted to readiness.
+
+## 34. Workflow migration closure evidence — Velnor-owned runtime
+
+The workflow-generation migration is implemented in the Velnor workspace at the
+`perf/docker-rust-mbx` branch. `crates/velnor-workflow` is the sole Rust
+generator/runtime package; the legacy `github-actions-unified` repository is now
+a compatibility facade pinned to Velnor commit
+`dacf345e641c12ef27ad019a10b8562d497816b1`.
+
+Generated workflows execute `velnor-workflow` directly. GitHub-hosted jobs
+bootstrap source revision `a099520c761559d3875f76be25f18a1a63ccbafc`; Velnor
+job images and release archives package the binary. Legacy generated Bash
+helpers are no longer emitted. The monitor is Velnor-tools-owned, uses typed
+GitHub polling, optional local Velnor observations, atomic evidence, bounded
+polling/history/error/snapshot/evidence resources, and one global deadline.
+
+Trust boundaries now include: exact action SHAs; exact approved policy reusable
+workflow ref `fe805b984d3e261d3686d7ec670792f8121306bc`; a required exact-shape
+base-owned `.github/workflows/ci-policy.yml` entrypoint; fork policy checkout
+sparse-isolated to workflow data; exact trusted self-hosted gates; and explicit
+or static-Git-derived default branches. Pull-request generated workflows keep
+policy advisory-only; the base-owned entrypoint is the authoritative Policy
+check. Release tag verification requires an explicit `--branch`.
+
+Focused proof after this closure: `velnor-workflow` tests `99` passed,
+`velnor-tools` tests `196` passed, source facade tests `1` passed, source
+format/check/Clippy passed, and Dockerfile BuildKit syntax checks passed.
+Final workspace gates remain the authoritative verification record. No live
+dual-lane GitHub run, deployed image digest, or branch-protection mutation is
+claimed here. The currently observed Velnor `protect-main` ruleset requires
+`DCO` and `ci-required` only; after the workflow entrypoint is materialized on
+the protected branch, operators must add its exact `Velnor workflow policy /
+Policy` check to the ruleset and verify one test PR before declaring the merge
+gate complete. Existing handwritten Velnor workflows remain outside generator
+ownership until separately migrated.
