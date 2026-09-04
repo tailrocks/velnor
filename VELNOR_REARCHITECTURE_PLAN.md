@@ -3746,8 +3746,8 @@ shared-daemon path is not restored.
 ## 62. Final worker-branch preservation audit — 2026-09-05
 
 The canonical target is `/Users/donbeave/Projects/tailrocks/velnor-project/velnor`
-on `perf/docker-rust-mbx`, currently `f6f29ac`, and it is equal to
-`origin/perf/docker-rust-mbx`. The old clone at
+on `perf/docker-rust-mbx`; its code convergence tip is `f6f29ac`, and this
+audit is published on its descendant. The old clone at
 `/Users/donbeave/Projects/donbeave/velnor` remains untouched, clean, and at
 `ae72e3a`; that tip is an ancestor of the canonical history. Its sole branch,
 all canonical WIP stash parents, standalone objects, and audit merge objects
@@ -3760,3 +3760,11 @@ fix, detached performance backup, and every other worktree remain present and
 clean. The MBX candidate `88218d4` remains preserved but unpromoted because a
 host `mbx --version` probe cannot establish capability inside the default Rust
 job image. No branch or worktree was reset, pruned, force-pushed, or discarded.
+
+## 63. Superseded amend-object retention — 2026-09-05
+
+The final no-reflog scan found six objects created by local parser amend
+attempts after the earlier archive checkpoint: superseded commits `e42ec91`
+and `feb3224`, plus four exact trees. Each is now retained and published under
+`refs/archive/canonical/replaced-*`; the canonical branch was not rewritten.
+After publication, `git fsck --no-reflogs --unreachable` is empty again.
