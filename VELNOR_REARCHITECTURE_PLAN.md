@@ -2865,7 +2865,7 @@ source. The rule that caught all three is the same one: verify before implementi
 
 ## 22. Concurrent hardening — stale fencing and action-tree isolation
 
-The shared branch now contains two bounded follow-ups from the post-handoff audit:
+The shared branch now contains four bounded follow-ups from the post-handoff audit:
 
 - `111ed1d` hardens the durable journal boundary. `SlotStale` is rejected when any job on the
   slot is in `Assigned`, `Starting`, `Running`, or `Completing`; the reducer leaves state and
@@ -2877,9 +2877,15 @@ The shared branch now contains two bounded follow-ups from the post-handoff audi
 - `d8fcfb2` mounts the fetched action tree at `/__a:ro` in the job, Node-action, and Docker-action
   containers. Workspace, temp, and tool mounts remain writable. Container tests assert both the
   read-only mount and absence of the old writable form.
+- `b665fae` makes `ReadyProof` an opaque model capability. Its deserializer routes every wire
+  value through `try_new`, so an all-false or partially false serialized proof cannot satisfy a
+  readiness check; the existing JSON shape remains unchanged.
+- `ac85ea1` adds the graceful half of microVM cancellation: a guest `Cancel` is sent over the
+  session before the bounded jailer termination fallback. The integrated runner check passed.
 
-The fixture baseline was refreshed to `a1e64dd8940c44e6913521267b61d0efcf31b24f` and pushed as
-`45cdcbd`; its full gate passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
+The fixture baseline was refreshed to `ac85ea191966ec631bf4c16e21d85589fb3fff6d` and pushed as
+`034e354`; its readiness refresh passed, and the full fixture gate at the preceding integrated
+tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
 formatting, workspace, capability, and L2 closure checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
