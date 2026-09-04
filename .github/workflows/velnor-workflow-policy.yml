@@ -46,6 +46,7 @@ jobs:
             --git https://github.com/tailrocks/velnor \
             --rev 52e81238dd40cb892b2419c18c0b2399b5216646 \
             --root "$VELNOR_WORKFLOW_ROOT" \
+            velnor-workflow \
             --bin velnor-workflow
           echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
 

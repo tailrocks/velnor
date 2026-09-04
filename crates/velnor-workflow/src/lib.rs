@@ -3430,7 +3430,7 @@ impl WorkflowIr {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --bin velnor-workflow\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} velnor-workflow --bin velnor-workflow\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
             VELNOR_WORKFLOW_REPOSITORY,
@@ -4484,7 +4484,7 @@ fn yaml_scalar(value: &str) -> String {
 fn workflow_runtime_setup(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} --bin velnor-workflow\n"
+            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} velnor-workflow --bin velnor-workflow\n"
         )
     } else {
         String::new()
@@ -6539,6 +6539,22 @@ mod tests {
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("branches: [trunk]"));
         assert!(workflow.contains("refs/heads/trunk"));
+    }
+
+    #[test]
+    fn hosted_runtime_install_selects_the_multi_binary_workspace_package() {
+        let config = must(
+            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
+            "scan fixture for hosted install command",
+        );
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        assert!(workflow.contains(
+            "cargo install --locked --git https://github.com/tailrocks/velnor.git --rev "
+        ));
+        assert!(workflow.contains("velnor-workflow --bin velnor-workflow"));
+        assert!(!workflow.contains(&format!(
+            "--rev {VELNOR_WORKFLOW_SOURCE_REV} --bin velnor-workflow"
+        )));
     }
 
     #[test]
