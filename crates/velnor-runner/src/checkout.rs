@@ -160,7 +160,60 @@ where
     execute_checkout_with_mirror(runner, plan, log, None)
 }
 
+/// Every form of this checkout's credential that must never reach a log.
+///
+/// The token is only half of it: what git actually carries is
+/// `AUTHORIZATION: basic base64("x-access-token:<token>")`, and that base64
+/// blob is a distinct string that no masker registered for the raw token is
+/// guaranteed to catch. Both go in, and [`velnor_model::redaction::SecretMasker`]
+/// expands each into the eleven encodings `HostContext` registers upstream
+/// (`src/Runner.Common/HostContext.cs:103-113`).
+///
+/// Callers that build the checkout step's `StepLog` register these as the
+/// step's masks, so a credential echoed anywhere in the job's output is masked
+/// like any other secret rather than only where a hard-coded prefix matched.
+#[must_use]
+pub fn checkout_credential_masks(plan: &CheckoutPlan) -> Vec<String> {
+    credential_mask_values(plan.token.as_deref())
+}
+
+fn credential_mask_values(token: Option<&str>) -> Vec<String> {
+    let Some(token) = token.filter(|token| !token.is_empty()) else {
+        return Vec::new();
+    };
+    let header = git_basic_auth_value(token);
+    let encoded = STANDARD.encode(format!("x-access-token:{token}"));
+    vec![token.to_string(), header, encoded]
+}
+
 pub fn execute_checkout_with_mirror<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    mirror_store: Option<&Path>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    // Mask at the boundary rather than at each `log.push`. The previous scheme
+    // redacted only arguments starting with a known `AUTHORIZATION:` prefix,
+    // so a credential that appeared in any other shape — a git error quoting
+    // the remote URL, a config dump, an encoded form — went out in cleartext.
+    // Filtering the whole log through the shared masker removes the enabling
+    // condition: no site inside this module has to remember to redact.
+    let masks = credential_mask_values(plan.token.as_deref());
+    let mut raw = Vec::new();
+    let result = execute_checkout_unmasked(runner, plan, &mut raw, mirror_store);
+    if masks.is_empty() {
+        log.append(&mut raw);
+    } else {
+        let masker = velnor_model::redaction::SecretMasker::new(&masks);
+        log.extend(raw.iter().map(|line| masker.mask(line)));
+    }
+    result
+}
+
+fn execute_checkout_unmasked<R>(
     runner: &mut R,
     plan: &CheckoutPlan,
     log: &mut Vec<String>,
@@ -3205,4 +3258,51 @@ mod tests {
             ["-C", "/__w", "clean", "-ffdx"]
         );
     }
+
+    /// The credential git carries is not the token: it is
+    /// `AUTHORIZATION: basic base64("x-access-token:<token>")`. A masker that
+    /// only knows the token would not recognise the header, so both go in.
+    #[test]
+    fn credential_masks_cover_the_token_and_the_encoded_header() {
+        let plan = CheckoutPlan {
+            token: Some("ghs_realcredential".to_string()),
+            ..test_checkout_plan(PathBuf::from("/__w/r/r"))
+        };
+        let masks = checkout_credential_masks(&plan);
+        assert!(masks.contains(&"ghs_realcredential".to_string()));
+        assert!(masks.contains(&git_basic_auth_value("ghs_realcredential")));
+        assert!(masks.contains(&STANDARD.encode("x-access-token:ghs_realcredential")));
+    }
+
+    #[test]
+    fn credential_masks_are_empty_without_a_token() {
+        assert!(credential_mask_values(None).is_empty());
+        assert!(credential_mask_values(Some("")).is_empty());
+    }
+
+    /// The old redaction matched a hard-coded `AUTHORIZATION:` prefix, so a
+    /// credential quoted by git in any other shape survived. Masking the whole
+    /// log at the boundary catches every shape, including the encodings the
+    /// shared masker derives.
+    #[test]
+    fn boundary_masking_removes_the_credential_in_every_shape() {
+        let token = "ghs_realcredential";
+        let masks = credential_mask_values(Some(token));
+        let masker = velnor_model::redaction::SecretMasker::new(&masks);
+        let header = git_basic_auth_value(token);
+        let encoded = STANDARD.encode(format!("x-access-token:{token}"));
+        for line in [
+            format!("fatal: could not read Username for 'https://x-access-token:{token}@github.com'"),
+            format!("\textraheader = {header}"),
+            format!("remote reported {encoded}"),
+            // A URI-escaped form of the credential, which the eleven upstream
+            // encoders cover and a prefix match never would.
+            format!("url=https%3A%2F%2F{token}%40github.com"),
+        ] {
+            let masked = masker.mask(&line);
+            assert!(!masked.contains(token), "token survived masking: {masked}");
+            assert!(!masked.contains(&encoded), "credential survived: {masked}");
+        }
+    }
 }
+
