@@ -667,21 +667,74 @@ fn wait_for_health(context: &mut Context, name: &str) -> bool {
 }
 
 /// BuildKit prints `CACHED` for a reused step; every other step line is a miss.
+fn finish_buildkit_step(
+    steps: &mut BTreeMap<String, ()>,
+    id: &str,
+    cached: bool,
+    hits: &mut u64,
+    misses: &mut u64,
+) {
+    if steps.remove(id).is_some() {
+        if cached {
+            *hits += 1;
+        } else {
+            *misses += 1;
+        }
+    }
+}
+
 fn count_layer_cache(output: &str) -> (u64, u64) {
-    let mut hits = 0;
-    let mut misses = 0;
+    let mut hits = 0_u64;
+    let mut misses = 0_u64;
+    let mut buildkit_steps = BTreeMap::<String, ()>::new();
+    let mut classic_step_cached = None;
+
     for line in output.lines() {
         let trimmed = line.trim_start();
-        // Step lines look like `#5 [2/4] RUN ...` or, in the classic builder,
-        // `Step 2/4 : RUN ...`.
-        let is_step = trimmed.starts_with("Step ")
-            || (trimmed.starts_with('#') && trimmed.contains(']') && trimmed.contains('['));
-        if trimmed.contains("CACHED") {
+        // BuildKit progress lines identify real Dockerfile steps with a
+        // numeric fraction (`[2/4]`). Internal/export steps also use brackets
+        // but have no fraction and must not enter layer accounting.
+        if let Some((id, detail)) = trimmed.split_once(' ')
+            && id.starts_with('#')
+            && detail
+                .split_once(']')
+                .is_some_and(|(header, _)| header.contains('[') && header.contains('/'))
+        {
+            buildkit_steps.insert(id.to_owned(), ());
+        }
+        if trimmed.starts_with('#') {
+            let id = trimmed.split_whitespace().next().unwrap_or_default();
+            if trimmed.contains("CACHED") {
+                finish_buildkit_step(&mut buildkit_steps, id, true, &mut hits, &mut misses);
+            } else if trimmed.contains("DONE") {
+                finish_buildkit_step(&mut buildkit_steps, id, false, &mut hits, &mut misses);
+            }
+        }
+
+        // Classic-builder output announces a step before printing either
+        // `Using cache` or the completed layer. Finalize the previous step
+        // only when the next step begins, then finalize the last one at EOF.
+        if trimmed.starts_with("Step ") {
+            if let Some(cached) = classic_step_cached.replace(false) {
+                if cached {
+                    hits += 1;
+                } else {
+                    misses += 1;
+                }
+            }
+        } else if trimmed.contains("Using cache") && classic_step_cached.is_some() {
+            classic_step_cached = Some(true);
+        }
+    }
+
+    if let Some(cached) = classic_step_cached {
+        if cached {
             hits += 1;
-        } else if is_step {
+        } else {
             misses += 1;
         }
     }
+    misses += buildkit_steps.len() as u64;
     (hits, misses)
 }
 
@@ -729,9 +782,11 @@ mod tests {
                         #5 [2/3] COPY cache-buster /velnor-bench/cache-buster\n\
                         #5 CACHED\n\
                         #6 [3/3] RUN printf layer-one > /velnor-bench/one\n";
-        assert_eq!(count_layer_cache(buildkit), (1, 3));
+        assert_eq!(count_layer_cache(buildkit), (1, 2));
         let classic = "Step 1/3 : FROM alpine\nStep 2/3 : COPY x /x\n ---> Using cache\n";
-        assert_eq!(count_layer_cache(classic), (0, 2));
+        assert_eq!(count_layer_cache(classic), (1, 1));
+        let terminal = "#1 [1/2] FROM alpine\n#1 DONE 0.1s\n#2 [2/2] RUN printf ok\n#2 CACHED\n";
+        assert_eq!(count_layer_cache(terminal), (1, 1));
         assert_eq!(count_layer_cache(""), (0, 0));
     }
 
