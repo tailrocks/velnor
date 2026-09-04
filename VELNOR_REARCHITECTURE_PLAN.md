@@ -112,6 +112,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `.github/workflows/docs.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
 | `.github/workflows/renovate.yml` (manual-dispatch runner admission) | codex-lead | claimed — T-020 |
 | `crates/velnor-bench/src/record.rs` (derived-summary integrity) | codex-lead | claimed — T-021 |
+| `crates/velnor-bench/src/sys.rs` + `drivers/cargo.rs` (Cargo measurement environment) | codex-lead | claimed — T-022 |
 
 ## 8. Discovered bug classes
 
