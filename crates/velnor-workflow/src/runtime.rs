@@ -22,6 +22,7 @@ use serde_yaml::{Mapping, Value};
 
 const IMMUTABLE_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
+const IMMUTABLE_POLICY_WORKFLOW_REV: &str = "fe805b984d3e261d3686d7ec670792f8121306bc";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -888,11 +889,7 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
 
 fn is_approved_policy_reusable(value: &str) -> bool {
     value.split_once('@').is_some_and(|(path, reference)| {
-        path == IMMUTABLE_POLICY_WORKFLOW
-            && reference.len() == 40
-            && reference
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
+        path == IMMUTABLE_POLICY_WORKFLOW && reference == IMMUTABLE_POLICY_WORKFLOW_REV
     })
 }
 
@@ -1415,7 +1412,7 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1444,7 +1441,7 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc
     permissions:
       contents: read
 ";
