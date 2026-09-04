@@ -29,9 +29,12 @@ const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
 const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
+const VELNOR_POLICY_WORKFLOW: &str =
+    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "883411f8c4f57875609ca8a7337485ebe24af2a0";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "ef344c901a51afca9042938b5d37e4745a04ac96";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "76d34ca5eaca700ed0d0a4aca3952542dcdc591e";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3124,7 +3127,7 @@ impl WorkflowIr {
         // selected verification lane is self-hosted. They execute checked-in
         // shell files and must never expose untrusted PR code to that runner.
         self.render_plan(&mut output, RunnerMode::Github, false);
-        self.render_policy(&mut output, RunnerMode::Github, false);
+        Self::render_policy(&mut output, RunnerMode::Github, false);
         self.render_hierarchy_groups(&mut output);
         let cache_save = kind != WorkflowKind::PullRequest;
         match runners {
@@ -3202,7 +3205,7 @@ impl WorkflowIr {
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  contents: read\n\njobs:"
         );
         self.render_plan(&mut output, RunnerMode::Github, false);
-        self.render_policy(&mut output, RunnerMode::Github, false);
+        Self::render_policy(&mut output, RunnerMode::Github, false);
         self.render_nested_unit_callers(&mut output);
         if kind != WorkflowKind::Nightly {
             self.render_nested_required(&mut output, kind == WorkflowKind::PullRequest);
@@ -3388,16 +3391,11 @@ impl WorkflowIr {
         );
     }
 
-    fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
-        let gate = self.trusted_runner_gate(runners, trusted);
+    fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
+        let _ = (runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Policy\n{gate}    runs-on: {}\n    steps:\n      - name: Checkout workflow data\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} --package velnor-workflow --bin velnor-workflow\n      - name: Checkout trusted policy\n        uses: {}\n        continue-on-error: true\n        with:\n          ref: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}}}\n          path: .github-policy\n          persist-credentials: false\n      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Enforce trusted workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root .github-policy",
-            self.runner_for(runners),
-            ActionPin::Checkout.reference(),
-            VELNOR_WORKFLOW_REPOSITORY,
-            VELNOR_WORKFLOW_SOURCE_REV,
-            ActionPin::Checkout.reference(),
+            "  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
         );
     }
 
@@ -3765,7 +3763,7 @@ impl WorkflowIr {
             output,
             "  required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
             needs.join(", "),
-            self.runner_for(runners),
+            yaml_scalar(&self.github_runner),
         );
     }
 }
@@ -3998,7 +3996,7 @@ fn render_preview(config: &ProjectConfig) -> String {
     .replace(
         "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 75",
         &format!(
-            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 75",
+            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
             trusted_release_runner_gate(&config.default_branch)
         ),
     )
@@ -4282,7 +4280,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         let build = build.replace(
             "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 90",
             &format!(
-                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 90",
+                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 90",
                 trusted_release_runner_gate(&config.default_branch)
             ),
         );
@@ -7017,9 +7015,11 @@ path-only = { path = "../path-only" }
         assert!(workflow.contains("persist-credentials: false"));
         assert!(workflow.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"));
         assert!(!workflow.contains("\non:\n  pull_request_target:"));
-        assert!(!workflow.contains("uses: ./.github/workflows/"));
-        assert!(workflow.contains("path: .github-policy"));
-        assert!(workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
+        let policy_reference =
+            format!("uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}");
+        assert!(workflow.contains(&policy_reference));
+        assert!(!workflow.contains("path: .github-policy"));
+        assert!(!workflow.contains("velnor-workflow policy --workflow-root .github-policy"));
         assert!(workflow.contains("velnor-workflow run --config .github/ci/project.toml"));
         for action in [
             ActionPin::Checkout.reference(),
@@ -7063,7 +7063,9 @@ path-only = { path = "../path-only" }
             files.get(&PathBuf::from(".github/workflows/nightly.yml")),
             "generated nightly workflow",
         );
-        assert!(pr_workflow.contains("name: Checkout workflow data"));
+        let policy_reference =
+            format!("uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}");
+        assert!(pr_workflow.contains(&policy_reference));
         assert!(pr_workflow.contains("pull_request:"));
         assert!(!pr_workflow.contains("branches: [main]"));
         assert!(main_workflow.contains("branches: [main]"));
@@ -7076,7 +7078,7 @@ path-only = { path = "../path-only" }
         assert!(files.contains_key(&PathBuf::from(".github/workflows/maintenance.yml")));
         assert!(files
             .values()
-            .any(|content| content.contains("velnor-workflow policy")));
+            .any(|content| content.contains(&policy_reference)));
         assert!(files
             .values()
             .any(|content| content.contains("velnor-workflow run")));

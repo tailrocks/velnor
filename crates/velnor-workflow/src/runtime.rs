@@ -19,6 +19,9 @@ use std::thread;
 use globset::{Glob, GlobSetBuilder};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
+
+const IMMUTABLE_POLICY_WORKFLOW: &str =
+    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
@@ -810,7 +813,7 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
         policy_failure(path, "uses must be a scalar reference", failures);
         return;
     };
-    if is_approved_local_reusable(action) {
+    if is_approved_local_reusable(action) || is_approved_policy_reusable(action) {
         return;
     }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
@@ -827,6 +830,16 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut usize) {
             failures,
         );
     }
+}
+
+fn is_approved_policy_reusable(value: &str) -> bool {
+    value.split_once('@').is_some_and(|(path, reference)| {
+        path == IMMUTABLE_POLICY_WORKFLOW
+            && reference.len() == 40
+            && reference
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+    })
 }
 
 fn is_approved_local_reusable(value: &str) -> bool {
@@ -1022,10 +1035,31 @@ fn contains_self_hosted_label(value: &str) -> bool {
 }
 
 fn has_trusted_runner_gate(value: &str) -> bool {
-    value.contains("github.event_name == 'push'")
-        && value.contains("github.event_name == 'schedule'")
-        && value.contains("github.event_name == 'workflow_dispatch'")
-        && value.contains("github.ref == 'refs/heads/")
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    let marker = "github.ref=='refs/heads/";
+    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
+        return false;
+    };
+    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
+        return false;
+    };
+    let branch = &value[start..end];
+    if !valid_branch(branch) {
+        return false;
+    }
+    let ci_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||github.event_name=='workflow_dispatch')"
+    );
+    let release_gate = format!(
+        "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
+    );
+    value == ci_gate || value == release_gate
 }
 
 fn policy_failure(path: &Path, message: &str, failures: &mut usize) {
@@ -1321,6 +1355,30 @@ jobs:
     }
 
     #[test]
+    fn policy_allows_only_full_sha_for_immutable_policy_workflow() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Policy caller
+on: pull_request
+jobs:
+  policy:
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+";
+        let root = policy_fixture("approved-policy", workflow, "github")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Policy caller
+on: pull_request
+jobs:
+  policy:
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@main
+";
+        let root = policy_fixture("floating-policy", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
     fn policy_requires_full_sha_for_external_actions_and_allows_approved_local_calls(
     ) -> Result<(), Box<dyn Error>> {
         let valid = format!(
@@ -1369,6 +1427,22 @@ jobs:
     runs-on: ${{ matrix.runner }}
 ";
         let root = policy_fixture("matrix-untrusted", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_noncanonical_gate_that_mentions_trusted_fragments(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: SpoofedGate
+on: pull_request
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    runs-on: [self-hosted, velnor]
+";
+        let root = policy_fixture("spoofed-gate", workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }
