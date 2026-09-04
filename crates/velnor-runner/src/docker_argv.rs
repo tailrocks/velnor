@@ -182,10 +182,10 @@ fn validate_domain(domain: &str) -> Result<(), InvalidImageReference> {
         Some((host, port)) => (host, Some(port)),
         None => (domain, None),
     };
-    if let Some(port) = port {
-        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(invalid("registry port is not numeric"));
-        }
+    if let Some(port) = port
+        && (port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(invalid("registry port is not numeric"));
     }
     if host.is_empty() {
         return Err(invalid("empty registry host"));

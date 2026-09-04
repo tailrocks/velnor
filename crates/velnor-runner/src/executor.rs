@@ -13844,6 +13844,45 @@ mod tests {
         args.first().is_some_and(|a| a == "image") && args.get(1).is_some_and(|a| a == "inspect")
     }
 
+    impl RecordingRunner {
+        /// Record one call whose environment travels outside argv: the env
+        /// file is expanded and process-environment forwards are appended, so
+        /// assertions see the effective command.
+        fn record_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: String,
+        ) -> Result<CommandResult> {
+            let mut args = crate::execution::expand_env_file_args(args);
+            for (name, value) in env {
+                args.push("-e".to_string());
+                args.push(format!("{name}={value}"));
+            }
+            if is_seed_probe(&args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args));
+            self.stdin.push(stdin);
+            self.env.push(env.to_vec());
+            let code = if self.codes.is_empty() {
+                0
+            } else {
+                self.codes.remove(0)
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
@@ -13909,6 +13948,41 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+
+        /// Values an env file cannot carry (anything multi-line) are forwarded
+        /// from the Docker client's own process environment, so the double has
+        /// to accept them instead of failing closed.
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, String::new())
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, String::new())
+        }
+
+        fn run_with_stdin_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: &str,
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, stdin.to_string())
         }
     }
 
@@ -14141,6 +14215,7 @@ mod tests {
             _timeout: Duration,
             on_output: &mut dyn FnMut(CommandStream, &str),
         ) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if args.first().is_some_and(|arg| arg == "exec")
                 && has_container_env_path(args, "GITHUB_OUTPUT", "masked_output")
@@ -14215,6 +14290,24 @@ mod tests {
     }
 
     impl CommandRunner for OutputWritingRunner {
+        /// Multi-line values cannot live in a Docker env file, so they are
+        /// forwarded from the client's process environment. Fold them back in
+        /// so the double still observes the effective command.
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            let mut args = args.to_vec();
+            for (name, value) in env {
+                args.push("-e".to_string());
+                args.push(format!("{name}={value}"));
+            }
+            self.run(program, &args)
+        }
+
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
@@ -14385,6 +14478,7 @@ mod tests {
             args: &[String],
             on_output: &mut dyn FnMut(CommandStream, &str),
         ) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             on_output(CommandStream::Stdout, "::add-mask::dynsecret");
             on_output(CommandStream::Stdout, "echo dynsecret");
@@ -14856,6 +14950,7 @@ esac
             "velnor.daemon-id=test-daemon",
             "--label",
             "velnor.job-id=job",
+            "--",
             "net",
         ]
         .into_iter()
@@ -14901,9 +14996,9 @@ esac
 
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
-        assert!(calls
-            .iter()
-            .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| {
+            args.starts_with(&["rm".into(), "--force".into(), "--".into(), "job".into()])
+        }));
         assert!(calls
             .iter()
             .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
@@ -15039,7 +15134,15 @@ esac
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                if args
+                    == [
+                        "rm".to_string(),
+                        "--force".to_string(),
+                        "--".to_string(),
+                        "job".to_string(),
+                    ]
+                    .as_slice()
+                {
                     assert!(
                         lease_live,
                         "lease must stay mounted until the job container is removed"
@@ -15121,7 +15224,15 @@ esac
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                if args
+                    == [
+                        "rm".to_string(),
+                        "--force".to_string(),
+                        "--".to_string(),
+                        "job".to_string(),
+                    ]
+                    .as_slice()
+                {
                     assert!(
                         lease_live,
                         "lease must stay mounted until the job container is removed"
@@ -18343,11 +18454,12 @@ type=sha,format=long,prefix=,enable=true"
             .contains("'--cache-from' 'type=gha,scope=bitcoin-processor-app-pr'"));
         assert!(calls[build_call.unwrap()]
             .contains("'--cache-to' 'type=gha,scope=bitcoin-processor-app-pr,mode=max'"));
-        // Non-secret runtime env remains inline, while credentials use a
-        // mode-0600 env file and never occur in the process argument vector.
+        // Every variable travels in a mode-0600 env file and never occurs in
+        // the process argument vector. The recorder expands the file, so these
+        // assert delivery; argv confidentiality is enforced by construction
+        // (docker_argv) and tested in container.rs.
         let build_invocation = &calls[build_call.unwrap()];
-        assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
-        assert!(!build_invocation.contains("docker-token"));
+        assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
         assert!(build_invocation
             .contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/"));
         assert!(build_invocation.contains("--env-file"));
@@ -19033,7 +19145,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         executor.cleanup_services(&spec).unwrap();
 
         assert_eq!(executor.runner().calls.len(), 1);
-        assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
+        assert_eq!(
+            executor.runner().calls[0].1,
+            vec!["rm", "--force", "--", "svc"]
+        );
     }
 
     struct ContainerRemovalRaceRunner;
@@ -20201,7 +20316,7 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].contains(&"INPUT_USERNAME=docker_user".into()));
-        assert!(!node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
         assert!(node_calls[0].contains(&"--env-file".into()));
         let build_exec = executor
             .runner()
@@ -20209,7 +20324,7 @@ fi"#
             .iter()
             .find(|(_, args)| args.iter().any(|arg| arg == "/__t/build-docker-image.sh"))
             .expect("build script should execute");
-        assert!(!build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
         assert!(build_exec.1.contains(&"--env-file".into()));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -24416,7 +24531,7 @@ fi"#
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(!node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
         assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"INPUT_BASE=main".into()));
         assert!(node_call
@@ -24734,7 +24849,7 @@ fi"#
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
             ));
-            assert!(!call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"GITHUB_TOKEN=ghs_token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
@@ -25208,8 +25323,8 @@ bitcoin-processor-app.push=true")
             "guest Docker must use the job lease socket, got {node_call:?}"
         );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
-        assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
-        assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
         assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
         assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
@@ -25388,11 +25503,11 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
-        assert!(!node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
         assert!(node_calls[0].contains(&"--env-file".into()));
         assert!(node_calls[0].contains(&"GITHUB_PATH=/github/file_commands/mise_path".into()));
         assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
-        assert!(!node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
         assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
@@ -25534,7 +25649,7 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"INPUT_CRATE=cargo-binstall".into()));
         assert!(node_calls[1].contains(&"INPUT_VERSION=latest".into()));
         assert!(node_calls[1].contains(&"INPUT_LOCKED=true".into()));
-        assert!(!node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
         assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
@@ -25975,7 +26090,7 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         for call in &node_calls {
-            assert!(!call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"INPUT_TOKEN=ghs_token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"INPUT_DISABLE_ANNOTATIONS=false".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
@@ -26161,7 +26276,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(!call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
             assert!(call.contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));

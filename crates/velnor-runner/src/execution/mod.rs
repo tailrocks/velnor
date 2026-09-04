@@ -565,16 +565,12 @@ pub fn expand_env_file_args(args: &[String]) -> Vec<String> {
     while let Some(arg) = iter.next() {
         if arg == "--env-file" {
             let path = iter.next().cloned().unwrap_or_default();
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => {
-                    for line in contents.lines() {
-                        expanded.push("-e".to_owned());
-                        expanded.push(line.to_owned());
-                    }
-                }
-                Err(_) => {
-                    expanded.push(arg.clone());
-                    expanded.push(path);
+            expanded.push(arg.clone());
+            expanded.push(path.clone());
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                for line in contents.lines() {
+                    expanded.push("-e".to_owned());
+                    expanded.push(line.to_owned());
                 }
             }
         } else {
@@ -597,15 +593,14 @@ impl RecordingCommands {
         while let Some(arg) = iter.next() {
             if arg == "--env-file" {
                 let path = iter.next().cloned().unwrap_or_default();
+                expanded.push(arg.clone());
+                expanded.push(path.clone());
                 if let Ok(contents) = std::fs::read_to_string(&path) {
                     for line in contents.lines() {
                         effective.push(line.to_owned());
                         expanded.push("-e".to_owned());
                         expanded.push(line.to_owned());
                     }
-                } else {
-                    expanded.push(arg.clone());
-                    expanded.push(path);
                 }
             } else {
                 expanded.push(arg.clone());

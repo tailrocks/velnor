@@ -1624,8 +1624,8 @@ mod tests {
             .iter()
             .any(|(_, args)| args.windows(4).any(|w| w == ["rm", "-f", "--", "pg"])));
         assert!(runner.calls.iter().any(|(_, args)| args
-            .windows(3)
-            .any(|w| w == ["network", "rm", "velnor-net-job-1"])));
+            .windows(4)
+            .any(|w| w == ["network", "rm", "--", "velnor-net-job-1"])));
     }
 
     /// Fails the first `docker network rm` with a transient nonzero exit.
