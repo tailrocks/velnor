@@ -2929,8 +2929,8 @@ leaving those sections as history. The tested runner source snapshot is
 `6c0c1af6db984e53fa33608a82927cebee1553a4`; it was materialized with
 `git archive 6c0c1af6db984e53fa33608a82927cebee1553a4 | tar -x -C <scratch>`.
 The verifier's current provenance commit is
-`38e260bb3ec6e3748cb76b4d358b09d4216e725c`, with the generated baseline present in its
-parent `2c2afc987454ea10cffbef6b18f208167479e38b`. Manifest identity is v12, crate `0.1.250`,
+`75b19e581f7d80b1166e347f199e14f083a97e65`, with the generated baseline present in its
+parent `ed834d044a4c597e99b1575c93ea9b59d2fd5ae5`. Manifest identity is v12, crate `0.1.250`,
 capability ID `23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and source
 SHA `6c0c1af6db984e53fa33608a82927cebee1553a4`. No live dual-lane verdict or deployed image
 digest is claimed.
@@ -2984,7 +2984,7 @@ diagnostics remain fail-closed; no live parity result is substituted.
 | Runner tools test, serial | 190 passed |
 | Runner library test, serial | 1583 passed, 1 ignored |
 | Fixture refresh plus capability readiness audit | pass; v12 / crate 0.1.250 / ID above |
-| Fixture capability contract, workflow audit, Python syntax, Python tests | pass; 38 Python tests |
+| Fixture capability contract, workflow audit, Python syntax, Python tests | pass; 39 Python tests |
 | Fixture `mise run workflow-check` | pass; actionlint and audit suite included |
 | Fixture L2 closure | pass; `closure-valid=3` |
 | Fixture Rust fmt/check/Clippy | pass |
