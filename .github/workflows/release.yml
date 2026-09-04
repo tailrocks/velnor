@@ -650,8 +650,11 @@ jobs:
             --disable-strategies compile --no-confirm --force
           cargo-deb --version
 
-      - name: Build (release-build embeds source SHA + tag; fails on drift)
+      - name: Build runner (release-build embeds source SHA + tag; fails on drift)
         run: cargo zigbuild -p velnor-runner -p velnorctl -p velnor-tools --release --locked --features release-build --target ${{ matrix.target }}
+
+      - name: Build workflow binary for the node package and release archive
+        run: cargo zigbuild -p velnor-workflow --release --locked --target ${{ matrix.target }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -662,10 +665,14 @@ jobs:
         run: |
           set -euo pipefail
           # Artifact NAMES keep the velnor-runner prefix until the Plan 079
-          # package rename (downstream apt verify + evidence reference them);
-          # the bound BINARY is the shipped product: /usr/bin/velnorctl.
+          # package rename (downstream apt verify + evidence reference them).
+          # The archive contains the runner and the node's workflow binary;
+          # the release record continues to bind the runner binary below.
           archive="velnor-runner-${VERSION}-${{ matrix.arch }}.tar.gz"
-          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner velnor-workflow
+          test -x "target/${{ matrix.target }}/release/velnor-workflow"
+          tar -tzf "$archive" | grep -Fxq velnor-runner
+          tar -tzf "$archive" | grep -Fxq velnor-workflow
           sha256sum "$archive" | awk '{print $1}' > "$archive.sha256"
           # Independent digest of the raw binary (the record's per-arch binary id).
           sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
@@ -769,6 +776,7 @@ jobs:
           grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
           grep -q "usr/bin/velnor-tools" "$manifest" || { echo "::error::deb missing usr/bin/velnor-tools" >&2; exit 1; }
+          grep -q "usr/bin/velnor-workflow" "$manifest" || { echo "::error::deb missing usr/bin/velnor-workflow" >&2; exit 1; }
           grep -q "usr/bin/velnor-guest-agent" "$manifest" || { echo "::error::deb missing usr/bin/velnor-guest-agent" >&2; exit 1; }
           grep -q "lib/systemd/system/velnor-fleet-policy-audit.service" "$manifest" || { echo "::error::deb missing fleet-policy audit service" >&2; exit 1; }
           grep -q "lib/systemd/system/velnor-fleet-policy-audit.timer" "$manifest" || { echo "::error::deb missing fleet-policy audit timer" >&2; exit 1; }
@@ -783,6 +791,8 @@ jobs:
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           build_binary="target/${{ matrix.target }}/release/velnor-runner"
+          workflow_binary="target/${{ matrix.target }}/release/velnor-workflow"
+          test -x "$workflow_binary" || { echo "::error::missing executable workflow binary" >&2; exit 1; }
           read_sha() {
             local path="$1" size token
             [ -f "$path" ] || { echo "::error::missing checksum sidecar: $path" >&2; return 1; }
@@ -812,6 +822,9 @@ jobs:
           packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
           [ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }
           [ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }
+          packaged_workflow_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-workflow | sha256sum | awk '{print $1}')"
+          workflow_binary_sha="$(sha256sum "$workflow_binary" | awk '{print $1}')"
+          [ "$packaged_workflow_sha" = "$workflow_binary_sha" ] || { echo "::error::deb workflow binary does not match target build" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
           cp "$src" "$dst"
           sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
@@ -1079,6 +1092,8 @@ jobs:
               tar -xzf "$tmp/$tarball" -C "$tmp/extract-$arch"
               [ "$(sha256sum "$tmp/extract-$arch/velnor-runner" | awk '{print $1}')" = "$record_bin" ] \
                 || { echo "::error::published binary digest != record ($arch)" >&2; exit 1; }
+              test -x "$tmp/extract-$arch/velnor-workflow" \
+                || { echo "::error::published tarball missing executable velnor-workflow ($arch)" >&2; exit 1; }
             done
             # Sign the published bytes, not the non-reproducible rebuild.
             rm -rf signer-input

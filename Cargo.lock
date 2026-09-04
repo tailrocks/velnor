@@ -4063,6 +4063,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
+ "velnor-client",
  "velnor-model",
  "zip",
 ]

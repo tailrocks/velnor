@@ -106,6 +106,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/manifest.rs` (Mr Boxington action-specific input literals) | codex-lead | complete — T-018 (`8434d05`) |
 | `crates/velnor-runner/src/action.rs` + `manifest.rs` (approved remote action runtime-kind classification) | codex-lead | claimed — T-019 |
 | `crates/velnor-workflow/**` + workspace registration (workflow generator/client) | codex-lead | claimed — T-020 |
+| `crates/velnor-tools/src/workflow_monitor.rs` + approved `velnor-tools → velnor-client` read edge | codex-lead | claimed — T-020 |
 
 ## 8. Discovered bug classes
 
@@ -3098,3 +3099,20 @@ Focused proof at this package: `velnor-workflow` tests `87` passed, all-targets
 check passed, and the package was pushed to `perf/docker-rust-mbx`. Packaging,
 monitoring, and the full workspace gate remain follow-up work in this same
 ownership claim.
+
+## 28. Workflow runtime distribution and evidence — package pending
+
+The Velnor node image and Debian release package now include
+`velnor-workflow`. Release archives carry the executable beside the runner;
+release verification checks its presence and the Debian payload digest. The
+workspace dependency-boundary inventory includes the new package.
+
+`velnor-tools workflow-monitor` now polls the authoritative GitHub run through
+`gh api`, optionally snapshots the selected Velnor instance through the typed
+`velnor-client` read transport, and atomically rewrites bounded JSON evidence.
+Timeout, local transport failure, and GitHub terminal failure remain distinct;
+local success never substitutes for GitHub completion. The monitor is
+read-only and credentials stay in the existing environment/runner transport.
+
+Focused proof: `velnor-tools` tests `192` passed, strict package Clippy passed,
+and dependency-boundary tests `6` passed. Full workspace gates remain required.
