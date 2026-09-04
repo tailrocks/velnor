@@ -3147,15 +3147,31 @@ impl WorkflowIr {
         // selected verification lane is self-hosted. They execute checked-in
         // shell files and must never expose untrusted PR code to that runner.
         self.render_plan(&mut output, RunnerMode::Github, false);
-        Self::render_policy(&mut output, RunnerMode::Github, false);
-        self.render_hierarchy_groups(&mut output);
+        if kind != WorkflowKind::PullRequest {
+            Self::render_policy(&mut output, RunnerMode::Github, false);
+        }
+        self.render_hierarchy_groups(&mut output, kind != WorkflowKind::PullRequest);
         let cache_save = kind != WorkflowKind::PullRequest;
         match runners {
-            RunnerMode::Github => self.render_verify_github(&mut output, None, cache_save),
-            RunnerMode::Velnor => self.render_verify_velnor(&mut output, cache_save),
+            RunnerMode::Github => self.render_verify_github(
+                &mut output,
+                None,
+                cache_save,
+                kind != WorkflowKind::PullRequest,
+            ),
+            RunnerMode::Velnor => self.render_verify_velnor(
+                &mut output,
+                cache_save,
+                kind != WorkflowKind::PullRequest,
+            ),
             RunnerMode::Both => {
-                self.render_verify_github(&mut output, None, cache_save);
-                self.render_verify_velnor(&mut output, false);
+                self.render_verify_github(
+                    &mut output,
+                    None,
+                    cache_save,
+                    kind != WorkflowKind::PullRequest,
+                );
+                self.render_verify_velnor(&mut output, false, kind != WorkflowKind::PullRequest);
             }
         }
         // Auxiliary schedules must not create or satisfy the branch-protection
@@ -3166,6 +3182,7 @@ impl WorkflowIr {
                 runners,
                 kind == WorkflowKind::PullRequest,
                 trusted_event,
+                kind != WorkflowKind::PullRequest,
             );
         }
         while output.ends_with("\n\n") {
@@ -3225,10 +3242,12 @@ impl WorkflowIr {
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  contents: read\n\njobs:"
         );
         self.render_plan(&mut output, RunnerMode::Github, false);
-        Self::render_policy(&mut output, RunnerMode::Github, false);
-        self.render_nested_unit_callers(&mut output);
+        if kind != WorkflowKind::PullRequest {
+            Self::render_policy(&mut output, RunnerMode::Github, false);
+        }
+        self.render_nested_unit_callers(&mut output, kind != WorkflowKind::PullRequest);
         if kind != WorkflowKind::Nightly {
-            self.render_nested_required(&mut output, kind == WorkflowKind::PullRequest);
+            self.render_nested_required(&mut output, kind != WorkflowKind::PullRequest);
         }
         while output.ends_with("\n\n") {
             output.pop();
@@ -3236,9 +3255,12 @@ impl WorkflowIr {
         output
     }
 
-    fn render_nested_unit_callers(&self, output: &mut String) {
+    fn render_nested_unit_callers(&self, output: &mut String, include_policy: bool) {
         for unit in &self.units {
-            let mut needs = vec!["plan".to_owned(), "policy".to_owned()];
+            let mut needs = vec!["plan".to_owned()];
+            if include_policy {
+                needs.push("policy".to_owned());
+            }
             needs.extend(unit.depends_on.iter().map(|dependency| {
                 self.units
                     .iter()
@@ -3257,18 +3279,19 @@ impl WorkflowIr {
         }
     }
 
-    fn render_nested_required(&self, output: &mut String, pull_request: bool) {
+    fn render_nested_required(&self, output: &mut String, include_policy: bool) {
         let units = self.units.iter().map(unit_group_job_id).collect::<Vec<_>>();
-        let needs = std::iter::once("plan".to_owned())
-            .chain(std::iter::once("policy".to_owned()))
-            .chain(units)
-            .collect::<Vec<_>>();
+        let mut needs = vec!["plan".to_owned()];
+        if include_policy {
+            needs.push("policy".to_owned());
+        }
+        needs.extend(units);
         let statuses = needs
             .iter()
             .map(|job| format!("needs['{job}'].result == 'success'"))
             .collect::<Vec<_>>()
             .join(" && ");
-        let check_name = if pull_request { "required" } else { "main" };
+        let check_name = if include_policy { "main" } else { "required" };
         let _ = writeln!(
             output,
             "  required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
@@ -3431,20 +3454,38 @@ impl WorkflowIr {
         }
     }
 
-    fn render_verify_github(&self, output: &mut String, condition: Option<&str>, cache_save: bool) {
-        self.render_verify_lane(output, RunnerMode::Github, condition, cache_save);
+    fn render_verify_github(
+        &self,
+        output: &mut String,
+        condition: Option<&str>,
+        cache_save: bool,
+        include_policy: bool,
+    ) {
+        self.render_verify_lane(
+            output,
+            RunnerMode::Github,
+            condition,
+            cache_save,
+            include_policy,
+        );
     }
 
-    fn render_verify_velnor(&self, output: &mut String, cache_save: bool) {
+    fn render_verify_velnor(&self, output: &mut String, cache_save: bool, include_policy: bool) {
         // Self-hosted runners never receive untrusted pull-request code.
         let condition = Some(format!(
             "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
             self.default_branch
         ));
-        self.render_verify_lane(output, RunnerMode::Velnor, condition.as_deref(), cache_save);
+        self.render_verify_lane(
+            output,
+            RunnerMode::Velnor,
+            condition.as_deref(),
+            cache_save,
+            include_policy,
+        );
     }
 
-    fn render_hierarchy_groups(&self, output: &mut String) {
+    fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
         let kinds = self
             .units
             .iter()
@@ -3454,9 +3495,14 @@ impl WorkflowIr {
             let group_id = stack_group_job_id(kind);
             let group_name = yaml_scalar(unit_group(kind));
             let _ = writeln!(output, "  {group_id}:\n    name: {group_name}");
+            let needs = if include_policy {
+                "[plan, policy]"
+            } else {
+                "[plan]"
+            };
             let _ = writeln!(
                 output,
-                "    needs: [plan, policy]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
+                "    needs: {needs}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
                 self.github_runner,
                 unit_group(kind),
             );
@@ -3483,6 +3529,7 @@ impl WorkflowIr {
         lane: RunnerMode,
         condition: Option<&str>,
         cache_save: bool,
+        include_policy: bool,
     ) {
         for unit in self
             .units
@@ -3491,7 +3538,7 @@ impl WorkflowIr {
         {
             let id = unit_job_id(lane, &unit.id);
             let lane_label = lane.display_name();
-            let needs = unit_needs(lane, unit);
+            let needs = unit_needs(lane, unit, include_policy);
             let runner = self.runner_for_unit(lane, unit);
             let group = unit_group(unit.kind);
             let label = unit
@@ -3742,6 +3789,7 @@ impl WorkflowIr {
         runners: RunnerMode,
         stable: bool,
         trusted: bool,
+        include_policy: bool,
     ) {
         let check_name = if stable { "required" } else { "main" };
         let lanes = match runners {
@@ -3749,7 +3797,10 @@ impl WorkflowIr {
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
             RunnerMode::Both => vec![RunnerMode::Github, RunnerMode::Velnor],
         };
-        let mut needs = vec!["plan".to_owned(), "policy".to_owned()];
+        let mut needs = vec!["plan".to_owned()];
+        if include_policy {
+            needs.push("policy".to_owned());
+        }
         let mut statuses = Vec::new();
         for lane in lanes {
             for unit in self
@@ -3871,12 +3922,12 @@ fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
 }
 
 #[allow(dead_code)]
-fn unit_needs(lane: RunnerMode, unit: &Unit) -> Vec<String> {
-    let mut needs = vec![
-        "plan".to_owned(),
-        "policy".to_owned(),
-        unit_group_job_id(unit),
-    ];
+fn unit_needs(lane: RunnerMode, unit: &Unit, include_policy: bool) -> Vec<String> {
+    let mut needs = vec!["plan".to_owned()];
+    if include_policy {
+        needs.push("policy".to_owned());
+    }
+    needs.push(unit_group_job_id(unit));
     needs.extend(
         unit.depends_on
             .iter()
@@ -7222,7 +7273,8 @@ path-only = { path = "../path-only" }
         );
         let policy_reference =
             format!("uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}");
-        assert!(pr_workflow.contains(&policy_reference));
+        assert!(!pr_workflow.contains(&policy_reference));
+        assert!(!pr_workflow.contains("needs: [plan, policy]"));
         assert!(policy_workflow.contains("pull_request_target:"));
         assert!(policy_workflow.contains(&policy_reference));
         assert!(!policy_workflow.contains("steps:"));
@@ -7256,7 +7308,7 @@ path-only = { path = "../path-only" }
             "root workflow",
         );
         assert!(root.contains("name: Planning"));
-        assert!(root.contains("name: Advisory policy"));
+        assert!(!root.contains("name: Advisory policy"));
         let rust_unit = must_some(
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",
