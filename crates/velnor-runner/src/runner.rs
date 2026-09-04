@@ -112,35 +112,152 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
-/// Keep blocking Contents-API admission off Tokio workers and bound the total
-/// time an acquired job can wait in the read-only gate.
+/// Bound the whole read-only closure-admission stage: the wait for a local
+/// admission slot plus the Contents-API fetches themselves. An acquired job
+/// waits inside this budget; it is never failed because a sibling admission
+/// was in flight.
 const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
-const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
-static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-/// SQLite admission is a single-writer boundary. Keep the Tokio blocking
-/// queue bounded by acquiring the only admission permit before spawning work.
-const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
-static OPERATIONAL_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// Closure admission is read-only — it fetches `action.yml` and mutates
+/// nothing — so it needs no mutual exclusion. This limiter exists only to cap
+/// admission's share of the control-plane blocking pool, so slow upstream
+/// fetches can never starve retention, teardown joins or Docker sweeps.
+/// Callers wait for a slot; they are never rejected for want of one.
+const ACTION_ADMISSION_CONCURRENCY: usize = 4;
+static ACTION_ADMISSION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// SQLite admission is already serialised by `Store`'s connection mutex, WAL
+/// and `busy_timeout`, and the control-plane blocking pool is explicitly
+/// sized, so admission takes no local permit at all. The stage is bounded by
+/// a deadline instead: a store that cannot answer within it is a real
+/// infrastructure failure, unlike a store that is merely busy.
+const OPERATIONAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionPersistenceOutcome {
     Accepted,
     Rejected,
     InfrastructureFailure,
+    DeadlineExceeded,
 }
 
-fn operational_admission_permits() -> Arc<Semaphore> {
+/// The stage an acquired job is in while it is not executing.
+///
+/// Every non-executing stage reports where the job is and why it is waiting,
+/// as machine-readable telemetry fields rather than prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobStage {
+    OperationalAdmission,
+    ActionAdmission,
+    HostCapacityWait,
+}
+
+impl JobStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OperationalAdmission => "operational_admission",
+            Self::ActionAdmission => "action_admission",
+            Self::HostCapacityWait => "host_capacity",
+        }
+    }
+}
+
+/// Why a stage was not making progress. Distinguishes local contention from a
+/// slow dependency, which prose in an error message cannot do reliably.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitReason {
+    /// A sibling admission held the bounded local limiter.
+    LocalAdmissionLimiter,
+    /// The read-only Contents API was answering slowly.
+    GithubContentsApi,
+    /// The operational store's writer was busy or stalled.
+    OperationalStoreWriter,
+    /// The host had no admissible disk budget yet.
+    HostDiskCapacity,
+}
+
+impl WaitReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalAdmissionLimiter => "local_admission_limiter",
+            Self::GithubContentsApi => "github_contents_api",
+            Self::OperationalStoreWriter => "operational_store_writer",
+            Self::HostDiskCapacity => "host_disk_capacity",
+        }
+    }
+}
+
+fn action_admission_limiter() -> Arc<Semaphore> {
     Arc::clone(
-        OPERATIONAL_ADMISSION_PERMITS
-            .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+        ACTION_ADMISSION_LIMITER
+            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_CONCURRENCY))),
     )
 }
 
-fn action_admission_permits() -> Arc<Semaphore> {
-    Arc::clone(
-        ACTION_ADMISSION_PERMITS
-            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
-    )
+/// Wait — never fail — for one of the bounded read-only admission slots.
+///
+/// Returns the permit and how long the caller waited. `Err` carries the wait
+/// that exhausted the budget, which is a bounded, explainable deadline rather
+/// than the old "a neighbour is busy, fail this job" rejection.
+async fn acquire_action_admission_slot(
+    budget: Duration,
+) -> std::result::Result<(tokio::sync::OwnedSemaphorePermit, Duration), Duration> {
+    let started = Instant::now();
+    match tokio::time::timeout(budget, action_admission_limiter().acquire_owned()).await {
+        Ok(permit) => Ok((
+            permit.expect("the action admission limiter is never closed"),
+            started.elapsed(),
+        )),
+        Err(_elapsed) => Err(started.elapsed()),
+    }
+}
+
+/// Wall-clock start of a stage, in Unix milliseconds, so an operator can line
+/// a wait up against GitHub's own timeline.
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since_epoch| u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Structured fields for one non-executing stage. `cause` and `ms` satisfy the
+/// `passive_wait` contract; `stage`, `wait_reason` and `stage_started_unix_ms`
+/// make the wait attributable without parsing any log line.
+fn stage_wait_telemetry_fields(
+    stage: JobStage,
+    reason: WaitReason,
+    waited_ms: u64,
+    stage_started_unix_ms: u64,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("cause".to_owned(), Value::from(stage.as_str())),
+        (
+            "ms".to_owned(),
+            Value::from(waited_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        ("stage".to_owned(), Value::from(stage.as_str())),
+        ("wait_reason".to_owned(), Value::from(reason.as_str())),
+        (
+            "stage_started_unix_ms".to_owned(),
+            Value::from(stage_started_unix_ms),
+        ),
+    ])
+}
+
+fn emit_stage_wait_telemetry(
+    admission: Option<&crate::ops::JobAdmission>,
+    stage: JobStage,
+    reason: WaitReason,
+    waited_ms: u64,
+    stage_started_unix_ms: u64,
+) {
+    let (Some(sink), Some(admission)) = (crate::ops::global(), admission) else {
+        return;
+    };
+    let _ = sink.emit_telemetry_for_admission(
+        admission,
+        TelemetryEvent::PassiveWait,
+        stage_wait_telemetry_fields(stage, reason, waited_ms, stage_started_unix_ms),
+    );
 }
 
 /// Run one job body on a dedicated OS thread owned by this slot.
@@ -179,37 +296,47 @@ async fn persist_admission_on_blocking_pool(
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
 ) -> AdmissionPersistenceOutcome {
-    persist_admission_on_blocking_pool_with(sink, admission, |sink, admission| {
-        sink.record_admission(&admission)
-    })
+    persist_admission_on_blocking_pool_with(
+        sink,
+        admission,
+        OPERATIONAL_ADMISSION_TIMEOUT,
+        |sink, admission| sink.record_admission(&admission),
+    )
     .await
 }
 
 async fn persist_admission_on_blocking_pool_with<F>(
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
+    deadline: Duration,
     persist: F,
 ) -> AdmissionPersistenceOutcome
 where
     F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
 {
-    let permits = operational_admission_permits();
-    // Admission is a pre-execution gate. Queueing an acquired job behind a
-    // stuck SQLite worker would hold the run-service lease without bounded
-    // progress, so fail closed when the single writer is busy.
-    let Ok(permit) = permits.try_acquire_owned() else {
-        return AdmissionPersistenceOutcome::InfrastructureFailure;
+    // `Store` is already a single-writer boundary (connection mutex + WAL +
+    // busy_timeout) and the blocking pool is explicitly sized, so a busy
+    // writer is something to wait for, not a reason to fail an acquired job.
+    // The stage is bounded by a deadline: only a store that cannot answer
+    // within it is an infrastructure failure.
+    let stage_started_unix_ms = unix_millis_now();
+    let started = Instant::now();
+    let telemetry_admission = admission.clone();
+    let worker = tokio::task::spawn_blocking(move || persist(sink, admission));
+    let outcome = match tokio::time::timeout(deadline, worker).await {
+        Ok(Ok(true)) => AdmissionPersistenceOutcome::Accepted,
+        Ok(Ok(false)) => AdmissionPersistenceOutcome::Rejected,
+        Ok(Err(_join_error)) => AdmissionPersistenceOutcome::InfrastructureFailure,
+        Err(_elapsed) => AdmissionPersistenceOutcome::DeadlineExceeded,
     };
-    match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        persist(sink, admission)
-    })
-    .await
-    {
-        Ok(true) => AdmissionPersistenceOutcome::Accepted,
-        Ok(false) => AdmissionPersistenceOutcome::Rejected,
-        Err(_join_error) => AdmissionPersistenceOutcome::InfrastructureFailure,
-    }
+    emit_stage_wait_telemetry(
+        Some(&telemetry_admission),
+        JobStage::OperationalAdmission,
+        WaitReason::OperationalStoreWriter,
+        duration_ms(started.elapsed()),
+        stage_started_unix_ms,
+    );
+    outcome
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5436,10 +5563,11 @@ async fn handle_job_request(
             const REJECTED_REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
             const WORKER_FAILURE_REASON: &str =
                 "operational store admission worker failed; job failed closed before execution";
-            let reason = if admission_outcome == AdmissionPersistenceOutcome::Rejected {
-                REJECTED_REASON
-            } else {
-                WORKER_FAILURE_REASON
+            const DEADLINE_REASON: &str = "operational store admission exceeded its 30s bounded deadline (wait_reason=operational_store_writer); job failed closed before execution";
+            let reason = match admission_outcome {
+                AdmissionPersistenceOutcome::Rejected => REJECTED_REASON,
+                AdmissionPersistenceOutcome::DeadlineExceeded => DEADLINE_REASON,
+                _ => WORKER_FAILURE_REASON,
             };
             // No admission row exists on either failure path. Writing a
             // JobRejected event would amplify an over-budget store or recurse
@@ -5622,23 +5750,29 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
-        let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
-                Ok(graph) => graph,
-                Err(error) => {
-                    complete_acquired_job_failure(
-                        &run_service_job,
-                        &AcquiredJobIdentity::from_job(&job),
-                        Some(&job),
-                        Some("action_admission".to_string()),
-                        &format!("{error:#}"),
-                    )
-                    .await?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
-                    return Err(error);
-                }
-            };
+        let admission_graph = match admit_job_closure(
+            &job,
+            &early_context,
+            &broker_cancellation.stored,
+            telemetry_admission.as_ref(),
+        )
+        .await
+        {
+            Ok(graph) => graph,
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
+                    Some("action_admission".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
+                return Err(error);
+            }
+        };
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
@@ -5678,6 +5812,7 @@ async fn handle_job_request(
         // backpressure while the run-service renewal keeps the job lease live,
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
+        let capacity_wait_started_unix_ms = unix_millis_now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
@@ -5717,21 +5852,17 @@ async fn handle_job_request(
                         emitted_pressure = true;
                     }
                     let wait_ms = u64::try_from(sleep.as_millis()).unwrap_or(u64::MAX);
-                    if wait_ms >= 1_000
-                        && let (Some(sink), Some(admission)) =
-                            (crate::ops::global(), telemetry_admission.as_ref())
-                    {
-                        let fields = BTreeMap::from([
-                            (
-                                "cause".to_owned(),
-                                Value::String("host_capacity".to_owned()),
-                            ),
-                            ("ms".to_owned(), Value::from(wait_ms)),
-                        ]);
-                        let _ = sink.emit_telemetry_for_admission(
-                            admission,
-                            TelemetryEvent::PassiveWait,
-                            fields,
+                    if wait_ms >= 1_000 {
+                        // Same structured shape as the two admission stages, so
+                        // "the host had no disk budget" and "a sibling held the
+                        // admission limiter" are distinguishable without parsing
+                        // a log line.
+                        emit_stage_wait_telemetry(
+                            telemetry_admission.as_ref(),
+                            JobStage::HostCapacityWait,
+                            WaitReason::HostDiskCapacity,
+                            wait_ms,
+                            capacity_wait_started_unix_ms,
                         );
                     }
                     eprintln!(
@@ -8989,25 +9120,75 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
+///
+/// Closure admission is read-only, so a job waits for a local admission slot
+/// instead of being failed for want of one. `ACTION_ADMISSION_TIMEOUT` bounds
+/// the whole stage — the wait for a slot plus the fetches — and an exhausted
+/// budget reports which of the two consumed it.
 async fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
+    telemetry_admission: Option<&crate::ops::JobAdmission>,
 ) -> Result<crate::admission::AdmissionGraph> {
-    let permit = action_admission_permits()
-        .try_acquire_owned()
-        .context("action admission blocking worker is busy")?;
+    let stage_started_unix_ms = unix_millis_now();
+    let stage_started = Instant::now();
+    let permit = match acquire_action_admission_slot(ACTION_ADMISSION_TIMEOUT).await {
+        Ok((permit, _waited)) => permit,
+        Err(waited) => {
+            let waited_ms = duration_ms(waited);
+            emit_stage_wait_telemetry(
+                telemetry_admission,
+                JobStage::ActionAdmission,
+                WaitReason::LocalAdmissionLimiter,
+                waited_ms,
+                stage_started_unix_ms,
+            );
+            bail!(
+                "action admission waited {waited_ms}ms for one of {ACTION_ADMISSION_CONCURRENCY} \
+                 local admission slots and exhausted its {}s budget \
+                 (stage=action_admission wait_reason=local_admission_limiter)",
+                ACTION_ADMISSION_TIMEOUT.as_secs()
+            );
+        }
+    };
+    let limiter_wait_ms = duration_ms(stage_started.elapsed());
+    emit_stage_wait_telemetry(
+        telemetry_admission,
+        JobStage::ActionAdmission,
+        WaitReason::LocalAdmissionLimiter,
+        limiter_wait_ms,
+        stage_started_unix_ms,
+    );
     let job = job.clone();
     let context_data = context_data.to_vec();
     let stored = stored.clone();
+    let fetches_started = Instant::now();
     let admission = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         admit_job_closure_sync(&job, &context_data, &stored)
     });
-    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
-        .await
-        .context("action admission exceeded its deadline")?
-        .context("action admission blocking worker failed")?
+    // Whatever the limiter wait already spent is spent: the remaining budget
+    // belongs to the fetches, so the stage as a whole stays bounded.
+    let fetch_budget = ACTION_ADMISSION_TIMEOUT.saturating_sub(stage_started.elapsed());
+    let graph = tokio::time::timeout(fetch_budget, admission).await;
+    emit_stage_wait_telemetry(
+        telemetry_admission,
+        JobStage::ActionAdmission,
+        WaitReason::GithubContentsApi,
+        duration_ms(fetches_started.elapsed()),
+        stage_started_unix_ms,
+    );
+    match graph {
+        Ok(joined) => joined.context("action admission blocking worker failed")?,
+        Err(_elapsed) => bail!(
+            "action admission read {}ms of action.yml metadata after a {limiter_wait_ms}ms local \
+             wait and exhausted its {}s budget (stage=action_admission \
+             wait_reason=github_contents_api)",
+            duration_ms(fetches_started.elapsed()),
+            ACTION_ADMISSION_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 fn admit_job_closure_sync(
@@ -14818,6 +14999,7 @@ jobs:
         let outcome = persist_admission_on_blocking_pool_with(
             sink,
             blocking_admission_test_input("job-blocking-panic"),
+            OPERATIONAL_ADMISSION_TIMEOUT,
             |_sink, _admission| -> bool { panic!("test-only admission worker panic") },
         )
         .await;
@@ -14844,26 +15026,155 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[tokio::test]
-    async fn blocking_admission_busy_writer_fails_closed_without_waiting() {
-        let base = unique_temp_dir("blocking-admission-busy");
+    /// A busy neighbour must never fail an acquired job. `Store` already
+    /// serialises writers, so concurrent admissions queue and all succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_from_every_slot_all_succeed() {
+        let base = unique_temp_dir("blocking-admission-concurrent");
         fs::create_dir_all(&base).unwrap();
         let sink = Arc::new(
             crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
         );
-        let permit = operational_admission_permits()
-            .try_acquire_owned()
-            .expect("test must own the only admission permit");
+
+        let admissions = (0..8).map(|slot| {
+            let sink = Arc::clone(&sink);
+            async move {
+                persist_admission_on_blocking_pool(
+                    sink,
+                    blocking_admission_test_input(&format!("job-blocking-slot-{slot}")),
+                )
+                .await
+            }
+        });
+        let outcomes = futures_util::future::join_all(admissions).await;
+
+        assert_eq!(outcomes.len(), 8);
+        for outcome in outcomes {
+            assert_eq!(outcome, AdmissionPersistenceOutcome::Accepted);
+        }
+        assert!(!sink.degraded());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Read-only closure admission serialises nothing it does not have to: up
+    /// to `ACTION_ADMISSION_CONCURRENCY` jobs admit at once, and the job that
+    /// arrives next waits for a slot instead of being rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn action_admission_slots_are_concurrent_and_waiting() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, waited) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            assert!(waited < Duration::from_secs(1));
+            held.push(permit);
+        }
+
+        // With every slot held, the next caller waits and then proceeds — the
+        // release, not a rejection, is what ends the wait.
+        let waiter = tokio::spawn(acquire_action_admission_slot(Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the caller must wait, not fail");
+        held.pop();
+        let (_permit, waited) = waiter
+            .await
+            .expect("waiter task")
+            .expect("a released slot must be granted, never rejected");
+        assert!(waited >= Duration::from_millis(50));
+    }
+
+    /// A genuinely exhausted budget is a bounded, explained wait — never an
+    /// instant "another slot is busy" failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exhausted_action_admission_budget_reports_a_bounded_wait() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, _) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            held.push(permit);
+        }
+
+        let budget = Duration::from_millis(120);
         let started = Instant::now();
-        let outcome = persist_admission_on_blocking_pool(
+        let waited = acquire_action_admission_slot(budget)
+            .await
+            .map(|_| ())
+            .expect_err("a fully held limiter must exhaust the budget, not return early");
+        assert!(waited >= budget, "the caller waited the whole budget");
+        assert!(
+            started.elapsed() < budget + Duration::from_secs(2),
+            "the wait stays bounded by the budget"
+        );
+        assert_eq!(
+            WaitReason::LocalAdmissionLimiter.as_str(),
+            "local_admission_limiter"
+        );
+    }
+
+    /// An operational store that cannot answer inside its bounded deadline is
+    /// a real infrastructure failure, and is reported as one — distinctly from
+    /// a rejected row and from a worker panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operational_admission_deadline_is_bounded_and_distinct() {
+        let base = unique_temp_dir("blocking-admission-deadline");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let deadline = Duration::from_millis(150);
+        let started = Instant::now();
+        let outcome = persist_admission_on_blocking_pool_with(
             sink,
-            blocking_admission_test_input("job-blocking-busy"),
+            blocking_admission_test_input("job-blocking-deadline"),
+            deadline,
+            |_sink, _admission| -> bool {
+                std::thread::sleep(Duration::from_secs(30));
+                true
+            },
         )
         .await;
-        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
-        assert!(started.elapsed() < Duration::from_secs(1));
-        drop(permit);
+
+        assert_eq!(outcome, AdmissionPersistenceOutcome::DeadlineExceeded);
+        assert_ne!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        assert!(
+            started.elapsed() >= deadline && started.elapsed() < deadline + Duration::from_secs(5),
+            "the caller waits the deadline and no longer"
+        );
+
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stage_wait_telemetry_is_machine_readable() {
+        let fields = stage_wait_telemetry_fields(
+            JobStage::HostCapacityWait,
+            WaitReason::HostDiskCapacity,
+            u64::MAX,
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            fields.get("stage"),
+            Some(&Value::from("host_capacity")),
+            "the stage names where the job is"
+        );
+        assert_eq!(
+            fields.get("wait_reason"),
+            Some(&Value::from("host_disk_capacity")),
+            "the wait reason names why it is not executing"
+        );
+        assert_eq!(
+            fields.get("stage_started_unix_ms"),
+            Some(&Value::from(1_700_000_000_000_u64))
+        );
+        assert_eq!(
+            fields.get("ms"),
+            Some(&Value::from(MAX_TELEMETRY_DURATION_MS)),
+            "durations stay bounded"
+        );
+        assert_eq!(fields.get("cause"), Some(&Value::from("host_capacity")));
     }
 
     #[cfg(feature = "test-support")]

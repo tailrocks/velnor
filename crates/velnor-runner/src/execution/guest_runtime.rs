@@ -529,7 +529,35 @@ impl<'a> GuestDockerTeardown<'a> {
             self.events
                 .push(log_line(&format!("[velnor-step {}]", step.id)));
             let step_state = state.with_step_action(&step.id);
-            if !step_state.evaluate_condition(step.condition.as_deref()) {
+            let condition_met = match step_state.evaluate_condition(step.condition.as_deref()) {
+                Ok(condition_met) => condition_met,
+                Err(error) => {
+                    // actions/runner fails a step whose condition cannot be
+                    // evaluated (src/Runner.Worker/StepsRunner.cs:231-242).
+                    self.events.push(log_line(&format!(
+                        "Step condition could not be evaluated: {error}"
+                    )));
+                    state.apply(
+                        &step.id,
+                        &StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: String::new(),
+                            stderr: format!("{error}"),
+                        },
+                    );
+                    self.events.push(ExecutionEvent::StepCompleted {
+                        step_id: step.id.clone(),
+                        exit_code: 1,
+                        skipped: false,
+                    });
+                    code = 1;
+                    continue;
+                }
+            };
+            if !condition_met {
                 state.apply(
                     &step.id,
                     &StepExecutionResult {
