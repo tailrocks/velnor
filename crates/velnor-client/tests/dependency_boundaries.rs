@@ -23,7 +23,6 @@ const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnor-workflow",
     "velnor-bench",
     "velnor-tools",
-    "velnor-workflow",
     "unit-collector",
 ];
 
@@ -455,8 +454,16 @@ fn crate_dependency_direction_matches_approved_graph() {
     // else; forbidding that edge is what previously left four callers on a
     // second, weaker masker. The boundary exists to stop a legacy crate
     // reaching into the new *architecture*, not into the shared vocabulary.
+    let tools = members_only(&graph["velnor-tools"])
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        tools,
+        BTreeSet::from(["velnor-client".to_owned(), "velnor-model".to_owned()]),
+        "velnor-tools may read the typed client and shared model only"
+    );
     for legacy in ["velnor-tools"] {
-        for new_crate in ["velnor-control", "velnor-client", "velnor-render"] {
+        for new_crate in ["velnor-control", "velnor-render"] {
             assert!(
                 !graph[legacy].iter().any(|d| d == new_crate),
                 "legacy crate {legacy} must not depend on new crate {new_crate}"
