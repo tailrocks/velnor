@@ -20,6 +20,7 @@ const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnor-render",
     "velnorctl",
     "velnor-runner",
+    "velnor-workflow",
     "velnor-bench",
     "velnor-tools",
     "velnor-workflow",
