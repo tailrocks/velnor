@@ -940,6 +940,7 @@ mod tests {
         let mut app = App::new(
             crate::Cli {
                 target: ".".to_owned(),
+                default_branch: None,
                 output: None,
                 runners: crate::RunnerMode::Github,
                 dry_run: true,
