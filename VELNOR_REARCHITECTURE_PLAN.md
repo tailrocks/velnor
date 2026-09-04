@@ -3056,3 +3056,24 @@ Fresh independent audits found these unresolved requirements, not accepted as co
 The branch is intentionally not declared complete. Next packages must preserve the shared
 ownership table, use explicit pathspec commits, and obtain independent review before
 touching reserved lifecycle or semantic code.
+
+## 26. Continuation anchor — mirror lease correction `d337304`
+
+`d337304` corrects the mirror package's reader lifetime. A successful checkout now retains a
+shared lease across mirror-backed hydration, and the repair path downgrades its exclusive
+lease only after ref publication, fetch, pinning, and requested-SHA resolution complete. A
+regression proves an active checkout reader blocks destructive mirror repair and releases the
+repair lock after checkout ownership is dropped. The stale shared health probe is rechecked
+under exclusive ownership before quarantine, so concurrent cold callers cannot quarantine a
+mirror that another caller just repaired.
+
+Independent post-correction reviews found no blocking correctness issue. Remaining medium
+proof/performance work is explicit: measure or test warm same-SHA N-way reads, different-repo
+concurrency, mutable-ref pinning, and end-to-end repair contention; release the reader lease
+as soon as hydration no longer needs the mirror if checkout semantics permit. These are
+bounded follow-ups, not evidence that the whole rearchitecture is complete.
+
+The exact Velnor head at this anchor is `d3373048ce80e65a6254cfe64684c803f8a5bcf9`; the
+fixture remains `0cbec6e3265c59e714a31df5cdd67c7d99462443`. Full workspace and fixture gates
+must be rerun after this correction. The reserved provisional-recovery and mixed-post-order
+findings in §25 remain open and owned by the other lead.
