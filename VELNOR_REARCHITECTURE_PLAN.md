@@ -2888,10 +2888,11 @@ The shared branch now contains four bounded follow-ups from the post-handoff aud
   oracle. It is integrated, but its transport and controller call sites remain part of the other
   lead's runner boundary.
 
-The fixture baseline is synchronized to `e6a55beaec6759912e38d51199dfd32248973396`; its latest
-generated export was already present on the shared fixture branch, and the full fixture gate at
-that integrated tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
-formatting, workspace, capability, and L2 closure checks.
+The fixture baseline is synchronized to `ed2626e8be79a5bb3d1867ddabd4ccc2b38c3bb8`; its latest
+generated export is present at fixture commit `26102182ff34e1650e5be341a8a4daf6daded56a` on the
+shared fixture branch. The full fixture gate at the preceding integrated tip passed with 49 Rust
+tests, 38 Python tests, workflow/actionlint, formatting, workspace, capability, and L2 closure
+checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
 mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
