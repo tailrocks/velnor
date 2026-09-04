@@ -1445,6 +1445,28 @@ jobs:
 ";
         let root = policy_fixture("floating-policy", workflow, "github")?;
         assert!(!run_policy(root)?);
+
+        let workflow = r"
+name: Policy caller
+on: pull_request
+jobs:
+  policy:
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+";
+        let root = policy_fixture("wrong-policy-pin", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_requires_the_base_owned_entrypoint_file() -> Result<(), Box<dyn Error>> {
+        let root = policy_fixture(
+            "missing-policy-entrypoint",
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n",
+            "github",
+        )?;
+        std::fs::remove_file(root.join(".github/workflows/ci-policy.yml"))?;
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
