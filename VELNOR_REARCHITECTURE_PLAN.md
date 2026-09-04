@@ -798,3 +798,134 @@ host-global state that already persists, with no `/proc/sys/fs/binfmt_misc` chec
 (`executor.rs:3123-3133`). Orphan BuildKit reclaim runs only at daemon startup or via
 `doctor` (`runner.rs:3826-3841`, `:11513-11527`), so a crashed worker leaks a buildkitd
 container and a multi-gigabyte volume indefinitely.
+
+### Correction to BC-8 — checkout admission is already fail-closed
+
+The claim that `submodules`, `sparse-checkout`, `filter`, `ssh-key`, `github-server-url` and
+`set-safe-directory` are accepted and silently ignored is **wrong**, and the corresponding
+implementation task was withdrawn before it produced code.
+
+Verified in source: `crates/velnor-runner/src/manifest.rs:435-448` declares the
+`actions/checkout` capability with exactly nine permitted inputs — `repository`, `ref`,
+`token`, `persist-credentials` (literal `true`/`false`), `path`, `clean`, `fetch-depth`,
+`fetch-tags`, `lfs` — and `validate_inputs` (`manifest.rs:1507+`) raises a
+`CapabilityViolation` for any input that matches no rule. Capability validation is strictly
+enforced: `args.rs:297-301` errors on any `VELNOR_CAPABILITY_VALIDATION` value other than
+`strict`. An independent security audit reached the same conclusion, and additionally
+confirmed that `persist-credentials: false` is correctly honoured on both lanes.
+
+What *is* wrong is the inverse: `crates/velnor-tools/src/main.rs:2110-2117` advertises
+`submodules` as supported when admission rejects it. The capability surface over-claims.
+That is the defect to fix, and it belongs with the capability-surface work rather than with
+checkout.
+
+Two process notes worth keeping. First, an audit finding is a hypothesis until the
+coordinator confirms it in source; two audits disagreed here and the source settled it.
+Second, the earlier claim was reached by reading the checkout implementation and observing
+no handling of those inputs — true, but the rejection lives at a different boundary. Reading
+one side of a boundary is not evidence about the other.
+
+### Investigation hazard — uncommitted work is visible to investigators
+
+A later investigation reported `crates/velnor-runner/src/expression/` as a complete
+3,000-line evaluator with zero call sites, and concluded that three expression
+implementations ship simultaneously with the correct one unreachable. That conclusion is
+wrong: the directory does not exist at the starting SHA (`git ls-tree 2858e92` returns
+nothing for that path) and is untracked in the working tree. It is the in-progress output of
+the expression-engine work package, observed mid-flight.
+
+Consequence for this program: investigators share a worktree with implementers, so a
+"dead code" or "duplicate implementation" finding must be checked against the starting SHA
+before it is believed. Recorded here rather than silently dropped, because the same mistake
+is easy to repeat.
+
+### BC-29 — Controls exist at one construction site while other sites bypass them
+
+The dominant structural pattern across the security audit: **20 of 34 findings are a control
+that exists and is correct at one call site, while the same operation has other sites that
+never route through it.** The remedy is to delete the unsafe overload, not to patch each
+site.
+
+Highest-severity instances, all verified at `0bfe740`:
+
+- **Docker argv has no `--` separator and no image-grammar check.** `runs.image:
+  docker://--privileged` combined with `runs.args` yields full control of a host
+  `docker run` — that is host root (`action.rs:738-742`, `container.rs:644-645`,
+  `executor.rs:2665-2677`). Admission only length-checks those fields.
+- **Path-based `fs::write`/`read_to_string` into the `1777` `RUNNER_TEMP`.** One step plants
+  a symlink at the predictable `/__t/<step_id>.sh`; the next step then gets arbitrary host
+  write, read and truncate as the runner user. There is no race to win
+  (`script_step.rs:781-786`, `:825-861`).
+- **Secrets on argv.** Job and service environment reach `docker run` argv
+  (`container.rs:231-236`, `:977-979`), and the entire MicroVM guest exec including the
+  resolved `run:` script does the same (`guest_runtime.rs:583-620`). `/proc` makes those
+  world-readable to co-tenants. Note the `docker exec` path *was* hardened with a `0600
+  --env-file` — this is exactly the one-site-fixed pattern.
+- **`::set-env` and `::add-path` are honoured, and parsed from stderr as well as stdout**,
+  behind a three-name denylist that omits `LD_PRELOAD`, `BASH_ENV`, `PYTHONPATH`,
+  `RUSTC_WRAPPER` and `MISE_*` (`workflow_command.rs:40-45`, `script_step.rs:968-970`).
+  Upstream v2.337.0 rejects both commands and never parsed stderr. This is CVE-2020-15228's
+  class, re-enabled and widened.
+- **Shared Cargo state across trust classes.** `registry/{cache,index}` and `git/db` are
+  mounted read-write into every job through `cache_class_path` — the one store-path API
+  without trust scoping (`container.rs:1122-1127`, `storage.rs:102-109`). The persistent
+  `target/` bucket is keyed on base repository, workflow and job name, and is excluded from
+  `git clean` (`checkout.rs:501-540`), so a poisoned build-script binary survives into the
+  trusted run.
+- **The Docker lease has no route allowlist** — only payload filtering on three create
+  routes, and no ownership check, so `/exec` is reachable on any container
+  (`docker_lease.rs:1145-1147`); a `Connection: Upgrade` request becomes an unfiltered raw
+  tunnel (`:2073-2093`).
+
+The redaction copies number **five**, not three, with three different sentinels (`***`,
+`[REDACTED]`, `[redacted]`), and they disagree materially: `records.rs:1773` accepts only
+`[REDACTED]`, so a runner-masked string fails the store validator. The copy facing
+attacker-controlled output is the weakest of the five.
+
+### BC-30 — Dead architecture is invisible because it is allowed to be
+
+Ten `#![allow(dead_code)]` attributes cover 46,612 lines, 26% of the workspace, and
+`cargo check --all-targets` is clean — which is the problem, not the reassurance.
+
+Provably unreachable, with call-site evidence: 16 of 19 `DistributedTaskClient` methods (12
+of them public) plus 12 types and `GitHubRunnerProtocol`, which has no implementations —
+roughly 950 lines of V1 Azure-DevOps protocol whose entry point `bail!`s with no V1 branch
+(`runner.rs:4279-4286`). `node/handoff.rs` and `node/recovery.rs` have zero external
+references to any public item, while `controller.rs` reimplements both inline and **more
+weakly**: `RecoveryCoordinator` has a retry budget and quarantine state that
+`GithubPacing:74-235` lacks, and `AssignmentHandoff` has generation fencing that
+`maybe_spawn_job:2248` replaces with bare CLI arguments and no validation. That is the
+mechanism behind BC-5's fencing defect: the correct implementation exists and is not used.
+`velnor-cas` has zero dependents; `velnor-action-journal` is reachable only through a
+one-line glob re-export that nothing consumes. The deletion ledger totals roughly 11,900
+provably unreachable lines.
+
+Related structural findings: `velnorctl` links the 117k-line daemon crate and consumes 12 of
+its 360 exported items, so 96.7% of that public surface is crate-internal; `DaemonArgs`'
+32 fields are declared three times (`args.rs:212`, `service.rs:93`,
+`velnorctl/runtime.rs:21`) with hand-written `From` bodies as the only guard against the two
+shipped binaries diverging; and `ReadyProof` (`velnor-model/node.rs:390`) is a proof type
+whose `try_new` hard-codes all four fields to `true` and exposes them as `pub` +
+`Deserialize`, so a valid value carries no information at all. Twenty-eight types have a
+validating constructor that a struct literal bypasses; the correct pattern — private fields,
+a wire mirror, and `TryFrom` — already exists in this workspace on `JobSummary`, `Slug`,
+`Digest` and `TelemetryEnvelope`.
+
+Panic policy is in better shape than expected: 103 production sites, and the class reachable
+from external input is **empty** — every untrusted boundary returns a typed error. Two live
+defects remain: lock-poison `expect` inside a spawned task (`controller.rs:334`, `:344`,
+`:373`) in a workspace that uses `PoisonError::into_inner` everywhere else, and a
+`debug_assert` on a Docker chunked-HTTP cursor (`docker_lease.rs:2388`) where a release build
+hangs instead of panicking.
+
+Error taxonomy is bimodal: seven crates are anyhow-free and typed, while `velnor-runner`
+carries 673 `bail!`, 1,055 `.context` and 181 public anyhow signatures. All nine
+string-matched error decisions trace to one line — `executor.rs:4227` formats a Docker exit
+code and stderr into an anyhow message with no typed carrier — so a single `DockerCliError`
+removes six of the nine. The worst consumer, `docker_start_error_is_transient:4346`, chooses
+between a five-attempt backoff and a two-attempt zero-delay budget by matching seven string
+literals against the whole error chain. Of 20 retry sites, five are unbounded (worst:
+`runner.rs:8504` teardown — fixed 1 s, no growth, no cap, no drain check, 1 Hz forensics
+forever on a detached thread), 13 have no wall-clock deadline, and three retry
+non-idempotent operations. `executor.rs:8769`'s "55 s deadline" is fake: it is checked only
+after a nested three-attempt retry has already completed.
