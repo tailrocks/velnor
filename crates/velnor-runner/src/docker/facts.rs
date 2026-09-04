@@ -230,23 +230,20 @@ impl<T: Clone> Fact<T> {
             return compute();
         };
         debug_assert_eq!(key.lifetime, self.lifetime);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((cached_key, value)) = state.as_ref()
+            && *cached_key == key
         {
-            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some((cached_key, value)) = state.as_ref()
-                && *cached_key == key
-            {
-                tracing::debug!(
-                    target: "velnor.docker",
-                    fact = self.name,
-                    lifetime = self.lifetime.label(),
-                    cached = true,
-                    "docker fact reused"
-                );
-                return Ok(value.clone());
-            }
+            tracing::debug!(
+                target: "velnor.docker",
+                fact = self.name,
+                lifetime = self.lifetime.label(),
+                cached = true,
+                "docker fact reused"
+            );
+            return Ok(value.clone());
         }
         let value = compute()?;
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         *state = Some((key, value.clone()));
         tracing::debug!(
             target: "velnor.docker",
@@ -271,6 +268,7 @@ impl<T: Clone> Fact<T> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn a_fact_is_recomputed_when_its_generation_changes() {
@@ -302,6 +300,37 @@ mod tests {
         assert_eq!(fact.get_or_try_init(None, compute), Ok(0));
         assert_eq!(fact.get_or_try_init(None, compute), Ok(1));
         assert_eq!(computed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn concurrent_initializers_share_one_generation_probe() {
+        let fact: Arc<Fact<u32>> = Arc::new(Fact::new("test", FactLifetime::Daemon));
+        let key = FactKey {
+            lifetime: FactLifetime::Daemon,
+            token: "generation-1".into(),
+        };
+        let computed = Arc::new(AtomicU32::new(0));
+        let ready = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let fact = Arc::clone(&fact);
+                let key = key.clone();
+                let computed = Arc::clone(&computed);
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    fact.get_or_try_init(Some(key), || {
+                        computed.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        Ok::<_, ()>(42)
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), Ok(42));
+        }
+        assert_eq!(computed.load(Ordering::SeqCst), 1);
     }
 
     #[test]
