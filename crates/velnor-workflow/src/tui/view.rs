@@ -634,6 +634,7 @@ mod tests {
         super::super::App::new(
             crate::Cli {
                 target: ".".to_owned(),
+                default_branch: None,
                 output: None,
                 runners: crate::RunnerMode::Github,
                 dry_run: false,

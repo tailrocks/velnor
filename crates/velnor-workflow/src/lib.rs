@@ -186,6 +186,7 @@ impl RunnerMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cli {
     target: String,
+    default_branch: Option<String>,
     output: Option<PathBuf>,
     runners: RunnerMode,
     dry_run: bool,
@@ -220,6 +221,11 @@ struct RawCli {
     /// Root directory for generated files.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// Default branch used for generated branch gates. If omitted, resolve it
+    /// from the repository's static Git remote metadata.
+    #[arg(long, value_name = "BRANCH")]
+    default_branch: Option<String>,
 
     /// Runner lanes to generate.
     #[arg(long, value_enum, default_value_t = RunnerMode::Both, value_name = "MODE")]
@@ -277,6 +283,7 @@ impl TryFrom<RawCli> for Cli {
 
         Ok(Self {
             target,
+            default_branch: raw.default_branch,
             output: raw.output,
             runners: raw.runners,
             dry_run: raw.dry_run,
@@ -637,6 +644,14 @@ fn write_toml_array(output: &mut String, name: &str, values: &[String]) {
     reason = "the scan pass keeps generic detectors in one auditable pipeline"
 )]
 pub fn scan_repository(root: &Path, runners: RunnerMode) -> Result<ProjectConfig, GeneratorError> {
+    scan_repository_with_default_branch(root, runners, "main")
+}
+
+fn scan_repository_with_default_branch(
+    root: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+) -> Result<ProjectConfig, GeneratorError> {
     let files = repository_files(root)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let mut units = Vec::new();
@@ -980,7 +995,7 @@ pub fn scan_repository(root: &Path, runners: RunnerMode) -> Result<ProjectConfig
         verified: true,
         workflow_files: default_workflow_files(),
         notes: Vec::new(),
-        default_branch: "main".to_owned(),
+        default_branch: default_branch.to_owned(),
         runners,
         github_runner: "ubuntu-24.04".to_owned(),
         velnor_labels: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
@@ -4543,7 +4558,12 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     }
     let source = RepositorySource::parse(&cli.target)?;
     let checkout = source.checkout()?;
-    let config = scan_repository(checkout.path(), cli.runners)?;
+    let default_branch = match cli.default_branch.as_deref() {
+        Some(branch) => validate_default_branch(branch)?.to_owned(),
+        None => source.default_branch(checkout.path())?,
+    };
+    let config =
+        scan_repository_with_default_branch(checkout.path(), cli.runners, &default_branch)?;
     if config.units.is_empty() {
         return Err(GeneratorError::usage(
             "scanner found no supported manifest or project shape; add project.toml manually only after defining a safe command",
@@ -5963,6 +5983,11 @@ impl RepositorySource {
         }
     }
 
+    fn default_branch(&self, checkout: &Path) -> Result<String, GeneratorError> {
+        let _ = self;
+        resolve_default_branch(checkout)
+    }
+
     fn output_root(&self, local_checkout: &Path) -> Result<PathBuf, GeneratorError> {
         match self {
             Self::Local(_) => Ok(local_checkout.to_path_buf()),
@@ -5982,6 +6007,78 @@ impl RepositorySource {
                 remote_output_root(&directory, owner, repository)
             }
         }
+    }
+}
+
+fn resolve_default_branch(repository: &Path) -> Result<String, GeneratorError> {
+    let symbolic_ref = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .output();
+    if let Ok(output) = symbolic_ref {
+        if output.status.success() {
+            let reference = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if let Some(branch) = reference.strip_prefix("origin/") {
+                return validate_default_branch(branch).map(str::to_owned);
+            }
+        }
+    }
+
+    let remote_head = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["ls-remote", "--symref", "origin", "HEAD"])
+        .output()
+        .map_err(|error| {
+            GeneratorError::usage(format!(
+                "resolve repository default branch from Git metadata: {error}; pass --default-branch explicitly"
+            ))
+        })?;
+    if remote_head.status.success() {
+        let output = String::from_utf8_lossy(&remote_head.stdout);
+        if let Some(branch) = parse_remote_head(&output) {
+            return Ok(branch.to_owned());
+        }
+    }
+    Err(GeneratorError::usage(
+        "repository default branch is unavailable from Git metadata; pass --default-branch explicitly",
+    ))
+}
+
+fn parse_remote_head(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let reference = line.strip_prefix("ref: refs/heads/")?;
+        let (branch, target) = reference.split_once('\t')?;
+        (target == "HEAD").then(|| validate_default_branch(branch).ok())?
+    })
+}
+
+fn validate_default_branch(branch: &str) -> Result<&str, GeneratorError> {
+    let valid = !branch.is_empty()
+        && branch.len() <= 255
+        && !branch.starts_with('/')
+        && !branch.ends_with('/')
+        && !branch.starts_with('.')
+        && !branch.ends_with('.')
+        && !branch.contains("..")
+        && !branch.contains("@{")
+        && !branch.contains("//")
+        && !branch.ends_with(".lock")
+        && !branch.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(character, '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        })
+        && !branch
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..");
+    if valid {
+        Ok(branch)
+    } else {
+        Err(GeneratorError::usage(format!(
+            "invalid default branch name: {branch:?}"
+        )))
     }
 }
 
@@ -6346,6 +6443,47 @@ mod tests {
                 ..
             }) if target == "estate"
         ));
+        let explicit_branch = Cli::parse_args([
+            OsString::from("."),
+            OsString::from("--default-branch"),
+            OsString::from("trunk"),
+        ]);
+        assert!(matches!(
+            explicit_branch,
+            Ok(Cli {
+                default_branch: Some(branch),
+                ..
+            }) if branch == "trunk"
+        ));
+    }
+
+    #[test]
+    fn remote_head_parser_requires_a_valid_head_branch() {
+        assert_eq!(
+            parse_remote_head("ref: refs/heads/trunk\tHEAD\n0123\tHEAD\n"),
+            Some("trunk")
+        );
+        assert_eq!(
+            parse_remote_head("ref: refs/heads/release/v1\tHEAD\n"),
+            Some("release/v1")
+        );
+        assert_eq!(
+            parse_remote_head("ref: refs/heads/main..evil\tHEAD\n"),
+            None
+        );
+        assert_eq!(parse_remote_head("0123\tHEAD\n"), None);
+    }
+
+    #[test]
+    fn non_main_default_branch_flows_into_generated_workflows() {
+        let config = must(
+            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "trunk"),
+            "scan fixture with non-main default branch",
+        );
+        assert!(config.toml().contains("default_branch = \"trunk\""));
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        assert!(workflow.contains("branches: [trunk]"));
+        assert!(workflow.contains("refs/heads/trunk"));
     }
 
     #[test]
@@ -8286,6 +8424,7 @@ path-only = { path = "../path-only" }
         );
         let cli = Cli {
             target: source.to_string_lossy().into_owned(),
+            default_branch: Some("main".to_owned()),
             output: Some(output.clone()),
             runners: RunnerMode::Github,
             dry_run: false,
