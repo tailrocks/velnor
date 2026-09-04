@@ -2,8 +2,7 @@
 //!
 //! Asserted from `cargo metadata` so the law holds no matter how manifests
 //! evolve: `velnor-client` meets the daemon only through versioned model DTOs,
-//! `velnor-control` consumes the journal and shared model directly, the action
-//! journal stays limited to foundational model crates, the workspace graph is
+//! `velnor-control` consumes the shared model directly, the workspace graph is
 //! acyclic, and no shared crate depends on Clap or Axum. The Axum transport
 //! adapter is owned by the CLI composition crate; it never enters the model,
 //! service, client, or renderer crates.
@@ -14,10 +13,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 11] = [
+const WORKSPACE_PACKAGES: [&str; 10] = [
     "velnor-model",
     "velnor-action-model",
-    "velnor-action-journal",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -28,7 +26,7 @@ const WORKSPACE_PACKAGES: [&str; 11] = [
     "unit-collector",
 ];
 
-const VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS: [&str; 2] = ["velnor-action-journal", "velnor-model"];
+const VELNOR_CONTROL_DIRECT_WORKSPACE_DEPS: [&str; 1] = ["velnor-model"];
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -375,8 +373,7 @@ fn velnor_client_depends_only_on_velnor_model() {
         "client depends on the shared model"
     );
     for forbidden in [
-        "velnor-action-journal",
-        "velnor-control",
+            "velnor-control",
         "velnor-runner",
         "axum",
         "clap",
@@ -403,8 +400,7 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
     let closure = transitive_closure(&metadata, "velnor-client");
     for forbidden in [
         "velnor-action-model",
-        "velnor-action-journal",
-        "velnor-control",
+            "velnor-control",
         "velnor-runner",
         "velnorctl",
         "axum",
@@ -442,13 +438,6 @@ fn crate_dependency_direction_matches_approved_graph() {
     assert_eq!(
         control_deps, control_allowed,
         "velnor-control direct workspace dependencies are explicitly allowlisted"
-    );
-    assert_eq!(
-        members_only(&graph["velnor-action-journal"])
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["velnor-action-model".to_owned(), "velnor-model".to_owned(),]),
-        "action journal is constrained to foundational model crates"
     );
     assert_velnor_control_direct_dependencies(&metadata, &cargo_metadata_resolved());
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
@@ -496,8 +485,7 @@ fn shared_crates_never_depend_on_clap_or_axum() {
     for shared in [
         "velnor-model",
         "velnor-action-model",
-        "velnor-action-journal",
-        "velnor-control",
+            "velnor-control",
         "velnor-client",
         "velnor-render",
     ] {
