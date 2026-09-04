@@ -2257,9 +2257,10 @@ Corruption detection now requires git to recognise the repository, `for-each-ref
 object named by a ref to exist; a failing mirror is renamed aside under the exclusive lock and
 rebuilt, and the warn-and-fall-back path is gone, so mirror failure fails the checkout step
 carrying git's own exit code. The mirror fetches only the wanted revision, pins it under
-`refs/velnor/*`, holds the exclusive lock only for create and repair, fetches under a **shared**
-lock, and short-circuits with zero network when the commit is already present. The workspace no
-longer fetches from the mirror at all — it hard-links objects and writes refs directly.
+`refs/velnor/*`, owns the mirror exclusively through create, repair, fetch, and pinning, then
+downgrades to a **shared** reader lease before workspace hydration; it short-circuits with zero
+network when the commit is already present. The workspace no longer fetches from the mirror at
+all — it hard-links objects and writes refs directly.
 
 Measured on a synthetic 6 MB repository with 250 `refs/pull/*`:
 
