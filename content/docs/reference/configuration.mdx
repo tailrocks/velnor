@@ -72,6 +72,9 @@ must select `docker` or `microvm`; missing or invalid selection is an error.
 | `VELNOR_SLOTS` | Concurrent daemon slots |
 | `VELNOR_QUEUE_WAIT_SECS` | Maximum wait for an unassigned slot |
 | `VELNOR_CAPACITY_WAIT_SECS` | Maximum wait for disk/capacity reservation |
+| `VELNOR_TRUST_SCOPE` | Pool trust boundary. Defaults to `untrusted`; only `trusted` grants capability, and `release` selects the `release` store namespace. See [Trust scope](/reference/trust-scope) |
+| `VELNOR_JOB_CPUS` | Explicit `--cpus` ceiling for the job container. Only ever narrows the derived per-slot share |
+| `VELNOR_CANCEL_SIGINT_TIMEOUT_MS` / `VELNOR_CANCEL_SIGTERM_TIMEOUT_MS` | Termination-ladder grace periods; defaults 7500 and 2500 |
 | `VELNOR_CAPABILITY_VALIDATION` | Must be `strict` |
 | `VELNOR_POOL_ID` / `VELNOR_POOL_NAME` | GitHub runner group selection; a runner group is GitHub's named access-control boundary for runners |
 | `VELNOR_STORAGE_ROOT` | Root for Velnor state when not supplied by systemd |
@@ -115,7 +118,16 @@ available. There is no backend fallback.
 
 - Configuration and runner identity are private local files; the operator PAT
   is separate from per-job GitHub credentials.
-- `VELNOR_SLOTS` controls local concurrency, not GitHub scheduling.
+- `VELNOR_SLOTS` controls local concurrency, not GitHub scheduling. It also
+  divides the derived host CPU and memory budget: each slot gets `budget /
+  slots`. See
+  [Storage and resource budgets](/operations/storage-and-resources).
+- Trust scope defaults to `untrusted` and fails closed. This is a breaking
+  change for nodes configured before it; see
+  [Trust scope](/reference/trust-scope).
+- Velnor admits a closed allowlist of actions and rejects everything else at
+  planning. See
+  [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
 - MicroVM supports a narrower action and cache surface than Docker.
 - Query, log, and storage projections may be empty after reopening because
   those operational projections are not fully rehydrated, even though durable

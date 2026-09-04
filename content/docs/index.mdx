@@ -36,7 +36,9 @@ New to Velnor? Follow this path:
 | Understand GitHub communication and execution | [Architecture](/concepts/architecture), [Execution](/guides/execution), [Integrations](/reference/integrations) |
 | Inspect a running node | [Observability](/operations/observability), [CLI/interface reference](/reference/interface) |
 | Investigate a failed or stuck job | [Getting started diagnosis](/getting-started#if-the-first-job-does-not-run), [Execution](/guides/execution) |
-| Understand credentials, isolation, and persisted data | [Security and data](/operations/security-and-data) |
+| Understand credentials, isolation, and persisted data | [Security and data](/operations/security-and-data), [Trust scope](/reference/trust-scope) |
+| Work out why a step ran or was skipped | [Expressions and conditions](/reference/expressions) |
+| Size a host, or diagnose disk and CPU budgets | [Storage and resource budgets](/operations/storage-and-resources) |
 | Look up commands and protocol details | [Interface reference](/reference/interface), [Runner protocol](/reference/runner-protocol) |
 | Build, test, or maintain Velnor | [Development](/guides/development), [Contributing](/guides/contributing) |
 
@@ -44,7 +46,13 @@ New to Velnor? Follow this path:
 
 - The packaged runtime targets Debian hosts and systemd.
 - A backend is explicit. Docker and microVM do not fall back to each other.
-- Capability admission is strict and cannot be bypassed.
+- Capability admission is strict and cannot be bypassed. Velnor admits a closed
+  allowlist of actions and rejects every other JavaScript, Docker, or composite
+  action at planning; see
+  [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
+- Trust scope defaults to `untrusted` and fails closed. A pool that needs the
+  host Docker socket or user secrets must set `VELNOR_TRUST_SCOPE=trusted`
+  explicitly; see [Trust scope](/reference/trust-scope).
 - The operator PAT registers runners and accesses GitHub management APIs. Job
   credentials come from the acquired GitHub job and are not substituted with
   the PAT.
@@ -61,5 +69,7 @@ The remaining pages are organized for operators and maintainers:
 
 - [Concepts](concepts/): architecture, system behavior, and vocabulary.
 - [Guides](guides/): execution, operations, development, and contribution.
-- [Operations](operations/): observability and security/data boundaries.
-- [Reference](reference/): integrations, interfaces, and runner protocol.
+- [Operations](operations/): observability, storage and resource budgets, and
+  security/data boundaries.
+- [Reference](reference/): trust scope, expressions, configuration,
+  integrations, interfaces, and runner protocol.

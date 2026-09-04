@@ -25,7 +25,10 @@ behavior and proof limits.
 | Runner V2 | The upstream GitHub Actions runner protocol family used by Velnor for broker, run-service, timeline, credentials, and completion behavior. |
 | Run service | The GitHub endpoint used to acquire a delivered job, renew its lease, and publish completion. |
 | Slot | One ready runner worker. Each slot is an independently supervised OS process with a generation-bound heartbeat. |
-| Trust scope | The operator-selected boundary controlling whether a job may use shared Docker, secrets, caches, and other capabilities. |
+| Trust scope | The operator-selected boundary controlling whether a job may use the host Docker socket, user secrets, privileged options, and which store partition it shares. Defaults to `untrusted`; only `trusted` grants capability. Never derived from the job payload. |
+| Store catalog | The single constructor for every persistent store path, so a store cannot be written at one path and reclaimed at another. |
+| Host budget | The machine's real CPU and memory capacity, derived as the tightest of every applicable constraint, and divided by slot count into a per-slot share. |
+| Termination ladder | `SIGINT → SIGTERM → SIGKILL`, applied to each registered cancellation target at the level it declares. |
 | Outbox | Durable completion intent awaiting remote send/acknowledgement. It makes a crash after local commit recoverable without guessing whether the remote call happened. |
 | vsock | Host/guest transport used by the Firecracker execution path for readiness, plan delivery, stdio, results, and completion acknowledgements. |
 | `CURRENT` | Implemented and supported by relevant source/tests, or backed by clearly identified current evidence. |
