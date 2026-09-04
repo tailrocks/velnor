@@ -1676,3 +1676,93 @@ there is the follow-up that unblocks both bumps.
 
 Also stale and needing a follow-up: `README.md:8` and
 `content/docs/guides/execution.mdx:123` still name mbx 1.6.0.
+
+### Correction to BC-24 / BC-29 — the secret masker is not duplicated
+
+The security audit reported five redaction copies with three sentinels that "disagree
+materially". That is wrong, and I verified it in source rather than taking either side.
+
+There is exactly **one** secret masker: `Masker` (`runner.rs:7203`, `impl` at `:7208`) using
+aho-corasick with `MatchKind::LeftmostLongest` and the single sentinel `***`. `mask_all`,
+`mask_single_value`, `mask_value`, `mask_log_lines` and `mask_log_lines_with` are thin wrappers
+over it, three of them `#[cfg(test)]`. They agree, and there is nothing to collapse.
+
+The other `redact_*` functions are different jobs, not copies of it: `protocol.rs:297` strips
+credentials from a URL, `executor.rs:12258` redacts known-secret action *inputs* by name, and
+`manifest.rs:106`'s `[redacted]` is an error message about an unsupported capability input. A
+sentinel count across unrelated functions is not evidence of a duplicated masker.
+
+The real defect is narrower and therefore more actionable: **two durable sinks do not call the
+one masker.** The step summary is uploaded unmasked (`runner.rs:6880`, with `job_masks` already
+in scope at the call site), and annotations are published unmasked into both `CompleteJob`
+(`:10466`) and timeline records (`:10460`) through `run_service_annotation` (`:11395`). An audit
+of every other durable sink — step-log blob, combined job log, timeline feed, telemetry, job
+outputs — found all of them masking correctly, and upstream does not mask artifact bytes either,
+so that is not a divergence.
+
+This still belongs to RC-4 (a control correct at one construction site while another path
+bypasses it), but the remedy is to route two call sites through the existing masker, not to
+consolidate implementations that were never duplicated.
+
+### BC-25 enlarged — the cache client could never have worked
+
+Fixing the v1 query parsing uncovered two further defects in the same function, both of the same
+class, all now fixed (`1a49c0c`, `674ef1f`):
+
+- `keys_from_query` split the key list on a literal comma *before* decoding, but toolkit sends
+  `cache?keys=${encodeURIComponent(keys.join(','))}` and `encodeURIComponent` escapes a comma as
+  `%2C`. So the entire restore-key list arrived as one bogus key. Even with the `version`
+  parameter fixed, restore keys would never have matched.
+- A v1 miss returned HTTP 200 with `{"__typename":"NotFoundError"}`. The toolkit client
+  (`getCacheEntry`) treats **only 204** as a miss and throws `Cache not found.` on a 200 lacking
+  `archiveLocation`. Now 204 with an empty body.
+
+The wire contracts were fixed against `actions/toolkit` pinned at
+`193fa46c20fde8b0ed54194bc08b841c78c0776d`: v1 `ArtifactCacheEntry` is
+`{cacheKey, scope, cacheVersion, creationTime, archiveLocation}` with no `cacheId` or
+`cacheDownloadUrl` on it at all, and v2's `matched_key` is field 3 of
+`GetCacheEntryDownloadURLResponse`, which the client uses to compute
+`isRestoreKeyMatch = request.key !== response.matchedKey` — omitting it made every hit look like
+a restore-key hit, so the entry was re-saved every run.
+
+One contract was left alone on principle rather than guessed: the reserve response's `cacheId`
+is typed `number` in toolkit while Velnor returns a hex SHA-256 string. The JavaScript client
+only truthy-checks it, so it works there, but BuildKit's Go client would deserialize into an
+integer field. Establishing that would require pinning a third upstream repository, and changing
+it means reworking the content-addressed id scheme — reported, not guessed.
+
+The unread `CacheHit.size` field that was blocking the `-D warnings` gate turned out to be
+vestigial from a v1 response field the client never had. Deleted rather than allowed.
+
+### The `RUNNER_TEMP` symlink defect is fixed at the syscall
+
+`RUNNER_TEMP` is mode 1777 with predictable step-file names, and every step file was written and
+read by path. Confirmed exploitable with no race. Fixed by binding `RUNNER_TEMP` once to a
+directory descriptor and creating and reading every step file relative to it: writes stage into
+an `O_CREAT|O_EXCL|O_NOFOLLOW` temporary and rename into place, refusing a non-regular
+destination; reads use `statat(SYMLINK_NOFOLLOW)` plus `O_NOFOLLOW` and treat a non-regular file
+as an error rather than following it; and the summary size is now taken from the open descriptor,
+so the file measured is the file read. Existing `fs_copy.rs` primitives were reused rather than
+new ones written.
+
+A detail worth keeping: `NoFollowDir::open_absolute` refuses a symlink anywhere in the path,
+which fails on macOS because `/var` is itself a symlink. `RUNNER_TEMP` is a runner-configured
+root, so it is canonicalised once through `open_trusted_rooted_destination` while everything
+below it stays hostile — the same treatment the rest of the tree gives trusted roots.
+
+Deferred root cause, named: step-file names remain predictable, so a step can still *forge*
+another step's outputs by writing a regular file at the expected path. Unpredictable per-step
+directories would close that, and it needs a change in `executor.rs`, which asserts
+`GITHUB_OUTPUT=/__t/step1_output`.
+
+### Coordination defect — I double-assigned a file
+
+`script_step.rs` was assigned to two packages at once, and both edited it. Nothing was lost —
+the second agent merged onto the first's commit rather than clobbering it — but that was luck
+plus care, not the process working. Ownership claims in §7 must be checked before a package is
+dispatched, and a file already claimed must be either declined or explicitly handed over.
+
+The shared index remains the sharpest hazard: `git add <path> && git commit` sweeps whatever
+anyone else has staged. The rule is now `git commit -s -- <paths>`, and `git pull --rebase
+--autostash` is also discouraged, having flattened another agent's staged files to unstaged
+(content survived; only the staged distinction was lost).
