@@ -9,6 +9,7 @@ members = [
   "crates/velnor-render",
   "crates/velnorctl",
   "crates/velnor-runner",
+  "crates/velnor-bench",
   "crates/velnor-tools",
   "tools/unit-collector",
 ]

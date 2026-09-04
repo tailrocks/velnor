@@ -1,0 +1,816 @@
+//! Real Rust builds, executed on the host with no container and no runner.
+//!
+//! This is the weakest driver in the crate and it is labelled as such
+//! everywhere: it observes [`Stage::FirstUserCommand`] and nothing else, so a
+//! result it produces can never be read as a claim about Velnor's job startup.
+//! It exists because the bash script this crate replaces measured exactly this,
+//! and that coverage must not be lost when the script is deleted.
+//!
+//! Every scenario works in its own detached `git worktree` under the scratch
+//! root. The subject checkout is never mutated: another agent may be editing
+//! it, and a benchmark that edits the tree it measures is not reproducible
+//! anyway.
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+use anyhow::{bail, Context as _, Result};
+
+use crate::{
+    drivers::{Context, Workload},
+    gittrace::{self, GitCounters},
+    record::{Observation, Resources},
+    scenario::Scenario,
+    stage::Stage,
+    sys::{tree_bytes, Rusage},
+};
+
+/// How the workspace is prepared before each measured iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Workspace {
+    /// One worktree, reused across iterations.
+    Reused,
+    /// A new worktree at the same commit for every iteration.
+    FreshEachIteration,
+    /// One worktree per concurrent job.
+    PerConcurrentJob,
+}
+
+/// How the target directory is prepared before each measured iteration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetDir {
+    /// Removed before every iteration: a genuinely cold build.
+    Cold,
+    /// Retained and warmed once before measurement begins.
+    Warm,
+    /// One target directory per concurrent job, each warmed once.
+    PerConcurrentJob,
+}
+
+/// Change applied to the workspace immediately before the measured command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mutation {
+    None,
+    /// Re-run an identical command first, so the measurement is pure no-op cost.
+    PrimeIdenticalRun,
+    /// Append a line to the first tracked Rust source file.
+    AppendToFirstSource,
+    /// Touch the workspace manifest without changing its content.
+    TouchManifest,
+    /// Touch a build script, forcing its rerun and downstream invalidation.
+    TouchBuildScript,
+    /// Rewrite `Cargo.lock` through a real `cargo update`.
+    UpdateLockfile,
+}
+
+/// The measured cargo invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CargoCommand {
+    /// A fixed subcommand over the whole workspace.
+    Workspace {
+        subcommand: &'static str,
+        extra: &'static [&'static str],
+    },
+    /// A package resolved from `cargo metadata` at prepare time.
+    ResolvedPackage { kind: PackageKind },
+    /// Alternate between the default and the full feature set.
+    AlternatingFeatures,
+}
+
+/// How a package is picked out of the resolved dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageKind {
+    /// A `*-sys` package, which links native code through a build script.
+    NativeSys,
+    /// A proc-macro package, which is compiled for the host and invalidates
+    /// every downstream crate.
+    ProcMacro,
+}
+
+/// A fully declarative plan for one Rust scenario.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Plan {
+    workspace: Workspace,
+    target: TargetDir,
+    mutation: Mutation,
+    command: CargoCommand,
+}
+
+const CHECK: CargoCommand = CargoCommand::Workspace {
+    subcommand: "check",
+    extra: &["--workspace", "--all-targets", "--locked"],
+};
+
+fn plan_for(id: &str) -> Option<Plan> {
+    let plan = match id {
+        "rust/cold" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Cold,
+            mutation: Mutation::None,
+            command: CHECK,
+        },
+        "rust/warm" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CHECK,
+        },
+        "rust/noop" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::PrimeIdenticalRun,
+            command: CHECK,
+        },
+        "rust/fresh-worktree-same-commit" => Plan {
+            workspace: Workspace::FreshEachIteration,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CHECK,
+        },
+        "rust/small-source-edit" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::AppendToFirstSource,
+            command: CHECK,
+        },
+        "rust/manifest-touch" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::TouchManifest,
+            command: CHECK,
+        },
+        "rust/lockfile-update" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::UpdateLockfile,
+            command: CHECK,
+        },
+        "rust/build-script-change" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::TouchBuildScript,
+            command: CHECK,
+        },
+        "rust/feature-set-change" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CargoCommand::AlternatingFeatures,
+        },
+        "rust/native-sys" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Cold,
+            mutation: Mutation::None,
+            command: CargoCommand::ResolvedPackage {
+                kind: PackageKind::NativeSys,
+            },
+        },
+        "rust/proc-macro" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Cold,
+            mutation: Mutation::None,
+            command: CargoCommand::ResolvedPackage {
+                kind: PackageKind::ProcMacro,
+            },
+        },
+        "rust/cargo-check" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CHECK,
+        },
+        "rust/cargo-build" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CargoCommand::Workspace {
+                subcommand: "build",
+                extra: &["--workspace", "--all-targets", "--locked"],
+            },
+        },
+        "rust/nextest" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CargoCommand::Workspace {
+                subcommand: "nextest",
+                extra: &["run", "--workspace", "--locked"],
+            },
+        },
+        "rust/clippy" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CargoCommand::Workspace {
+                subcommand: "clippy",
+                extra: &["--workspace", "--all-targets", "--locked"],
+            },
+        },
+        "rust/doc" => Plan {
+            workspace: Workspace::Reused,
+            target: TargetDir::Warm,
+            mutation: Mutation::None,
+            command: CargoCommand::Workspace {
+                subcommand: "doc",
+                extra: &["--workspace", "--no-deps", "--locked"],
+            },
+        },
+        "rust/concurrent-jobs" => Plan {
+            workspace: Workspace::PerConcurrentJob,
+            target: TargetDir::PerConcurrentJob,
+            mutation: Mutation::None,
+            command: CHECK,
+        },
+        _ => return None,
+    };
+    Some(plan)
+}
+
+pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
+    let plan = plan_for(scenario.id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no cargo workload is implemented for {}; \
+             it is declared in the matrix and reported as unrun",
+            scenario.id
+        )
+    })?;
+    Ok(Box::new(CargoWorkload {
+        plan,
+        scenario: scenario.id,
+        worktrees: Vec::new(),
+        targets: Vec::new(),
+        package: None,
+        iteration: 0,
+        notes: vec![
+            "cargo-direct driver: measured on the host with no container and no runner, so \
+             this record describes the build only and is not a claim about Velnor job latency"
+                .to_owned(),
+        ],
+    }))
+}
+
+struct CargoWorkload {
+    plan: Plan,
+    scenario: &'static str,
+    worktrees: Vec<PathBuf>,
+    targets: Vec<PathBuf>,
+    package: Option<String>,
+    iteration: u64,
+    notes: Vec<String>,
+}
+
+impl CargoWorkload {
+    fn add_worktree(&mut self, context: &mut Context, root: &Path, name: &str) -> Result<PathBuf> {
+        let path = root.join(name);
+        let invocation = context
+            .runner
+            .run(
+                "git",
+                &[
+                    "-C".to_owned(),
+                    context.velnor_repo.display().to_string(),
+                    "worktree".to_owned(),
+                    "add".to_owned(),
+                    "--detach".to_owned(),
+                    path.display().to_string(),
+                    "HEAD".to_owned(),
+                ],
+            )
+            .context("git worktree add")?;
+        if !invocation.ok() {
+            bail!("git worktree add failed: {}", invocation.stderr.trim());
+        }
+        self.worktrees.push(path.clone());
+        Ok(path)
+    }
+
+    fn cargo_args(&self, iteration: u64) -> Vec<String> {
+        match &self.plan.command {
+            CargoCommand::Workspace { subcommand, extra } => {
+                let mut args = vec![(*subcommand).to_owned()];
+                args.extend(extra.iter().map(|value| (*value).to_owned()));
+                args
+            }
+            CargoCommand::ResolvedPackage { .. } => {
+                let package = self.package.clone().unwrap_or_default();
+                vec![
+                    "build".to_owned(),
+                    "--locked".to_owned(),
+                    "-p".to_owned(),
+                    package,
+                ]
+            }
+            CargoCommand::AlternatingFeatures => {
+                let mut args = vec![
+                    "check".to_owned(),
+                    "--workspace".to_owned(),
+                    "--all-targets".to_owned(),
+                    "--locked".to_owned(),
+                ];
+                if iteration.is_multiple_of(2) {
+                    args.push("--all-features".to_owned());
+                }
+                args
+            }
+        }
+    }
+
+    fn run_cargo(
+        &self,
+        context: &mut Context,
+        workspace: &Path,
+        target: &Path,
+        args: &[String],
+        trace_file: Option<&Path>,
+    ) -> Result<u64> {
+        let mut env = vec![
+            ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
+            ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
+            ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
+        ];
+        if let Some(trace_file) = trace_file {
+            env.extend(gittrace::trace_env(trace_file));
+        }
+        let started = Instant::now();
+        let invocation = context
+            .runner
+            .exec("cargo", args, Some(workspace), &env)
+            .context("spawning cargo")?;
+        let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if !invocation.ok() {
+            bail!(
+                "cargo {} failed with status {}: {}",
+                args.join(" "),
+                invocation.code,
+                invocation
+                    .stderr
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            );
+        }
+        Ok(elapsed)
+    }
+
+    fn apply_mutation(&self, context: &mut Context, workspace: &Path) -> Result<()> {
+        match self.plan.mutation {
+            Mutation::None | Mutation::PrimeIdenticalRun => Ok(()),
+            Mutation::AppendToFirstSource => {
+                let file = first_tracked_source(context, workspace)?;
+                let path = workspace.join(file);
+                let mut text = std::fs::read_to_string(&path)?;
+                text.push_str("\n// velnor-bench source edit\n");
+                std::fs::write(&path, text)?;
+                Ok(())
+            }
+            Mutation::TouchManifest => touch(&workspace.join("Cargo.toml")),
+            Mutation::TouchBuildScript => {
+                let script = find_build_script(workspace).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no build.rs exists in this workspace, so the build-script-change \
+                         scenario has nothing to invalidate"
+                    )
+                })?;
+                touch(&script)
+            }
+            Mutation::UpdateLockfile => {
+                let invocation = context
+                    .runner
+                    .exec(
+                        "cargo",
+                        &["update", "--workspace"],
+                        Some(workspace),
+                        &[("CARGO_TERM_COLOR".to_owned(), "never".to_owned())],
+                    )
+                    .context("cargo update")?;
+                if !invocation.ok() {
+                    bail!("cargo update failed: {}", invocation.stderr.trim());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Undo the mutation so the next iteration starts from the same state.
+    fn restore(&self, context: &mut Context, workspace: &Path) {
+        if matches!(
+            self.plan.mutation,
+            Mutation::AppendToFirstSource | Mutation::UpdateLockfile
+        ) {
+            let _ = context
+                .runner
+                .exec("git", &["checkout", "--", "."], Some(workspace), &[]);
+        }
+    }
+}
+
+impl Workload for CargoWorkload {
+    fn prepare(&mut self, context: &mut Context) -> Result<()> {
+        let root = context.work_root.join(self.scenario.replace('/', "_"));
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        std::fs::create_dir_all(&root)?;
+
+        let worktree_count = match self.plan.workspace {
+            Workspace::PerConcurrentJob => context.concurrency.max(1),
+            Workspace::Reused | Workspace::FreshEachIteration => 1,
+        };
+        for index in 0..worktree_count {
+            self.add_worktree(context, &root, &format!("workspace-{index}"))?;
+        }
+        let target_count = match self.plan.target {
+            TargetDir::PerConcurrentJob => context.concurrency.max(1),
+            TargetDir::Cold | TargetDir::Warm => 1,
+        };
+        for index in 0..target_count {
+            let target = root.join(format!("target-{index}"));
+            std::fs::create_dir_all(&target)?;
+            self.targets.push(target);
+        }
+
+        if let CargoCommand::ResolvedPackage { kind } = self.plan.command {
+            let workspace = self.worktrees[0].clone();
+            let package = resolve_package(context, &workspace, kind)?;
+            self.notes
+                .push(format!("resolved package for this scenario: {package}"));
+            self.package = Some(package);
+        }
+
+        // Warm the target directory outside the measurement where the plan
+        // calls for it. A warm scenario measured from cold is not warm.
+        if matches!(
+            self.plan.target,
+            TargetDir::Warm | TargetDir::PerConcurrentJob
+        ) {
+            let args = self.cargo_args(0);
+            for index in 0..self.targets.len() {
+                let workspace = self.worktrees[index.min(self.worktrees.len() - 1)].clone();
+                let target = self.targets[index].clone();
+                self.run_cargo(context, &workspace, &target, &args, None)
+                    .context("warm-up run")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn iterate(&mut self, context: &mut Context) -> Result<Observation> {
+        self.iteration += 1;
+        context.runner.reset();
+        let before_usage = Rusage::children();
+        let root = context.work_root.join(self.scenario.replace('/', "_"));
+        let disk_before = tree_bytes(&root);
+        let started = Instant::now();
+
+        if self.plan.workspace == Workspace::FreshEachIteration {
+            let name = format!("workspace-fresh-{}", self.iteration);
+            self.add_worktree(context, &root, &name)?;
+        }
+        let workspace = self
+            .worktrees
+            .last()
+            .cloned()
+            .expect("prepare created at least one worktree");
+        let target = self.targets[0].clone();
+
+        if self.plan.target == TargetDir::Cold && target.exists() {
+            std::fs::remove_dir_all(&target)?;
+            std::fs::create_dir_all(&target)?;
+        }
+
+        self.apply_mutation(context, &workspace)?;
+        let args = self.cargo_args(self.iteration);
+        if self.plan.mutation == Mutation::PrimeIdenticalRun {
+            self.run_cargo(context, &workspace, &target, &args, None)
+                .context("priming run")?;
+        }
+
+        let trace_file = root.join(format!("git-trace-{}.jsonl", self.iteration));
+        let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
+            self.run_concurrent(context, &args)?
+        } else {
+            self.run_cargo(context, &workspace, &target, &args, Some(&trace_file))?
+        };
+        self.restore(context, &workspace);
+
+        let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let usage = Rusage::children().since(before_usage);
+        let disk_after = tree_bytes(&root);
+        let git = GitCounters::from_event_file(&trace_file).unwrap_or_default();
+
+        Ok(Observation {
+            total_ms,
+            stages_ms: BTreeMap::from([(Stage::FirstUserCommand, command_ms)]),
+            checkout_phases_ms: BTreeMap::new(),
+            resources: Resources {
+                cpu_user_us: usage.user_us,
+                cpu_system_us: usage.system_us,
+                max_rss_bytes: usage.max_rss_bytes,
+                block_input_ops: usage.block_input_ops,
+                block_output_ops: usage.block_output_ops,
+                disk_bytes_delta: i64::try_from(disk_after).unwrap_or(i64::MAX)
+                    - i64::try_from(disk_before).unwrap_or(0),
+                process_count: context.runner.process_count() as u64,
+                docker_invocations: context.runner.count_of("docker") as u64,
+                bytes_downloaded: git.received_bytes,
+                ..Resources::default()
+            },
+            git,
+        })
+    }
+
+    fn teardown(&mut self, context: &mut Context) -> Result<()> {
+        // Leave the shared repository exactly as it was found.
+        for path in std::mem::take(&mut self.worktrees) {
+            let _ = context.runner.run(
+                "git",
+                &[
+                    "-C".to_owned(),
+                    context.velnor_repo.display().to_string(),
+                    "worktree".to_owned(),
+                    "remove".to_owned(),
+                    "--force".to_owned(),
+                    path.display().to_string(),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    fn notes(&self) -> Vec<String> {
+        self.notes.clone()
+    }
+}
+
+impl CargoWorkload {
+    /// Concurrent jobs really do run concurrently: one thread per worktree,
+    /// each with its own target directory.
+    fn run_concurrent(&self, context: &mut Context, args: &[String]) -> Result<u64> {
+        let pairs: Vec<(PathBuf, PathBuf)> = self
+            .worktrees
+            .iter()
+            .cloned()
+            .zip(self.targets.iter().cloned())
+            .collect();
+        let started = Instant::now();
+        let failures: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = pairs
+                .iter()
+                .map(|(workspace, target)| {
+                    scope.spawn(move || {
+                        let output = std::process::Command::new("cargo")
+                            .args(args)
+                            .current_dir(workspace)
+                            .env("CARGO_TARGET_DIR", target)
+                            .env("CARGO_TERM_COLOR", "never")
+                            .env("CARGO_INCREMENTAL", "0")
+                            .stdin(std::process::Stdio::null())
+                            .output();
+                        match output {
+                            Ok(output) if output.status.success() => None,
+                            Ok(output) => Some(format!(
+                                "cargo exited {} in {}",
+                                output.status.code().unwrap_or(-1),
+                                workspace.display()
+                            )),
+                            Err(error) => Some(format!("cargo could not be spawned: {error}")),
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Some("thread panicked".to_owned()))
+                })
+                .collect()
+        });
+        let _ = context;
+        if !failures.is_empty() {
+            bail!("concurrent jobs failed: {}", failures.join("; "));
+        }
+        Ok(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+fn touch(path: &Path) -> Result<()> {
+    let text = std::fs::read(path)?;
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+fn first_tracked_source(context: &mut Context, workspace: &Path) -> Result<String> {
+    let listing = context
+        .runner
+        .exec("git", &["ls-files", "*.rs"], Some(workspace), &[])
+        .context("git ls-files")?;
+    let mut files: Vec<&str> = listing.stdout.lines().filter(|l| !l.is_empty()).collect();
+    files.sort_unstable();
+    files
+        .first()
+        .map(|file| (*file).to_owned())
+        .ok_or_else(|| anyhow::anyhow!("workspace has no tracked Rust source"))
+}
+
+fn find_build_script(workspace: &Path) -> Option<PathBuf> {
+    let direct = workspace.join("build.rs");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let crates = workspace.join("crates");
+    let entries = std::fs::read_dir(crates).ok()?;
+    entries
+        .flatten()
+        .map(|entry| entry.path().join("build.rs"))
+        .find(|path| path.is_file())
+}
+
+/// Pick a package out of the resolved graph. Nothing here guesses from a name
+/// alone for proc macros: `cargo metadata` states the target kind.
+fn resolve_package(context: &mut Context, workspace: &Path, kind: PackageKind) -> Result<String> {
+    let metadata = context
+        .runner
+        .exec(
+            "cargo",
+            &["metadata", "--format-version", "1", "--locked"],
+            Some(workspace),
+            &[("CARGO_TERM_COLOR".to_owned(), "never".to_owned())],
+        )
+        .context("cargo metadata")?;
+    if !metadata.ok() {
+        bail!("cargo metadata failed: {}", metadata.stderr.trim());
+    }
+    let value: serde_json::Value = serde_json::from_str(&metadata.stdout)?;
+    select_package(&value, kind).ok_or_else(|| {
+        anyhow::anyhow!(
+            "the dependency graph contains no {} package, so this scenario has no subject",
+            match kind {
+                PackageKind::NativeSys => "-sys",
+                PackageKind::ProcMacro => "proc-macro",
+            }
+        )
+    })
+}
+
+fn select_package(metadata: &serde_json::Value, kind: PackageKind) -> Option<String> {
+    let packages = metadata.get("packages")?.as_array()?;
+    let mut names: Vec<String> = packages
+        .iter()
+        .filter(|package| match kind {
+            PackageKind::NativeSys => package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|name| name.ends_with("-sys")),
+            PackageKind::ProcMacro => package
+                .get("targets")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|targets| {
+                    targets.iter().any(|target| {
+                        target
+                            .get("kind")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|kinds| {
+                                kinds.iter().any(|kind| kind.as_str() == Some("proc-macro"))
+                            })
+                    })
+                }),
+        })
+        .filter_map(|package| {
+            package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    names.sort_unstable();
+    names.into_iter().next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_rust_scenario_with_a_cargo_fallback_has_a_plan() {
+        for scenario in crate::scenario::MATRIX {
+            if scenario.fallback == Some(crate::scenario::Driver::CargoDirect) {
+                assert!(
+                    plan_for(scenario.id).is_some(),
+                    "{} has no cargo plan",
+                    scenario.id
+                );
+                assert!(build(scenario).is_ok(), "{}", scenario.id);
+            }
+        }
+    }
+
+    #[test]
+    fn the_plans_cover_what_the_deleted_bash_script_measured() {
+        // Every scenario the removed scripts/benchmark/benchmark.sh ran, mapped
+        // onto the declarative matrix. A gap here means coverage was lost.
+        for (bash_name, id) in [
+            ("cold_check", "rust/cold"),
+            ("warm_check", "rust/warm"),
+            ("noop", "rust/noop"),
+            ("fresh_worktree_separate_target_cold", "rust/cold"),
+            ("fresh_worktree_separate_target_warm", "rust/warm"),
+            (
+                "cross_worktree_shared_target_reuse",
+                "rust/fresh-worktree-same-commit",
+            ),
+            ("small_source_edit", "rust/small-source-edit"),
+            ("dependency_manifest_touch", "rust/manifest-touch"),
+            ("dependency_graph_change", "rust/lockfile-update"),
+            ("build", "rust/cargo-build"),
+            ("warm_build", "rust/cargo-build"),
+            ("nextest", "rust/nextest"),
+            ("clippy", "rust/clippy"),
+            ("native_sys_build", "rust/native-sys"),
+            ("parallel_independent_jobs", "rust/concurrent-jobs"),
+        ] {
+            assert!(
+                plan_for(id).is_some(),
+                "bash scenario {bash_name} lost its replacement {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_rust_scenario_is_refused_not_faked() {
+        let scenario = crate::scenario::find("docker/existing-image").expect("scenario");
+        let error = build(scenario).map(|_| ()).expect_err("must refuse");
+        assert!(error.to_string().contains("reported as unrun"), "{error}");
+    }
+
+    #[test]
+    fn cold_plans_remove_the_target_and_warm_plans_do_not() {
+        assert_eq!(plan_for("rust/cold").unwrap().target, TargetDir::Cold);
+        assert_eq!(plan_for("rust/warm").unwrap().target, TargetDir::Warm);
+        assert_eq!(
+            plan_for("rust/concurrent-jobs").unwrap().workspace,
+            Workspace::PerConcurrentJob
+        );
+    }
+
+    #[test]
+    fn feature_set_change_alternates_the_feature_flags() {
+        let workload = build(crate::scenario::find("rust/feature-set-change").unwrap()).unwrap();
+        let _ = workload;
+        let plan = plan_for("rust/feature-set-change").unwrap();
+        assert_eq!(plan.command, CargoCommand::AlternatingFeatures);
+
+        let harness = CargoWorkload {
+            plan,
+            scenario: "rust/feature-set-change",
+            worktrees: Vec::new(),
+            targets: Vec::new(),
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        assert!(!harness.cargo_args(1).contains(&"--all-features".to_owned()));
+        assert!(harness.cargo_args(2).contains(&"--all-features".to_owned()));
+    }
+
+    #[test]
+    fn proc_macro_selection_uses_the_target_kind_not_the_name() {
+        let metadata = serde_json::json!({
+            "packages": [
+                {"name": "zzz-not-a-macro", "targets": [{"kind": ["lib"]}]},
+                {"name": "syn-like", "targets": [{"kind": ["proc-macro"]}]},
+                {"name": "openssl-sys", "targets": [{"kind": ["lib"]}]}
+            ]
+        });
+        assert_eq!(
+            select_package(&metadata, PackageKind::ProcMacro).as_deref(),
+            Some("syn-like")
+        );
+        assert_eq!(
+            select_package(&metadata, PackageKind::NativeSys).as_deref(),
+            Some("openssl-sys")
+        );
+    }
+
+    #[test]
+    fn selection_returns_nothing_when_the_graph_has_no_such_package() {
+        let metadata = serde_json::json!({"packages": []});
+        assert_eq!(select_package(&metadata, PackageKind::ProcMacro), None);
+        assert_eq!(select_package(&metadata, PackageKind::NativeSys), None);
+    }
+
+    #[test]
+    fn touch_preserves_content() {
+        let path = std::env::temp_dir().join(format!("velnor-bench-touch-{}", std::process::id()));
+        std::fs::write(&path, b"contents").expect("write");
+        touch(&path).expect("touch");
+        assert_eq!(std::fs::read(&path).expect("read"), b"contents");
+        let _ = std::fs::remove_file(&path);
+    }
+}

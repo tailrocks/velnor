@@ -3609,6 +3609,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "velnor-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "velnor-model",
+]
+
+[[package]]
 name = "velnor-cas"
 version = "0.1.0"
 dependencies = [
