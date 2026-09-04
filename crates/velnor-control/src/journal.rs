@@ -4051,6 +4051,7 @@ mod tests {
                     phase,
                     accepted_unix: 1,
                     terminal_conclusion: None,
+                    provisional: false,
                 }],
                 ..FleetState::default()
             };
