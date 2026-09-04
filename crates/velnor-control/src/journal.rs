@@ -30,7 +30,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 4;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 5;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     worker TEXT NOT NULL,
     phase TEXT NOT NULL,
     accepted_unix INTEGER NOT NULL DEFAULT 0,
-    terminal_conclusion TEXT
+    terminal_conclusion TEXT,
+    provisional INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
@@ -237,6 +238,10 @@ fn outbox_owner_is_proven(state: &FleetState, row: &OutboxRecord) -> bool {
             job.job_id == row.job_id
                 && job.slot_id == row.slot_id
                 && job.generation == row.generation
+                // A provisional row records an *intent* to acquire. Treating it
+                // as ownership would let a runner that never received a 200
+                // publish a terminal completion for a job another runner owns.
+                && !job.provisional
         })
 }
 
@@ -370,6 +375,14 @@ pub struct JobRecord {
     /// completion payload was serialised. Recovery must reuse this instead of
     /// synthesising a failure for a job that had already finished green.
     pub terminal_conclusion: Option<String>,
+    /// True while the runner has *told GitHub it intends to acquire* this job
+    /// but has not seen a 200 back.
+    ///
+    /// The row exists so the slot is occupied and a crash leaves evidence, but
+    /// it is deliberately not proof of ownership: `outbox_owner_is_proven`
+    /// refuses a provisional row, so no completion can ever be sent against
+    /// one. `JobOwned` clears it.
+    pub provisional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,6 +477,24 @@ pub enum Event {
         slot_id: SlotId,
         job_id: JobId,
         generation: Generation,
+    },
+    /// Written *before* `acquirejob` is called, so a crash between the call and
+    /// its reply leaves durable evidence that this runner may already own the
+    /// job. Recovery resolves it with `renewjob`, which only the lease holder
+    /// can call successfully — the 409 from `acquirejob` cannot be used, since
+    /// upstream's `RunServiceError` carries no runner identity.
+    JobAcquisitionIntended {
+        slot_id: SlotId,
+        job_id: JobId,
+        generation: Generation,
+        message_id: String,
+    },
+    /// The provisional row could not be resolved to ownership: `acquirejob`
+    /// reported the message gone, or the probe proved another runner holds it.
+    JobAcquisitionLost {
+        job_id: JobId,
+        generation: Generation,
+        reason: String,
     },
     JobOwned {
         job_id: JobId,
@@ -800,6 +831,59 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 slot.phase = ActorPhase::Assigned;
             }
         }
+        Event::JobAcquisitionIntended {
+            slot_id,
+            job_id,
+            generation,
+            message_id: _,
+        } => {
+            // Occupy the slot before calling GitHub, so a crash in the acquire
+            // window leaves evidence. This does to the slot exactly what
+            // `Assigned` does — the slot must be `Assigned` for `JobOwned` to
+            // be accepted — while the job row it creates is deliberately
+            // provisional: it is not proof of ownership and cannot back a
+            // completion.
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation
+                || slot.phase != ActorPhase::Ready
+                || state.jobs.iter().any(|job| job.job_id == job_id)
+            {
+                rejected = true;
+            } else {
+                state.slot_mut(&slot_id).phase = ActorPhase::Assigned;
+                state.jobs.push(JobRecord {
+                    job_id,
+                    slot_id,
+                    generation,
+                    attempt: 0,
+                    worker: String::new(),
+                    phase: ActorPhase::Assigned,
+                    accepted_unix: 0,
+                    terminal_conclusion: None,
+                    provisional: true,
+                });
+            }
+        }
+        Event::JobAcquisitionLost {
+            job_id,
+            generation,
+            reason: _,
+        } => {
+            // Only a provisional row may be dropped this way. Once ownership is
+            // proven the job has to reach a terminal state through completion,
+            // never by being forgotten.
+            let droppable = state
+                .jobs
+                .iter()
+                .any(|job| job.job_id == job_id && job.generation == generation && job.provisional);
+            if droppable {
+                state
+                    .jobs
+                    .retain(|job| !(job.job_id == job_id && job.generation == generation));
+            } else {
+                rejected = true;
+            }
+        }
         Event::JobOwned {
             job_id,
             slot_id,
@@ -835,6 +919,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     phase: ActorPhase::Assigned,
                     accepted_unix,
                     terminal_conclusion: None,
+                    // A 200 came back: this row is now proof of ownership.
+                    provisional: false,
                 });
                 commands.push(SideEffect::StartJob { job_id, generation });
             }
@@ -898,7 +984,15 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     .iter()
                     .find(|slot| slot.slot_id == job.slot_id)
                     .map(|slot| slot.generation);
-                if job.generation != generation || slot_generation != Some(generation) {
+                // A provisional row records an intent to acquire, not ownership.
+                // This check has to be here as well as in
+                // `outbox_owner_is_proven`, because that one is only consulted
+                // when a row already exists — the *first* intent would otherwise
+                // create one against a job this runner may not own.
+                if job.provisional
+                    || job.generation != generation
+                    || slot_generation != Some(generation)
+                {
                     rejected = true;
                 } else if let Some(outbox_index) =
                     state.outbox.iter().position(|row| row.job_id == job_id)
@@ -1187,6 +1281,18 @@ impl Journal {
         if outbox_shape_rank(outbox_shape) > version_outbox_rank(stored) {
             return Err(outbox_schema_mismatch(stored, outbox_shape));
         }
+        // The same rule for v5, whose shape change is in `jobs` rather than
+        // `outbox`, so the outbox-only check above cannot see it.
+        //
+        // Scoped to exactly a v4 stamp. Older stamps are not evidence of a
+        // mutated shape: a v2 or v3 file opened here may legitimately carry the
+        // current `jobs` shape, because `SCHEMA` creates that table at the
+        // current definition and their own migrations stamp explicitly. Only
+        // the v4-to-v5 step can be silently re-stamped, so only it needs
+        // guarding.
+        if stored == JOURNAL_SCHEMA_VERSION - 1 && table_has_column(&conn, "jobs", "provisional")? {
+            return Err(outbox_schema_mismatch(stored, outbox_shape));
+        }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         if !wal.eq_ignore_ascii_case("wal") {
             return Err(StoreError::new(
@@ -1204,9 +1310,10 @@ impl Journal {
         // Upgrade the physical shape and stamp the current version *before*
         // any event may be written. An older binary that reopens this file
         // then hits `journal.schema.newer` and refuses it, instead of
-        // decoding a v4 log with a v3 event vocabulary and silently dropping
-        // the terminal states it does not know.
+        // decoding a newer log with an older event vocabulary and silently
+        // dropping the terminal states it does not know.
         migrate_v3_to_v4(&mut conn)?;
+        migrate_v4_to_v5(&mut conn)?;
         let journal = Self {
             conn,
             path: path.to_path_buf(),
@@ -1589,7 +1696,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
 
     let mut statement = conn.prepare(
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion
+                terminal_conclusion, provisional
          FROM jobs ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1602,6 +1709,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, String>(5)?,
             row.get::<_, i64>(6)?,
             row.get::<_, Option<String>>(7)?,
+            row.get::<_, i64>(8)? != 0,
         ))
     })?;
     for row in rows {
@@ -1614,6 +1722,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             phase,
             accepted_unix,
             terminal_conclusion,
+            provisional,
         ) = row?;
         state.jobs.push(JobRecord {
             job_id: JobId(job_id),
@@ -1624,6 +1733,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             phase: parse_actor_phase(&phase)?,
             accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
             terminal_conclusion,
+            provisional,
         });
     }
 
@@ -1797,8 +1907,8 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         tx.execute(
             "INSERT INTO jobs (
                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                terminal_conclusion, provisional
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 job.job_id.0,
                 job.slot_id.0,
@@ -1808,6 +1918,7 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 job.phase.as_str(),
                 job.accepted_unix as i64,
                 job.terminal_conclusion.as_deref(),
+                job.provisional as i64,
             ],
         )?;
     }
@@ -2126,6 +2237,30 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
     Ok(())
 }
 
+/// v5 adds the provisional bit to `jobs`.
+///
+/// Existing rows migrate to `provisional = 0`: every row written before this
+/// version came from a `JobOwned` event, which only follows a 200 from
+/// `acquirejob`, so they are all genuine ownership and must keep proving it.
+fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) == JOURNAL_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if table_has_column(&tx, "jobs", "provisional")? {
+        // The shape is already v5 while the stamp says v4. Something mutated
+        // the tables without stamping, and re-stamping here would decide, by
+        // assumption, which vocabulary wrote the existing events. Leave the
+        // file untouched and let the shape check refuse it.
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE jobs ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;")?;
+    tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -2199,6 +2334,8 @@ fn event_kind(event: &Event) -> &'static str {
     match event {
         Event::ControlLive => "control_live",
         Event::JournalWritable => "journal_writable",
+        Event::JobAcquisitionIntended { .. } => "job_acquisition_intended",
+        Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
         Event::Routing { .. } => "routing",
         Event::DesiredCapacity { .. } => "desired_capacity",
@@ -4807,6 +4944,136 @@ mod tests {
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.outbox.len(), 1);
         assert!(!state.outbox[0].remote_acked);
+    }
+
+    /// The whole point of the provisional row: it occupies the slot and records
+    /// that this runner may already own the job, but it must never be able to
+    /// back a terminal completion. If it could, a runner that crashed before
+    /// seeing a 200 could publish a result for a job another runner owns.
+    #[test]
+    fn a_provisional_row_cannot_back_a_completion() {
+        let (dir, mut journal) = open_tmp("provisional-not-owner");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                message_id: "msg-1".into(),
+            })
+            .unwrap();
+
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1, "the slot is occupied");
+        assert!(state.jobs[0].provisional);
+
+        // Ownership is not proven, so a completion intent is refused.
+        let intent = journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        assert!(
+            intent.rejected,
+            "a provisional row must not prove ownership"
+        );
+        assert!(journal.load_state().unwrap().outbox.is_empty());
+
+        // A 200 promotes it, and the same intent is then accepted.
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "w".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        let state = journal.load_state().unwrap();
+        assert!(!state.jobs[0].provisional, "a 200 proves ownership");
+        let intent = journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        assert!(!intent.rejected);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A provisional row can be dropped when the probe proves the job is not
+    /// ours. An owned row cannot: once ownership is proven the job has to reach
+    /// a terminal state through completion, never by being forgotten.
+    #[test]
+    fn only_a_provisional_row_may_be_abandoned_by_acquisition_loss() {
+        let (dir, mut journal) = open_tmp("provisional-loss");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                message_id: "msg-1".into(),
+            })
+            .unwrap();
+        let lost = journal
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("guid-1"),
+                generation: r#gen(),
+                reason: "another runner holds the lease".into(),
+            })
+            .unwrap();
+        assert!(!lost.rejected);
+        assert!(
+            journal.load_state().unwrap().jobs.is_empty(),
+            "the slot is freed"
+        );
+
+        // Now prove ownership and try again: it must be refused.
+        journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-2"),
+                generation: r#gen(),
+                message_id: "msg-2".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-2"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "w".into(),
+                accepted_unix: 0,
+            })
+            .unwrap();
+        let lost = journal
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("guid-2"),
+                generation: r#gen(),
+                reason: "should not be allowed".into(),
+            })
+            .unwrap();
+        assert!(lost.rejected, "an owned job cannot be forgotten");
+        assert_eq!(journal.load_state().unwrap().jobs.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
