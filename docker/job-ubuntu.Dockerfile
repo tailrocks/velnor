@@ -28,7 +28,7 @@ RUN mkdir -p /out \
             !skip' /in/job-mise.lock > /out/mise.lock \
     && ! grep -q 'core:rust' /out/mise.lock
 
-FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS jobimage
 
 # Packages the toolchain install itself needs: a C/C++ toolchain and CMake for
 # the mise entries that build from source (`cargo:cargo-deny`) and for crates
@@ -254,3 +254,22 @@ WORKDIR /__w
 ARG VELNOR_IMAGE_VERSION=development
 LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/tailrocks/velnor"
+
+# Build the workflow generator from the locked workspace source after the
+# complete job image exists. The builder inherits the already-installed Rust
+# toolchain, while the final stage receives only the executable.
+FROM jobimage AS workflow-builder
+WORKDIR /tmp/velnor-workflow-build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /tmp/velnor-workflow-build/
+COPY crates /tmp/velnor-workflow-build/crates
+COPY tools /tmp/velnor-workflow-build/tools
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/root/.cache/sccache \
+    cargo build --locked --release --package velnor-workflow --bin velnor-workflow \
+    && install -Dm0755 target/release/velnor-workflow /usr/local/bin/velnor-workflow
+
+FROM jobimage
+COPY --from=workflow-builder /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow
+RUN test -x /usr/local/bin/velnor-workflow \
+    && /usr/local/bin/velnor-workflow --help >/dev/null
