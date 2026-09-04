@@ -3593,7 +3593,7 @@ The canonical working directory remains
 `/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
 `perf/docker-rust-mbx`; the old checkout
 `/Users/donbeave/Projects/donbeave/velnor` remains intact and clean. The old
-clone's live branch/worktree tip is an ancestor of canonical `1ba082f`, and it
+clone's live branch/worktree tip is an ancestor of canonical `32a60f9`, and it
 has no additional branch, worktree, or stash to merge. The canonical fix
 worktree and detached performance backup are also ancestors of the target.
 
@@ -3637,8 +3637,8 @@ unreviewed snapshot was promoted into `perf/docker-rust-mbx`.
 ## 55. Archived WIP application audit — 2026-09-05
 
 Each of the five canonical stash archives was checked with a read-only
-three-way `git merge-tree --write-tree --name-only` against current
-`perf/docker-rust-mbx` (`6153329`). The oldest TLS/backend WIP produced a
+three-way `git merge-tree --write-tree --name-only` at the pre-documentation
+audit tip of `perf/docker-rust-mbx` (`6153329`). The oldest TLS/backend WIP produced a
 conflict-free merge tree, but its changes overlap the committed
 toolchain/runtime/protocol fixes and add no reviewed requirement. The large
 `pr534` snapshot conflicts across deleted-versus-current architecture and
