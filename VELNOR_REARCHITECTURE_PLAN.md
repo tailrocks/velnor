@@ -3024,3 +3024,35 @@ The goal remains open. Highest unresolved classes include the reserved runner/co
 completion and acquisition recovery paths, unavailable VelnorJob benchmark driver,
 unsupported production reads, true network-cold Docker proof, and the broad semantic,
 cancellation, fault, soak, and architecture decomposition work in §§15, 18, and 58.
+
+## 25. Continuation findings — current anchor `aa913f3`
+
+`aa913f3` serializes mutable writes to each shared bare Git mirror. Health probing is
+shared-lock read-only work; mirror repair, ref publication, fetch, pinning, and requested
+SHA resolution now execute under one exclusive per-mirror lease. A barrier-started regression
+proves two different cold requests resolve their own commits and never overlap fetch writers.
+The workspace hydration phase remains outside that lease.
+
+The benchmark follow-ups are also on this branch: `d7c061a` removes image pulls from
+identity probing, `9cc2c3f` merges concurrent Cargo worker invocations into the sample
+census, and `915cc15` replaces process-wide RSS snapshots with per-child Linux/macOS
+`wait4` accounting. Full source and fixture gates remain green at the prior anchor; the
+mirror package has passed its focused tests and runner Clippy but still requires the next
+full workspace gate after this commit.
+
+Fresh independent audits found these unresolved requirements, not accepted as complete:
+
+* P0: recovery classifies a provisional acquisition as accepted and can leave the slot
+  occupied without a bounded `renewjob` ownership probe or terminal outcome. This crosses
+  the reserved runner/controller boundary and requires coordination with the other lead.
+* P1: mixed native/JavaScript post steps are stored and executed in separate lists rather
+  than one upstream LIFO stack; the implementation boundary is reserved `executor.rs`.
+* P1: the remaining live GitHub dual-lane provenance, deployed image identity, default-mbx
+  Rust run, fault suite, soak suite, and official-runner comparison are absent. Existing
+  local fixture gates prove schemas and mutation resistance, not live parity.
+* P1: control/mutation and acquisition recovery have additional fail-open/indeterminate
+  paths; no benchmark or source gate is treated as evidence that those paths are fixed.
+
+The branch is intentionally not declared complete. Next packages must preserve the shared
+ownership table, use explicit pathspec commits, and obtain independent review before
+touching reserved lifecycle or semantic code.
