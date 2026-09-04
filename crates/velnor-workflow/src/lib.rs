@@ -523,6 +523,7 @@ pub struct ProjectConfig {
 fn default_workflow_files() -> Vec<String> {
     vec![
         "ci-pr.yml".to_owned(),
+        "ci-policy.yml".to_owned(),
         "ci-main.yml".to_owned(),
         "nightly.yml".to_owned(),
         "maintenance.yml".to_owned(),
@@ -2199,7 +2200,11 @@ fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
     if !profile.verified {
         return Vec::new();
     }
-    let mut files = vec!["ci-pr.yml".to_owned(), "ci-main.yml".to_owned()];
+    let mut files = vec![
+        "ci-pr.yml".to_owned(),
+        "ci-policy.yml".to_owned(),
+        "ci-main.yml".to_owned(),
+    ];
     if matches!(
         profile.profile,
         RepositoryProfile::RustWorkspaceNative
@@ -3820,6 +3825,12 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
     files
 }
 
+fn render_policy_entrypoint() -> String {
+    format!(
+        "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\npermissions:\n  contents: read\n\njobs:\n  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read\n"
+    )
+}
+
 fn stack_group_job_id(kind: UnitKind) -> String {
     let key = match kind {
         UnitKind::Rust => "rust",
@@ -4599,6 +4610,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
     for workflow_file in &config.workflow_files {
         let content = match workflow_file.as_str() {
             "ci-pr.yml" => Some(workflow.render_nested(WorkflowKind::PullRequest)),
+            "ci-policy.yml" => Some(render_policy_entrypoint()),
             "ci-main.yml" => Some(workflow.render_nested(WorkflowKind::Main)),
             "nightly.yml" => Some(workflow.render_nested(WorkflowKind::Nightly)),
             "maintenance.yml" => Some(format!("{GENERATED_HEADER}{}", render_maintenance(config))),
@@ -4956,6 +4968,7 @@ fn generated_file_purpose(path: &Path) -> &'static str {
     match path.to_string_lossy().as_ref() {
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         value if value.ends_with("ci-pr.yml") => "parallel PR verification",
+        value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-main.yml") => "trusted main verification",
         value if value.ends_with("nightly.yml") => "scheduled full verification",
         value if value.ends_with("maintenance.yml") => "closed-PR cache cleanup",
@@ -7055,6 +7068,10 @@ path-only = { path = "../path-only" }
             files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
             "generated workflow",
         );
+        let policy_workflow = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-policy.yml")),
+            "generated policy workflow",
+        );
         let main_workflow = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
             "generated main workflow",
@@ -7066,6 +7083,9 @@ path-only = { path = "../path-only" }
         let policy_reference =
             format!("uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}");
         assert!(pr_workflow.contains(&policy_reference));
+        assert!(policy_workflow.contains("pull_request_target:"));
+        assert!(policy_workflow.contains(&policy_reference));
+        assert!(!policy_workflow.contains("steps:"));
         assert!(pr_workflow.contains("pull_request:"));
         assert!(!pr_workflow.contains("branches: [main]"));
         assert!(main_workflow.contains("branches: [main]"));
@@ -7554,7 +7574,8 @@ path-only = { path = "../path-only" }
                         .collect::<Vec<_>>();
                     if runner_lines.is_empty() {
                         assert!(
-                            content.contains("uses: ./.github/workflows/"),
+                            content.contains("uses: ./.github/workflows/")
+                                || content.contains(&format!("uses: {VELNOR_POLICY_WORKFLOW}@")),
                             "no runner or reusable-workflow call in {workflow_name}"
                         );
                         continue;

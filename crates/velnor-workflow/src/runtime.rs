@@ -725,11 +725,14 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
 }
 
 fn inspect_workflow(workflow: &Mapping, path: &Path, failures: &mut usize) {
+    let approved_policy_entrypoint = is_approved_policy_entrypoint(path, workflow);
     for (key, value) in workflow {
         let key = key.as_str();
         match key {
             "on" => {
-                if contains_exact_yaml_value(value, "pull_request_target") {
+                if contains_exact_yaml_value(value, "pull_request_target")
+                    && !approved_policy_entrypoint
+                {
                     policy_failure(path, "pull_request_target is forbidden", failures);
                 }
             }
@@ -737,6 +740,57 @@ fn inspect_workflow(workflow: &Mapping, path: &Path, failures: &mut usize) {
             _ => inspect_yaml_value(value, path, None, false, failures),
         }
     }
+}
+
+fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping) -> bool {
+    if !path.ends_with(Path::new(".github/workflows/ci-policy.yml"))
+        || mapping_value(workflow, "name").and_then(Value::as_str) != Some("Velnor workflow policy")
+    {
+        return false;
+    }
+    let Some(on) = mapping_value(workflow, "on").and_then(Value::as_mapping) else {
+        return false;
+    };
+    if on.len() != 1 {
+        return false;
+    }
+    let Some(event) = mapping_value(on, "pull_request_target").and_then(Value::as_mapping) else {
+        return false;
+    };
+    let Some(types) = mapping_value(event, "types").and_then(Value::as_sequence) else {
+        return false;
+    };
+    let expected_types = ["opened", "synchronize", "reopened"];
+    if types.len() != expected_types.len()
+        || types
+            .iter()
+            .zip(expected_types)
+            .any(|(value, expected)| value.as_str() != Some(expected))
+    {
+        return false;
+    }
+    let Some(jobs) = mapping_value(workflow, "jobs").and_then(Value::as_mapping) else {
+        return false;
+    };
+    let Some(policy) = mapping_value(jobs, "policy").and_then(Value::as_mapping) else {
+        return false;
+    };
+    if jobs.len() != 1
+        || mapping_value(policy, "name").and_then(Value::as_str) != Some("Policy")
+        || mapping_value(policy, "uses")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_approved_policy_reusable(value))
+    {
+        return false;
+    }
+    let Some(permissions) = mapping_value(policy, "permissions").and_then(Value::as_mapping) else {
+        return false;
+    };
+    permissions.len() == 1
+        && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
+        && policy
+            .keys()
+            .all(|key| matches!(key.as_str(), "name" | "uses" | "permissions"))
 }
 
 fn inspect_jobs(value: &Value, path: &Path, failures: &mut usize) {
@@ -1374,6 +1428,54 @@ jobs:
     uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@main
 ";
         let root = policy_fixture("floating-policy", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_allows_only_the_exact_base_owned_policy_entrypoint() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Velnor workflow policy
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  policy:
+    name: Policy
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+    permissions:
+      contents: read
+";
+        let root = policy_fixture("approved-policy-entrypoint", workflow, "github")?;
+        std::fs::rename(
+            root.join(".github/workflows/policy.yml"),
+            root.join(".github/workflows/ci-policy.yml"),
+        )?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor workflow policy
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+jobs:
+  policy:
+    name: Policy
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+    permissions:
+      contents: read
+  bypass:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+";
+        let root = policy_fixture("bypassed-policy-entrypoint", workflow, "github")?;
+        std::fs::rename(
+            root.join(".github/workflows/policy.yml"),
+            root.join(".github/workflows/ci-policy.yml"),
+        )?;
         assert!(!run_policy(root)?);
         Ok(())
     }
