@@ -18,6 +18,22 @@ Docker, or a job — every number it produced was a statement about `cargo`.
    the runner already uses.
 4. **A statistic is only emitted where the sample supports it.** See below.
 
+## Honest runnability contract
+
+Every matrix row names `velnor-job` as its preferred driver, but a
+`VelnorJob` row remains **unrun** until the real runner-owned VelnorJob driver
+exists. A registered runner, GitHub credentials, a fixture checkout, Docker,
+network access, or any other external prerequisite does not authorize a
+preferred measurement by itself. Those capabilities can establish that the
+environment is ready; they cannot make an unimplemented driver runnable.
+
+Where the matrix declares an honest fallback, the result is explicitly marked
+`degraded` and records the fallback driver plus the missing preferred-driver
+requirements. For Docker rows, `docker-direct` is such a fallback: it measures
+real container work, but not Velnor job dispatch, broker delivery, acquisition,
+or admission. It must never be presented as a preferred VelnorJob measurement.
+Rows without an honest fallback remain unrun.
+
 ## Percentile policy
 
 A quantile `q` is only distinguishable from the sample maximum when the sample
