@@ -538,3 +538,39 @@ two ways is unrepresentable; one capacity model derived from `statvfs` rather th
 constants; one lease-honouring bounded reclaimer that never touches a foreign class; and
 disk pressure is a state machine with a deadline and a terminal state, with admission
 evaluated before acquisition.*
+
+## 12. Open decisions requiring evidence
+
+### D-1 — One C crypto stack, and which one
+
+The dependency graph builds **two** complete C crypto stacks on every target: vendored
+OpenSSL (via `native-tls-vendored`) and `aws-lc-sys`. The second is unavoidable while
+`sigstore-sign` is used: `sigstore-crypto 0.11.0` declares `aws-lc-rs` as a plain
+non-optional, non-feature-gated dependency and has no `[features]` table at all, and
+`sigstore-tsa 0.11.0` hardcodes `rustls-webpki` with the `aws-lc-rs` feature. The
+`native-tls`/`rustls` features on those crates forward to `reqwest` only — transport, not
+the crypto provider. So no manifest-level selection removes it.
+
+The reverse direction is available: drop vendored OpenSSL and reuse the `aws-lc-rs` already
+in the graph, by moving `reqwest` to `rustls` (which pulls `rustls-platform-verifier`, so
+system-root behavior is preserved) and `tokio-tungstenite` to `rustls-tls-native-roots`.
+
+It is blocked on a **behavioral** question, not a packaging one:
+`crates/velnor-runner/src/protocol.rs:1522` calls `.use_native_tls()`, and the comment at
+`:3956` records the reason — GitHub has throttled by TLS fingerprint under concurrent load,
+silently dropping step records. Changing the stack changes the fingerprint.
+
+Decision requires measurement: run the concurrent-load step-record scenario against both
+TLS backends and compare dropped-record rates. Until that evidence exists, neither stack is
+removed. The root fix for the enabling condition — a published crate with an ungated crypto
+backend — is an upstream feature request to `prefix-dev/sigstore-rust`, with a
+`[patch.crates-io]` fork in the interim.
+
+Nothing above weakens signature verification; all three options verify the same signatures.
+
+## 13. Completed work packages
+
+| ID | Change | Commits |
+| --- | --- | --- |
+| T-003a | Licence gate: `deny.toml` had no `[licenses]` section, so `cargo deny check licenses` failed with 367 rejections; the `deny` mise task ran only `advisories`, which hid it. Allow-list enumerated from the real graph (MIT, Apache-2.0, BSD-3-Clause, ISC, Unicode-3.0, Zlib — no blanket, no exception needed) and the task now runs every section. Gate now reports `advisories ok, bans ok, licenses ok, sources ok`. | `5644bfd` |
+| T-003b | `tokio` `fs` feature declared (four `tokio::fs` uses in `gha_cache.rs` compiled only through transitive feature unification); unused `process` feature removed after confirming zero `tokio::process` uses in the workspace. | `d72dd73` |
