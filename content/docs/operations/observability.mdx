@@ -148,9 +148,17 @@ log views are empty. Treat an empty projection after restart as a visibility
 limitation, not proof that no work occurred.
 
 Completion recovery uses local outbox state plus remote acknowledgement. An
-outbox entry is retained until GitHub acknowledges completion. Inspect local
-outbox age and completion-related events when execution succeeded locally but
-GitHub remains pending.
+outbox entry is retained until it reaches a terminal state, which is one of
+three: GitHub acknowledged the completion; the run service reported the job
+already terminal; or the entry's durable budget — a permanent refusal, eight
+attempts, or six hours — was spent, and the entry was abandoned. An abandoned
+entry means **GitHub was never told the job finished** and the run service will
+time the job out; the reason is preserved permanently in the journal. Outbox
+age counts only pending entries, so an abandoned entry drops out of it.
+
+Inspect outbox age and completion-related events when execution succeeded
+locally but GitHub remains pending, and inspect the journal's unresolvable
+completions when GitHub timed a job out that Velnor believed it finished.
 
 There is no currently available diagnostics bundle command. Fixture reports and
 host-doctor scripts are maintainer/evidence tooling, use synthetic inputs in

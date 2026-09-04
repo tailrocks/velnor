@@ -185,6 +185,12 @@ fn parse_page_token(raw: &str) -> Result<(u64, String, usize), PortError> {
         field: "page_token".to_owned(),
         message: "malformed continuation token".to_owned(),
     })?;
+    if generation == 0 {
+        return Err(PortError::Invalid {
+            field: "page_token".to_owned(),
+            message: "malformed continuation token".to_owned(),
+        });
+    }
     let offset = offset.parse::<usize>().map_err(|_| PortError::Invalid {
         field: "page_token".to_owned(),
         message: "malformed continuation token".to_owned(),
@@ -344,6 +350,21 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, PortError::Conflict { .. }));
+    }
+
+    #[test]
+    fn page_token_generation_zero_is_rejected() {
+        let service = QueryService::new();
+        service
+            .replace(vec![resource("a"), resource("b")])
+            .expect("replace");
+        let error = service
+            .query(QueryRequest {
+                page_token: Some(format!("v1:0:{}:1", "0".repeat(64))),
+                ..QueryRequest::default()
+            })
+            .unwrap_err();
+        assert!(matches!(error, PortError::Invalid { field, .. } if field == "page_token"));
     }
 
     #[test]

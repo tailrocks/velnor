@@ -1360,7 +1360,7 @@ fn validate_text(field: &'static str, value: &str) -> Result<String, InvalidTele
     if value.is_empty() {
         return Err(InvalidTelemetry::rule(field, "must not be empty"));
     }
-    if value.len() > MAX_TEXT_LEN {
+    if value.chars().count() > MAX_TEXT_LEN {
         return Err(InvalidTelemetry::rule(field, "exceeds the length cap"));
     }
     if value.chars().any(char::is_control) {
@@ -1609,6 +1609,29 @@ mod tests {
         assert_eq!(value["schema_version"], TELEMETRY_SCHEMA);
         assert_eq!(value["event"], "compile_end");
         assert_eq!(value["fields"]["ms"], 42);
+    }
+
+    #[test]
+    fn unicode_identity_length_matches_schema_character_count() {
+        let at_limit = "é".repeat(MAX_TEXT_LEN);
+        let over_limit = "é".repeat(MAX_TEXT_LEN + 1);
+
+        for field in ["run_id", "repo", "trust_domain"] {
+            let mut valid = serde_json::to_value(envelope()).expect("serialize envelope");
+            valid[field] = json!(at_limit.clone());
+            let result = serde_json::from_value::<TelemetryEnvelope>(valid);
+            assert!(
+                result.is_ok(),
+                "{field} at schema limit rejected: {result:?}"
+            );
+
+            let mut invalid = serde_json::to_value(envelope()).expect("serialize envelope");
+            invalid[field] = json!(over_limit.clone());
+            assert!(
+                serde_json::from_value::<TelemetryEnvelope>(invalid).is_err(),
+                "{field} over schema limit accepted"
+            );
+        }
     }
 
     #[test]

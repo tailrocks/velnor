@@ -2213,7 +2213,14 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
 fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if u32::try_from(stored).unwrap_or(0) == JOURNAL_SCHEMA_VERSION {
+    // Gate and stamp on *this* step's own target, never the symbolic current
+    // version. When v5 was added, this comparison against
+    // `JOURNAL_SCHEMA_VERSION` silently became "skip if already 5" while the
+    // stamp below became "claim 5" — so a v3 file was upgraded to the v4 shape,
+    // stamped 5, and the v5 step then early-returned without adding its column.
+    // Every existing journal was left claiming a shape it did not have, and no
+    // older binary could open it either.
+    if u32::try_from(stored).unwrap_or(0) >= 4 {
         return Ok(());
     }
     if !table_has_column(&tx, "outbox", "attempts")? {
@@ -2231,7 +2238,8 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
     if !table_has_column(&tx, "jobs", "terminal_conclusion")? {
         tx.execute_batch("ALTER TABLE jobs ADD COLUMN terminal_conclusion TEXT;")?;
     }
-    tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+    // Stamp exactly v4: `migrate_v4_to_v5` runs next and owns the final version.
+    tx.pragma_update(None, "user_version", 4u32)?;
     tx.commit()?;
     Ok(())
 }
@@ -2244,18 +2252,19 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
 fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if u32::try_from(stored).unwrap_or(0) == JOURNAL_SCHEMA_VERSION {
+    if u32::try_from(stored).unwrap_or(0) >= 5 {
         return Ok(());
     }
-    if table_has_column(&tx, "jobs", "provisional")? {
-        // The shape is already v5 while the stamp says v4. Something mutated
-        // the tables without stamping, and re-stamping here would decide, by
-        // assumption, which vocabulary wrote the existing events. Leave the
-        // file untouched and let the shape check refuse it.
-        return Ok(());
+    if !table_has_column(&tx, "jobs", "provisional")? {
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;")?;
     }
-    tx.execute_batch("ALTER TABLE jobs ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;")?;
-    tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+    // Always stamp, even when the column was already present. Detecting a shape
+    // that ran ahead of its stamp is `Journal::open`'s job and is scoped there
+    // to the one transition where it is evidence of tampering; refusing to
+    // stamp *here* instead left legitimate upgrades from v2 and v3 stuck at 4
+    // with the v5 column in place — the file then materialized fine but claimed
+    // the wrong version forever.
+    tx.pragma_update(None, "user_version", 5u32)?;
     tx.commit()?;
     Ok(())
 }
@@ -5015,6 +5024,64 @@ mod tests {
     /// that this runner may already own the job, but it must never be able to
     /// back a terminal completion. If it could, a runner that crashed before
     /// seeing a 200 could publish a result for a job another runner owns.
+    /// Every migration step must stamp its **own** target version, not the
+    /// symbolic current one.
+    ///
+    /// This is the regression test for a one-way data-loss bug: when v5 was
+    /// added, `migrate_v3_to_v4` still stamped `JOURNAL_SCHEMA_VERSION`, so an
+    /// upgraded file claimed 5 while carrying the v4 shape, the v5 step
+    /// early-returned without adding its column, and every later
+    /// `materialized_state()` failed with `no such column: provisional`. The
+    /// stamp being 5 meant no older binary could open it either — no run, no
+    /// rollback. `Journal::open` alone does not catch it, because it only
+    /// replays events, so this asserts on materialization.
+    #[test]
+    fn an_upgrade_from_every_older_version_can_still_materialize() {
+        for stamped in [2u32, 3, 4] {
+            let (dir, journal) = open_tmp(&format!("upgrade-from-v{stamped}"));
+            let path = dir.join("journal.db");
+            drop(journal);
+
+            // Rewind the stamp to simulate a file written by an older binary.
+            // The shape is current, which is exactly the case a real upgrade
+            // hits after `CREATE TABLE IF NOT EXISTS` has run.
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", stamped).unwrap();
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+                .unwrap();
+            drop(conn);
+
+            match Journal::open(&path) {
+                Ok(journal) => {
+                    // Opening is not proof: materialization is where a missing
+                    // column actually surfaces.
+                    journal.load_state().unwrap_or_else(|error| {
+                        panic!("v{stamped} upgrade cannot materialize: {error:?}")
+                    });
+                    let conn = Connection::open(&path).unwrap();
+                    let version: i64 = conn
+                        .query_row("PRAGMA user_version", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(
+                        u32::try_from(version).unwrap(),
+                        JOURNAL_SCHEMA_VERSION,
+                        "v{stamped} upgrade must land on the current version"
+                    );
+                }
+                Err(error) => {
+                    // Refusing is acceptable only for the shape-ahead-of-stamp
+                    // guard, which must leave the file untouched. Silently
+                    // stamping a shape it does not have is not.
+                    assert_eq!(
+                        error.envelope.reason, "journal.schema.mismatch",
+                        "v{stamped} upgrade failed for an unexpected reason"
+                    );
+                }
+            }
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
     #[test]
     fn a_provisional_row_cannot_back_a_completion() {
         let (dir, mut journal) = open_tmp("provisional-not-owner");
