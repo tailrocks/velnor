@@ -253,6 +253,24 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
     Ok(())
 }
 
+/// Validate schema metadata before any setup pragma can write database state.
+/// A connection with no schema-version table is the fresh-database path; an
+/// existing metadata table must be readable before configuration proceeds.
+fn preflight_schema(conn: &Connection) -> StoreResult<()> {
+    let has_schema_version: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+             WHERE type = 'table' AND name = 'schema_version'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_schema_version {
+        migrations::current_version(conn)?;
+    }
+    Ok(())
+}
+
 /// One attempt of the contention-retried setup section: open, WAL
 /// configuration, and meta-table seeding. Any `store.locked` outcome here
 /// is retried by [`Store::open_with`]; everything else fails immediately.
@@ -263,6 +281,7 @@ fn open_setup(path: &Path) -> StoreResult<Connection> {
             path.display()
         ))
     })?;
+    preflight_schema(&conn)?;
     configure_connection(&conn)?;
     migrations::ensure_meta_tables(&conn)?;
     Ok(conn)
@@ -421,6 +440,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 7);
+    }
+
+    #[test]
+    fn future_schema_open_does_not_mutate_setup_state() {
+        let temp = TempDb::new("future-schema-setup");
+        let conn = Connection::open(&temp.path).expect("open future-schema fixture");
+        conn.execute_batch(
+            "PRAGMA auto_vacuum=NONE;
+             PRAGMA journal_mode=DELETE;
+             CREATE TABLE schema_version (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+                 version INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL
+             );",
+        )
+        .expect("create future-schema metadata");
+        conn.execute(
+            "INSERT INTO schema_version (singleton, version, updated_at)
+             VALUES (0, ?1, ?2)",
+            params![LATEST_SCHEMA_VERSION + 1, "1970-01-01T00:00:00Z"],
+        )
+        .expect("seed future schema version");
+
+        let journal_mode_before: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode before open");
+        let auto_vacuum_before: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("read auto-vacuum before open");
+        let page_count_before: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("read page count before open");
+        let user_version_before: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read user version before open");
+        let schema_version_before: (i64, String) = conn
+            .query_row(
+                "SELECT version, updated_at FROM schema_version WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read schema metadata before open");
+        let migration_lock_tables_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'migration_lock'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read metadata tables before open");
+        drop(conn);
+
+        let error = Store::open(&temp.path).expect_err("future schema must block opening");
+        assert_eq!(error.envelope.reason, "store.schema.unsupported");
+
+        let conn = Connection::open(&temp.path).expect("reopen future-schema database");
+        let journal_mode_after: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal mode after open");
+        let auto_vacuum_after: i64 = conn
+            .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+            .expect("read auto-vacuum after open");
+        let page_count_after: i64 = conn
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .expect("read page count after open");
+        let user_version_after: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read user version after open");
+        let schema_version_after: (i64, String) = conn
+            .query_row(
+                "SELECT version, updated_at FROM schema_version WHERE singleton = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read schema metadata after open");
+        let migration_lock_tables_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'migration_lock'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read metadata tables after open");
+
+        assert_eq!(journal_mode_after, journal_mode_before);
+        assert_eq!(auto_vacuum_after, auto_vacuum_before);
+        assert_eq!(page_count_after, page_count_before);
+        assert_eq!(user_version_after, user_version_before);
+        assert_eq!(schema_version_after, schema_version_before);
+        assert_eq!(migration_lock_tables_after, migration_lock_tables_before);
     }
 
     #[test]
