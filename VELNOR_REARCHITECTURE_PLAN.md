@@ -1018,3 +1018,55 @@ one warning.
 | T-001 | P0 toolchain: Rust 1.98.0 → 1.98.1 (vtable miscompilation, rust#161441) across all five pin sites, and a Renovate manager that actually matches them, grouped into one PR with no stabilization delay so a correctness backport is not held back. Gates on 1.98.1: fmt pass, workspace build pass, clippy pass on the nine crates untouched by concurrent work. | `e1bc67b` |
 | T-007a | Job execution given its own thread, control-plane pool bounded — the prerequisite for removing the fail-closed admission permits. | `239c695` |
 | T-006a | Workflow commands: leading whitespace trimmed before matching, closing the `add-mask` bypass that let a whitespace-prefixed mask directive be ignored and the secret printed. | `766b214` |
+
+### Correction to BC-25 — `RunServiceStepResult` snake_case is correct, not a defect
+
+The claim that `RunServiceStepResult` (`protocol.rs:3276-3298`) is wrongly snake_case inside a
+camelCase payload is **wrong**. Upstream `src/Sdk/RSWebApi/Contracts/StepResult.cs` at
+v2.337.0 declares those names snake_case explicitly — `[DataMember(Name = "external_id")]`,
+`"started_at"`, `"completed_at"`, `"completed_log_lines"`, and so on.
+
+The mechanism is worth recording because it is what makes this contract family hard to audit:
+upstream serialises through `VssJsonMediaTypeFormatter` with
+`VssCamelCasePropertyNamesContractResolver`, and `ToCamelCase` is a no-op on a name that
+already starts lowercase. So an explicit `DataMember` name passes through unchanged whatever
+its casing, while a bare `[DataMember]` property is camelCased. `CompleteJobRequest`
+therefore genuinely carries a camelCase envelope containing a snake_case `stepResults`
+element. The asymmetry is real on the wire, and Velnor matches it.
+
+That rule was applied to every serde struct in `protocol.rs`. The full sweep found **exactly
+one** wire-name mismatch — the `RunServiceError` envelope already recorded as BC-1 — and it
+is fixed. `CompleteJobRequest`, `StepResult`, `Annotation`, `Telemetry`, `AcquireJobRequest`,
+`RenewJobRequest`/`Response`, `RunnerJobRequestRef`, `TaskAgentMessage`, `TaskAgentSession`,
+`TaskAgentReference`, `TaskAgent`, `JobEvent`, `TaskAgentJobRequest`, `TimelineRecord` and
+`TimelineRecordFeedLinesWrapper` all match upstream exactly. The Twirp/results-service structs
+and the GitHub REST structs are protobuf-JSON and REST snake_case respectively, so no
+`DataMember` oracle applies to them.
+
+The cache contracts in BC-25 remain valid — their oracle is `actions/toolkit`
+(`packages/cache`), where v1 `ArtifactCacheEntry` is `{cacheKey, scope, archiveLocation}` and
+v2 `GetCacheEntryDownloadURLResponse` carries `matched_key`.
+
+One genuine divergence was found and deferred: upstream classifies a run-service failure purely
+on the parsed body's `statusCode` and ignores the HTTP status, whereas Velnor additionally
+requires HTTP 404 before consulting the body. The two agree in practice, but the divergence is
+real and belongs in the completion-recovery package.
+
+### Coordination defect found in this program's own process — shared staging area
+
+The BC-1 fix was authored correctly but landed inside an unrelated documentation commit
+(`5178c06`), with no Conventional Commit message and no signoff of its own.
+
+The cause is mine. In a shared worktree the *index* is shared too, so `git commit -m …` — even
+without `-a`, and even when the author only ran `git add` on their own file — commits every
+path any agent has staged. My documentation commits swept another agent's staged
+`protocol.rs`.
+
+Rule for every agent in this program, added to §1: **commit with an explicit pathspec** —
+`git commit -s -o <paths> -m …` — never a bare `git commit`. And never run `git stash` in the
+shared worktree: one agent did so to test whether a lint error was pre-existing, which stashed
+other agents' uncommitted work; it was restored file by file and verified, but the next
+occurrence may not be.
+
+The fix itself is correct and is on the branch; it is not being re-committed, because that
+would require rewriting a shared branch's history to gain nothing but a tidier message.
