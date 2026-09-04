@@ -120,19 +120,23 @@ services, networks, and BuildKit resources.
 
 #### Docker Rust acceleration
 
-The default job image pins Mr Boxington (`mbx`) 1.6.0 and runs
+The default job image pins Mr Boxington (`mbx`) 1.7.0 and runs
 `mbx setup --yes` while building the image. The generated Cargo launcher is
 first on `PATH`, so workflow steps continue to invoke plain `cargo`; those
 commands transparently enter Mr Boxington. There is no default
 `RUSTC_WRAPPER`. Mr Boxington discovers the container's cgroup constraints and
 available resources instead of Velnor hardcoding CPU or memory values for it.
 
-Velnor mounts the job's host-persistent Mr Boxington cache and managed target
-directories at `/var/cache/mbx`. The host store is partitioned by the admitted
-`untrusted`, `trusted`, or `release` trust class and then by numeric GitHub
-repository ID. Missing or invalid repository identity fails closed
-to a job-ephemeral store. This prevents compiled state from one repository or
-trust boundary becoming an input to another. Trust partitioning is a cache
+Velnor mounts the daemon pool's host-persistent Mr Boxington cache and managed
+target directories at `/var/cache/mbx`. `VELNOR_TRUST_SCOPE` is configured for
+the daemon pool, not independently admitted for each job; it selects the
+pool's trust namespace (such as `untrusted`, `trusted`, or `release`) for
+persistent compiler stores. Those stores are further scoped by repository
+identity when the acquired job payload provides it. A per-job trust class
+remains unresolved: the job message has no `head_repository_id` from which
+Velnor can safely derive one. If repository identity is missing or invalid,
+Velnor falls back to a job-ephemeral store. This fallback is a persistence
+decision, not a per-job trust classification. Trust partitioning is a cache
 reuse boundary, not encryption or protection from a compromised host.
 
 Mr Boxington owns garbage collection inside this store. Velnor supplies the
