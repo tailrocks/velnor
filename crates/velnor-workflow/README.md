@@ -12,7 +12,8 @@ velnor-workflow REPOSITORY --runners both --plain
 velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --config .github/ci/project.toml --scope affected
 velnor-workflow test-crates --config .github/ci/project.toml
-velnor-workflow policy --workflow-root .
+velnor-workflow policy --workflow-root . \
+  --approved-policy-revision 12da6232672f039e42c21fe9dff00085856ef92d
 velnor-workflow release verify-tag
 ```
 
