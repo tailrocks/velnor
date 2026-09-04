@@ -3327,3 +3327,13 @@ compatibility facade is source commit `d9a409c`; its Cargo lockfile and README
 use the same full Velnor revision. The corrected base-owned policy workflow is
 pinned separately at `47f06562126e8a3cfa08db7b668a21d60def7f1a` and installs
 the hardened runtime.
+
+## 38. Policy bootstrap cycle removal
+
+The policy workflow revision and the runtime revision cannot safely pin each
+other through self-referential commit hashes. The policy contract therefore
+passes its caller-selected full policy revision as a required trusted input to
+the pinned reusable workflow; the installed runtime compares the entrypoint's
+full SHA with that input. The base-owned entrypoint remains the authority, and
+the static scanner requires the exact-shape entrypoint plus self-consistent
+full-SHA input.

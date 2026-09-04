@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/sccache \
     cd /opt/mise/config \
-    && mise exec -- cargo build --manifest-path /src/Cargo.toml --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow \
+    && mise exec -- cargo build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow \
     && mise exec -- sccache --show-stats
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
