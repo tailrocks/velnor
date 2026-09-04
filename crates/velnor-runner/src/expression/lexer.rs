@@ -538,10 +538,8 @@ impl LexicalAnalyzer {
                 }
                 self.unclosed_tokens.pop();
             }
-            TokenKind::Separator => {
-                if self.peek_unclosed() != Some(TokenKind::StartParameters) {
-                    return Token::new(TokenKind::Unexpected, raw_value, index, None);
-                }
+            TokenKind::Separator if self.peek_unclosed() != Some(TokenKind::StartParameters) => {
+                return Token::new(TokenKind::Unexpected, raw_value, index, None);
             }
             _ => {}
         }

@@ -78,6 +78,10 @@ impl ArrayValue {
         self.items.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
     /// Reference equality, matching `Object.ReferenceEquals` in
     /// `EvaluationResult.cs:267`.
     fn same_instance(&self, other: &Self) -> bool {
@@ -119,8 +123,8 @@ impl ObjectValue {
         &self.entries
     }
 
-    pub fn len(&self) -> usize {
-        self.entries.len()
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -530,15 +534,15 @@ pub fn format_number(value: f64) -> String {
     const SIGNIFICANT_DIGITS: usize = 15;
 
     // Round to 15 significant digits, then decide fixed vs scientific the way
-    // .NET's "G" specifier does: scientific when the decimal exponent is
-    // below -5 or at/above the precision.
+    // .NET's "G" specifier does: fixed-point only while the decimal exponent
+    // is greater than -5 and less than the precision specifier.
     let scientific = format!("{:.*e}", SIGNIFICANT_DIGITS - 1, value);
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("rust exponential formatting always contains 'e'");
     let exponent: i32 = exponent.parse().expect("exponent is an integer");
 
-    if exponent < -5 || exponent >= SIGNIFICANT_DIGITS as i32 {
+    if exponent <= -5 || exponent >= SIGNIFICANT_DIGITS as i32 {
         let mantissa = trim_trailing_zeros(mantissa);
         let sign = if exponent < 0 { '-' } else { '+' };
         return format!("{mantissa}E{sign}{:02}", exponent.abs());
