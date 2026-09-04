@@ -683,17 +683,6 @@ fn collect_manifests(
 
 pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
     let workflows = root.join(".github/workflows");
-    let project = root.join(DEFAULT_CONFIG);
-    let runner_mode = fs::read_to_string(&project)
-        .ok()
-        .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-        .and_then(|config| {
-            config
-                .get("runners")
-                .and_then(toml::Value::as_str)
-                .map(ToOwned::to_owned)
-        })
-        .unwrap_or_default();
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let mut failures = 0;
@@ -722,7 +711,7 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
             );
             continue;
         };
-        inspect_workflow(workflow, &path, &runner_mode, &mut failures);
+        inspect_workflow(workflow, &path, &mut failures);
     }
     if failures > 0 {
         return Err(GeneratorError::usage(format!(
@@ -732,7 +721,7 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn inspect_workflow(workflow: &Mapping, path: &Path, runner_mode: &str, failures: &mut usize) {
+fn inspect_workflow(workflow: &Mapping, path: &Path, failures: &mut usize) {
     for (key, value) in workflow {
         let key = key.as_str();
         match key {
@@ -741,13 +730,13 @@ fn inspect_workflow(workflow: &Mapping, path: &Path, runner_mode: &str, failures
                     policy_failure(path, "pull_request_target is forbidden", failures);
                 }
             }
-            "jobs" => inspect_jobs(value, path, runner_mode, failures),
-            _ => inspect_yaml_value(value, path, runner_mode, None, false, failures),
+            "jobs" => inspect_jobs(value, path, failures),
+            _ => inspect_yaml_value(value, path, None, false, failures),
         }
     }
 }
 
-fn inspect_jobs(value: &Value, path: &Path, runner_mode: &str, failures: &mut usize) {
+fn inspect_jobs(value: &Value, path: &Path, failures: &mut usize) {
     let Some(jobs) = value.as_mapping() else {
         policy_failure(path, "jobs must be a YAML mapping", failures);
         return;
@@ -769,35 +758,29 @@ fn inspect_jobs(value: &Value, path: &Path, runner_mode: &str, failures: &mut us
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
             .and_then(Value::as_mapping);
-        inspect_mapping(job, path, runner_mode, matrix, trusted_gate, failures);
+        inspect_mapping(job, path, matrix, trusted_gate, failures);
     }
 }
 
 fn inspect_yaml_value(
     value: &Value,
     path: &Path,
-    runner_mode: &str,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     failures: &mut usize,
 ) {
     match value {
         Value::Mapping(mapping) => {
-            inspect_mapping(mapping, path, runner_mode, matrix, trusted_gate, failures);
+            inspect_mapping(mapping, path, matrix, trusted_gate, failures);
         }
         Value::Sequence(sequence) => {
             for item in sequence {
-                inspect_yaml_value(item, path, runner_mode, matrix, trusted_gate, failures);
+                inspect_yaml_value(item, path, matrix, trusted_gate, failures);
             }
         }
-        Value::Tagged(tagged) => inspect_yaml_value(
-            tagged.value(),
-            path,
-            runner_mode,
-            matrix,
-            trusted_gate,
-            failures,
-        ),
+        Value::Tagged(tagged) => {
+            inspect_yaml_value(tagged.value(), path, matrix, trusted_gate, failures);
+        }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
@@ -805,7 +788,6 @@ fn inspect_yaml_value(
 fn inspect_mapping(
     mapping: &Mapping,
     path: &Path,
-    runner_mode: &str,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     failures: &mut usize,
@@ -817,8 +799,8 @@ fn inspect_mapping(
                 policy_failure(path, "pull_request_target is forbidden", failures);
             }
             "uses" => inspect_uses(value, path, failures),
-            "runs-on" => inspect_runner(value, path, runner_mode, matrix, trusted_gate, failures),
-            _ => inspect_yaml_value(value, path, runner_mode, matrix, trusted_gate, failures),
+            "runs-on" => inspect_runner(value, path, matrix, trusted_gate, failures),
+            _ => inspect_yaml_value(value, path, matrix, trusted_gate, failures),
         }
     }
 }
@@ -889,7 +871,6 @@ impl RunnerAnalysis {
 fn inspect_runner(
     value: &Value,
     path: &Path,
-    runner_mode: &str,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     failures: &mut usize,
@@ -906,7 +887,7 @@ fn inspect_runner(
             failures,
         );
     }
-    if analysis.self_hosted && runner_mode != "velnor" && runner_mode != "both" && !trusted_gate {
+    if analysis.self_hosted && !trusted_gate {
         policy_failure(
             path,
             "self-hosted jobs require a default-branch trusted-event gate",
