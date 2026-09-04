@@ -68,14 +68,15 @@ notes[]
 
 `observations[].git` is tagged evidence, not an unqualified counter object:
 `{"status":"not_measured"}` for drivers without Git tracing,
-`{"status":"no_git_process"}` only when an authoritative measured-window
-child-exec census proves that no Git process ran, and
+`{"status":"no_git_trace_observed"}` only when an armed trace slot
+survives without any Trace2 event, and
 `{"status":"observed","counters":{...},"successful":true|false}` when
 complete Trace2 lifecycles were observed. Concurrent workers may emit
 `status: "mixed"` with observed counters and explicit worker counts. A
 complete non-zero Git lifecycle remains observed with `successful: false`;
-malformed, incomplete, or missing evidence fails the current Cargo-direct run
-until that child census exists.
+malformed, incomplete, or missing evidence fails the current Cargo-direct run.
+The state means “no Git Trace2 process observed”; it is not a claim that a
+child could not have exited before Trace2 initialization.
 
 Each summary carries `samples, min, max, mean, variance, p50, p95, p99`.
 
@@ -135,11 +136,11 @@ readable from `trace.jsonl` with no new sink.
 
 Byte and ref counters do **not** need a runner change: `gittrace` sets
 `GIT_TRACE2_EVENT` on the Git processes Cargo spawns and reads the documented
-event JSON back. A missing post-command file currently fails closed because
-the harness lacks an authoritative child-exec census; it must not be inferred
-from a separate preflight. For jobs the runner drives, the runner must set the
-same variable on its Git children for those counters to appear and provide the
-child census before emitting `no_git_process`.
+event JSON back. Each worker arms its owned trace slot with a unique marker
+before timing. Marker-only output is explicit `no_git_trace_observed`; missing,
+overwritten, empty, malformed, or incomplete output fails closed. For jobs the
+runner drives, the runner must set the same variable on its Git children for
+those counters to appear.
 
 ## Coverage inherited from the deleted script
 

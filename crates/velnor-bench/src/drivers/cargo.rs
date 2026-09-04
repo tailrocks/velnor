@@ -337,6 +337,13 @@ enum WorktreeState {
     Removed,
 }
 
+/// One owned Trace2 destination armed for exactly one measured worker.
+#[derive(Debug, Clone)]
+struct TraceSlot {
+    path: PathBuf,
+    marker: String,
+}
+
 struct CargoWorkload {
     plan: Plan,
     scenario: &'static str,
@@ -620,20 +627,26 @@ impl Workload for CargoWorkload {
         // process/resource census and establish the disk baseline immediately
         // before the command; snapshot all observation inputs before restore.
         context.runner.reset();
-        let trace_files = self.prepare_trace_files(&context.work_root)?;
+        let trace_slots = self.prepare_trace_files(&context.work_root)?;
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
-            self.run_concurrent(context, &args, &trace_files)?
+            self.run_concurrent(context, &args, &trace_slots)?
         } else {
-            self.run_cargo(context, &workspace, &target, &args, Some(&trace_files[0]))?
+            self.run_cargo(
+                context,
+                &workspace,
+                &target,
+                &args,
+                Some(&trace_slots[0].path),
+            )?
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let usage = context.runner.rusage();
         let disk_after = tree_bytes(&root);
         let process_count = context.runner.process_count() as u64;
         let docker_invocations = context.runner.count_of("docker") as u64;
-        let git = read_trace_files(&trace_files).context("reading Git trace evidence")?;
+        let git = read_trace_files(&trace_slots).context("reading Git trace evidence")?;
 
         let observation = Observation {
             total_ms,
@@ -687,7 +700,7 @@ impl Workload for CargoWorkload {
 }
 
 impl CargoWorkload {
-    fn prepare_trace_files(&mut self, work_root: &Path) -> Result<Vec<PathBuf>> {
+    fn prepare_trace_files(&mut self, work_root: &Path) -> Result<Vec<TraceSlot>> {
         // Git resolves GIT_TRACE2_EVENT relative to each worker's workspace.
         // Use one absolute root so every worker writes to the path we later
         // read, regardless of the caller's relative --work-root spelling.
@@ -702,7 +715,7 @@ impl CargoWorkload {
             bail!("Cargo workload has no workers for Git trace evidence");
         }
 
-        let mut trace_files = Vec::with_capacity(worker_count);
+        let mut trace_slots = Vec::with_capacity(worker_count);
         for worker_index in 0..worker_count {
             let trace_file = trace_file_path_for_worker(
                 &work_root,
@@ -716,9 +729,19 @@ impl CargoWorkload {
             // file. A partial setup remains owned by teardown.
             self.scratch.traces.push(trace_file.clone());
             clear_trace_file(&trace_file)?;
-            trace_files.push(trace_file);
+            let marker = trace_arm_marker(
+                self.scratch.nonce,
+                self.scratch.id,
+                self.iteration,
+                worker_index,
+            );
+            arm_trace_file(&trace_file, &marker)?;
+            trace_slots.push(TraceSlot {
+                path: trace_file,
+                marker,
+            });
         }
-        Ok(trace_files)
+        Ok(trace_slots)
     }
 
     fn cleanup_worktrees(&mut self, context: &mut Context, failures: &mut Vec<String>) {
@@ -785,14 +808,14 @@ impl CargoWorkload {
         &self,
         context: &mut Context,
         args: &[String],
-        trace_files: &[PathBuf],
+        trace_slots: &[TraceSlot],
     ) -> Result<u64> {
         if self.scratch.worktrees.len() != self.scratch.targets.len()
-            || self.scratch.worktrees.len() != trace_files.len()
+            || self.scratch.worktrees.len() != trace_slots.len()
         {
             bail!("concurrent Cargo workers, targets, and Git traces must have equal ownership");
         }
-        if trace_files.is_empty() {
+        if trace_slots.is_empty() {
             bail!("concurrent Cargo workload has no Git trace files");
         }
 
@@ -802,7 +825,7 @@ impl CargoWorkload {
             .iter()
             .map(|worktree| worktree.path.clone())
             .zip(self.scratch.targets.iter().cloned())
-            .zip(trace_files.iter().cloned())
+            .zip(trace_slots.iter().map(|slot| slot.path.clone()))
             .map(|((workspace, target), trace_file)| (workspace, target, trace_file))
             .collect();
         let started = Instant::now();
@@ -945,6 +968,15 @@ fn trace_file_path_for_worker(
     ))
 }
 
+fn trace_arm_marker(
+    owner_nonce: u128,
+    owner_id: u64,
+    iteration: u64,
+    worker_index: usize,
+) -> String {
+    format!("velnor-bench-trace-arm-v1:{owner_nonce}:{owner_id}:{iteration}:{worker_index}\n")
+}
+
 fn cargo_env(target: &Path, trace_file: Option<&Path>) -> Vec<(String, String)> {
     let mut env = vec![
         ("CARGO_TARGET_DIR".to_owned(), target.display().to_string()),
@@ -957,35 +989,57 @@ fn cargo_env(target: &Path, trace_file: Option<&Path>) -> Vec<(String, String)> 
     env
 }
 
-fn read_trace_files(paths: &[PathBuf]) -> Result<GitEvidence> {
-    if paths.is_empty() {
+fn read_trace_files(slots: &[TraceSlot]) -> Result<GitEvidence> {
+    if slots.is_empty() {
         bail!("no Git trace files were registered for the measured command");
     }
     let mut counters = GitCounters::default();
     let mut successful = true;
-    for path in paths {
-        let trace = match GitTrace::from_event_file(path) {
-            Ok(trace) => trace,
-            Err(gittrace::TraceError::Read { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                return Err(anyhow::anyhow!(
-                    "worker Git trace {} is missing; refusing to infer no Git process without an authoritative measured-window child-exec census",
-                    path.display()
-                ));
-            }
-            Err(error) => {
-                return Err(anyhow::Error::new(error)
-                    .context(format!("reading worker Git trace {}", path.display())));
-            }
+    let mut observed_workers = 0_u64;
+    let mut no_git_workers = 0_u64;
+    for slot in slots {
+        let trace = read_trace_slot(slot)
+            .with_context(|| format!("reading worker Git trace {}", slot.path.display()))?;
+        let Some(trace) = trace else {
+            no_git_workers = no_git_workers.saturating_add(1);
+            continue;
         };
+        observed_workers = observed_workers.saturating_add(1);
         successful &= trace.successful;
         counters.merge(trace.counters);
     }
-    Ok(GitEvidence::Observed {
+    if observed_workers == 0 {
+        return Ok(GitEvidence::NoGitTraceObserved);
+    }
+    if no_git_workers == 0 {
+        return Ok(GitEvidence::Observed {
+            counters,
+            successful,
+        });
+    }
+    Ok(GitEvidence::Mixed {
         counters,
         successful,
+        observed_workers,
+        no_git_workers,
     })
+}
+
+fn read_trace_slot(slot: &TraceSlot) -> Result<Option<GitTrace>> {
+    let stream = std::fs::read_to_string(&slot.path)
+        .with_context(|| format!("reading trace slot {}", slot.path.display()))?;
+    let Some(events) = stream.strip_prefix(&slot.marker) else {
+        bail!(
+            "trace slot {} is missing its arm marker or has the wrong marker",
+            slot.path.display()
+        );
+    };
+    if events.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        GitTrace::from_events(events).map_err(anyhow::Error::new)?,
+    ))
 }
 
 fn clear_trace_file(path: &Path) -> Result<()> {
@@ -996,6 +1050,11 @@ fn clear_trace_file(path: &Path) -> Result<()> {
             Err(error).with_context(|| format!("removing stale git trace {}", path.display()))
         }
     }
+}
+
+fn arm_trace_file(path: &Path, marker: &str) -> Result<()> {
+    std::fs::write(path, marker.as_bytes())
+        .with_context(|| format!("arming Git trace slot {}", path.display()))
 }
 
 fn touch(path: &Path) -> Result<()> {
@@ -1207,6 +1266,26 @@ mod tests {
         format!(
             "{{\"event\":\"version\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000001Z\",\"evt\":\"4\",\"exe\":\"2.50.1\"}}\n{{\"event\":\"data\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000002Z\",\"key\":\"bytes-received\",\"value\":{bytes}}}\n{{\"event\":\"exit\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000003Z\",\"code\":0}}\n{{\"event\":\"atexit\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000004Z\",\"code\":0}}\n"
         )
+    }
+
+    fn test_trace_slot(
+        root: &Path,
+        nonce: u128,
+        owner_id: u64,
+        iteration: u64,
+        worker_index: usize,
+    ) -> TraceSlot {
+        let path = trace_file_path_for_worker(
+            root,
+            "test/concurrent",
+            nonce,
+            owner_id,
+            iteration,
+            worker_index,
+        );
+        let marker = trace_arm_marker(nonce, owner_id, iteration, worker_index);
+        arm_trace_file(&path, &marker).expect("arm test trace slot");
+        TraceSlot { path, marker }
     }
 
     fn test_cargo_workspace(parent: &Path, name: &str) -> PathBuf {
@@ -1533,10 +1612,11 @@ mod tests {
         let first_target = root.join("target-0");
         let second_target = root.join("target-1");
         let scratch = ScratchOwner::new();
-        let trace_files = vec![
-            trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 0),
-            trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 1),
+        let trace_slots = vec![
+            test_trace_slot(&root, scratch.nonce, scratch.id, 1, 0),
+            test_trace_slot(&root, scratch.nonce, scratch.id, 1, 1),
         ];
+        let trace_files: Vec<PathBuf> = trace_slots.iter().map(|slot| slot.path.clone()).collect();
         let mut harness = CargoWorkload {
             plan: plan_for("rust/concurrent-jobs").expect("concurrent plan"),
             scenario: "rust/concurrent-jobs",
@@ -1570,19 +1650,25 @@ mod tests {
         };
 
         harness
-            .run_concurrent(&mut context, &["check".to_owned()], &trace_files)
+            .run_concurrent(&mut context, &["check".to_owned()], &trace_slots)
             .expect("cargo workers");
 
         assert_eq!(context.runner.process_count(), 2);
         assert_eq!(context.runner.count_of("cargo"), 2);
-        let first = GitCounters::from_event_file(&trace_files[0]).expect("first worker trace");
-        let second = GitCounters::from_event_file(&trace_files[1]).expect("second worker trace");
+        let first = read_trace_slot(&trace_slots[0])
+            .expect("read first worker trace")
+            .expect("first worker emitted Git trace")
+            .counters;
+        let second = read_trace_slot(&trace_slots[1])
+            .expect("read second worker trace")
+            .expect("second worker emitted Git trace")
+            .counters;
         assert!(first.processes > 0);
         assert!(second.processes > 0);
         let GitEvidence::Observed {
             counters: merged,
             successful,
-        } = read_trace_files(&trace_files).expect("merge worker traces")
+        } = read_trace_files(&trace_slots).expect("merge worker traces")
         else {
             panic!("worker traces must be observed");
         };
@@ -1629,20 +1715,57 @@ mod tests {
     }
 
     #[test]
+    fn trace_slots_are_armed_before_measurement() {
+        let root = test_path("trace-arm");
+        let mut workload = test_workload(plan_for("rust/cold").expect("cold plan"), "rust/cold");
+        let slots = workload
+            .prepare_trace_files(&root)
+            .expect("prepare trace slot");
+        assert_eq!(slots.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&slots[0].path).expect("read arm marker"),
+            slots[0].marker
+        );
+
+        let mut context = test_context(root.clone(), root.join("repo"), 1);
+        workload.teardown(&mut context).expect("clean trace slot");
+        assert!(!slots[0].path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn concurrent_trace_merge_isolated_and_strict() {
         let root = test_path("concurrent-trace-merge");
         std::fs::create_dir_all(&root).expect("create trace root");
         let first = root.join("worker-0.jsonl");
         let second = root.join("worker-1.jsonl");
         let ambient = root.join("ambient.jsonl");
-        std::fs::write(&first, complete_trace("worker-0", 11)).expect("write first trace");
-        std::fs::write(&second, complete_trace("worker-1", 22)).expect("write second trace");
+        let first_slot = TraceSlot {
+            path: first.clone(),
+            marker: trace_arm_marker(1, 1, 1, 0),
+        };
+        let second_slot = TraceSlot {
+            path: second.clone(),
+            marker: trace_arm_marker(1, 1, 1, 1),
+        };
+        arm_trace_file(&first, &first_slot.marker).expect("arm first trace");
+        arm_trace_file(&second, &second_slot.marker).expect("arm second trace");
+        std::fs::write(
+            &first,
+            format!("{}{}", first_slot.marker, complete_trace("worker-0", 11)),
+        )
+        .expect("write first trace");
+        std::fs::write(
+            &second,
+            format!("{}{}", second_slot.marker, complete_trace("worker-1", 22)),
+        )
+        .expect("write second trace");
         std::fs::write(&ambient, complete_trace("ambient", 1000)).expect("write ambient trace");
 
         let GitEvidence::Observed {
             counters,
             successful,
-        } = read_trace_files(&[first.clone(), second.clone()]).expect("merge traces")
+        } = read_trace_files(&[first_slot.clone(), second_slot.clone()]).expect("merge traces")
         else {
             panic!("complete worker traces must be observed");
         };
@@ -1651,14 +1774,47 @@ mod tests {
         assert_eq!(counters.processes, 2);
 
         let no_git = root.join("no-git.jsonl");
-        let error = read_trace_files(std::slice::from_ref(&no_git))
-            .expect_err("missing child evidence must fail closed");
-        assert!(error.to_string().contains("authoritative"), "{error:#}");
+        let no_git_slot = TraceSlot {
+            path: no_git,
+            marker: trace_arm_marker(1, 1, 1, 2),
+        };
+        arm_trace_file(&no_git_slot.path, &no_git_slot.marker).expect("arm no-Git trace");
+        assert!(matches!(
+            read_trace_files(std::slice::from_ref(&no_git_slot)),
+            Ok(GitEvidence::NoGitTraceObserved)
+        ));
+        let mixed =
+            read_trace_files(&[first_slot.clone(), no_git_slot.clone()]).expect("mixed workers");
+        assert!(matches!(
+            mixed,
+            GitEvidence::Mixed {
+                observed_workers: 1,
+                no_git_workers: 1,
+                successful: true,
+                ..
+            }
+        ));
 
         let malformed = root.join("malformed.jsonl");
-        std::fs::write(&malformed, "not json\n").expect("write malformed trace");
-        let error = read_trace_files(&[first, malformed]).expect_err("malformed worker fails");
+        let malformed_slot = TraceSlot {
+            path: malformed.clone(),
+            marker: trace_arm_marker(1, 1, 1, 3),
+        };
+        std::fs::write(&malformed, format!("{}not json\n", malformed_slot.marker))
+            .expect("write malformed trace");
+        let error =
+            read_trace_files(&[first_slot, malformed_slot]).expect_err("malformed worker fails");
         assert!(error.to_string().contains("malformed"), "{error:#}");
+
+        let empty = root.join("empty.jsonl");
+        let empty_slot = TraceSlot {
+            path: empty.clone(),
+            marker: trace_arm_marker(1, 1, 1, 4),
+        };
+        std::fs::write(&empty, b"").expect("write empty trace");
+        let error = read_trace_files(std::slice::from_ref(&empty_slot))
+            .expect_err("empty worker evidence fails");
+        assert!(format!("{error:#}").contains("marker"), "{error:#}");
 
         let _ = std::fs::remove_dir_all(root);
     }

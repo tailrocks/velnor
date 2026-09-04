@@ -207,6 +207,7 @@ pub enum RecordError {
         requirement: Requirement,
     },
     ScenarioFamilyMismatch,
+    InvalidGitEvidence,
     WrongSchema(String),
     InsufficientObservations {
         samples: usize,
@@ -265,6 +266,12 @@ impl std::fmt::Display for RecordError {
                     "record family does not match the declared scenario"
                 )
             }
+            Self::InvalidGitEvidence => {
+                write!(
+                    formatter,
+                    "record contains structurally invalid Git evidence"
+                )
+            }
             Self::WrongSchema(schema) => write!(formatter, "unexpected schema {schema}"),
             Self::InsufficientObservations { samples, required } => write!(
                 formatter,
@@ -286,8 +293,8 @@ impl BenchRecord {
     /// Check the invariants the schema alone cannot express.
     ///
     /// # Errors
-    /// Unknown scenario, family mismatch, malformed degraded evidence, wrong
-    /// schema, a stage the driver is structurally unable to observe, or
+    /// Unknown scenario, family mismatch, malformed degraded or Git evidence,
+    /// wrong schema, a stage the driver is structurally unable to observe, or
     /// summaries not derived from the observations.
     pub fn validate(&self) -> Result<(), RecordError> {
         if self.schema != RESULT_SCHEMA {
@@ -338,6 +345,9 @@ impl BenchRecord {
         }
         let observable = self.driver.observable_stages();
         for observation in &self.observations {
+            if !observation.git.is_valid() {
+                return Err(RecordError::InvalidGitEvidence);
+            }
             for stage in observation.stages_ms.keys() {
                 if !observable.contains(stage) {
                     return Err(RecordError::StageOutsideDriverCoverage {
@@ -460,10 +470,34 @@ mod tests {
             evidence
         );
         assert_eq!(
-            serde_json::to_value(GitEvidence::NoGitProcess).expect("serialize no-Git state")
+            serde_json::to_value(GitEvidence::NoGitTraceObserved).expect("serialize no-Git state")
                 ["status"],
-            "no_git_process"
+            "no_git_trace_observed"
         );
+        let mixed = GitEvidence::Mixed {
+            counters: crate::gittrace::GitCounters {
+                processes: 1,
+                ..crate::gittrace::GitCounters::default()
+            },
+            successful: true,
+            observed_workers: 1,
+            no_git_workers: 1,
+        };
+        assert!(mixed.is_valid());
+        assert_eq!(
+            serde_json::to_value(mixed).expect("serialize mixed state")["status"],
+            "mixed"
+        );
+    }
+
+    #[test]
+    fn a_record_rejects_observed_git_evidence_without_processes() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations[0].git = GitEvidence::Observed {
+            counters: crate::gittrace::GitCounters::default(),
+            successful: true,
+        };
+        assert_eq!(record.validate(), Err(RecordError::InvalidGitEvidence));
     }
 
     #[test]
