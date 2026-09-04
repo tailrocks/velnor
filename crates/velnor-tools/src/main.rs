@@ -3902,26 +3902,31 @@ struct RunnerCleanupGuard {
     slots: u64,
 }
 
+fn runner_cleanup_command(root: &Path, pat: &str, slots: u64) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args([
+            "run",
+            "--bin",
+            "velnorctl",
+            "--",
+            "remove",
+            "--pat",
+            pat,
+            "--slots",
+            &slots.to_string(),
+        ])
+        .current_dir(root);
+    command
+}
+
 impl Drop for RunnerCleanupGuard {
     fn drop(&mut self) {
         if !self.enabled {
             return;
         }
         eprintln!("==> Removing runner ({} slot(s))", self.slots);
-        let _ = Command::new("cargo")
-            .args([
-                "run",
-                "--bin",
-                "velnor-runner",
-                "--",
-                "remove",
-                "--pat",
-                &self.pat,
-                "--slots",
-                &self.slots.to_string(),
-            ])
-            .current_dir(&self.root)
-            .status();
+        let _ = runner_cleanup_command(&self.root, &self.pat, self.slots).status();
     }
 }
 
@@ -4901,6 +4906,18 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
         assert!(!fixture_smoke_dispatch(None, Some(123)).unwrap());
         assert!(fixture_smoke_dispatch(Some(true), Some(123)).unwrap());
         assert!(fixture_smoke_dispatch(Some(false), None).is_err());
+    }
+
+    #[test]
+    fn runner_cleanup_uses_operator_cli() {
+        let command = runner_cleanup_command(Path::new("/work"), "test-pat", 2);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.windows(2).any(|pair| pair == ["--bin", "velnorctl"]));
+        assert!(args.windows(2).any(|pair| pair == ["--", "remove"]));
     }
 
     #[test]
