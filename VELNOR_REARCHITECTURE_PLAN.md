@@ -2540,3 +2540,31 @@ be a deliberate call rather than a side effect.
   `cache`, `container` and `executor` tests. Two packages independently hit it and neither could
   attribute failures without a baseline diff. This undermines every gate in the program and should
   be fixed before it costs another package a day.
+
+## 17. T-020 storage — recovered, merged, and safety decision recorded
+
+The `d76eab7` object was recovered from the local object database/reflog and compared with
+`dd93963`. The merge keeps `dd93963`'s explicit `StorageLayout` snapshot through cache listing,
+pointer protection, and reclaim while adding d76's catalog, host accounting, leases, claims, and
+bounded disk-pressure model. The storage package landed in `2036c30` and the compatibility entry
+point in `5af89ef`; the explicit BuildKit safety follow-up landed in `371d3c1`. All three
+commits carry DCO signoff and the Codex co-author trailer.
+
+The changed runner paths are `cache.rs`, `host_capacity.rs`, `leftover_disk.rs`, `lib.rs`, and
+`store_catalog.rs`. Store roots now come from `StoreCatalog`, including the artifact root; canonical
+and legacy paths use one explicit layout snapshot. `HostCapacity` uses `statvfs` plus Docker's
+`system df` accounting. `ScopeLease` and `FilesystemCoordinator` publish class-typed leases under
+one snapshot lock, while the leftover reaper combines Docker liveness with leases, job claims, and
+a bounded workspace-idle floor. `DiskPressure` is total and absorbing at `Deregistered`; every
+degraded refusal is a bounded `RefuseUntil`.
+
+Decision: emergency reclaim **does not** invoke `prune_owned_builder`. BuildKit is Docker-owned and
+the current storage package has no BuildKit lease or job claim that spans its mutable content;
+`buildx prune --max-used-space 0B` could therefore remove live build state even when a path looks
+idle. The explicit owned-builder function remains available for a future caller that proves that
+lease. No broad Docker/system/volume/builder prune was added.
+
+Still blocked by the task boundary: apply `StoreCatalog::for_job_temp(...).artifacts_run(...)` at
+`executor.rs:9400-9408`; move disk-pressure admission ahead of acquisition at
+`runner.rs:2588-2646` and `2751-2760`; and publish the three missing lease classes at
+`runner.rs:5688-5695`. Those files remain untouched by T-020.
