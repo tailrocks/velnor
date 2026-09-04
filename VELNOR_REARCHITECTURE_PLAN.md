@@ -1976,3 +1976,90 @@ to add the same cross-binary guard test even if it does not unify them.
 
 Also still to correct: `content/docs/getting-started.mdx:88` documents
 `VELNOR_TRUST_SCOPE=trusted`.
+
+### BC-24 closed — durable sinks now mask, and the masker covers encoded variants
+
+`e050683`. Both unmasked sinks are fixed: the step summary is scrubbed line by line into a
+masked copy, matching `FileCommandManager.cs:256-284` (read line, mask, write into a scrubbed
+file, and queue only the scrubbed copy) — line-by-line also reproduces upstream's CRLF-to-LF
+normalisation and terminating newline. Annotations now pass through one masker in both the
+per-step results and the job-level list of `CompleteJob`, and masking happens **before** the
+length cap, as `ExecutionContext.cs:801-805` does.
+
+One deliberate divergence, flagged in the code: upstream masks only `Issue.Message`, because its
+title and path live in an untyped `Issue.Data` bag. Velnor carries `title` and `path` as typed
+fields on the same durable payload, and `::error title=<secret>::` puts a secret there — so
+Velnor masks them too. Diverging *toward* more masking on a field upstream does not have is
+correct.
+
+The encoder gap is closed and was larger than I reported: upstream registers **eleven** value
+encoders at `HostContext.cs:103-113`, not eight — the nine I named plus `Base64StringEscapeShift2`
+and `PowerShellPostAmpersandEscape`. All eleven are implemented from the bodies in
+`Sdk/DTLogging/Logging/ValueEncoders.cs` and expanded inside `Masker::new`, so every value the
+masker holds — including `::add-mask::` additions — is covered in every encoding, exactly as
+`SecretMasker.AddValue`/`AddValueEncoder` do, with empty encodings dropped per their guard.
+Details that only reading the source would give: `ExpressionStringEscape` is `'` → `''`
+(`ExpressionUtility.cs:259-262`), `TrimDoubleQuotes` returns empty unless the value is longer
+than eight characters *and* quoted at both ends, and both PowerShell encoders refuse sections
+under six characters.
+
+The upstream caps are implemented: 4096-character annotation truncation after masking, ten
+published per issue type with counters clamped to the same cap (upstream only increments while
+under it, so its published count is `min(total, 10)`), `step_number` populated from the record
+order instead of hardcoded `None`, and the telemetry limits of three issues at 256 characters.
+
+Coordination note kept for the record: the *increment* site is in `workflow_command.rs` and
+increments unconditionally. Clamping at the publication boundary produces byte-identical
+published values, so nothing is left wrong, but structural parity with upstream would put the
+"only count while under the cap" rule at the increment site.
+
+### BC-32 and BC-33 closed — the timing SLOs can now report a breach
+
+`914cf59`. Fixed as a class rather than as assignments: every duration a path may not measure is
+now `Option<u64>`, with `None` meaning not measured and filtered out of the percentile exactly as
+`queue_ms` already was.
+
+The audit of the sibling fields found a second real defect. `finalize_ms` is measured on every
+path that builds a record and was fine, but `container_boot_ms` was not: the microVM backend's
+`script_job_result_from_outcome` emitted `ExecutionTimings { first_step_ms: 0, checkout_ms: 0,
+container_boot_ms: 0, steps_ms: 0 }`. All four became `Option`, and since `first_step_ms` feeds
+an SLO, the zeros had been silently *improving* the pickup-to-first-step number as well.
+
+The percentile guard reuses the benchmark crate's rule (`n >= 1/(1-q)`: p50 needs 2, p95 needs
+20, p99 needs 100) and its `Unsupported` shape, plus a `NoSamples` case, so the doctor now prints
+`UNSUPPORTED` or `NO-SAMPLES` where it previously printed `PASS`. The rule was **mirrored rather
+than imported**, with a reason I accept: `crates/velnor-bench` is maintainer-only tooling that is
+never shipped in the deb, and importing it would pull the benchmark harness into the shipped
+daemon. Deferred and named: hoist the statistics module into `velnor-model` so both crates share
+one implementation.
+
+BC-33's structural fix was done rather than deferred. A typed `job-timing.jsonl` sink is written
+and read through one serialiser, bounded to 512 records per slot, and `JobTimingRecord` gained a
+typed `completed_at`, so ordering no longer depends on a string-compared log prefix whose format
+is maintained for an unrelated web-UI reason. The human `"job-timing "` lifecycle line stays as
+forensics and nothing parses it — a test asserts that a record present only in `lifecycle.log`
+is not counted as a sample.
+
+Both secret tests assert on the **uploaded bytes** rather than an intermediate value: the byte
+sequence handed to `upload_step_summary`, and `serde_json::to_vec` of the real
+`RunServiceCompleteJob` that `complete_job` posts. The agent stated the boundary it could not
+cross rather than overclaiming: there is no HTTP-level assertion, because the summary upload
+validates a signed blob URL and refuses a loopback mock.
+
+### The shared branch tip does not compile
+
+Verified at `3749065`: `crates/velnor-runner/src/container.rs:10` imports
+`crate::execution::docker::host_budget`, but `crates/velnor-runner/src/execution/docker/` is
+**untracked** — it exists only in one agent's working copy, while `git ls-tree` shows
+`execution/docker.rs` as a single file. Every consumer fails with `unresolved import` and
+`module docker is private`.
+
+Two agents were already blocked by it; both anchored their gate evidence at `709583a`, the last
+tip that builds, and one spent part of its run proving the breakage was not its own. Routed to
+the owner with instructions to commit the module together with its consumer and to verify
+against a `git archive` of HEAD rather than the shared worktree.
+
+This is the shared-tree hazard in its most damaging form: not a lost edit, but a commit that is
+individually correct and collectively broken, because the index and the working tree disagree
+about what exists. It is also an argument for the pin-integrity discipline being extended to a
+"HEAD must compile" check.
