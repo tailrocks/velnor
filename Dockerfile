@@ -30,7 +30,7 @@ RUN mkdir -p /opt/mise/bin \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.8.14" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
     && mise install --locked --yes rust sccache \
     && mise reshim \
