@@ -316,6 +316,148 @@ pub fn ensure_owned(journal: &mut Journal, job_id: &JobId) -> anyhow::Result<Gen
 ///
 /// # Errors
 /// Missing slot or rejected `JobOwned`.
+/// What a probe of the run service concluded about a provisional row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquisitionVerdict {
+    /// `renewjob` succeeded, so this runner holds the lease: the row is ours
+    /// and must be promoted rather than dropped.
+    Owned,
+    /// The run service reported the job gone or belonging to someone else.
+    NotOurs,
+    /// The probe could not reach a conclusion. Neither promoting nor dropping
+    /// is safe, so the row is left alone for the next attempt.
+    Indeterminate,
+}
+
+/// Record the *intent* to acquire, before the call to GitHub.
+///
+/// This is what closes the window in which a crash between `acquirejob`
+/// returning 200 and the durable marker left no local record at all — no
+/// renewal, no completion, and a job lost until its lease expired. The row it
+/// writes occupies the slot but is explicitly not ownership.
+pub fn intend_acquisition(
+    journal: &mut Journal,
+    job_id: &JobId,
+    slot_id: &SlotId,
+    message_id: &str,
+) -> anyhow::Result<Generation> {
+    let state = journal.materialized_state()?;
+    if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
+        // Already recorded, provisionally or otherwise: reuse its generation so
+        // a retry of the same message does not fork the row.
+        return Ok(job.generation);
+    }
+    let slot = state
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == *slot_id)
+        .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
+    let generation = slot.generation;
+    let outcome = journal.apply(Event::JobAcquisitionIntended {
+        slot_id: slot_id.clone(),
+        job_id: job_id.clone(),
+        generation,
+        message_id: message_id.to_string(),
+    })?;
+    if outcome.rejected {
+        anyhow::bail!(
+            "acquisition intent rejected for {} on {} (slot must still be Ready)",
+            job_id.0,
+            slot_id.0
+        );
+    }
+    Ok(generation)
+}
+
+/// Promote a provisional row after GitHub returned the job.
+pub fn confirm_acquisition(
+    journal: &mut Journal,
+    job_id: &JobId,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let owned = journal.apply(Event::JobOwned {
+        job_id: job_id.clone(),
+        slot_id: slot_id.clone(),
+        attempt: 1,
+        generation,
+        worker: format!("velnor-job@{}", job_id.0),
+        accepted_unix: 0,
+    })?;
+    if owned.rejected {
+        anyhow::bail!("JobOwned rejected for {}", job_id.0);
+    }
+    Ok(())
+}
+
+/// Drop a provisional row the probe proved is not ours.
+pub fn abandon_acquisition(
+    journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let lost = journal.apply(Event::JobAcquisitionLost {
+        job_id: job_id.clone(),
+        generation,
+        reason: reason.to_string(),
+    })?;
+    if lost.rejected {
+        anyhow::bail!(
+            "JobAcquisitionLost rejected for {} — only a provisional row may be abandoned",
+            job_id.0
+        );
+    }
+    Ok(())
+}
+
+/// Resolve every provisional row left behind by a crash in the acquire window.
+///
+/// The oracle is `renewjob`, not the 409 from `acquirejob`: upstream's
+/// `RunServiceError` carries only `source`, `statusCode` and `errorMessage`
+/// (`src/Sdk/RSWebApi/RunServiceHttpClient.cs:88-120`), so a conflict cannot
+/// distinguish "we acquired it and crashed" from "another runner has it".
+/// Only the lease holder can renew, which is exactly the discrimination needed.
+///
+/// An indeterminate probe leaves the row untouched: promoting a job we may not
+/// own would let two runners publish for it, and dropping one we do own would
+/// strand it until the lease expired.
+pub fn resolve_provisional_acquisitions<P>(
+    journal: &mut Journal,
+    mut probe: P,
+) -> anyhow::Result<Vec<(JobId, AcquisitionVerdict)>>
+where
+    P: FnMut(&JobId) -> AcquisitionVerdict,
+{
+    let state = journal.materialized_state()?;
+    let pending: Vec<(JobId, SlotId, Generation)> = state
+        .jobs
+        .iter()
+        .filter(|job| job.provisional)
+        .map(|job| (job.job_id.clone(), job.slot_id.clone(), job.generation))
+        .collect();
+    let mut resolved = Vec::new();
+    for (job_id, slot_id, generation) in pending {
+        let verdict = probe(&job_id);
+        match verdict {
+            AcquisitionVerdict::Owned => {
+                confirm_acquisition(journal, &job_id, &slot_id, generation)?;
+            }
+            AcquisitionVerdict::NotOurs => {
+                abandon_acquisition(
+                    journal,
+                    &job_id,
+                    generation,
+                    "run service reports the job is not held by this runner",
+                )?;
+            }
+            AcquisitionVerdict::Indeterminate => {}
+        }
+        resolved.push((job_id, verdict));
+    }
+    Ok(resolved)
+}
+
 pub fn accept_job(
     journal: &mut Journal,
     job_id: &JobId,
@@ -585,6 +727,145 @@ mod tests {
                 .rejected
         );
         g
+    }
+
+    fn prime_ready_slot(journal: &mut Journal) -> (SlotId, Generation) {
+        let g = Generation::INITIAL;
+        let slot = SlotId("scope-1".into());
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        (slot, g)
+    }
+
+    /// A crash between `acquirejob` returning 200 and the durable marker used
+    /// to leave no local record at all: no renewal, no completion, and the job
+    /// lost until its lease expired. The intent row survives that crash, and
+    /// `renewjob` — which only the lease holder can call — resolves it.
+    #[test]
+    fn a_crash_in_the_acquire_window_recovers_the_job_it_owns() {
+        let dir = tmp("acquire-window-owned");
+        let job = JobId("guid-1".into());
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+            // Process dies here: GitHub may or may not have returned 200.
+        }
+
+        let mut journal = restart(&dir);
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1, "the intent survived the crash");
+        assert!(state.jobs[0].provisional);
+
+        let resolved =
+            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::Owned).unwrap();
+        assert_eq!(resolved, vec![(job.clone(), AcquisitionVerdict::Owned)]);
+        let state = journal.materialized_state().unwrap();
+        assert!(
+            !state.jobs[0].provisional,
+            "a successful renew proves the job is ours"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_job_another_runner_holds_is_dropped_and_the_slot_freed() {
+        let dir = tmp("acquire-window-not-ours");
+        let job = JobId("guid-1".into());
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+        }
+
+        let mut journal = restart(&dir);
+        let resolved =
+            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::NotOurs)
+                .unwrap();
+        assert_eq!(resolved, vec![(job, AcquisitionVerdict::NotOurs)]);
+        assert!(
+            journal.materialized_state().unwrap().jobs.is_empty(),
+            "the slot is freed for the next job"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The case that must change nothing. Promoting a job we may not own would
+    /// let two runners publish for it; dropping one we do own would strand it
+    /// until the lease expired. So an unreachable run service leaves the row
+    /// exactly as it was, for the next attempt.
+    #[test]
+    fn an_indeterminate_probe_leaves_the_row_untouched() {
+        let dir = tmp("acquire-window-indeterminate");
+        let job = JobId("guid-1".into());
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+        }
+
+        let mut journal = restart(&dir);
+        let resolved =
+            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::Indeterminate)
+                .unwrap();
+        assert_eq!(resolved, vec![(job, AcquisitionVerdict::Indeterminate)]);
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(
+            state.jobs[0].provisional,
+            "still provisional, still ours to resolve later"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Retrying the same broker message must not fork the row.
+    #[test]
+    fn repeating_the_intent_reuses_the_row() {
+        let dir = tmp("acquire-intent-idempotent");
+        let job = JobId("guid-1".into());
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot, _) = prime_ready_slot(&mut journal);
+        let first = intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+        let second = intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(journal.materialized_state().unwrap().jobs.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// Simulate process death: every boundary below is a durable commit, so
