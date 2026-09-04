@@ -31,7 +31,7 @@ const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .gith
 const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "a2eecb6bededb3ef6c92ef2a921bec436d167256";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "ef344c901a51afca9042938b5d37e4745a04ac96";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
