@@ -3525,3 +3525,37 @@ diff check.
 Remaining honestly: no live Docker daemon or failure proof; `image-pull` remains
 unrunnable pending a disposable daemon/data-root/socket; full Docker Engine/cgroup
 accounting is absent.
+
+## 51. Canonical branch/worktree convergence and ownership audit — 2026-09-05
+
+The canonical implementation checkout is now
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
+`perf/docker-rust-mbx`, with local and `origin/perf/docker-rust-mbx` both at
+`14d52ffc93a69c88f7eee9a5b0a89eddff41fc24`. The old checkout at
+`/Users/donbeave/Projects/donbeave/velnor` is retained as a backup and is clean;
+its live local tip `c26b74fc` and stale remote-tracking tip `e81db000` are
+ancestors of the canonical branch. The canonical `main`, detached performance
+backup, and `fix/workflow-scope-test-catalog-helper` worktree tips are also
+ancestors. Therefore there is no unmerged live branch/worktree commit to merge;
+an artificial merge would add no content.
+
+The old clone's two dangling policy snapshots (`df1c2e5` and `15a1f68`) were
+imported as durable remote archive refs:
+`refs/archive/old-clone/dangling-policy-lockfile-20260905` and
+`refs/archive/old-clone/dangling-policy-patch-20260905`. They are stale
+intermediate states rooted at `3901a2c` that remove current architecture, so
+they were preserved, not cherry-picked over the canonical branch. No checkout
+or branch was deleted, reset, or pruned.
+
+The Docker ownership red-team found four follow-ups: recover resources after a
+lost create response only through an exact per-resource identity; remove broad
+owner-label image adoption; avoid forced image-ID deletion when foreign
+references may exist; and resolve borrowed job/service image tags before
+measurement. Service start and first-user execution also need separate timing.
+These are code work, not readiness claims. The disposable-daemon requirement
+for `docker/image-pull` remains unchanged.
+
+Verification at this convergence checkpoint: benchmark package tests `104`
+passed; workspace locked check, strict benchmark Clippy, format, and diff checks
+passed. No live Docker daemon is available on this host (`dockerd` is absent;
+the CLI is OrbStack), so no Docker lifecycle claim is promoted.
