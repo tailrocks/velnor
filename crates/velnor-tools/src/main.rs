@@ -2372,8 +2372,9 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
                     | "token"
                     | "path"
                     | "fetch-depth"
-                    | "submodules"
                     | "persist-credentials"
+                    | "clean"
+                    | "fetch-tags"
                     | "lfs"
             );
             if !supported {
@@ -2517,10 +2518,8 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("actions/checkout", 46),
         ("actions/deploy-pages", 1),
         ("actions/download-artifact", 3),
-        ("actions/setup-python", 1),
         ("actions/upload-artifact", 6),
         ("actions/upload-pages-artifact", 1),
-        ("baptiste0928/cargo-install", 1),
         ("crazy-max/ghaction-github-runtime", 2),
         ("docker/bake-action", 1),
         ("docker/build-push-action", 1),
@@ -2528,7 +2527,6 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("docker/metadata-action", 1),
         ("docker/setup-buildx-action", 5),
         ("dorny/paths-filter", 5),
-        ("dtolnay/rust-toolchain", 1),
         ("extractions/setup-just", 4),
         ("jdx/mise-action", 13),
         ("mozilla-actions/sccache-action", 7),
@@ -4732,6 +4730,44 @@ jobs:
     #[test]
     fn target_audit_normalizes_uses_and_compacts_values() {
         target_audit_self_test().unwrap();
+    }
+
+    #[test]
+    fn target_audit_checkout_inputs_match_admitted_surface() {
+        for (input, expected_unsupported) in [
+            ("clean", false),
+            ("fetch-tags", false),
+            ("submodules", true),
+        ] {
+            let step = serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                "uses: actions/checkout@v7\nwith:\n  {input}: \"true\"\n"
+            ))
+            .unwrap();
+            let mut surface = TargetSurface::default();
+            collect_step(&mut surface, ".github/workflows/test.yml", &step);
+
+            assert_eq!(
+                !surface.unsupported.is_empty(),
+                expected_unsupported,
+                "checkout input {input} drifted from the admitted surface: {:?}",
+                surface.unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn target_audit_does_not_advertise_unadmitted_action_families() {
+        let expected = expected_target_uses();
+        for action in [
+            "actions/setup-python",
+            "baptiste0928/cargo-install",
+            "dtolnay/rust-toolchain",
+        ] {
+            assert!(
+                !expected.contains_key(action),
+                "{action} has no manifest capability and must not be advertised"
+            );
+        }
     }
 
     #[test]
