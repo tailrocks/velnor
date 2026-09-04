@@ -737,7 +737,19 @@ impl ResolvedAction {
 
         let (image, build_context_host, dockerfile_host) =
             if let Some(image) = image.strip_prefix("docker://") {
-                (image.to_string(), None, None)
+                // `runs.image` is repository content, so in the fork-PR case it
+                // is attacker-controlled. Without a grammar check a value like
+                // `docker://--privileged` reaches the host `docker run` as a
+                // flag and hands the workflow root on a shared runner host.
+                // Reject anything that is not an OCI reference here, at the
+                // one place the scheme is stripped.
+                let image = crate::docker_argv::ImageReference::parse(image).map_err(|error| {
+                    anyhow::anyhow!(
+                        "action '{}' declares an invalid Docker image: {error}",
+                        self.plan.repository
+                    )
+                })?;
+                (image.as_str().to_string(), None, None)
             } else {
                 let dockerfile_host = self.plan.action_dir.join(image);
                 let tag = docker_action_tag(

@@ -11,6 +11,7 @@ use velnor_model::{derive_execution_nonce, GuestJobPlan, JobConclusion, VsockMes
 use super::artifacts::hex_sha256;
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
+use crate::docker_argv::{DockerCommand, FlagSink, ImageReference, PreparedDockerArgs};
 use crate::docker_lease::{DAEMON_ID_LABEL, JOB_ID_LABEL};
 use crate::executor::{CommandResult, CommandRunner, JobExecutionState, StepExecutionResult};
 use crate::script_step::StepCommandState;
@@ -436,58 +437,69 @@ impl<'a> GuestDockerTeardown<'a> {
     fn execute_steps(&mut self, plan: &GuestJobPlan, job_name: &str) -> Result<i32, String> {
         let label = plan.isolation_label();
         for service in &plan.services {
-            let mut args = vec![
-                "run".into(),
-                "-d".into(),
-                "--name".into(),
+            let image = parse_image(&service.image)?;
+            let mut command = DockerCommand::new(guest_env_dir(), ["run"]);
+            let args = &mut command;
+            args.flags([
+                "-d".to_owned(),
+                "--name".to_owned(),
                 service.name.clone(),
-                "--network".into(),
+                "--network".to_owned(),
                 self.network.clone(),
-                "--label".into(),
+                "--label".to_owned(),
                 label.clone(),
-            ];
+            ]);
             if !service.network_alias.is_empty() {
-                args.extend(["--network-alias".into(), service.network_alias.clone()]);
+                args.pair("--network-alias", service.network_alias.clone());
             }
             for port in &service.ports {
-                args.extend(["-p".into(), port.clone()]);
+                args.pair("-p", port.clone());
             }
+            // Service credentials never reach argv: /proc/<pid>/cmdline is
+            // world-readable to every co-tenant of this host.
             for env in &service.env {
-                args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+                args.env(env.name.clone(), env.value.clone());
             }
-            args.push(service.image.clone());
-            docker_owned(self.runner, self.events, self.host_docker, args)?;
+            let prepared = command.image(&image).finish().map_err(env_file_error)?;
+            docker_prepared(self.runner, self.events, self.host_docker, &prepared)?;
             self.containers.push(service.name.clone());
         }
         if !plan.image.is_empty() {
-            let mut args = vec![
-                "run".into(),
-                "-d".into(),
-                "--name".into(),
+            let image = parse_image(&plan.image)?;
+            let mut command = DockerCommand::new(guest_env_dir(), ["run"]);
+            let args = &mut command;
+            args.flags([
+                "-d".to_owned(),
+                "--name".to_owned(),
                 job_name.to_string(),
-                "--network".into(),
+                "--network".to_owned(),
                 self.network.clone(),
-                "--label".into(),
+                "--label".to_owned(),
                 label.clone(),
-            ];
+            ]);
+            // Job environment carries the workflow's secrets. It goes to a
+            // mode-0600 env file, never to argv.
             for env in &plan.env {
-                args.extend(["-e".into(), format!("{}={}", env.name, env.value)]);
+                args.env(env.name.clone(), env.value.clone());
             }
-            args.extend([
-                "-e".into(),
-                "GITHUB_OUTPUT=/github/file_commands/GITHUB_OUTPUT".into(),
-                "-e".into(),
-                "GITHUB_ENV=/github/file_commands/GITHUB_ENV".into(),
-                "-e".into(),
-                "GITHUB_PATH=/github/file_commands/GITHUB_PATH".into(),
-                "-e".into(),
-                "GITHUB_STEP_SUMMARY=/github/file_commands/GITHUB_STEP_SUMMARY".into(),
+            args.envs([
+                ("GITHUB_OUTPUT", "/github/file_commands/GITHUB_OUTPUT"),
+                ("GITHUB_ENV", "/github/file_commands/GITHUB_ENV"),
+                ("GITHUB_PATH", "/github/file_commands/GITHUB_PATH"),
+                (
+                    "GITHUB_STEP_SUMMARY",
+                    "/github/file_commands/GITHUB_STEP_SUMMARY",
+                ),
             ]);
             if !plan.workspace.is_empty() {
-                args.extend(["-w".into(), plan.workspace.clone()]);
+                args.pair("-w", plan.workspace.clone());
             }
-            args.extend([plan.image.clone(), "sleep".into(), "infinity".into()]);
-            docker_owned(self.runner, self.events, self.host_docker, args)?;
+            let prepared = command
+                .image(&image)
+                .operands(["sleep", "infinity"])
+                .finish()
+                .map_err(env_file_error)?;
+            docker_prepared(self.runner, self.events, self.host_docker, &prepared)?;
             self.containers.push(job_name.to_string());
         }
         if plan.buildx {
@@ -604,18 +616,21 @@ impl<'a> GuestDockerTeardown<'a> {
                 .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
                 .collect();
             let script = super::guest_actions::guest_step_script(&resolved_step)?;
-            let mut exec = vec!["exec".into()];
+            let mut command = DockerCommand::new(guest_env_dir(), ["exec"]);
+            let exec = &mut command;
+            // `sh -s` reads the step script from stdin. The resolved script
+            // interpolates workflow expressions, so on argv it would publish
+            // every secret it uses through world-readable /proc.
+            exec.flag("-i");
             if !resolved_step.working_directory.is_empty() {
-                exec.extend(["-w".into(), resolved_step.working_directory.clone()]);
+                exec.pair("-w", resolved_step.working_directory.clone());
             }
             let step_env = step_state.step_env(&[]);
             for (name, value) in &step_env {
-                exec.push("-e".into());
-                exec.push(format!("{name}={value}"));
+                exec.env(name.clone(), value.clone());
             }
             for env in &resolved_step.env {
-                exec.push("-e".into());
-                exec.push(format!("{}={}", env.name, env.value));
+                exec.env(env.name.clone(), env.value.clone());
             }
             if !step_state.path_prepend().is_empty() {
                 let base_path = step_env
@@ -623,12 +638,10 @@ impl<'a> GuestDockerTeardown<'a> {
                     .find(|(name, _)| name == "PATH")
                     .map(|(_, value)| value.as_str())
                     .unwrap_or("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
-                exec.push("-e".into());
-                exec.push(format!(
-                    "PATH={}:{}",
-                    step_state.path_prepend().join(":"),
-                    base_path
-                ));
+                exec.env(
+                    "PATH",
+                    format!("{}:{base_path}", step_state.path_prepend().join(":")),
+                );
             }
             for input in &resolved_step.inputs {
                 let name = input
@@ -642,15 +655,20 @@ impl<'a> GuestDockerTeardown<'a> {
                         }
                     })
                     .collect::<String>();
-                exec.push("-e".into());
-                exec.push(format!("VELNOR_INPUT_{name}={}", input.value));
+                exec.env(format!("VELNOR_INPUT_{name}"), input.value.clone());
             }
-            exec.extend([job_name.to_string(), "sh".into(), "-c".into(), script]);
-            let result = docker_owned_timeout(
+            let prepared = command
+                .operands()
+                .operand(job_name.to_string())
+                .operands(["sh", "-s"])
+                .finish()
+                .map_err(env_file_error)?;
+            let result = docker_prepared_stdin_timeout(
                 self.runner,
                 self.events,
                 self.host_docker,
-                exec,
+                &prepared,
+                &script,
                 guest_step_timeout(step.timeout_ms),
             )?;
             if !result.stdout.is_empty() {
@@ -1294,23 +1312,81 @@ fn docker_owned_timeout(
     owned: Vec<String>,
     timeout: Duration,
 ) -> Result<CommandResult, String> {
-    if owned.iter().any(|arg| arg.contains("docker.sock")) {
-        return Err("guest plan refused a docker.sock mount".into());
-    }
-    if host_docker {
-        events.push(ExecutionEvent::HostDockerInvoked(format!(
-            "docker {}",
-            owned.join(" ")
-        )));
-    } else {
-        events.push(ExecutionEvent::GuestDocker(format!(
-            "docker {}",
-            owned.join(" ")
-        )));
-    }
+    record_docker_invocation(events, host_docker, &owned)?;
     runner
         .run_timeout("docker", &owned, timeout)
         .map_err(|error| format!("docker {}: {error}", owned.join(" ")))
+}
+
+/// Directory for the mode-0600 env files backing guest Docker commands. The
+/// files are created with `O_EXCL|O_NOFOLLOW` under a unique name and unlinked
+/// when the prepared command is dropped, so a shared `/tmp` is safe.
+fn guest_env_dir() -> PathBuf {
+    std::env::temp_dir().join("velnor-guest-env")
+}
+
+fn env_file_error(error: std::io::Error) -> String {
+    format!("guest docker command could not be prepared: {error}")
+}
+
+fn parse_image(raw: &str) -> Result<ImageReference, String> {
+    ImageReference::parse(raw).map_err(|error| format!("guest plan {error}"))
+}
+
+/// Shared refusal + event record for every guest Docker invocation. The argv
+/// carries no environment values, so recording it cannot leak a secret.
+fn record_docker_invocation(
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    args: &[String],
+) -> Result<(), String> {
+    if args.iter().any(|arg| arg.contains("docker.sock")) {
+        return Err("guest plan refused a docker.sock mount".into());
+    }
+    let rendered = format!("docker {}", args.join(" "));
+    if host_docker {
+        events.push(ExecutionEvent::HostDockerInvoked(rendered));
+    } else {
+        events.push(ExecutionEvent::GuestDocker(rendered));
+    }
+    Ok(())
+}
+
+fn docker_prepared(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    prepared: &PreparedDockerArgs,
+) -> Result<CommandResult, String> {
+    record_docker_invocation(events, host_docker, prepared.args())?;
+    runner
+        .run_timeout_with_env(
+            "docker",
+            prepared.args(),
+            prepared.process_env(),
+            Duration::from_millis(DEFAULT_GUEST_STEP_TIMEOUT_MS),
+        )
+        .map_err(|error| format!("docker {}: {error}", prepared.args().join(" ")))
+}
+
+fn docker_prepared_stdin_timeout(
+    runner: &mut dyn CommandRunner,
+    events: &mut Vec<ExecutionEvent>,
+    host_docker: bool,
+    prepared: &PreparedDockerArgs,
+    stdin: &str,
+    timeout: Duration,
+) -> Result<CommandResult, String> {
+    record_docker_invocation(events, host_docker, prepared.args())?;
+    runner
+        .run_with_stdin_timeout_with_env(
+            "docker",
+            prepared.args(),
+            prepared.process_env(),
+            stdin,
+            timeout,
+        )
+        .map_err(|error| format!("docker {}: {error}", prepared.args().join(" ")))
 }
 
 fn docker(

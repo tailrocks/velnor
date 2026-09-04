@@ -1,16 +1,13 @@
 #![allow(dead_code)]
 
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
 
-static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub use crate::docker_argv::PreparedDockerArgs;
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
@@ -68,48 +65,64 @@ pub struct JobContainerSpec {
 }
 
 impl JobContainerSpec {
-    fn append_rust_acceleration(&self, args: &mut Vec<String>) {
+    fn append_rust_acceleration(&self, command: &mut DockerCommand) {
         if let Some(host) = &self.mbx_store_host {
-            args.extend(["-v".into(), self.mount_arg(host, "/var/cache/mbx")]);
-            for setting in [
-                "MBX_CACHE_DIR=/var/cache/mbx",
-                "MBX_TARGET_ROOT=/var/cache/mbx/targets",
-                "MBX_GC_AUTO=true",
-                "MBX_GC_MAX_SIZE=20GiB",
-                "MBX_TARGET_MAX_SIZE=30GiB",
-                "MBX_GC_MAX_TOTAL_SIZE=50GiB",
-            ] {
-                args.extend(["-e".into(), setting.into()]);
-            }
+            command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
+            command.envs([
+                ("MBX_CACHE_DIR", "/var/cache/mbx"),
+                ("MBX_TARGET_ROOT", "/var/cache/mbx/targets"),
+                ("MBX_GC_AUTO", "true"),
+                ("MBX_GC_MAX_SIZE", "20GiB"),
+                ("MBX_TARGET_MAX_SIZE", "30GiB"),
+                ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
+            ]);
         } else if let Some(host) = &self.sccache_store_host {
-            args.extend(["-v".into(), self.mount_arg(host, "/var/cache/sccache")]);
-            for setting in [
-                "MBX_DISABLE=1",
-                "RUSTC_WRAPPER=sccache",
-                "SCCACHE_DIR=/var/cache/sccache",
-                "SCCACHE_CACHE_SIZE=20G",
-                "SCCACHE_GHA_ENABLED=false",
-            ] {
-                args.extend(["-e".into(), setting.into()]);
-            }
+            command.pair("-v", self.mount_arg(host, "/var/cache/sccache"));
+            command.envs([
+                ("MBX_DISABLE", "1"),
+                ("RUSTC_WRAPPER", "sccache"),
+                ("SCCACHE_DIR", "/var/cache/sccache"),
+                ("SCCACHE_CACHE_SIZE", "20G"),
+                ("SCCACHE_GHA_ENABLED", "false"),
+            ]);
         }
     }
 
-    pub fn create_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "create".into(),
-            "--label".into(),
-            format!("velnor.daemon-id={}", self.daemon_id),
-            "--label".into(),
-            format!("velnor.job-id={}", self.name),
-            self.network.clone(),
-        ]
+    /// Directory that holds the mode-0600 env files backing this job's Docker
+    /// commands. Job-scoped, so it disappears with the job temp tree.
+    pub(crate) fn env_dir(&self) -> PathBuf {
+        self.temp_host.join("_velnor").join("exec-env")
     }
 
-    pub fn start_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
+    /// Validated image for this job container.
+    ///
+    /// # Errors
+    /// The configured image is not an OCI reference.
+    fn image_reference(&self) -> io::Result<ImageReference> {
+        Ok(ImageReference::parse(&self.image)?)
+    }
+
+    pub fn create_network_args(&self) -> Vec<String> {
+        let mut command = DockerArgv::new(["network", "create"]);
+        command.flags([
+            "--label".to_owned(),
+            format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".to_owned(),
+            format!("velnor.job-id={}", self.name),
+        ]);
+        command.operands().operand(self.network.clone()).into_argv()
+    }
+
+    /// `docker run` for the job container.
+    ///
+    /// # Errors
+    /// The job image is not a valid OCI reference, or an env file backing the
+    /// job environment could not be created.
+    pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
+        let image = self.image_reference()?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
             "--detach".into(),
             "--add-host".into(),
             // Standard alias for host services (GitHub-hosted runners expose
@@ -203,83 +216,77 @@ impl JobContainerSpec {
             self.mount_arg(&self.actions_host, "/__a"),
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
-            "-e".into(),
-            "RUSTUP_HOME=/root/.rustup".into(),
-            "-e".into(),
-            "CARGO_HOME=/github/home/.cargo".into(),
-            "-e".into(),
-            "RUNNER_TEMP=/__t".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-            "-e".into(),
-            format!(
-                "VELNOR_DOCKER_HOST_TEMP={}",
-                self.docker_host_path(&self.temp_host).display()
-            ),
-            "-e".into(),
-            format!(
-                "VELNOR_DOCKER_HOST_WORKSPACE={}",
-                self.docker_host_path(&self.workspace_host).display()
-            ),
-        ];
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        args.env("RUSTUP_HOME", "/root/.rustup");
+        args.env("CARGO_HOME", "/github/home/.cargo");
+        args.env("RUNNER_TEMP", "/__t");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        args.env(
+            "VELNOR_DOCKER_HOST_TEMP",
+            self.docker_host_path(&self.temp_host).display().to_string(),
+        );
+        args.env(
+            "VELNOR_DOCKER_HOST_WORKSPACE",
+            self.docker_host_path(&self.workspace_host)
+                .display()
+                .to_string(),
+        );
         for (name, value) in &self.env {
             if is_docker_control_env(name) {
                 continue;
             }
-            args.extend(["-e".into(), format!("{name}={value}")]);
+            args.env(name.clone(), value.clone());
         }
-        self.append_ownership_labels(&mut args);
-        args.extend(self.options.iter().cloned());
-        args.extend(self.resource_options.iter().cloned());
+        self.append_ownership_labels(args);
+        args.flags(self.options.iter().cloned());
+        args.flags(self.resource_options.iter().cloned());
         // Docker creates the actual workload in dockerd's cgroup, not in the
         // Velnor worker process. Keep the outer job below the package-owned
         // aggregate cap; the job lease proxy applies the same policy to
         // containers created from inside the job.
-        self.append_job_cgroup_parent(&mut args);
+        self.append_job_cgroup_parent(args);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
         // when no container limit is explicit. Large Rust/Zig links open one
         // descriptor per object and fail with ProcessFdQuotaExceeded. Make the
         // job contract deterministic and large enough for GitHub-scale builds.
-        args.extend(["--ulimit".into(), format!("nofile={JOB_NOFILE_LIMIT}")]);
+        args.flags(["--ulimit".to_owned(), format!("nofile={JOB_NOFILE_LIMIT}")]);
 
         // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
         // assigns localhost to ::1, which can split same-process servers and
         // clients across address families (for example Vite binds ::1 while
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
-        args.extend(["--sysctl".into(), "net.ipv6.conf.all.disable_ipv6=1".into()]);
+        args.flags(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
 
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
 
         // The per-job network is runner policy. Keep it after expanded job
         // and daemon resource options so the job cannot be displaced from the
         // network shared with its workflow services.
-        args.extend(["--network".into(), self.network.clone()]);
+        args.pair("--network", self.network.clone());
 
         // Daemon-owned acceleration mounts and variables must follow both
         // workflow environment and expanded container options. A trusted job
         // may add options, but cannot redirect a persistent store or stack
         // sccache with the image's mbx shim.
-        self.append_rust_acceleration(&mut args);
+        self.append_rust_acceleration(args);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
         // Velnor appends each masked step's lines to this file (mounted at
         // /__t). `tail -F` waits for the file if it does not exist yet.
-        args.extend([
-            self.image.clone(),
-            "sh".into(),
-            "-c".into(),
-            "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log".into(),
-        ]);
-        args
+        command
+            .image(&image)
+            .operands([
+                "sh",
+                "-c",
+                "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log",
+            ])
+            .finish()
     }
 
     /// `docker run` args that copy the job image's baked /opt/mise installs +
@@ -288,44 +295,32 @@ impl JobContainerSpec {
     /// shadows the image-baked tools while the baked shims keep pointing at
     /// them — observed live as `mise ERROR gh is not a valid shim` on a fresh
     /// store. Seeding once per image digest removes that class.
-    pub fn seed_mise_store_args(&self) -> Vec<String> {
+    ///
+    /// # Errors
+    /// The job image is not a valid OCI reference.
+    pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
+        let image = self.image_reference()?;
         let store = mise_store_host(&self.temp_host);
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--entrypoint".into(),
-            "sh".into(),
-        ];
+        let mut args = DockerArgv::new(["run"]);
+        args.flags(["--rm", "--entrypoint", "sh"]);
         self.append_job_cgroup_parent(&mut args);
-        args.extend([
-            "-v".into(),
+        args.flags([
+            "-v".to_owned(),
             self.mount_arg(
                 &self.mise_executable_store_host(),
                 "/__velnor_seed/installs",
             ),
-            "-v".into(),
+            "-v".to_owned(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
-            self.image.clone(),
-            "-c".into(),
-            "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
-             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
-                .into(),
         ]);
-        args
-    }
-
-    fn exec_script_args(
-        &self,
-        script_path_in_container: &str,
-        shell: Shell,
-        working_directory: &str,
-        env: &[(String, String)],
-    ) -> Vec<String> {
-        self.exec_process_args(
-            working_directory,
-            env,
-            &shell.command_args(script_path_in_container),
-        )
+        Ok(args
+            .image(&image)
+            .operands([
+                "-c",
+                "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
+                 cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true",
+            ])
+            .into_argv())
     }
 
     pub fn prepare_exec_script_args(
@@ -344,25 +339,9 @@ impl JobContainerSpec {
         )
     }
 
-    fn exec_process_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        command: &[String],
-    ) -> Vec<String> {
-        let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
-        self.append_base_exec_env(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        args.push(self.name.clone());
-        args.extend(command.iter().cloned());
-        args
-    }
-
+    /// # Errors
+    /// Creating an env file for the step environment failed, or a masked
+    /// secret would have reached argv.
     pub fn prepare_exec_process_args(
         &self,
         working_directory: &str,
@@ -370,20 +349,15 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(vec![
-            "exec".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ]);
-        self.append_base_exec_env(&mut prepared.args);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.push(self.name.clone());
-        prepared.args.extend(command.iter().cloned());
-        Ok(prepared)
+        self.exec_command(working_directory, env, secret_masks, command, false)
     }
 
     /// Like prepare_exec_process_args, but with stdin kept open (`docker exec
     /// -i`) so the caller can stream data (for example a registry password).
+    ///
+    /// # Errors
+    /// Creating an env file for the step environment failed, or a masked
+    /// secret would have reached argv.
     pub fn prepare_exec_process_stdin_args(
         &self,
         working_directory: &str,
@@ -391,50 +365,43 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(vec![
-            "exec".into(),
-            "-i".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ]);
-        self.append_base_exec_env(&mut prepared.args);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.push(self.name.clone());
-        prepared.args.extend(command.iter().cloned());
+        self.exec_command(working_directory, env, secret_masks, command, true)
+    }
+
+    fn exec_command(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+        stdin: bool,
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut builder = DockerCommand::new(self.env_dir(), ["exec"]);
+        if stdin {
+            builder.flag("-i");
+        }
+        builder.pair("--workdir", working_directory);
+        self.append_base_exec_env(&mut builder);
+        self.append_step_env(&mut builder, env);
+        let prepared = builder
+            .operands()
+            .operand(self.name.clone())
+            .operands(command.iter().cloned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
-    fn append_step_env(
-        &self,
-        prepared: &mut PreparedDockerArgs,
-        env: &[(String, String)],
-        secret_masks: &[String],
-    ) -> io::Result<()> {
+    /// Step environment. Every entry is recorded as an environment variable,
+    /// never as an argv token: the builder decides between a mode-0600
+    /// `--env-file` and a bare `-e NAME` process-environment forward.
+    fn append_step_env(&self, command: &mut DockerCommand, env: &[(String, String)]) {
         for (name, value) in env {
             if is_docker_control_env(name) {
                 continue;
             }
-            let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
-            if is_secret && value.contains('\n') {
-                // Docker env files are line-oriented and cannot represent an
-                // armored key or certificate. Ask Docker to forward this
-                // variable from its own process environment instead: the
-                // value stays out of argv, logs, and the env-file parser.
-                prepared.args.extend(["-e".into(), name.clone()]);
-                prepared.process_env.push((name.clone(), value.clone()));
-            } else if is_secret {
-                let env_file = write_exec_env_file(&self.temp_host, name, value)?;
-                prepared
-                    .args
-                    .extend(["--env-file".into(), env_file.path().display().to_string()]);
-                prepared.env_files.push(env_file);
-            } else {
-                prepared
-                    .args
-                    .extend(["-e".into(), format!("{name}={value}")]);
-            }
+            command.env(name.clone(), value.clone());
         }
-        Ok(())
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -449,99 +416,32 @@ impl JobContainerSpec {
     /// host user's HOME into exec'd processes; explicit -e wins. Docker
     /// endpoint/context/config overrides from workflow and step env are
     /// dropped, so every in-container Docker client stays on the lease.
-    fn append_base_exec_env(&self, args: &mut Vec<String>) {
-        for kv in [
-            "HOME=/github/home".to_string(),
-            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
-            "RUSTUP_HOME=/root/.rustup".to_string(),
-            "CARGO_HOME=/github/home/.cargo".to_string(),
-            "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            format!(
-                "VELNOR_DOCKER_HOST_TEMP={}",
-                self.docker_host_path(&self.temp_host).display()
-            ),
-            format!(
-                "VELNOR_DOCKER_HOST_WORKSPACE={}",
-                self.docker_host_path(&self.workspace_host).display()
-            ),
-        ] {
-            args.extend(["-e".into(), kv]);
-        }
+    fn append_base_exec_env(&self, command: &mut DockerCommand) {
+        command.env("HOME", "/github/home");
+        command.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        command.env("RUSTUP_HOME", "/root/.rustup");
+        command.env("CARGO_HOME", "/github/home/.cargo");
+        command.env(
+            "PATH",
+            "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
+        command.env(
+            "VELNOR_DOCKER_HOST_TEMP",
+            self.docker_host_path(&self.temp_host).display().to_string(),
+        );
+        command.env(
+            "VELNOR_DOCKER_HOST_WORKSPACE",
+            self.docker_host_path(&self.workspace_host)
+                .display()
+                .to_string(),
+        );
     }
 
-    fn run_node_action_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        path_prepend: &[String],
-        node_image: &str,
-        entrypoint_container_path: &str,
-    ) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            self.sidecar_container_name("node-action"),
-            "--network".into(),
-            self.network.clone(),
-            "--workdir".into(),
-            working_directory.into(),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/__w"),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/github/workspace"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/__t"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/tmp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/runner_temp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/file_commands"),
-            "-v".into(),
-            self.mount_arg(&self.home_host, "/github/home"),
-            "-v".into(),
-            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
-            "-v".into(),
-            self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-            // The Node image entrypoint/shell drops env names with '-', but
-            // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
-            "--entrypoint".into(),
-            "node".into(),
-        ];
-        self.append_ownership_labels(&mut args);
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        self.append_rust_acceleration(&mut args);
-        self.append_job_cgroup_parent(&mut args);
-        if !path_prepend.is_empty() {
-            let path = path_prepend
-                .iter()
-                .cloned()
-                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_string()))
-                .collect::<Vec<_>>()
-                .join(":");
-            args.extend(["-e".into(), format!("PATH={path}")]);
-        }
-        args.push(node_image.into());
-        args.push(entrypoint_container_path.into());
-        args
-    }
-
+    /// `docker run` for a Node action sidecar.
+    ///
+    /// # Errors
+    /// The node image is not a valid OCI reference, an env file could not be
+    /// created, or a masked secret would have reached argv.
     pub fn prepare_run_node_action_args(
         &self,
         working_directory: &str,
@@ -551,101 +451,102 @@ impl JobContainerSpec {
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(self.run_node_action_args(
-            working_directory,
-            &[],
-            path_prepend,
-            node_image,
-            entrypoint_container_path,
-        ));
-        let image_position = prepared.args.len() - 2;
-        let trailing = prepared.args.split_off(image_position);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.extend(trailing);
+        let image = ImageReference::parse(node_image)?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--rm".to_owned(),
+            "--name".to_owned(),
+            self.sidecar_container_name("node-action"),
+            "--network".to_owned(),
+            self.network.clone(),
+            "--workdir".to_owned(),
+            working_directory.to_owned(),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/__w"),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/__t"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/tmp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
+            "-v".to_owned(),
+            self.mount_arg(&self.home_host, "/github/home"),
+            "-v".to_owned(),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".to_owned(),
+            self.mount_arg(&self.actions_host, "/__a"),
+            "-v".to_owned(),
+            self.mount_arg(&self.tools_host, "/__tool"),
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        // The Node image entrypoint/shell drops env names with '-', but
+        // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
+        args.pair("--entrypoint", "node");
+        self.append_ownership_labels(args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
+        self.append_rust_acceleration(args);
+        self.append_job_cgroup_parent(args);
+        if !path_prepend.is_empty() {
+            let path = path_prepend
+                .iter()
+                .cloned()
+                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_owned()))
+                .collect::<Vec<_>>()
+                .join(":");
+            args.env("PATH", path);
+        }
+        self.append_step_env(args, env);
+        let prepared = command
+            .image(&image)
+            .operand(entrypoint_container_path.to_owned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
+    /// `docker build` for a Dockerfile action.
+    ///
+    /// # Errors
+    /// The generated tag is not a valid OCI reference.
     pub fn build_docker_action_args(
         &self,
         image: &str,
         dockerfile_host: &Path,
         context_host: &Path,
-    ) -> Vec<String> {
-        vec![
-            "build".into(),
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-            "--tag".into(),
-            image.into(),
-            "--file".into(),
+    ) -> io::Result<Vec<String>> {
+        let image = ImageReference::parse(image)?;
+        let mut args = DockerArgv::new(["build"]);
+        args.flags([
+            "--cgroup-parent".to_owned(),
+            crate::docker_lease::JOB_CGROUP_PARENT.to_owned(),
+            "--tag".to_owned(),
+            image.as_str().to_owned(),
+            "--file".to_owned(),
             self.docker_host_path(dockerfile_host).display().to_string(),
-            self.docker_host_path(context_host).display().to_string(),
-        ]
+        ]);
+        Ok(args
+            .operands()
+            .operand(self.docker_host_path(context_host).display().to_string())
+            .into_argv())
     }
 
-    fn run_docker_action_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        image: &str,
-        entrypoint: Option<&str>,
-        command_args: &[String],
-    ) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            self.sidecar_container_name("docker-action"),
-            "--network".into(),
-            self.network.clone(),
-            "--workdir".into(),
-            working_directory.into(),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/__w"),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/github/workspace"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/__t"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/tmp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/runner_temp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/file_commands"),
-            "-v".into(),
-            self.mount_arg(&self.home_host, "/github/home"),
-            "-v".into(),
-            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
-            "-v".into(),
-            self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-        ];
-        self.append_ownership_labels(&mut args);
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        self.append_rust_acceleration(&mut args);
-        self.append_job_cgroup_parent(&mut args);
-        if let Some(entrypoint) = entrypoint {
-            args.extend(["--entrypoint".into(), entrypoint.into()]);
-        }
-        args.push(image.into());
-        args.extend(command_args.iter().cloned());
-        args
-    }
-
+    /// `docker run` for a Dockerfile/`docker://` action.
+    ///
+    /// The action's `runs.args` are workflow-controlled and are emitted only
+    /// after the end-of-flags separator, so they can never become Docker
+    /// flags.
+    ///
+    /// # Errors
+    /// The action image is not a valid OCI reference, an env file could not
+    /// be created, or a masked secret would have reached argv.
     pub fn prepare_run_docker_action_args(
         &self,
         working_directory: &str,
@@ -655,102 +556,142 @@ impl JobContainerSpec {
         entrypoint: Option<&str>,
         command_args: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(self.run_docker_action_args(
-            working_directory,
-            &[],
-            image,
-            entrypoint,
-            command_args,
-        ));
-        let image_position = prepared.args.len() - command_args.len() - 1;
-        let trailing = prepared.args.split_off(image_position);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.extend(trailing);
+        let image = ImageReference::parse(image)?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--rm".to_owned(),
+            "--name".to_owned(),
+            self.sidecar_container_name("docker-action"),
+            "--network".to_owned(),
+            self.network.clone(),
+            "--workdir".to_owned(),
+            working_directory.to_owned(),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/__w"),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/__t"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/tmp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
+            "-v".to_owned(),
+            self.mount_arg(&self.home_host, "/github/home"),
+            "-v".to_owned(),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".to_owned(),
+            self.mount_arg(&self.actions_host, "/__a"),
+            "-v".to_owned(),
+            self.mount_arg(&self.tools_host, "/__tool"),
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        self.append_ownership_labels(args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
+        self.append_rust_acceleration(args);
+        self.append_job_cgroup_parent(args);
+        if let Some(entrypoint) = entrypoint {
+            args.pair("--entrypoint", entrypoint.to_owned());
+        }
+        self.append_step_env(args, env);
+        let prepared = command
+            .image(&image)
+            .operands(command_args.iter().cloned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
     pub fn remove_container_args(&self) -> Vec<String> {
-        vec!["rm".into(), "--force".into(), self.name.clone()]
+        let mut args = DockerArgv::new(["rm"]);
+        args.flag("--force");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn remove_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "rm".into(), self.network.clone()]
+        DockerArgv::new(["network", "rm"])
+            .operands()
+            .operand(self.network.clone())
+            .into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "disconnect".into(),
-            "--force".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "disconnect"]);
+        args.flag("--force");
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "connect".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        DockerArgv::new(["network", "connect"])
+            .operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn inspect_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "inspect".into(), self.network.clone()]
+        DockerArgv::new(["network", "inspect"])
+            .operands()
+            .operand(self.network.clone())
+            .into_argv()
     }
 
+    /// `getent hosts <alias>` inside the job container. The alias is a
+    /// workflow-controlled service key, so it stays an operand.
     pub fn service_dns_args(&self, alias: &str) -> Vec<String> {
-        vec![
-            "exec".into(),
-            self.name.clone(),
-            "getent".into(),
-            "hosts".into(),
-            alias.into(),
-        ]
+        DockerArgv::new(["exec"])
+            .operands()
+            .operand(self.name.clone())
+            .operands(["getent", "hosts", alias])
+            .into_argv()
     }
 
     pub fn resolver_state_args(&self) -> Vec<String> {
-        vec![
-            "exec".into(),
-            self.name.clone(),
-            "cat".into(),
-            "/etc/resolv.conf".into(),
-        ]
+        DockerArgv::new(["exec"])
+            .operands()
+            .operand(self.name.clone())
+            .operands(["cat", "/etc/resolv.conf"])
+            .into_argv()
     }
 
     pub fn guest_docker_socket_host(&self) -> PathBuf {
         crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
     }
 
-    fn append_docker_socket_mount(&self, args: &mut Vec<String>) {
+    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) {
         if !self.mount_docker_socket {
             return;
         }
-        args.extend([
-            "-v".into(),
+        args.pair(
+            "-v",
             format!(
                 "{}:/var/run/docker.sock",
                 self.guest_docker_socket_host().display()
             ),
-        ]);
+        );
     }
 
-    fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
+    fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
         if !self.mount_docker_socket {
             return;
         }
         if let Some(path) = &self.docker_cli_host_path {
-            args.extend([
-                "-v".into(),
-                format!("{}:/usr/local/bin/docker:ro", path.display()),
-            ]);
+            args.pair("-v", format!("{}:/usr/local/bin/docker:ro", path.display()));
         }
         if let Some(path) = &self.docker_cli_plugin_host_dir {
-            args.extend([
-                "-v".into(),
+            args.pair(
+                "-v",
                 format!("{}:/usr/local/lib/docker/cli-plugins:ro", path.display()),
-            ]);
+            );
         }
     }
 
@@ -863,96 +804,30 @@ impl JobContainerSpec {
         format!("velnor-{kind}-{}", self.name)
     }
 
-    fn append_ownership_labels(&self, args: &mut Vec<String>) {
-        args.extend([
-            "--label".into(),
-            format!("velnor.daemon-id={}", self.daemon_id),
-            "--label".into(),
-            format!("velnor.job-id={}", self.name),
-        ]);
+    fn append_ownership_labels(&self, args: &mut impl FlagSink) {
+        args.pair("--label", format!("velnor.daemon-id={}", self.daemon_id));
+        args.pair("--label", format!("velnor.job-id={}", self.name));
     }
 
-    fn append_job_cgroup_parent(&self, args: &mut Vec<String>) {
-        args.extend([
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-        ]);
+    fn append_job_cgroup_parent(&self, args: &mut impl FlagSink) {
+        args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
     }
 }
 
-#[derive(Debug)]
-pub struct PreparedDockerArgs {
-    pub args: Vec<String>,
-    env_files: Vec<ExecEnvFile>,
-    process_env: Vec<(String, String)>,
-}
-
-impl PreparedDockerArgs {
-    fn new(args: Vec<String>) -> Self {
-        Self {
-            args,
-            env_files: Vec::new(),
-            process_env: Vec::new(),
+/// Fail-closed audit: no finished Docker command line may contain a masked
+/// secret. The builder already makes environment-on-argv unconstructible;
+/// this catches a secret that reached argv through some other operand (an
+/// action argument, a mount path) before the process is spawned.
+fn audit_argv_for_secrets(args: &[String], secret_masks: &[String]) -> io::Result<()> {
+    for mask in secret_masks.iter().filter(|mask| mask.len() >= 3) {
+        if args.iter().any(|arg| arg.contains(mask.as_str())) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to run docker: a masked secret reached the command line",
+            ));
         }
     }
-
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    pub fn process_env(&self) -> &[(String, String)] {
-        &self.process_env
-    }
-}
-
-#[derive(Debug)]
-struct ExecEnvFile {
-    path: PathBuf,
-}
-
-impl ExecEnvFile {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ExecEnvFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn env_value_is_secret(value: &str, secret_masks: &[String]) -> bool {
-    !value.is_empty()
-        && secret_masks
-            .iter()
-            .filter(|mask| mask.len() >= 3)
-            .any(|mask| value.contains(mask))
-}
-
-fn env_name_is_secret(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    matches!(
-        name.as_str(),
-        "ACTIONS_RUNTIME_TOKEN" | "ACTIONS_ID_TOKEN_REQUEST_TOKEN" | "GITHUB_TOKEN"
-    ) || name.ends_with("_TOKEN")
-        || name.ends_with("_PASSWORD")
-        || name.ends_with("_SECRET")
-        || name.ends_with("_PRIVATE_KEY")
-}
-
-fn write_exec_env_file(temp_host: &Path, name: &str, value: &str) -> io::Result<ExecEnvFile> {
-    let dir = temp_host.join("_velnor").join("exec-env");
-    fs::create_dir_all(&dir)?;
-    let counter = EXEC_ENV_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("env-{}-{counter}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    writeln!(file, "{name}={value}")?;
-    Ok(ExecEnvFile { path })
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -967,82 +842,85 @@ pub struct ServiceContainerSpec {
 }
 
 impl ServiceContainerSpec {
-    pub fn start_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--detach".into(),
-            "--name".into(),
+    /// `docker run` for a workflow service container.
+    ///
+    /// `env_dir` is the owning job's env-file directory: service environment
+    /// is workflow-controlled and routinely holds credentials (for example
+    /// `POSTGRES_PASSWORD`), so it is written to a mode-0600 file instead of
+    /// the world-readable command line.
+    ///
+    /// # Errors
+    /// The service image is not a valid OCI reference, or the env file could
+    /// not be created.
+    pub fn start_args(&self, env_dir: &Path) -> io::Result<PreparedDockerArgs> {
+        let image = ImageReference::parse(&self.image)?;
+        let mut command = DockerCommand::new(env_dir, ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--detach".to_owned(),
+            "--name".to_owned(),
             self.name.clone(),
-        ];
+        ]);
         for (name, value) in &self.env {
-            args.extend(["-e".into(), format!("{name}={value}")]);
+            args.env(name.clone(), value.clone());
         }
         for port in &self.ports {
-            args.extend(["-p".into(), port.clone()]);
+            args.pair("-p", port.clone());
         }
-        args.extend(self.options.iter().cloned());
-        args.extend([
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-        ]);
+        args.flags(self.options.iter().cloned());
+        args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
         // occurrence, so append the per-job network and workflow service key
         // as its DNS alias after user options.
-        args.extend([
-            "--network".into(),
-            self.network.clone(),
-            "--network-alias".into(),
-            self.network_alias.clone(),
-        ]);
-        args.extend([self.image.clone()]);
-        args
+        args.pair("--network", self.network.clone());
+        args.pair("--network-alias", self.network_alias.clone());
+        command.image(&image).finish()
     }
 
     pub fn remove_args(&self) -> Vec<String> {
-        vec!["rm".into(), "--force".into(), self.name.clone()]
+        let mut args = DockerArgv::new(["rm"]);
+        args.flag("--force");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "disconnect".into(),
-            "--force".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "disconnect"]);
+        args.flag("--force");
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "connect".into(),
-            "--alias".into(),
-            self.network_alias.clone(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "connect"]);
+        args.pair("--alias", self.network_alias.clone());
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn health_status_args(&self) -> Vec<String> {
-        vec![
-            "inspect".into(),
-            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"
-                .into(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["inspect"]);
+        args.flag(
+            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+        );
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn id_args(&self) -> Vec<String> {
-        vec![
-            "inspect".into(),
-            "--format={{.Id}}".into(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["inspect"]);
+        args.flag("--format={{.Id}}");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn mapped_ports_args(&self) -> Vec<String> {
-        vec!["port".into(), self.name.clone()]
+        DockerArgv::new(["port"])
+            .operands()
+            .operand(self.name.clone())
+            .into_argv()
     }
 }
 
