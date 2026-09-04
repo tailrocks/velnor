@@ -3559,3 +3559,28 @@ Verification at this convergence checkpoint: benchmark package tests `104`
 passed; workspace locked check, strict benchmark Clippy, format, and diff checks
 passed. No live Docker daemon is available on this host (`dockerd` is absent;
 the CLI is OrbStack), so no Docker lifecycle claim is promoted.
+
+## 52. Docker identity recovery and lifecycle cleanup — pushed commit `564cea2`
+
+Docker-direct workloads now resolve borrowed job/service image references to
+immutable digests before measurement and use those digests for build contexts,
+container creation, and service wiring. Build outputs carry owner/role labels,
+and each measured build receives a fresh unique tag so repeated uncached builds
+cannot retarget an earlier owned tag. Image cleanup first proves the expected
+tag still names the expected owner and immutable ID, then removes only that
+verified immutable ID without force; a concurrent tag retarget therefore
+cannot redirect deletion to a foreign image.
+
+Lost create responses are recovered only when a filtered listing and a second
+inspect prove one exact name, immutable ID, owner, role, and (for containers)
+the expected image. All registered network/container runner errors route
+through cleanup, and service job start plus first-user execution are measured
+as separate lifecycle stages. Failed cleanup retains ownership and aggregates
+failures for the outer teardown retry.
+
+Focused proof at `564cea2dc6375ed56d9897830c04af21f6686cf0`:
+`velnor-bench` tests passed (`108` across three suites), strict package Clippy
+passed, and format/diff checks passed. No live Docker daemon is available on
+this host, so disposable-daemon cold-pull proof, live failure/recovery proof,
+and default-mbx end-to-end evidence remain open. `docker/image-pull` stays
+unrunnable until its isolated daemon/data-root/socket exists.
