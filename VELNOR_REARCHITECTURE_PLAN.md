@@ -1341,3 +1341,52 @@ history.
 
 Both incidents are consequences of many agents sharing one worktree, and both are now covered
 by the §1 rules: explicit pathspec on every commit, and never `git stash` in a shared tree.
+
+### BC-31 resolved, and its root cause was one naming rule
+
+Empirical match counts against the files each manager targeted: **eight of the ten custom
+managers matched nothing** — `cargo-nextest`, `rust-script`, `casey/just`,
+`protocolbuffers/protobuf`, `cli/cli`, `mozilla/sccache`, `hadolint/hadolint` and
+`sigstore/cosign`. Only `jdx/mise` (1 match) and the `rust-lang/rust` manager added in
+`e1bc67b` (7 matches) were live. My earlier note that the sccache, hadolint and cosign
+matchers corresponded to real strings was wrong: those shell assignments no longer exist in
+`docker/job-ubuntu.Dockerfile`, having moved to `docker/job-mise.toml`.
+
+The root cause is a single naming rule. Renovate's **native** mise manager defaults to
+`**/{,.}mise{,.*}.toml`, which requires the basename to *start* with `mise` — so
+`docker/build-mise.toml` and `docker/job-mise.toml` matched nothing, the entire job-image
+toolchain was unmanaged, and the eight regex managers were imitating the coverage that
+absence created. The fix is therefore not eight replacement regexes but an override of
+`mise.managerFilePatterns` to include both files (repeating the six defaults, since an
+override replaces rather than extends), verified against the manager source in
+`renovate@44.61.6` — its `backendDatasources` covers the `aqua:`, `cargo:`, `github:` and
+`core:` backends those files actually use.
+
+One hazard was established from Renovate's source rather than assumed:
+`mise/lockfile.js::getLockFileName` derives the lock name from the *directory*, not the
+basename, so Renovate computes `docker/mise.lock`, finds no such file, and returns `null` —
+it will not refresh `docker/*-mise.lock`, and it does not create a spurious file either.
+Rather than regex-bumping checksummed lock entries, the gate below fails the build when a
+declaration and its lock disagree, which turns the silent stale-lock hazard loud. That matters
+because a stale mise lock silently pins an old toolchain regardless of the declared version.
+
+**The class fix** is `scripts/pin_integrity.mjs`, wired into the `ci` and `check` mise tasks,
+built in the style of the `actions/runner` pin — an assertion, not a note. It asserts three
+properties in one gate: every custom manager, every individual `matchString` and every
+selected file must produce at least one match and capture `currentValue` (and a
+`managerCoverage` rule requires every file matching `(^|/)[^/]*mise\.toml$` to be reachable,
+so a future `docker/foo-mise.toml` fails the build instead of going unmanaged); every
+`[tools]` entry must equal its adjacent lockfile entry and agree across configs,
+backend-insensitively; and `config/version-pins.json` names the one authoritative site for
+each literal repeated outside mise, failing also when a mirror's pattern stops matching, so a
+moved pin cannot quietly drop out of the comparison.
+
+It was proven to fail rather than merely to pass: reintroducing the original `\bjust@` manager
+verbatim, reverting the nextest pin, and reverting `MISE_VERSION` each produced a specific
+error and exit 1, and the clean tree exits 0. The Renovate config validator was likewise
+proven non-vacuous by injecting a bogus key.
+
+| ID | Change | Commits |
+| --- | --- | --- |
+| T-014 | Eight dead custom managers deleted; the native mise manager pointed at the image configs that were never covered; `MISE_VERSION` coverage widened to the root `Dockerfile`, which was unmanaged entirely; pin-integrity gate added and proven to fail. | `6bb40d0`, `8c84237` |
+| T-012a | The two environment divergences reconciled: `cargo-nextest` 0.9.140 → 0.9.143 in the root `mise.toml`, `MISE_VERSION` v2026.8.14 → v2026.9.1 in `Dockerfile`. | `f1e272f` |
