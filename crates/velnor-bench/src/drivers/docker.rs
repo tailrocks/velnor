@@ -8,6 +8,7 @@
 use std::{
     collections::BTreeMap,
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -48,6 +49,105 @@ const USER_COMMAND: &str = "printf velnor-bench-first-user-command";
 /// tiny and has a deterministic readiness signal.
 const SERVICE_IMAGE: &str = "docker.io/library/redis:7-alpine";
 
+static NEXT_BUILD_TAG: AtomicU64 = AtomicU64::new(0);
+
+fn is_build_kind(kind: Kind) -> bool {
+    matches!(kind, Kind::BuildCached | Kind::BuildUncached | Kind::Buildx)
+}
+
+fn unique_build_tag() -> String {
+    let serial = NEXT_BUILD_TAG.fetch_add(1, Ordering::Relaxed);
+    format!("velnor-bench-cached-{}-{serial}:latest", std::process::id())
+}
+
+fn with_cleanup(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup_error) => {
+            primary.context(format!("workload cleanup also failed: {cleanup_error:#}"))
+        }
+    }
+}
+
+fn remove_image_if_missing(context: &mut Context, image: &str) -> Result<()> {
+    let invocation = context
+        .runner
+        .run("docker", &["image", "rm", "-f", image])
+        .context("docker image removal")?;
+    if invocation.ok()
+        || invocation
+            .stderr
+            .to_ascii_lowercase()
+            .contains("no such image")
+    {
+        return Ok(());
+    }
+    bail!(
+        "docker image removal failed with exit code {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    )
+}
+
+fn force_remove(context: &mut Context, name: &str) -> Result<()> {
+    let invocation = context
+        .runner
+        .run("docker", &["rm", "-f", name])
+        .with_context(|| format!("removing Docker container {name}"))?;
+    if invocation.ok()
+        || invocation
+            .stderr
+            .to_ascii_lowercase()
+            .contains("no such container")
+    {
+        return Ok(());
+    }
+    bail!(
+        "removing Docker container {name} failed with exit code {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    )
+}
+
+fn remove_network(context: &mut Context, name: &str) -> Result<()> {
+    let invocation = context
+        .runner
+        .run("docker", &["network", "rm", name])
+        .with_context(|| format!("removing Docker network {name}"))?;
+    if invocation.ok()
+        || invocation
+            .stderr
+            .to_ascii_lowercase()
+            .contains("no such network")
+    {
+        return Ok(());
+    }
+    bail!(
+        "removing Docker network {name} failed with exit code {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    )
+}
+
+fn cleanup_resources(context: &mut Context, containers: &[&str], networks: &[&str]) -> Result<()> {
+    let mut failures = Vec::new();
+    for &name in containers {
+        if let Err(error) = force_remove(context, name) {
+            failures.push(error.to_string());
+        }
+    }
+    for &name in networks {
+        if let Err(error) = remove_network(context, name) {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("Docker resource cleanup failed: {}", failures.join("; "))
+    }
+}
+
 pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     let kind = match scenario.id {
         "docker/existing-image" => Kind::ExistingImage,
@@ -68,6 +168,8 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     };
     Ok(Box::new(DockerWorkload {
         kind,
+        build_tag: is_build_kind(kind).then(unique_build_tag),
+        build_tag_needs_cleanup: false,
         iteration: 0,
         notes: Vec::new(),
     }))
@@ -75,6 +177,8 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
 
 struct DockerWorkload {
     kind: Kind,
+    build_tag: Option<String>,
+    build_tag_needs_cleanup: bool,
     iteration: u64,
     notes: Vec<String>,
 }
@@ -117,11 +221,6 @@ impl DockerWorkload {
             std::process::id(),
             self.iteration
         )
-    }
-
-    /// Remove a container, ignoring "no such container".
-    fn force_remove(context: &mut Context, name: &str) {
-        let _ = context.runner.run("docker", &["rm", "-f", name]);
     }
 }
 
@@ -172,15 +271,14 @@ impl Workload for DockerWorkload {
             write_build_context(&dir, &context.job_image)?;
             if self.kind == Kind::BuildCached {
                 // Warm the layer cache once, outside the measurement.
-                let warmed = context.runner.run(
-                    "docker",
-                    &[
-                        "build",
-                        "-t",
-                        "velnor-bench-cached:latest",
-                        &dir.display().to_string(),
-                    ],
-                )?;
+                let tag = self
+                    .build_tag
+                    .as_deref()
+                    .expect("build workloads have an owned image tag");
+                self.build_tag_needs_cleanup = true;
+                let warmed = context
+                    .runner
+                    .run("docker", &["build", "-t", tag, &dir.display().to_string()])?;
                 require_success(warmed, "docker cached-build warmup")?;
             }
         }
@@ -236,14 +334,13 @@ impl Workload for DockerWorkload {
     }
 
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
-        if matches!(
-            self.kind,
-            Kind::BuildCached | Kind::BuildUncached | Kind::Buildx
-        ) {
-            let _ = context.runner.run(
-                "docker",
-                &["image", "rm", "-f", "velnor-bench-cached:latest"],
-            );
+        if self.build_tag_needs_cleanup {
+            let tag = self
+                .build_tag
+                .as_deref()
+                .expect("owned build image has a tag");
+            remove_image_if_missing(context, tag).context("tearing down benchmark image")?;
+            self.build_tag_needs_cleanup = false;
         }
         Ok(())
     }
@@ -304,8 +401,8 @@ impl DockerWorkload {
         let created = created?;
         if !created.ok() {
             let stderr = created.stderr.clone();
-            Self::force_remove(context, &name);
-            bail!("docker create failed: {}", stderr.trim());
+            let primary = anyhow::anyhow!("docker create failed: {}", stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::ContainerCreate, create_ms);
 
@@ -314,8 +411,8 @@ impl DockerWorkload {
         let started = started?;
         if !started.ok() {
             let stderr = started.stderr.clone();
-            Self::force_remove(context, &name);
-            bail!("docker start failed: {}", stderr.trim());
+            let primary = anyhow::anyhow!("docker start failed: {}", stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::ContainerStart, start_ms);
 
@@ -328,8 +425,8 @@ impl DockerWorkload {
         let executed = executed?;
         if !executed.ok() {
             let stderr = executed.stderr.clone();
-            Self::force_remove(context, &name);
-            bail!("first user command failed: {}", stderr.trim());
+            let primary = anyhow::anyhow!("first user command failed: {}", stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::FirstUserCommand, exec_ms);
 
@@ -337,8 +434,7 @@ impl DockerWorkload {
         // exit state back out of the daemon.
         let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
         if let Err(error) = completion {
-            Self::force_remove(context, &name);
-            return Err(error);
+            return Err(with_cleanup(error, force_remove(context, &name)));
         }
         stages.insert(Stage::CompletionOverhead, completion_ms);
 
@@ -347,8 +443,8 @@ impl DockerWorkload {
         let removed = removed?;
         if !removed.ok() {
             let stderr = removed.stderr.clone();
-            Self::force_remove(context, &name);
-            bail!("docker container teardown failed: {}", stderr.trim());
+            let primary = anyhow::anyhow!("docker container teardown failed: {}", stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
@@ -361,7 +457,7 @@ impl DockerWorkload {
         resources: &mut Resources,
     ) -> Result<()> {
         let image = context.job_image.clone();
-        let _ = context.runner.run("docker", &["image", "rm", "-f", &image]);
+        remove_image_if_missing(context, &image).context("removing image for cold pull")?;
 
         let (pulled, pull_ms) = timed(|| context.runner.run("docker", &["pull", &image]).cloned());
         let pulled = pulled?;
@@ -407,16 +503,18 @@ impl DockerWorkload {
         });
         let created = created?;
         if !created.ok() {
-            Self::force_remove(context, &name);
-            bail!("docker create after pull failed: {}", created.stderr.trim());
+            let primary =
+                anyhow::anyhow!("docker create after pull failed: {}", created.stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::ContainerCreate, create_ms);
         let (started, start_ms) =
             timed(|| context.runner.run("docker", &["start", &name]).cloned());
         let started = started?;
         if !started.ok() {
-            Self::force_remove(context, &name);
-            bail!("docker start after pull failed: {}", started.stderr.trim());
+            let primary =
+                anyhow::anyhow!("docker start after pull failed: {}", started.stderr.trim());
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::ContainerStart, start_ms);
         let (executed, exec_ms) = timed(|| {
@@ -427,28 +525,27 @@ impl DockerWorkload {
         });
         let executed = executed?;
         if !executed.ok() {
-            Self::force_remove(context, &name);
-            bail!(
+            let primary = anyhow::anyhow!(
                 "first user command after pull failed: {}",
                 executed.stderr.trim()
             );
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::FirstUserCommand, exec_ms);
         let (completion, completion_ms) = timed(|| inspect_container_state(context, &name));
         if let Err(error) = completion {
-            Self::force_remove(context, &name);
-            return Err(error);
+            return Err(with_cleanup(error, force_remove(context, &name)));
         }
         stages.insert(Stage::CompletionOverhead, completion_ms);
         let (removed, teardown_ms) =
             timed(|| context.runner.run("docker", &["rm", "-f", &name]).cloned());
         let removed = removed?;
         if !removed.ok() {
-            Self::force_remove(context, &name);
-            bail!(
+            let primary = anyhow::anyhow!(
                 "docker teardown after pull failed: {}",
                 removed.stderr.trim()
             );
+            return Err(with_cleanup(primary, force_remove(context, &name)));
         }
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
@@ -496,11 +593,14 @@ impl DockerWorkload {
         });
         let service_started = service_started?;
         if !service_started.ok() {
-            let _ = context.runner.run("docker", &["network", "rm", &network]);
-            bail!(
+            let primary = anyhow::anyhow!(
                 "docker service start failed: {}",
                 service_started.stderr.trim()
             );
+            return Err(with_cleanup(
+                primary,
+                cleanup_resources(context, &[&service], &[&network]),
+            ));
         }
         let setup_ms = network_ms.saturating_add(service_ms);
         stages.insert(Stage::DockerSetup, setup_ms);
@@ -509,9 +609,11 @@ impl DockerWorkload {
         let (ready, start_ms) = timed(|| wait_for_health(context, &service));
         stages.insert(Stage::ContainerStart, start_ms);
         if !ready {
-            let _ = context.runner.run("docker", &["rm", "-f", &service]);
-            let _ = context.runner.run("docker", &["network", "rm", &network]);
-            bail!("service container never became reachable");
+            let primary = anyhow::anyhow!("service container never became reachable");
+            return Err(with_cleanup(
+                primary,
+                cleanup_resources(context, &[&service], &[&network]),
+            ));
         }
 
         let (created, create_ms) = timed(|| {
@@ -536,13 +638,14 @@ impl DockerWorkload {
         });
         let created = created?;
         if !created.ok() {
-            Self::force_remove(context, &job);
-            let _ = context.runner.run("docker", &["rm", "-f", &service]);
-            let _ = context.runner.run("docker", &["network", "rm", &network]);
-            bail!(
+            let primary = anyhow::anyhow!(
                 "docker service job create failed: {}",
                 created.stderr.trim()
             );
+            return Err(with_cleanup(
+                primary,
+                cleanup_resources(context, &[&job, &service], &[&network]),
+            ));
         }
         stages.insert(Stage::ContainerCreate, create_ms);
 
@@ -556,41 +659,24 @@ impl DockerWorkload {
             Ok(())
         });
         if let Err(error) = executed {
-            Self::force_remove(context, &job);
-            let _ = context.runner.run("docker", &["rm", "-f", &service]);
-            let _ = context.runner.run("docker", &["network", "rm", &network]);
-            return Err(error);
+            return Err(with_cleanup(
+                error,
+                cleanup_resources(context, &[&job, &service], &[&network]),
+            ));
         }
         stages.insert(Stage::FirstUserCommand, exec_ms);
         let (completion, completion_ms) = timed(|| inspect_container_state(context, &job));
         if let Err(error) = completion {
-            Self::force_remove(context, &job);
-            let _ = context.runner.run("docker", &["rm", "-f", &service]);
-            let _ = context.runner.run("docker", &["network", "rm", &network]);
-            return Err(error);
+            return Err(with_cleanup(
+                error,
+                cleanup_resources(context, &[&job, &service], &[&network]),
+            ));
         }
         stages.insert(Stage::CompletionOverhead, completion_ms);
 
-        let (removed, teardown_ms) = timed(|| -> Result<(Invocation, Invocation, Invocation)> {
-            let job = context.runner.run("docker", &["rm", "-f", &job])?.clone();
-            let service = context
-                .runner
-                .run("docker", &["rm", "-f", &service])?
-                .clone();
-            let network = context
-                .runner
-                .run("docker", &["network", "rm", &network])?
-                .clone();
-            Ok((job, service, network))
-        });
-        let (job_removed, service_removed, network_removed) = removed?;
-        for (operation, invocation) in [
-            ("docker service job teardown", job_removed),
-            ("docker service teardown", service_removed),
-            ("docker network teardown", network_removed),
-        ] {
-            require_success(&invocation, operation)?;
-        }
+        let (removed, teardown_ms) =
+            timed(|| cleanup_resources(context, &[&job, &service], &[&network]));
+        removed?;
         stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
     }
@@ -617,7 +703,10 @@ impl DockerWorkload {
         stages.insert(Stage::DockerSetup, setup_ms);
 
         let path = dir.display().to_string();
-        let tag = "velnor-bench-cached:latest".to_owned();
+        let tag = self
+            .build_tag
+            .clone()
+            .expect("build workloads have an owned image tag");
         let args: Vec<String> = if self.kind == Kind::Buildx {
             vec![
                 "buildx".to_owned(),
@@ -630,6 +719,10 @@ impl DockerWorkload {
         } else {
             vec!["build".to_owned(), "-t".to_owned(), tag.clone(), path]
         };
+        // A failed build may have created or retagged an image before it
+        // reported the error. The tag is unique to this workload, so it is
+        // safe for teardown to remove it even on that partial path.
+        self.build_tag_needs_cleanup = true;
         let (built, build_ms) = timed(|| context.runner.run("docker", &args));
         let built = built?;
         if !built.ok() {
@@ -821,5 +914,25 @@ mod tests {
         let error = require_success(&invocation, "docker exec").expect_err("must fail closed");
         assert!(error.to_string().contains("exit code 17"));
         assert!(error.to_string().contains("container failed"));
+    }
+
+    #[test]
+    fn build_tags_are_unique_to_the_workload_owner() {
+        let first = unique_build_tag();
+        let second = unique_build_tag();
+        assert_ne!(first, second);
+        assert!(first.starts_with("velnor-bench-cached-"));
+        assert!(first.ends_with(":latest"));
+    }
+
+    #[test]
+    fn cleanup_error_keeps_the_primary_failure() {
+        let error = with_cleanup(
+            anyhow::anyhow!("primary workload failure"),
+            Err(anyhow::anyhow!("container removal failed")),
+        );
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("primary workload failure"));
+        assert!(rendered.contains("container removal failed"));
     }
 }

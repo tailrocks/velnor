@@ -439,15 +439,24 @@ impl CargoWorkload {
     }
 
     /// Undo the mutation so the next iteration starts from the same state.
-    fn restore(&self, context: &mut Context, workspace: &Path) {
+    fn restore(&self, context: &mut Context, workspace: &Path) -> Result<()> {
         if matches!(
             self.plan.mutation,
             Mutation::AppendToFirstSource | Mutation::UpdateLockfile
         ) {
-            let _ = context
+            let invocation = context
                 .runner
-                .exec("git", &["checkout", "--", "."], Some(workspace), &[]);
+                .exec("git", &["checkout", "--", "."], Some(workspace), &[])
+                .context("restore Cargo workload mutation")?;
+            if !invocation.ok() {
+                bail!(
+                    "restoring Cargo workload mutation failed with exit code {}: {}",
+                    invocation.code,
+                    invocation.stderr.trim()
+                );
+            }
         }
+        Ok(())
     }
 }
 
@@ -567,14 +576,15 @@ impl Workload for CargoWorkload {
             },
             git,
         };
-        self.restore(context, &workspace);
+        self.restore(context, &workspace)?;
         Ok(observation)
     }
 
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
         // Leave the shared repository exactly as it was found.
+        let mut failures = Vec::new();
         for path in std::mem::take(&mut self.worktrees) {
-            let _ = context.runner.run(
+            let result = context.runner.run(
                 "git",
                 &[
                     "-C".to_owned(),
@@ -585,6 +595,22 @@ impl Workload for CargoWorkload {
                     path.display().to_string(),
                 ],
             );
+            match result {
+                Ok(invocation) if invocation.ok() => {}
+                Ok(invocation) => failures.push(format!(
+                    "remove worktree {} exited {}: {}",
+                    path.display(),
+                    invocation.code,
+                    invocation.stderr.trim()
+                )),
+                Err(error) => failures.push(format!(
+                    "remove worktree {} could not be executed: {error}",
+                    path.display()
+                )),
+            }
+        }
+        if !failures.is_empty() {
+            bail!("Cargo workload teardown failed: {}", failures.join("; "));
         }
         Ok(())
     }
@@ -859,6 +885,33 @@ mod tests {
             !AMBIENT_CARGO_ENV_TO_REMOVE.contains(&"CARGO_TARGET_DIR"),
             "the explicit per-sample target directory must remain set"
         );
+    }
+
+    #[test]
+    fn teardown_surfaces_worktree_removal_failures() {
+        let mut workload = CargoWorkload {
+            plan: plan_for("rust/cold").expect("cold plan"),
+            scenario: "rust/cold",
+            worktrees: vec![std::env::temp_dir().join("velnor-bench-unregistered-worktree")],
+            targets: Vec::new(),
+            package: None,
+            iteration: 0,
+            notes: Vec::new(),
+        };
+        let mut context = Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: Runner::new(),
+        };
+
+        let error = workload
+            .teardown(&mut context)
+            .expect_err("an unregistered worktree must fail cleanup");
+        assert!(error.to_string().contains("Cargo workload teardown failed"));
+        assert!(error.to_string().contains("remove worktree"));
     }
 
     #[test]
