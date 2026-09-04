@@ -272,7 +272,7 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Forbidden("token"),
 ];
 const MR_BOXINGTON_INPUTS: &[InputRule] = &[
-    InputRule::Literal("backend", &["local", "github", "server"]),
+    InputRule::Literal("backend", &["github", "server"]),
     InputRule::Any("version"),
     InputRule::Any("github-token"),
     InputRule::Any("cache-key"),
@@ -2417,10 +2417,10 @@ mod tests {
     }
 
     #[test]
-    fn mr_boxington_runs_as_pinned_generic_node_action_for_all_backends() {
+    fn mr_boxington_rejects_unsupported_local_backend() {
         const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
 
-        for backend in ["local", "github", "server"] {
+        for backend in ["github", "server"] {
             validate_resolved_action(
                 "cache",
                 "jdx/mr-boxington-action",
@@ -2430,6 +2430,22 @@ mod tests {
             )
             .unwrap();
         }
+
+        let local_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            local_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
 
         let backend_error = validate_resolved_action(
             "cache",
