@@ -330,7 +330,7 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -601,7 +601,7 @@ impl JobContainerSpec {
             "-v".to_owned(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".to_owned(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".to_owned(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -706,7 +706,7 @@ impl JobContainerSpec {
             "-v".to_owned(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".to_owned(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".to_owned(),
             self.mount_arg(&self.tools_host, "/__tool"),
         ]);
@@ -1697,6 +1697,7 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"/tmp/actions:/__a:ro".into()));
         assert!(args.contains(
             &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
                 .into()
@@ -1839,7 +1840,7 @@ mod tests {
         assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
-        assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
+        assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
@@ -2153,6 +2154,7 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert!(args.contains(&"/tmp/actions:/__a:ro".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -2327,6 +2329,7 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert!(args.contains(&"/tmp/actions:/__a:ro".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));

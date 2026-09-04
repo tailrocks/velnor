@@ -251,14 +251,39 @@ impl std::fmt::Debug for TerminationTarget {
                 .field("name", name)
                 .field("role", role)
                 .finish(),
-            Self::Hook { label, .. } => {
-                formatter.debug_struct("Hook").field("label", label).finish()
-            }
+            Self::Hook { label, .. } => formatter
+                .debug_struct("Hook")
+                .field("label", label)
+                .finish(),
         }
     }
 }
 
 impl TerminationTarget {
+    /// The escalation level at which this target may be terminated.
+    ///
+    /// Not everything a cancelled job holds may die at the first request. The
+    /// job container and its service containers must outlive cancellation
+    /// long enough for `always()` and `cancelled()` post steps to run against
+    /// a container that still exists — upstream stops them in an `always()`
+    /// post step, "Stop containers"
+    /// (`src/Runner.Worker/ContainerOperationProvider.cs:57-63`), not on the
+    /// cancellation callback. Everything that is the *current step's own work*
+    /// — its host process tree, its Docker-action sidecar, its BuildKit
+    /// builder — dies immediately, which is what upstream's
+    /// `step.ExecutionContext.CancelToken()` does
+    /// (`src/Runner.Worker/StepsRunner.cs:181-186`).
+    #[must_use]
+    pub const fn terminate_at(&self) -> CancelLevel {
+        match self {
+            Self::Container {
+                role: ContainerRole::Job | ContainerRole::Service,
+                ..
+            } => CancelLevel::Forced,
+            _ => CancelLevel::Requested,
+        }
+    }
+
     /// Stable identity used for deduplication and log lines.
     #[must_use]
     pub fn key(&self) -> String {
@@ -379,7 +404,9 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
     ];
     match docker_bounded(&args) {
         Ok(_) => Ok(()),
-        Err(detail) if detail.contains("No such container") || detail.contains("is not running") => {
+        Err(detail)
+            if detail.contains("No such container") || detail.contains("is not running") =>
+        {
             Ok(())
         }
         Err(detail) => Err(detail),
@@ -416,9 +443,14 @@ fn wait_until_gone(
 /// leave anything running.
 #[must_use]
 pub fn terminate(target: &TerminationTarget, deadline: Instant) -> TerminationOutcome {
-    terminate_with(target, deadline, TerminationLadder::default(), &|duration| {
-        std::thread::sleep(duration);
-    })
+    terminate_with(
+        target,
+        deadline,
+        TerminationLadder::default(),
+        &|duration| {
+            std::thread::sleep(duration);
+        },
+    )
 }
 
 /// [`terminate`] with an explicit ladder and sleep, so the escalation order is
@@ -553,6 +585,16 @@ struct Inner {
 /// code path cannot execute a step without one.
 #[derive(Clone)]
 pub struct JobCancellation(Arc<Inner>);
+
+impl Default for JobCancellation {
+    /// An inert token. This is the honest default for a `JobExecutionState`
+    /// built to render expressions outside a running job; the job path never
+    /// reaches it, because [`crate::executor::DockerJobEngine`] installs its
+    /// own required token on the state before the first step runs.
+    fn default() -> Self {
+        Self::inert()
+    }
+}
 
 impl std::fmt::Debug for JobCancellation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -716,7 +758,7 @@ impl JobCancellation {
             .push((id, target));
         // A target created after cancellation was requested is still a target:
         // terminate it now rather than leaking it because it lost a race.
-        if self.is_cancelled() {
+        if self.level() >= CancelLevel::Requested {
             self.fan_out_once();
         }
         TargetRegistration {
@@ -787,6 +829,7 @@ impl JobCancellation {
     /// Public so the daemon-shutdown path can drive a synchronous fan-out and
     /// observe the outcome before it exits.
     pub fn fan_out_once(&self) {
+        let level = self.level();
         let targets: Vec<TerminationTarget> = self
             .0
             .registry
@@ -795,6 +838,7 @@ impl JobCancellation {
             .targets
             .iter()
             .map(|(_, target)| target.clone())
+            .filter(|target| level >= target.terminate_at())
             .collect();
         if targets.is_empty() {
             return;
@@ -981,14 +1025,36 @@ mod tests {
                 Ok(())
             }),
         });
+        token.request(CancelReason::ServerRequested);
         token.fan_out_once();
         let reached: Vec<String> = token
             .outcomes()
             .into_iter()
             .map(|outcome| outcome.target)
             .collect();
+        // The job and its service containers are deliberately absent: they must
+        // outlive the request so `always()` post steps run against a container
+        // that still exists.
         assert_eq!(
             reached,
+            vec![
+                "container:velnor-buildkit-1",
+                "pgid:4242",
+                "hook:vsock-cancel"
+            ]
+        );
+        assert!(hook_ran.load(Ordering::SeqCst));
+
+        token.force();
+        token.fan_out_once();
+        let forced: Vec<String> = token
+            .outcomes()
+            .into_iter()
+            .skip(reached.len())
+            .map(|outcome| outcome.target)
+            .collect();
+        assert_eq!(
+            forced,
             vec![
                 "container:velnor-job-1",
                 "container:velnor-service-1-postgres",
@@ -997,7 +1063,6 @@ mod tests {
                 "hook:vsock-cancel",
             ]
         );
-        assert!(hook_ran.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1028,7 +1093,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![
                 TerminationSignal::Interrupt,
                 TerminationSignal::Terminate,
@@ -1069,7 +1136,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Interrupt]
         );
         assert!(outcome.gone);
@@ -1101,7 +1170,9 @@ mod tests {
             },
         );
         assert_eq!(
-            *sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            *sent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Kill]
         );
     }
@@ -1112,8 +1183,8 @@ mod tests {
         token.request(CancelReason::ServerRequested);
         assert!(token.outcomes().is_empty());
         let _late = token.register(TerminationTarget::Container {
-            name: "velnor-service-1-redis".into(),
-            role: ContainerRole::Service,
+            name: "velnor-docker-action-velnor-job-1".into(),
+            role: ContainerRole::DockerAction,
         });
         assert_eq!(
             token
@@ -1121,7 +1192,7 @@ mod tests {
                 .into_iter()
                 .map(|outcome| outcome.target)
                 .collect::<Vec<_>>(),
-            vec!["container:velnor-service-1-redis"]
+            vec!["container:velnor-docker-action-velnor-job-1"]
         );
     }
 
