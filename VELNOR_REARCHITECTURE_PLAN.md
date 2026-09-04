@@ -3495,3 +3495,17 @@ Focused proof at `d61c7e5`: `velnor-bench` tests passed (`97`), the format check
 passed, and strict Clippy passed. Remaining follow-up: implement a disposable
 Docker daemon/data-root/socket per measured iteration, with no shared-daemon
 mutation. `image-pull` remains unrun until then.
+
+## 49. Docker ownership identity and fail-closed validation — `00e4835`, `c26b635`, `d843d9d`, `26a1e6c` (2026-09-05)
+
+Docker container/network ownership now uses owner+role labels. Immutable IDs are
+captured only after successful create/run/network-create; later lifecycle and
+destructive calls use those IDs. Unresolved identity refuses name cleanup and
+retains ownership. `docker/image-pull` has no fallback and is unrunnable.
+Record validation now requires a declared preferred/degraded driver, with a
+forged image-pull regression test.
+
+Focused proof: `velnor-bench` tests passed (`103` across three suites), along with fmt,
+locked check, and strict Clippy. Remaining: a disposable Docker
+daemon/data-root/socket is required before image-pull; live Docker
+failure/identity proof and build-image ownership remain.
