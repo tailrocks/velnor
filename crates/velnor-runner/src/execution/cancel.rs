@@ -629,6 +629,17 @@ pub struct TargetRegistration {
     id: u64,
 }
 
+impl std::fmt::Debug for TargetRegistration {
+    /// Names the registration without printing the token, whose `Debug` walks
+    /// the whole registry.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TargetRegistration")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Drop for TargetRegistration {
     fn drop(&mut self) {
         self.token.deregister(self.id);
@@ -1242,6 +1253,44 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![TerminationSignal::Kill]
         );
+    }
+
+    /// A microVM job used to be entirely uncancellable: the only cancellation
+    /// path killed a host container that does not exist on that backend, so the
+    /// guest kept running while GitHub was told the job was cancelled. The
+    /// jailer is an ordinary host process, so it belongs on the same ladder as
+    /// every other target — and it must die on the first request, not only on
+    /// escalation, because it is the job's work rather than a container that
+    /// post steps still need.
+    #[test]
+    fn a_microvm_jailer_is_reachable_from_the_fan_out() {
+        let token = JobCancellation::recording(None);
+        let jailer = TerminationTarget::ProcessGroup {
+            pgid: 4242,
+            label: "microvm-jailer".into(),
+        };
+        assert_eq!(
+            jailer.terminate_at(),
+            CancelLevel::Requested,
+            "the guest is the job's own work, not a container post steps need"
+        );
+        let registration = token.register(jailer);
+        token.request(CancelReason::ServerRequested);
+        // `request` spawns the fan-out, so drive it here rather than racing the
+        // thread; what this asserts is that the jailer is *in* the fan-out set.
+        token.fan_out_once();
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec!["pgid:4242"]
+        );
+        // Dropping the session deregisters it, so a finished job leaves nothing
+        // on the fan-out to kill.
+        drop(registration);
+        assert!(token.target_keys().is_empty());
     }
 
     #[test]
