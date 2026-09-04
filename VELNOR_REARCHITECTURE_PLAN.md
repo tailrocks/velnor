@@ -169,3 +169,147 @@ _Pending synthesis._
 | 2026-09-04 | Wave 1 investigations launched (I-01 … I-09). |
 | 2026-09-04 | Wave 2 investigations launched (I-10 … I-16). |
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
+
+### BC-5 — Four disjoint lifecycle models, none of which is the control flow
+
+`ActorPhase` (`crates/velnor-model/src/node.rs:313`) is a real generation-fenced machine.
+`SlotPhase` (`node/phase.rs:33`) and `JobState` (`node/lifecycle.rs:167`) are write-only
+projections — `SlotPhase::{Acquiring,Running,Finalizing,WaitingForCapacity,…}` are never
+emitted, so `is_busy()` is structurally always false and the durable projection can never
+show a busy fleet. What actually executes a job is an 826-line function
+(`crates/velnor-runner/src/runner.rs:5286-6111`) driven by booleans, `Option`s, atomics,
+flocks and file markers.
+
+Consequences already proven from this structure:
+
+- **Fencing an executing slot loses the job.** `fence_stale_slot_actor`
+  (`node/controller.rs:2121`) emits `Event::SlotStale` without checking for an active job,
+  and kills the *heartbeat* pid rather than the worker. The generation bump then makes
+  `CompletionIntended` fail `outbox_owner_is_proven`
+  (`crates/velnor-control/src/journal.rs:783`, `:211`), so the completion is never sent and
+  the job hangs at GitHub.
+- **Slot liveness is proven by the wrong process** (`node/slot.rs:64-96`): the heartbeat
+  process only writes a heartbeat; the process that runs jobs has no heartbeat of its own.
+- **The two modules that model fencing and recovery correctly — `node/handoff.rs` and
+  `node/recovery.rs` — have zero call sites**, while `controller.rs` reimplements weaker
+  logic inline.
+
+Missing invariant: *there is exactly one lifecycle model, and it is the one the control
+flow is expressed in.* Target is a typestate `Job<S>`
+(`Notified → Acquired → Admitted → Reserved → Prepared → Running → Publishing → Staged →
+Sent → Acked → ToreDown`) where `JobCredentials` is constructible only from a
+`DurableAdmission`, `Running` requires a `Reservation` and scope leases by value, the send
+claim is non-`Clone` and consumed by `send()`, and `fence()` refuses an occupied slot *by
+signature* — making the fencing defect a compile error.
+
+### BC-6 — Cancellation is a container assassination side channel, not a model
+
+Upstream v2.337.0 models cancellation as an in-process token: `StepsRunner.cs:146-187` sets
+`JobContext.Status = cancelled` and re-evaluates every step's `if:`, so `always()` and
+`cancelled()` become true while `success()` and `failure()` become false; post steps run
+under **fresh unlinked** cancellation sources (`ExecutionContext.cs:436`, `:1384-1395`);
+processes are terminated SIGINT → 7.5 s → SIGTERM → 2.5 s → SIGKILL
+(`ProcessInvoker.cs:32-33`, `:443-447`).
+
+Velnor's entire mechanism is `runner.rs:6593-6595` → `kill_job_container`
+(`runner.rs:7146-7171`): an unbounded `docker kill` (SIGKILL) against exactly two container
+names. `execute_script_job` (`runner.rs:7189-7205`) takes no cancellation token at all; the
+flag is read only *after* the executor has returned (`runner.rs:5930-5952`).
+
+P0 consequences: a cancelled job keeps running ordinary subsequent steps (deterministic
+with `continue-on-error`, `executor.rs:2174-2176` → `:11341-11350` → `:11725-11727`);
+`cancelled()` is hardcoded `false` (`executor.rs:11729-11731`) so `if: cancelled()` never
+runs and `if: failure()` wrongly does; there is no graceful termination anywhere, although
+`node/controller.rs:46`, `:567-596` already implements SIGTERM → 5 s → SIGKILL for another
+purpose; MicroVM jobs are entirely uncancellable while GitHub is told `Canceled`; the whole
+typed cancel API (`ExecutionSession::cancel`, both backend `cancel()`s,
+`VsockMessage::Cancel`) is dead code reachable only from `execution/tests.rs:542`; and job
+`timeout-minutes` is never a wall clock (`executor.rs:12828-12837`) — a 10-minute job with
+20 steps can run 200 minutes.
+
+Three documentation statements overclaim and must be corrected with the fix:
+`content/docs/guides/execution.mdx:187`, `content/docs/guides/integrations.mdx:98` and
+`:119`.
+
+Missing invariant: *cancellation is a first-class input to execution, and every process,
+container, daemon and child it spawned is reachable from one termination ladder.*
+
+### BC-7 — Three Docker access paths coexist, and the fast one is the subprocess
+
+Velnor talks to Docker three ways simultaneously: the `docker` CLI as a subprocess for the
+whole job lifecycle; a hand-rolled ~2600-line HTTP/1.1 Engine API client over the Unix
+socket (`docker_lease.rs:916-2600`) aimed at the *guest*, not the runner; and nested
+CLI-in-CLI, where buildx, login and build-push run as
+`docker exec <job> sh -c "docker buildx …"` (`executor.rs:3193-3227`) — two processes per
+logical operation.
+
+Measured call counts: a minimal job spawns **12 + N** host `docker` processes (N = script
+steps); a representative job (2 services, 15 steps, buildx + login + push, 1 action) spawns
+**52-72**, plus up to 64 lease threads. A transient daemon restart replays the sequence up
+to five times: **150+ processes for a job that ran zero steps.**
+
+P0 items within the class: no cancellation of the runner's own Engine work (a *client* is
+SIGKILLed and container names are recovered by argv archaeology,
+`executor.rs:12852-13030`, even though the lease already has the right primitive at
+`docker_lease.rs:1711-1719`); control-plane calls inherit a **360-minute** timeout so a
+stalled dockerd parks a slot for six hours; `docker info` — the Engine's heaviest endpoint
+and a daemon-generation fact — runs once per job uncached (`execution/docker.rs:124`); the
+cgroup-proof cache is invalidated by *any* non-zero docker exit including an ordinary
+failing user step (`executor.rs:406-410`), so the cache key and its invalidation trigger
+are unrelated facts; no typed lifecycle ownership, with go-template `--format` strings
+re-parsed by at least 11 functions; and unbounded output buffering that buffers full output
+even on streaming calls.
+
+Missing invariant: *one typed Docker client owns the host control plane, every call has an
+operation-appropriate deadline, and every fact is cached against the generation that can
+invalidate it.*
+
+### BC-8 — Unsupported checkout inputs are accepted and silently ignored
+
+Velnor replaces `actions/checkout` with a native implementation intercepted on action
+identity at any version (`crates/velnor-runner/src/checkout.rs:679-687`), and a second,
+divergent shell implementation exists for the MicroVM guest
+(`execution/guest_actions.rs:63-122`). Admission never gates unknown inputs
+(`admission.rs:590-596`).
+
+`submodules` is silently ignored — there is no `git submodule` call anywhere in
+velnor-runner — while the step log asserts `submodules: false` even when the workflow asked
+for true (`executor.rs:12183`), and the capability auditor lists it as *supported*
+(`crates/velnor-tools/src/main.rs:2110-2117`). `sparse-checkout`, `filter`, `ssh-key`,
+`github-server-url` and `set-safe-directory` are likewise accepted and ignored;
+`github-server-url` being ignored makes an external-repo checkout on GHES fetch from
+github.com.
+
+Missing invariant: *an input Velnor does not implement is rejected at admission, never
+accepted and dropped.* This is the fail-early requirement of the capability model, and it
+is also why the capability manifest currently certifies behavior that does not exist.
+
+### BC-9 — Credentials outlive their workspace
+
+The credentialed `.git/config` survives on the host if the runner dies between the last
+step and cleanup (`runner.rs:8126`) or if `remove_job_workspace` fails; cleanup failure is
+downgraded to a stderr warning (`checkout.rs:311-318`) and there is no stale-job-dir
+reaper. The MicroVM guest checkout writes the token into workspace config with **no cleanup
+path at all** (`execution/guest_actions.rs:89-92`).
+
+Missing invariant: *a credential's lifetime is owned by a guard that cannot be skipped by a
+crash path, and cleanup failure is an error, not a warning.*
+
+### BC-10 — Checkout does network and byte work it does not need to
+
+The daemon-wide bare mirror fetches `+refs/*:refs/*` at full depth on every job
+(`git_mirror.rs:49-57`) — on GitHub that includes every `refs/pull/*` — so cold start is
+strictly worse than upstream's `--depth=1` single-ref fetch. There is no "sha already
+present" short-circuit, and an exclusive `flock` is held across the entire network fetch
+(`checkout.rs:161-177`, `git_mirror.rs:41`), so an N-way matrix on one commit performs N
+*serialized* full fetches. Workspace objects are then **physically copied** out of the
+mirror every job (verified empirically: loose objects land in `ws/.git/objects`) with no
+alternates, `--shared`, `worktree add` or reflink — despite `fs_copy.rs:1254`/`:1266`
+already providing `ioctl_ficlone`/`fclonefileat` and using them for the Cargo `target/`
+restore. The mirror key omits the host (`git_mirror.rs:64-83`), so the same `owner/repo` on
+two hosts share one mirror and force-update each other, and there is no corruption
+detection beyond `HEAD` existence (`git_mirror.rs:44`), so a broken mirror silently
+degrades every future job forever.
+
+Missing invariant: *no duplicate fetch without a correctness reason, no byte copied that
+could be shared, and no lock held across the network.*
