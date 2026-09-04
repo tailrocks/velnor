@@ -65,7 +65,7 @@ use crate::{
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
-    slot_log::{self, SlotForensics, LIFECYCLE_LOG},
+    slot_log::{self, SlotForensics},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -916,29 +916,51 @@ pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String
     Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
 }
 
+/// One completed job's durations, as written to the typed `job-timing.jsonl`
+/// sink and read back by the doctor SLOs.
+///
+/// Every duration that a code path may not have measured is `Option<u64>`, and
+/// `None` means "not measured" — never `0`. A zero placeholder is not a neutral
+/// default here: it is the fastest possible sample, so it drags a percentile
+/// down and turns an unmeasurable SLO into a permanently satisfied one.
+/// `pickup_ms` and `finalize_ms` stay unconditional because both are measured
+/// on every path that builds a record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct JobTimingRecord {
     v: u8,
     job_id: String,
+    /// Job completion time, the sort key for the SLO window. Typed, so the
+    /// reader never has to parse a timestamp out of a log line prefix.
+    #[serde(default)]
+    completed_at: String,
     #[serde(default)]
     queue_ms: Option<u64>,
     #[serde(default)]
     queue_to_first_step_ms: Option<u64>,
     pickup_ms: u64,
-    first_step_ms: u64,
-    checkout_ms: u64,
-    container_boot_ms: u64,
-    steps_ms: u64,
+    #[serde(default)]
+    first_step_ms: Option<u64>,
+    #[serde(default)]
+    checkout_ms: Option<u64>,
+    #[serde(default)]
+    container_boot_ms: Option<u64>,
+    #[serde(default)]
+    steps_ms: Option<u64>,
     finalize_ms: u64,
-    teardown_ms: u64,
+    /// Filled in by the post-completion teardown thread once teardown actually
+    /// finishes. `None` on the paths that have no teardown to run.
+    #[serde(default)]
+    teardown_ms: Option<u64>,
 }
 
+/// Durations an execution backend measured. A backend that does not measure a
+/// phase reports `None` rather than `0`; see [`JobTimingRecord`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ExecutionTimings {
-    first_step_ms: u64,
-    checkout_ms: u64,
-    container_boot_ms: u64,
-    steps_ms: u64,
+    first_step_ms: Option<u64>,
+    checkout_ms: Option<u64>,
+    container_boot_ms: Option<u64>,
+    steps_ms: Option<u64>,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -6200,19 +6222,24 @@ async fn handle_job_request(
         let timing_record = JobTimingRecord {
             v: 1,
             job_id: job.job_id.clone(),
+            completed_at: unix_now_iso8601(),
             queue_ms: Some(queue_ms),
-            queue_to_first_step_ms: Some(
+            queue_to_first_step_ms: execution_timings.first_step_ms.map(|first_step_ms| {
                 queue_ms
                     .saturating_add(pickup_ms)
-                    .saturating_add(execution_timings.first_step_ms),
-            ),
+                    .saturating_add(first_step_ms)
+            }),
             pickup_ms,
-            first_step_ms: pickup_ms.saturating_add(execution_timings.first_step_ms),
+            first_step_ms: execution_timings
+                .first_step_ms
+                .map(|first_step_ms| pickup_ms.saturating_add(first_step_ms)),
             checkout_ms: execution_timings.checkout_ms,
             container_boot_ms: execution_timings.container_boot_ms,
             steps_ms: execution_timings.steps_ms,
             finalize_ms,
-            teardown_ms: 0,
+            // Not measured yet: only the teardown thread can fill this in, and
+            // only on a path that has teardown to run.
+            teardown_ms: None,
         };
         if let Some(teardown) = teardown {
             start_post_completion_teardown(
@@ -6223,8 +6250,8 @@ async fn handle_job_request(
                 job_claim,
             )
             .await?;
-        } else if let Ok(json) = serde_json::to_string(&timing_record) {
-            forensics.lifecycle(&format!("job-timing {json}"));
+        } else {
+            record_job_timing(&teardown_config_dir, forensics, &timing_record);
         }
         println!(
             "Job completed with result {:?} and message acknowledged.",
@@ -7909,12 +7936,10 @@ fn script_job_result_from_outcome(
         executed_physical_actions: outcome.executed_physical_actions,
         step_logs,
         teardown: None,
-        timings: ExecutionTimings {
-            first_step_ms: 0,
-            checkout_ms: 0,
-            container_boot_ms: 0,
-            steps_ms: 0,
-        },
+        // The microVM backend instruments none of these phases. Reporting
+        // zeroes would feed the doctor's percentiles four of the fastest
+        // possible samples; report "not measured" instead.
+        timings: ExecutionTimings::default(),
     }
 }
 
@@ -8706,10 +8731,10 @@ fn execute_script_job_inner(
             services_removed,
         }),
         timings: ExecutionTimings {
-            first_step_ms,
-            checkout_ms: duration_ms(checkout_duration),
-            container_boot_ms,
-            steps_ms,
+            first_step_ms: Some(first_step_ms),
+            checkout_ms: Some(duration_ms(checkout_duration)),
+            container_boot_ms: Some(container_boot_ms),
+            steps_ms: Some(steps_ms),
         },
     })
 }
@@ -8885,16 +8910,15 @@ async fn start_post_completion_teardown(
     mut timing_record: JobTimingRecord,
     job_claim: JobClaim,
 ) -> Result<()> {
+    let timing_config_dir = config_dir.clone();
     let task = std::thread::spawn(move || {
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
         loop {
             match teardown.clone().run(&job_claim, &forensics) {
                 Ok(()) => {
-                    timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
-                    if let Ok(json) = serde_json::to_string(&timing_record) {
-                        forensics.lifecycle(&format!("job-timing {json}"));
-                    }
+                    timing_record.teardown_ms = Some(duration_ms(teardown_started.elapsed()));
+                    record_job_timing(&timing_config_dir, &forensics, &timing_record);
                     println!(
                         "forensics.lifecycle event=teardown-done timestamp={}",
                         unix_now_iso8601()
@@ -11861,76 +11885,191 @@ const DEFAULT_SLO_FINALIZE_MS: u64 = 2_000;
 const DEFAULT_SLO_TEARDOWN_MS: u64 = 2_000;
 const DEFAULT_SLO_SAMPLE_SIZE: usize = 100;
 
+/// Sample count a quantile needs before it can be told apart from the sample
+/// maximum. With `n` observations the largest quantile the sample can
+/// distinguish is `1 - 1/n`, so `q` needs `n >= 1 / (1 - q)`: p50 needs 2, p95
+/// needs 20, p99 needs 100.
+///
+/// This is the rule `crates/velnor-bench/src/stats.rs` enforces, and it is
+/// here for the same reason: the benchmark script this project deleted printed
+/// a "p95" at `n = 5` that was, by construction, its own maximum. That crate is
+/// maintainer-only tooling that is deliberately never shipped, so the shipped
+/// daemon mirrors the rule rather than taking a dependency on it; hoisting the
+/// one implementation into `velnor-model` is the outstanding consolidation.
+const fn min_samples_for_percentile(percentile: usize) -> usize {
+    if percentile >= 100 {
+        return usize::MAX;
+    }
+    100_usize.div_ceil(100 - percentile)
+}
+
+/// A percentile the sample was large enough to support, or the reason it was
+/// withheld. Mirrors `velnor_bench::stats::Quantile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingQuantile {
+    Value(u64),
+    /// The metric had samples, but too few for this quantile.
+    Unsupported {
+        samples: usize,
+        required: usize,
+    },
+    /// The metric had no samples at all: nothing on record measured it.
+    NoSamples,
+}
+
+impl std::fmt::Display for TimingQuantile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) => write!(formatter, "{value}ms"),
+            Self::Unsupported { samples, required } => {
+                write!(formatter, "unsupported(n={samples}, needs {required})")
+            }
+            Self::NoSamples => write!(formatter, "no-samples"),
+        }
+    }
+}
+
+impl TimingQuantile {
+    const fn value(self) -> Option<u64> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Unsupported { .. } | Self::NoSamples => None,
+        }
+    }
+}
+
+/// One metric's distribution over the SLO window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingSeries {
+    samples: usize,
+    p50: TimingQuantile,
+    p95: TimingQuantile,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TimingPercentiles {
-    queue_p50: Option<u64>,
-    queue_p95: Option<u64>,
-    queue_to_first_step_p50: Option<u64>,
-    queue_to_first_step_p95: Option<u64>,
-    pickup_p50: u64,
-    pickup_p95: u64,
-    first_step_p50: u64,
-    first_step_p95: u64,
-    finalize_p50: u64,
-    finalize_p95: u64,
-    teardown_p50: u64,
-    teardown_p95: u64,
+    queue: TimingSeries,
+    queue_to_first_step: TimingSeries,
+    pickup: TimingSeries,
+    first_step: TimingSeries,
+    finalize: TimingSeries,
+    teardown: TimingSeries,
 }
 
-fn parse_job_timing_line(line: &str) -> Option<JobTimingRecord> {
-    let (_, json) = line.split_once("job-timing ")?;
-    serde_json::from_str(json.trim()).ok()
+/// Typed job-timing sink, one JSON object per line.
+///
+/// The SLO reader used to recover records by splitting `lifecycle.log` on the
+/// literal string `"job-timing "`. That coupled a health signal to the wording
+/// of a prose log: renaming the prefix would have made the SLOs report "no
+/// completed job-timing records yet" — which reads as health — instead of
+/// failing. Emitter and reader now share this file and one serialiser, and the
+/// lifecycle line is kept purely as human forensics.
+const JOB_TIMING_LOG: &str = "job-timing.jsonl";
+
+/// Records retained per slot. The doctor window is
+/// [`DEFAULT_SLO_SAMPLE_SIZE`]; keeping a few multiples of it bounds the file
+/// without needing log rotation.
+const JOB_TIMING_RETAINED: usize = 512;
+
+/// Append one record to the typed sink and mirror it into `lifecycle.log` for
+/// a human reading an incident. Best-effort in both directions: a logging
+/// failure must never affect the runner.
+fn record_job_timing(config_dir: &Path, forensics: &SlotForensics, record: &JobTimingRecord) {
+    let Ok(json) = serde_json::to_string(record) else {
+        return;
+    };
+    forensics.lifecycle(&format!("job-timing {json}"));
+    let dir = config_dir.join("logs");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(JOB_TIMING_LOG);
+    let mut lines: Vec<String> = fs::read_to_string(&path)
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(json);
+    let keep_from = lines.len().saturating_sub(JOB_TIMING_RETAINED);
+    lines.drain(..keep_from);
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let _ = fs::write(&path, body);
 }
 
-fn parse_timestamped_job_timing_line(line: &str) -> Option<(&str, JobTimingRecord)> {
-    let (prefix, _) = line.split_once("job-timing ")?;
-    let timestamp = prefix.split_whitespace().next()?;
-    Some((timestamp, parse_job_timing_line(line)?))
+/// Read one slot's typed job-timing records back through the same serialiser
+/// that wrote them.
+fn read_job_timing_records(logs_dir: &Path) -> Vec<JobTimingRecord> {
+    let Ok(contents) = fs::read_to_string(logs_dir.join(JOB_TIMING_LOG)) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<JobTimingRecord>(line).ok())
+        .collect()
 }
 
-fn percentile(values: &mut [u64], percentile: usize) -> u64 {
-    if values.is_empty() {
-        return 0;
+/// Nearest-rank percentile, withheld when the sample cannot support it.
+fn percentile(values: &mut [u64], percentile: usize) -> TimingQuantile {
+    let samples = values.len();
+    if samples == 0 {
+        return TimingQuantile::NoSamples;
+    }
+    let required = min_samples_for_percentile(percentile);
+    if samples < required {
+        return TimingQuantile::Unsupported { samples, required };
     }
     values.sort_unstable();
-    let rank = (values.len() * percentile).div_ceil(100).saturating_sub(1);
-    values[rank.min(values.len() - 1)]
+    let rank = (samples * percentile).div_ceil(100).saturating_sub(1);
+    TimingQuantile::Value(values[rank.min(samples - 1)])
+}
+
+fn timing_series(mut values: Vec<u64>) -> TimingSeries {
+    let samples = values.len();
+    let p50 = percentile(&mut values, 50);
+    let p95 = percentile(&mut values, 95);
+    TimingSeries { samples, p50, p95 }
 }
 
 fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> {
     if records.is_empty() {
         return None;
     }
-    let mut queue: Vec<_> = records
-        .iter()
-        .filter_map(|record| record.queue_ms)
-        .collect();
-    let mut queue_to_first_step: Vec<_> = records
-        .iter()
-        .filter_map(|record| record.queue_to_first_step_ms)
-        .collect();
-    let mut pickup: Vec<_> = records.iter().map(|record| record.pickup_ms).collect();
-    let mut first_step: Vec<_> = records.iter().map(|record| record.first_step_ms).collect();
-    let mut finalize: Vec<_> = records.iter().map(|record| record.finalize_ms).collect();
-    let mut teardown: Vec<_> = records.iter().map(|record| record.teardown_ms).collect();
+    // Every metric filters out the records that did not measure it, exactly as
+    // queue_ms always has: an unmeasured phase must not contribute a sample.
     Some(TimingPercentiles {
-        queue_p50: optional_percentile(&mut queue, 50),
-        queue_p95: optional_percentile(&mut queue, 95),
-        queue_to_first_step_p50: optional_percentile(&mut queue_to_first_step, 50),
-        queue_to_first_step_p95: optional_percentile(&mut queue_to_first_step, 95),
-        pickup_p50: percentile(&mut pickup.clone(), 50),
-        pickup_p95: percentile(&mut pickup, 95),
-        first_step_p50: percentile(&mut first_step.clone(), 50),
-        first_step_p95: percentile(&mut first_step, 95),
-        finalize_p50: percentile(&mut finalize.clone(), 50),
-        finalize_p95: percentile(&mut finalize, 95),
-        teardown_p50: percentile(&mut teardown.clone(), 50),
-        teardown_p95: percentile(&mut teardown, 95),
+        queue: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.queue_ms)
+                .collect(),
+        ),
+        queue_to_first_step: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.queue_to_first_step_ms)
+                .collect(),
+        ),
+        pickup: timing_series(records.iter().map(|record| record.pickup_ms).collect()),
+        first_step: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.first_step_ms)
+                .collect(),
+        ),
+        finalize: timing_series(records.iter().map(|record| record.finalize_ms).collect()),
+        teardown: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.teardown_ms)
+                .collect(),
+        ),
     })
-}
-
-fn optional_percentile(values: &mut [u64], rank: usize) -> Option<u64> {
-    (!values.is_empty()).then(|| percentile(values, rank))
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -11946,32 +12085,27 @@ fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<Job
     };
     let mut records = Vec::new();
     for (slot_index, slot_dir) in slot_dirs.into_iter().enumerate() {
-        let mut line_index = 0_usize;
-        for file_name in [format!("{LIFECYCLE_LOG}.1"), LIFECYCLE_LOG.to_string()] {
-            let path = slot_dir.join("logs").join(file_name);
-            let Ok(contents) = fs::read_to_string(path) else {
-                continue;
-            };
-            for line in contents.lines() {
-                if let Some((timestamp, record)) = parse_timestamped_job_timing_line(line) {
-                    records.push((timestamp.to_owned(), slot_index, line_index, record));
-                }
-                line_index = line_index.saturating_add(1);
-            }
+        for (line_index, record) in read_job_timing_records(&slot_dir.join("logs"))
+            .into_iter()
+            .enumerate()
+        {
+            records.push((slot_index, line_index, record));
         }
     }
+    // Ordered by the record's own typed completion timestamp, not by a
+    // timestamp scraped off a log line. unix_now_iso8601 is fixed-width UTC,
+    // so a lexicographic compare is a chronological one; slot and write order
+    // break ties deterministically.
     records.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
+        left.2
+            .completed_at
+            .cmp(&right.2.completed_at)
+            .then(left.0.cmp(&right.0))
             .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
     });
     let keep_from = records.len().saturating_sub(limit);
     records.drain(..keep_from);
-    records
-        .into_iter()
-        .map(|(_, _, _, record)| record)
-        .collect()
+    records.into_iter().map(|(_, _, record)| record).collect()
 }
 
 fn print_doctor_slos(records: &[JobTimingRecord]) {
@@ -11979,76 +12113,64 @@ fn print_doctor_slos(records: &[JobTimingRecord]) {
         println!("timing SLOs: no completed job-timing records yet");
         return;
     };
-    let queue_budget = env_u64("VELNOR_SLO_QUEUE_MS", DEFAULT_SLO_QUEUE_MS);
-    let queue_to_first_step_budget = env_u64(
-        "VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS",
-        DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS,
-    );
-    let pickup_budget = env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS);
-    let first_step_budget = env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS);
-    let finalize_budget = env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS);
-    let teardown_budget = env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS);
     println!("timing SLOs: samples={}", records.len());
-    if let (Some(p50), Some(p95)) = (summary.queue_p50, summary.queue_p95) {
-        let state = timing_slo_state(p95, queue_budget);
-        println!("  queue: p50={p50}ms p95={p95}ms budget={queue_budget}ms {state}");
-        if p95 > queue_budget {
-            eprintln!("WARNING: timing SLO breach: queue p95={p95}ms exceeds {queue_budget}ms");
-        }
-    }
-    if let (Some(p50), Some(p95)) = (
-        summary.queue_to_first_step_p50,
-        summary.queue_to_first_step_p95,
-    ) {
-        let state = timing_slo_state(p95, queue_to_first_step_budget);
-        println!(
-            "  queue-to-first-step: p50={p50}ms p95={p95}ms budget={queue_to_first_step_budget}ms {state}"
-        );
-        if p95 > queue_to_first_step_budget {
-            eprintln!(
-                "WARNING: timing SLO breach: queue-to-first-step p95={p95}ms exceeds {queue_to_first_step_budget}ms"
-            );
-        }
-    }
-    for (name, p50, p95, budget) in [
+    for (name, series, budget) in [
+        (
+            "queue",
+            summary.queue,
+            env_u64("VELNOR_SLO_QUEUE_MS", DEFAULT_SLO_QUEUE_MS),
+        ),
+        (
+            "queue-to-first-step",
+            summary.queue_to_first_step,
+            env_u64(
+                "VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS",
+                DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS,
+            ),
+        ),
         (
             "pickup",
-            summary.pickup_p50,
-            summary.pickup_p95,
-            pickup_budget,
+            summary.pickup,
+            env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS),
         ),
         (
             "pickup-to-first-step",
-            summary.first_step_p50,
-            summary.first_step_p95,
-            first_step_budget,
+            summary.first_step,
+            env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS),
         ),
         (
             "finalize",
-            summary.finalize_p50,
-            summary.finalize_p95,
-            finalize_budget,
+            summary.finalize,
+            env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS),
         ),
         (
             "teardown",
-            summary.teardown_p50,
-            summary.teardown_p95,
-            teardown_budget,
+            summary.teardown,
+            env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS),
         ),
     ] {
-        let state = timing_slo_state(p95, budget);
-        println!("  {name}: p50={p50}ms p95={p95}ms budget={budget}ms {state}");
-        if p95 > budget {
+        let state = timing_slo_state(series.p95, budget);
+        println!(
+            "  {name}: n={} p50={} p95={} budget={budget}ms {state}",
+            series.samples, series.p50, series.p95
+        );
+        if let Some(p95) = series.p95.value()
+            && p95 > budget
+        {
             eprintln!("WARNING: timing SLO breach: {name} p95={p95}ms exceeds {budget}ms");
         }
     }
 }
 
-fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
-    if p95 > budget {
-        "WARN"
-    } else {
-        "PASS"
+/// A budget can only be met by a percentile the sample actually supports.
+/// Reporting PASS for a metric nothing measured, or for one measured too few
+/// times, is the failure this replaces: it reads as health.
+fn timing_slo_state(p95: TimingQuantile, budget: u64) -> &'static str {
+    match p95 {
+        TimingQuantile::Value(p95) if p95 > budget => "WARN",
+        TimingQuantile::Value(_) => "PASS",
+        TimingQuantile::Unsupported { .. } => "UNSUPPORTED",
+        TimingQuantile::NoSamples => "NO-SAMPLES",
     }
 }
 
@@ -12446,6 +12568,7 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slot_log::LIFECYCLE_LOG;
 
     #[test]
     fn workflow_source_context_requires_exact_workflow_sha() {
@@ -18946,15 +19069,23 @@ runs:
         JobTimingRecord {
             v: 1,
             job_id: job_id.to_string(),
+            completed_at: "2026-07-18T00:00:00.0000000Z".to_string(),
             queue_ms: Some(20),
             queue_to_first_step_ms: Some(50),
             pickup_ms,
-            first_step_ms: 30,
-            checkout_ms: 20,
-            container_boot_ms: 30,
-            steps_ms: 40,
+            first_step_ms: Some(30),
+            checkout_ms: Some(20),
+            container_boot_ms: Some(30),
+            steps_ms: Some(40),
             finalize_ms: 50,
-            teardown_ms: 60,
+            teardown_ms: Some(60),
+        }
+    }
+
+    fn timing_record_at(job_id: &str, completed_at: &str) -> JobTimingRecord {
+        JobTimingRecord {
+            completed_at: completed_at.to_string(),
+            ..timing_record(job_id, 1)
         }
     }
 
@@ -18970,21 +19101,20 @@ runs:
     }
 
     #[test]
-    fn timing_record_reads_legacy_json_without_queue_fields() {
-        let legacy = r#"{
+    fn timing_record_reads_json_without_optional_fields() {
+        let sparse = r#"{
             "v": 1,
-            "job_id": "legacy",
+            "job_id": "sparse",
             "pickup_ms": 10,
-            "first_step_ms": 20,
-            "checkout_ms": 3,
-            "container_boot_ms": 4,
-            "steps_ms": 5,
-            "finalize_ms": 6,
-            "teardown_ms": 7
+            "finalize_ms": 6
         }"#;
-        let record: JobTimingRecord = serde_json::from_str(legacy).unwrap();
+        let record: JobTimingRecord = serde_json::from_str(sparse).unwrap();
         assert_eq!(record.queue_ms, None);
         assert_eq!(record.queue_to_first_step_ms, None);
+        // An absent duration is "not measured", never zero.
+        assert_eq!(record.first_step_ms, None);
+        assert_eq!(record.container_boot_ms, None);
+        assert_eq!(record.teardown_ms, None);
     }
 
     #[cfg(unix)]
@@ -19142,16 +19272,31 @@ runs:
         abandoned_precreated_environment_cleanup_takes_lease_impl();
     }
 
+    /// The emitter and the reader are bound to each other, not to the wording
+    /// of a prose log line: whatever `record_job_timing` writes is exactly what
+    /// `recent_job_timings` reads back.
     #[test]
-    fn timing_parser_ignores_unrelated_and_malformed_lines() {
-        assert!(parse_job_timing_line("broker session created").is_none());
-        assert!(parse_job_timing_line("job-timing not-json").is_none());
-        let record = timing_record("job-2", 11);
-        let line = format!(
-            "2026-07-18T00:00:00Z runner=slot-1 job-timing {}",
-            serde_json::to_string(&record).unwrap()
+    fn job_timing_round_trips_from_emitter_to_slo_reader() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        // Single-slot layout: the slot config dir is the config base itself.
+        let slot = root.clone();
+        fs::create_dir_all(slot.join("logs")).unwrap();
+        let forensics = SlotForensics::new(slot.join("logs"), "runner=slot-1".to_string());
+        let first = timing_record_at("first", "2026-07-18T00:00:00.0000000Z");
+        let second = timing_record_at("second", "2026-07-18T00:00:01.0000000Z");
+
+        record_job_timing(&slot, &forensics, &first);
+        record_job_timing(&slot, &forensics, &second);
+
+        assert_eq!(
+            recent_job_timings(&root, 1, 100),
+            vec![first.clone(), second.clone()]
         );
-        assert_eq!(parse_job_timing_line(&line), Some(record));
+        assert_eq!(recent_job_timings(&root, 1, 1), vec![second]);
+        // The human lifecycle line stays, but nothing parses it any more.
+        let lifecycle = fs::read_to_string(slot.join("logs").join(LIFECYCLE_LOG)).unwrap();
+        assert!(lifecycle.contains("job-timing "));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -19160,19 +19305,101 @@ runs:
         let mut slow = timing_record("slow", 9_000);
         slow.queue_ms = Some(8_000);
         slow.queue_to_first_step_ms = Some(21_000);
-        slow.first_step_ms = 4_000;
+        slow.first_step_ms = Some(4_000);
         let summary = timing_percentiles(&[fast, slow]).unwrap();
-        assert_eq!(summary.queue_p95, Some(8_000));
-        assert_eq!(summary.queue_to_first_step_p95, Some(21_000));
-        assert_eq!(summary.pickup_p50, 100);
-        assert_eq!(summary.pickup_p95, 9_000);
-        assert_eq!(summary.first_step_p95, 4_000);
+        // Two samples support a p50 but not a p95.
+        assert_eq!(summary.pickup.p50, TimingQuantile::Value(100));
+        assert_eq!(
+            summary.pickup.p95,
+            TimingQuantile::Unsupported {
+                samples: 2,
+                required: 20
+            }
+        );
+        assert_eq!(summary.queue.p50, TimingQuantile::Value(20));
+        assert_eq!(summary.queue_to_first_step.p50, TimingQuantile::Value(50));
+        assert_eq!(summary.first_step.p50, TimingQuantile::Value(30));
+    }
+
+    #[test]
+    fn percentile_thresholds_match_the_bench_crate_rule() {
+        assert_eq!(min_samples_for_percentile(50), 2);
+        assert_eq!(min_samples_for_percentile(95), 20);
+        assert_eq!(min_samples_for_percentile(99), 100);
+    }
+
+    /// The window holds 100 records, so a supported p95 is reachable; a single
+    /// completed job must never report itself as one.
+    #[test]
+    fn a_single_job_is_never_its_own_p95() {
+        let one = [timing_record("only", 9_999)];
+        let summary = timing_percentiles(&one).unwrap();
+        assert_eq!(
+            summary.pickup.p95,
+            TimingQuantile::Unsupported {
+                samples: 1,
+                required: 20
+            }
+        );
+        assert_eq!(timing_slo_state(summary.pickup.p95, 10), "UNSUPPORTED");
+
+        let many: Vec<_> = (0..20)
+            .map(|index| timing_record(&format!("job-{index}"), index as u64 * 100))
+            .collect();
+        let summary = timing_percentiles(&many).unwrap();
+        assert_eq!(summary.pickup.p95, TimingQuantile::Value(1_800));
+        assert_eq!(timing_slo_state(summary.pickup.p95, 1_000), "WARN");
+        assert_eq!(timing_slo_state(summary.pickup.p95, 2_000), "PASS");
+    }
+
+    /// BC-32/BC-33: teardown_ms used to be built as a literal 0, so the
+    /// teardown SLO could never breach. An unmeasured teardown must now be
+    /// absent from the sample rather than a zero-millisecond one.
+    #[test]
+    fn unmeasured_teardown_reports_no_samples_instead_of_passing() {
+        let records: Vec<_> = (0..25)
+            .map(|index| JobTimingRecord {
+                teardown_ms: None,
+                container_boot_ms: None,
+                first_step_ms: None,
+                queue_to_first_step_ms: None,
+                ..timing_record(&format!("job-{index}"), 10)
+            })
+            .collect();
+
+        let summary = timing_percentiles(&records).unwrap();
+
+        assert_eq!(summary.teardown.samples, 0);
+        assert_eq!(summary.teardown.p95, TimingQuantile::NoSamples);
+        assert_eq!(
+            timing_slo_state(summary.teardown.p95, DEFAULT_SLO_TEARDOWN_MS),
+            "NO-SAMPLES"
+        );
+        assert_eq!(summary.first_step.p95, TimingQuantile::NoSamples);
+        // A measured teardown over budget still breaches.
+        let breached: Vec<_> = (0..25)
+            .map(|index| JobTimingRecord {
+                teardown_ms: Some(DEFAULT_SLO_TEARDOWN_MS + 1),
+                ..timing_record(&format!("job-{index}"), 10)
+            })
+            .collect();
+        let summary = timing_percentiles(&breached).unwrap();
+        assert_eq!(
+            timing_slo_state(summary.teardown.p95, DEFAULT_SLO_TEARDOWN_MS),
+            "WARN"
+        );
     }
 
     #[test]
     fn doctor_timing_slo_marks_pass_and_breach() {
-        assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
-        assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+        assert_eq!(
+            timing_slo_state(TimingQuantile::Value(3_000), 3_000),
+            "PASS"
+        );
+        assert_eq!(
+            timing_slo_state(TimingQuantile::Value(3_001), 3_000),
+            "WARN"
+        );
     }
 
     #[test]
@@ -19198,59 +19425,75 @@ runs:
     }
 
     #[test]
-    fn recent_job_timings_reads_rotated_logs_and_honors_limit() {
+    fn recent_job_timings_ignores_the_prose_lifecycle_log() {
         let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
         let logs = root.join("logs");
         fs::create_dir_all(&logs).unwrap();
-        let old = timing_record("old", 1);
-        let current = timing_record("current", 2);
-        fs::write(
-            logs.join(format!("{LIFECYCLE_LOG}.1")),
-            format!(
-                "2026-07-18T00:00:00Z job-timing {}\n",
-                serde_json::to_string(&old).unwrap()
-            ),
-        )
-        .unwrap();
+        let record = timing_record("prose-only", 1);
+        // A record that only ever reached lifecycle.log is not a timing sample:
+        // the reader is bound to the typed sink, not to log wording.
         fs::write(
             logs.join(LIFECYCLE_LOG),
             format!(
                 "2026-07-18T00:00:01Z job-timing {}\n",
-                serde_json::to_string(&current).unwrap()
+                serde_json::to_string(&record).unwrap()
             ),
         )
         .unwrap();
-        assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
+
+        assert!(recent_job_timings(&root, 1, 10).is_empty());
+
+        fs::write(
+            logs.join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(recent_job_timings(&root, 1, 10), vec![record]);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn recent_job_timings_orders_records_across_slots_by_timestamp() {
+    fn recent_job_timings_orders_records_across_slots_by_completion_time() {
         let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
         for slot in 1..=2 {
             fs::create_dir_all(root.join("slots").join(format!("slot-{slot}")).join("logs"))
                 .unwrap();
         }
-        let newest = timing_record("newest-slot-1", 1);
-        let older = timing_record("older-slot-2", 2);
+        let newest = timing_record_at("newest-slot-1", "2026-07-18T00:00:02.0000000Z");
+        let older = timing_record_at("older-slot-2", "2026-07-18T00:00:01.0000000Z");
         fs::write(
-            root.join("slots/slot-1/logs").join(LIFECYCLE_LOG),
-            format!(
-                "2026-07-18T00:00:02Z job-timing {}\n",
-                serde_json::to_string(&newest).unwrap()
-            ),
+            root.join("slots/slot-1/logs").join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&newest).unwrap()),
         )
         .unwrap();
         fs::write(
-            root.join("slots/slot-2/logs").join(LIFECYCLE_LOG),
-            format!(
-                "2026-07-18T00:00:01Z job-timing {}\n",
-                serde_json::to_string(&older).unwrap()
-            ),
+            root.join("slots/slot-2/logs").join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&older).unwrap()),
         )
         .unwrap();
 
         assert_eq!(recent_job_timings(&root, 2, 1), vec![newest]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn job_timing_sink_is_bounded() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        let slot = root.clone();
+        fs::create_dir_all(slot.join("logs")).unwrap();
+        let forensics = SlotForensics::new(slot.join("logs"), "runner=slot-1".to_string());
+        for index in 0..(JOB_TIMING_RETAINED + 5) {
+            record_job_timing(
+                &slot,
+                &forensics,
+                &timing_record(&format!("job-{index}"), 1),
+            );
+        }
+
+        let retained = read_job_timing_records(&slot.join("logs"));
+
+        assert_eq!(retained.len(), JOB_TIMING_RETAINED);
+        assert_eq!(retained[0].job_id, "job-5");
         fs::remove_dir_all(root).unwrap();
     }
 
