@@ -826,8 +826,14 @@ struct RustScenario {
     job: &'static str,
     /// Substrings the serialized job must contain.
     required: &'static [(&'static str, &'static str)],
-    /// Substrings the serialized job must NOT contain.
-    forbidden: &'static [(&'static str, &'static str)],
+    /// Environment names the job and its steps must not declare. A trailing
+    /// `*` matches a prefix. Declared names are checked structurally so a
+    /// scenario may still *read* a variable it must not *set*.
+    forbidden_env: &'static [&'static str],
+    /// Action repositories no step of the job may reference.
+    forbidden_uses: &'static [&'static str],
+    /// Reject an `actions/cache` step that persists the Cargo `target/` tree.
+    forbid_target_cache: bool,
 }
 
 /// The Rust scenarios the fixture must cover.
@@ -852,14 +858,13 @@ fn fixture_rust_scenarios() -> &'static [RustScenario] {
                 ("nextest invocation", "cargo nextest run"),
                 ("scenario evidence", "rust-default"),
             ],
-            forbidden: &[
-                ("job-level compiler-cache wrapper", "RUSTC_WRAPPER"),
-                ("explicit sccache action", "mozilla-actions/sccache-action"),
-                ("explicit sccache environment", "SCCACHE_"),
-                ("explicit Mr Boxington action", "jdx/mr-boxington-action"),
-                ("acceleration opt-out", "MBX_DISABLE"),
-                ("cargo target cache", "path: target"),
+            forbidden_env: &["RUSTC_WRAPPER", "SCCACHE_*", "MBX_*"],
+            forbidden_uses: &[
+                "mozilla-actions/sccache-action",
+                "jdx/mr-boxington-action",
+                "kunobi-ninja/kache-action",
             ],
+            forbid_target_cache: true,
         },
         RustScenario {
             id: "B explicit sccache compatibility",
@@ -870,7 +875,9 @@ fn fixture_rust_scenarios() -> &'static [RustScenario] {
                 ("local sccache environment", "SCCACHE_GHA_ENABLED"),
                 ("scenario evidence", "rust-sccache"),
             ],
-            forbidden: &[],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
         },
         RustScenario {
             id: "C explicit acceleration opt-out",
@@ -879,10 +886,9 @@ fn fixture_rust_scenarios() -> &'static [RustScenario] {
                 ("acceleration opt-out", "MBX_DISABLE"),
                 ("scenario evidence", "rust-accel-optout"),
             ],
-            forbidden: &[
-                ("explicit sccache action", "mozilla-actions/sccache-action"),
-                ("job-level compiler-cache wrapper", "RUSTC_WRAPPER"),
-            ],
+            forbidden_env: &["RUSTC_WRAPPER", "SCCACHE_*"],
+            forbidden_uses: &["mozilla-actions/sccache-action"],
+            forbid_target_cache: true,
         },
         RustScenario {
             id: "D cache interaction",
@@ -892,7 +898,9 @@ fn fixture_rust_scenarios() -> &'static [RustScenario] {
                 ("cache restore-keys", "restore-keys:"),
                 ("scenario evidence", "rust-cache-interaction"),
             ],
-            forbidden: &[],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
         },
         RustScenario {
             id: "E parallel Rust",
@@ -901,7 +909,9 @@ fn fixture_rust_scenarios() -> &'static [RustScenario] {
                 ("parallel shard matrix", "shard:"),
                 ("scenario evidence", "rust-parallel"),
             ],
-            forbidden: &[],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
         },
     ]
 }
@@ -948,17 +958,108 @@ fn check_rust_scenarios(content: &str) -> Vec<String> {
                 ));
             }
         }
-        for (label, snippet) in scenario.forbidden {
-            if body.contains(snippet) {
+        for name in rust_scenario_declared_env(job) {
+            if let Some(rule) = scenario
+                .forbidden_env
+                .iter()
+                .find(|rule| environment_name_matches(rule, &name))
+            {
                 failures.push(format!(
-                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not declare {label}: {snippet}",
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not declare environment {name} (rule {rule})",
                     scenario.id, scenario.job
                 ));
+            }
+        }
+        for reference in rust_scenario_step_uses(job) {
+            if let Some(forbidden) = scenario
+                .forbidden_uses
+                .iter()
+                .find(|forbidden| reference.contains(*forbidden))
+            {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not use {forbidden}: {reference}",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+        if scenario.forbid_target_cache {
+            for path in rust_scenario_cached_paths(job) {
+                if path == "target" || path.starts_with("target/") {
+                    failures.push(format!(
+                        "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not cache the Cargo target tree: {path}",
+                        scenario.id, scenario.job
+                    ));
+                }
             }
         }
     }
 
     failures
+}
+
+/// Match one `forbidden_env` rule: an exact name, or a `PREFIX_*` prefix.
+fn environment_name_matches(rule: &str, name: &str) -> bool {
+    match rule.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == rule,
+    }
+}
+
+/// Environment names a job declares, at job level and on each of its steps.
+fn rust_scenario_declared_env(job: &serde_yaml::Value) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut collect = |value: Option<&serde_yaml::Value>| {
+        if let Some(mapping) = value.and_then(serde_yaml::Value::as_mapping) {
+            names.extend(mapping.keys().cloned());
+        }
+    };
+    collect(job.get("env"));
+    for step in rust_scenario_steps(job) {
+        collect(step.get("env"));
+    }
+    names
+}
+
+fn rust_scenario_steps(job: &serde_yaml::Value) -> &[serde_yaml::Value] {
+    job.get("steps")
+        .and_then(serde_yaml::Value::as_sequence)
+        .map_or(&[][..], |steps| steps.as_slice())
+}
+
+fn rust_scenario_step_uses(job: &serde_yaml::Value) -> Vec<String> {
+    rust_scenario_steps(job)
+        .iter()
+        .filter_map(|step| step.get("uses").and_then(serde_yaml::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Paths each `actions/cache` step of the job persists.
+fn rust_scenario_cached_paths(job: &serde_yaml::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for step in rust_scenario_steps(job) {
+        let uses = step
+            .get("uses")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_default();
+        if !uses.starts_with("actions/cache") {
+            continue;
+        }
+        let Some(path) = step
+            .get("with")
+            .and_then(|with| with.get("path"))
+            .and_then(serde_yaml::Value::as_str)
+        else {
+            continue;
+        };
+        paths.extend(
+            path.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    paths
 }
 
 fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
@@ -4555,17 +4656,17 @@ mno\trefs/tags/not-a-runner-release
             .expect("the default Velnor Rust path is mandatory");
         assert!(
             default_scenario
-                .forbidden
-                .iter()
-                .any(|(_, snippet)| *snippet == "mozilla-actions/sccache-action"),
+                .forbidden_uses
+                .contains(&"mozilla-actions/sccache-action"),
             "the default path must not declare the sccache action"
         );
         assert!(
-            default_scenario
-                .forbidden
-                .iter()
-                .any(|(_, snippet)| *snippet == "RUSTC_WRAPPER"),
-            "the default path must not set a job-level compiler-cache wrapper"
+            default_scenario.forbidden_env.contains(&"RUSTC_WRAPPER"),
+            "the default path must not set a compiler-cache wrapper"
+        );
+        assert!(
+            default_scenario.forbid_target_cache,
+            "the default path must not cache the Cargo target tree"
         );
 
         // sccache is one scenario among several, never a fixture-wide
@@ -4585,11 +4686,16 @@ mno\trefs/tags/not-a-runner-release
         let workflow = r#"
 jobs:
   rust-default:
-    steps:
-      - uses: mozilla-actions/sccache-action@0000000000000000000000000000000000000000
-      - run: cargo nextest run --locked -p app-a
     env:
       RUSTC_WRAPPER: sccache
+    steps:
+      - uses: mozilla-actions/sccache-action@0000000000000000000000000000000000000000
+      - uses: actions/cache@1111111111111111111111111111111111111111
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+      - run: cargo nextest run --locked -p app-a
 "#;
 
         let failures = check_rust_scenarios(workflow);
@@ -4597,13 +4703,19 @@ jobs:
         assert!(
             failures
                 .iter()
-                .any(|failure| failure.contains("must not declare explicit sccache action")),
+                .any(|failure| failure.contains("must not use mozilla-actions/sccache-action")),
             "{failures:?}"
         );
         assert!(
-            failures.iter().any(
-                |failure| failure.contains("must not declare job-level compiler-cache wrapper")
-            ),
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not declare environment RUSTC_WRAPPER")),
+            "{failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not cache the Cargo target tree")),
             "{failures:?}"
         );
         for scenario in fixture_rust_scenarios().iter().skip(1) {
