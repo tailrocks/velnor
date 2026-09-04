@@ -68,13 +68,14 @@ notes[]
 
 `observations[].git` is tagged evidence, not an unqualified counter object:
 `{"status":"not_measured"}` for drivers without Git tracing,
-`{"status":"no_git_process"}` after the trace destination passes a Git
-preflight but the measured command emits no Git process, and
+`{"status":"no_git_process"}` only when an authoritative measured-window
+child-exec census proves that no Git process ran, and
 `{"status":"observed","counters":{...},"successful":true|false}` when
 complete Trace2 lifecycles were observed. Concurrent workers may emit
 `status: "mixed"` with observed counters and explicit worker counts. A
 complete non-zero Git lifecycle remains observed with `successful: false`;
-malformed or incomplete evidence fails the run.
+malformed, incomplete, or missing evidence fails the current Cargo-direct run
+until that child census exists.
 
 Each summary carries `samples, min, max, mean, variance, p50, p95, p99`.
 
@@ -134,11 +135,11 @@ readable from `trace.jsonl` with no new sink.
 
 Byte and ref counters do **not** need a runner change: `gittrace` sets
 `GIT_TRACE2_EVENT` on the Git processes Cargo spawns and reads the documented
-event JSON back. Each measured worker first runs a traced Git preflight and
-clears that file before timing, so a missing post-command file is explicit
-`no_git_process` evidence rather than fabricated zero counters. For jobs the
-runner drives, the runner must set the same variable on its Git children for
-those counters to appear.
+event JSON back. A missing post-command file currently fails closed because
+the harness lacks an authoritative child-exec census; it must not be inferred
+from a separate preflight. For jobs the runner drives, the runner must set the
+same variable on its Git children for those counters to appear and provide the
+child census before emitting `no_git_process`.
 
 ## Coverage inherited from the deleted script
 

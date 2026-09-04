@@ -619,11 +619,8 @@ impl Workload for CargoWorkload {
         // Setup and priming are not the measured user command. Reset the
         // process/resource census and establish the disk baseline immediately
         // before the command; snapshot all observation inputs before restore.
-        let work_root = context.work_root.clone();
-        let trace_files = self.prepare_trace_files(context, &work_root)?;
-        // The trace preflight proves setup, but is outside the measured
-        // command and must not pollute process or resource counts.
         context.runner.reset();
+        let trace_files = self.prepare_trace_files(&context.work_root)?;
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
@@ -690,11 +687,7 @@ impl Workload for CargoWorkload {
 }
 
 impl CargoWorkload {
-    fn prepare_trace_files(
-        &mut self,
-        context: &mut Context,
-        work_root: &Path,
-    ) -> Result<Vec<PathBuf>> {
+    fn prepare_trace_files(&mut self, work_root: &Path) -> Result<Vec<PathBuf>> {
         // Git resolves GIT_TRACE2_EVENT relative to each worker's workspace.
         // Use one absolute root so every worker writes to the path we later
         // read, regardless of the caller's relative --work-root spelling.
@@ -722,36 +715,6 @@ impl CargoWorkload {
             // Register before clearing or allowing Git tracing to create the
             // file. A partial setup remains owned by teardown.
             self.scratch.traces.push(trace_file.clone());
-            clear_trace_file(&trace_file)?;
-            let worktree_index = if self.plan.workspace == Workspace::PerConcurrentJob {
-                worker_index
-            } else {
-                self.scratch.worktrees.len().saturating_sub(1)
-            };
-            let workspace = self
-                .scratch
-                .worktrees
-                .get(worktree_index)
-                .map(|worktree| worktree.path.as_path())
-                .context("Cargo workload has no worktree for Git trace preflight")?;
-            let env = gittrace::trace_env(&trace_file);
-            let invocation = context
-                .runner
-                .exec("git", &["--version"], Some(workspace), &env)
-                .context("spawning Git trace preflight")?;
-            if !invocation.ok() {
-                bail!(
-                    "Git trace preflight failed with status {}: {}",
-                    invocation.code,
-                    invocation.stderr.trim()
-                );
-            }
-            let preflight = GitTrace::from_event_file(&trace_file).with_context(|| {
-                format!("validating Git trace preflight {}", trace_file.display())
-            })?;
-            if !preflight.successful || preflight.counters.processes == 0 {
-                bail!("Git trace preflight did not produce a successful Git lifecycle");
-            }
             clear_trace_file(&trace_file)?;
             trace_files.push(trace_file);
         }
@@ -1000,40 +963,28 @@ fn read_trace_files(paths: &[PathBuf]) -> Result<GitEvidence> {
     }
     let mut counters = GitCounters::default();
     let mut successful = true;
-    let mut observed_workers = 0_u64;
-    let mut no_git_workers = 0_u64;
     for path in paths {
         let trace = match GitTrace::from_event_file(path) {
             Ok(trace) => trace,
             Err(gittrace::TraceError::Read { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
-                no_git_workers = no_git_workers.saturating_add(1);
-                continue;
+                return Err(anyhow::anyhow!(
+                    "worker Git trace {} is missing; refusing to infer no Git process without an authoritative measured-window child-exec census",
+                    path.display()
+                ));
             }
             Err(error) => {
                 return Err(anyhow::Error::new(error)
                     .context(format!("reading worker Git trace {}", path.display())));
             }
         };
-        observed_workers = observed_workers.saturating_add(1);
         successful &= trace.successful;
         counters.merge(trace.counters);
     }
-    if observed_workers == 0 {
-        return Ok(GitEvidence::NoGitProcess);
-    }
-    if no_git_workers == 0 {
-        return Ok(GitEvidence::Observed {
-            counters,
-            successful,
-        });
-    }
-    Ok(GitEvidence::Mixed {
+    Ok(GitEvidence::Observed {
         counters,
         successful,
-        observed_workers,
-        no_git_workers,
     })
 }
 
@@ -1700,20 +1651,9 @@ mod tests {
         assert_eq!(counters.processes, 2);
 
         let no_git = root.join("no-git.jsonl");
-        assert!(matches!(
-            read_trace_files(std::slice::from_ref(&no_git)),
-            Ok(GitEvidence::NoGitProcess)
-        ));
-        let mixed = read_trace_files(&[first.clone(), no_git]).expect("mixed workers");
-        assert!(matches!(
-            mixed,
-            GitEvidence::Mixed {
-                observed_workers: 1,
-                no_git_workers: 1,
-                successful: true,
-                ..
-            }
-        ));
+        let error = read_trace_files(std::slice::from_ref(&no_git))
+            .expect_err("missing child evidence must fail closed");
+        assert!(error.to_string().contains("authoritative"), "{error:#}");
 
         let malformed = root.join("malformed.jsonl");
         std::fs::write(&malformed, "not json\n").expect("write malformed trace");
