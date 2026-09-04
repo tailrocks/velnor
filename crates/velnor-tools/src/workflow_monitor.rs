@@ -1,12 +1,12 @@
 //! Read-only correlation of GitHub workflow state and local Velnor evidence.
 
 use anyhow::{bail, Context, Result};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,6 +15,10 @@ use time::OffsetDateTime;
 use velnor_client::{ResourceQuery, UnixControlClient, UnixEndpoint};
 
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+const GITHUB_API_URL: &str = "https://api.github.com";
+const GITHUB_API_VERSION: &str = "2026-03-10";
+const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const GITHUB_USER_AGENT: &str = "velnor-tools-workflow-monitor";
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Configuration for monitoring one GitHub Actions run.
@@ -298,17 +302,42 @@ pub fn monitor_workflow_run<'a>(
 }
 
 fn fetch_run(repo: &str, run_id: u64, timeout: Duration) -> Result<GitHubActionsRun> {
-    let endpoint = format!("repos/{repo}/actions/runs/{run_id}");
-    let output = run_command_with_timeout("gh", &["api", &endpoint], timeout)
-        .with_context(|| format!("run gh api {endpoint}"))?;
-    if !output.status.success() {
-        bail!(
-            "gh api {endpoint} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    if timeout.is_zero() {
+        bail!("GitHub request timeout must be greater than zero");
     }
-    serde_json::from_slice(&output.stdout)
+
+    let token = github_token()?;
+    let endpoint = format!("{GITHUB_API_URL}/repos/{repo}/actions/runs/{run_id}");
+    let client = Client::builder()
+        .timeout(timeout.min(GITHUB_REQUEST_TIMEOUT))
+        .user_agent(GITHUB_USER_AGENT)
+        .build()
+        .context("build GitHub workflow monitor HTTP client")?;
+    let response = client
+        .get(&endpoint)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .send()
+        .with_context(|| format!("fetch GitHub Actions run {run_id} for {repo}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("GitHub Actions run {run_id} request failed with HTTP {status}");
+    }
+    response
+        .json()
         .with_context(|| format!("parse GitHub Actions run {run_id} response"))
+}
+
+fn github_token() -> Result<String> {
+    for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(variable)
+            && !value.trim().is_empty()
+        {
+            return Ok(value);
+        }
+    }
+    bail!("workflow monitor requires a GitHub token in GITHUB_TOKEN (or GH_TOKEN); none found")
 }
 
 fn collect_velnor_observation(instance: &str, deadline: Instant) -> VelnorObservation {
@@ -413,43 +442,6 @@ fn unavailable_velnor_observation(instance: String, error: impl Into<String>) ->
         available: false,
         snapshots: std::collections::BTreeMap::new(),
         errors: vec![error.into()],
-    }
-}
-
-fn run_command_with_timeout(
-    program: &str,
-    arguments: &[&str],
-    timeout: Duration,
-) -> Result<std::process::Output> {
-    let mut child = Command::new(program)
-        .args(arguments)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn {program}"))?;
-    let started = Instant::now();
-    loop {
-        match child
-            .try_wait()
-            .with_context(|| format!("wait for {program}"))?
-        {
-            Some(_) => {
-                return child
-                    .wait_with_output()
-                    .with_context(|| format!("collect {program} output"));
-            }
-            None if Instant::now().duration_since(started) >= timeout => {
-                child
-                    .kill()
-                    .with_context(|| format!("stop timed-out {program}"))?;
-                let _ = child.wait();
-                bail!("{program} timed out after {} ms", timeout.as_millis());
-            }
-            None => {
-                let remaining = timeout.saturating_sub(Instant::now().duration_since(started));
-                thread::sleep(Duration::from_millis(25).min(remaining));
-            }
-        }
     }
 }
 
