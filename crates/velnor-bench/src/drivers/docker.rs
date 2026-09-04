@@ -15,7 +15,7 @@ use std::{
 use anyhow::{bail, Context as _, Result};
 
 use crate::{
-    drivers::{Context, Workload},
+    drivers::{isolated_docker::IsolatedDockerDaemon, Context, Workload},
     gittrace::GitEvidence,
     record::{Observation, Resources},
     scenario::Scenario,
@@ -28,6 +28,8 @@ use crate::{
 enum Kind {
     /// Image already on the host; measures pure container lifecycle.
     ExistingImage,
+    /// Pulls an image through a disposable daemon with a private data root.
+    ImagePull,
     /// Job-shaped container: workspace mount plus a user command.
     JobContainer,
     /// Job container plus a linked service container and a readiness wait.
@@ -516,11 +518,8 @@ fn remove_network_id(context: &mut Context, id: &str) -> Result<()> {
 pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
     let kind = match scenario.id {
         "docker/existing-image" => Kind::ExistingImage,
+        "docker/image-pull" => Kind::ImagePull,
         "docker/simple-job-container" => Kind::JobContainer,
-        "docker/image-pull" => bail!(
-            "docker/image-pull is disabled: an isolated Docker daemon/data root is required; \
-             refusing to mutate the shared Docker daemon"
-        ),
         "docker/service-container" => Kind::ServiceContainer,
         "docker/build-cached" => Kind::BuildCached,
         "docker/build-uncached" => Kind::BuildUncached,
@@ -910,6 +909,13 @@ impl Workload for DockerWorkload {
             bail!("Docker workload still owns scratch; teardown is required before prepare");
         }
         self.scratch.allocate(&context.work_root)?;
+        if self.kind == Kind::ImagePull {
+            self.notes.push(
+                "image-pull uses a disposable isolated Docker daemon for every measured iteration"
+                    .to_owned(),
+            );
+            return Ok(());
+        }
         let job_image = context.job_image.clone();
         self.measured_job_image = Some(prepare_image(context, &job_image, false, "job image")?);
         if self.kind == Kind::ServiceContainer {
@@ -963,6 +969,7 @@ impl Workload for DockerWorkload {
             Kind::ExistingImage | Kind::JobContainer => {
                 self.run_container_lifecycle(context, &mut stages)?;
             }
+            Kind::ImagePull => self.run_image_pull(context, &mut stages)?,
             Kind::ServiceContainer => {
                 self.run_service_container(context, &mut stages)?;
             }
@@ -1040,6 +1047,39 @@ impl Workload for DockerWorkload {
 }
 
 impl DockerWorkload {
+    fn run_image_pull(
+        &mut self,
+        context: &mut Context,
+        stages: &mut BTreeMap<Stage, u64>,
+    ) -> Result<()> {
+        let scratch_root = self.scratch.path("")?;
+        let owner = self.owner_token();
+        let (daemon, setup_ms) = timed(|| {
+            IsolatedDockerDaemon::start(&scratch_root, &owner, self.iteration, &mut context.runner)
+        });
+        let mut daemon = daemon?;
+        stages.insert(Stage::DockerSetup, setup_ms);
+
+        let image = context.job_image.clone();
+        let (pull_result, pull_ms) = timed(|| -> Result<()> {
+            let pulled = daemon
+                .run(&mut context.runner, &["pull", &image])
+                .map_err(anyhow::Error::from)
+                .context("running isolated Docker image pull")?
+                .clone();
+            require_success(&pulled, "docker image pull")
+        });
+        if let Err(error) = pull_result {
+            return Err(with_cleanup(error, daemon.shutdown()));
+        }
+        stages.insert(Stage::FirstUserCommand, pull_ms);
+
+        let (shutdown, teardown_ms) = timed(|| daemon.shutdown());
+        shutdown?;
+        stages.insert(Stage::Teardown, teardown_ms);
+        Ok(())
+    }
+
     fn run_container_lifecycle(
         &mut self,
         context: &mut Context,
@@ -1537,7 +1577,6 @@ mod tests {
         for scenario in crate::scenario::MATRIX {
             if scenario.family == crate::scenario::Family::Docker
                 && scenario.fallback == Some(crate::scenario::Driver::DockerDirect)
-                && scenario.id != "docker/image-pull"
             {
                 assert!(build(scenario).is_ok(), "{} has no workload", scenario.id);
             }
@@ -1545,15 +1584,9 @@ mod tests {
     }
 
     #[test]
-    fn image_pull_is_refused_before_workload_construction() {
+    fn image_pull_builds_a_workload() {
         let scenario = crate::scenario::find("docker/image-pull").expect("scenario");
-        let error = build(scenario).map(|_| ()).expect_err("must refuse");
-        let message = error.to_string();
-        assert!(
-            message.contains("isolated Docker daemon/data root"),
-            "{message}"
-        );
-        assert!(message.contains("shared Docker daemon"), "{message}");
+        assert!(build(scenario).is_ok());
     }
 
     #[test]

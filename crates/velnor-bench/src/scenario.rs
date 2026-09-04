@@ -289,6 +289,7 @@ const VELNOR_JOB: &[Requirement] = &[
     Requirement::NetworkEgress,
 ];
 const CONTAINER: &[Requirement] = &[Requirement::DockerDaemon];
+const CONTAINER_ONLINE: &[Requirement] = &[Requirement::DockerDaemon, Requirement::NetworkEgress];
 /// The cargo fallback runs on the host with no container and no runner: it
 /// measures the build alone, which is precisely the scope of the bash script
 /// this crate replaces, and is never a claim about Velnor.
@@ -360,7 +361,7 @@ scenarios! {
     // Docker behaviour.
     "docker/existing-image", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
         "Container lifecycle for an image already present on the host";
-    "docker/image-pull", Docker, VelnorJob, None, VELNOR_JOB, &[],
+    "docker/image-pull", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER_ONLINE,
         "Cold pull of the job image from the registry";
     "docker/simple-job-container", Docker, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
         "Job container running a trivial user command";
@@ -517,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn image_pull_is_unrun_until_isolated_daemon_exists() {
+    fn image_pull_degrades_only_to_the_isolated_docker_driver() {
         let capabilities = Capabilities {
             docker_daemon: true,
             registered_runner: true,
@@ -527,11 +528,28 @@ mod tests {
             ..Capabilities::default()
         };
         let scenario = find("docker/image-pull").expect("scenario");
-        assert!(matches!(
+        assert_eq!(
             scenario.runnability(capabilities),
-            Runnability::Unrunnable { ref missing }
-                if missing == &vec![Requirement::VelnorJobDriver]
-        ));
+            Runnability::Degraded {
+                driver: Driver::DockerDirect,
+                missing_for_preferred: vec![Requirement::VelnorJobDriver],
+            }
+        );
+    }
+
+    #[test]
+    fn image_pull_requires_network_egress_for_its_cold_registry_semantics() {
+        let capabilities = Capabilities {
+            docker_daemon: true,
+            ..Capabilities::default()
+        };
+        let scenario = find("docker/image-pull").expect("scenario");
+        assert_eq!(
+            scenario.runnability(capabilities),
+            Runnability::Unrunnable {
+                missing: vec![Requirement::NetworkEgress],
+            }
+        );
     }
 
     #[test]
