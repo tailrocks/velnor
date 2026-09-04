@@ -3765,7 +3765,7 @@ impl WorkflowIr {
             output,
             "  required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
             needs.join(", "),
-            self.runner_for(runners),
+            yaml_scalar(&self.github_runner),
         );
     }
 }
@@ -3998,7 +3998,7 @@ fn render_preview(config: &ProjectConfig) -> String {
     .replace(
         "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 75",
         &format!(
-            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 75",
+            "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 75",
             trusted_release_runner_gate(&config.default_branch)
         ),
     )
@@ -4282,7 +4282,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         let build = build.replace(
             "    runs-on: ${{ matrix.runner }}\n    timeout-minutes: 90",
             &format!(
-                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ matrix.lane == 'github' || {} }}}}\n    timeout-minutes: 90",
+                "    runs-on: ${{{{ matrix.runner }}}}\n    if: ${{{{ {} }}}}\n    timeout-minutes: 90",
                 trusted_release_runner_gate(&config.default_branch)
             ),
         );

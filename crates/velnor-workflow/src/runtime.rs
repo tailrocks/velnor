@@ -1022,10 +1022,31 @@ fn contains_self_hosted_label(value: &str) -> bool {
 }
 
 fn has_trusted_runner_gate(value: &str) -> bool {
-    value.contains("github.event_name == 'push'")
-        && value.contains("github.event_name == 'schedule'")
-        && value.contains("github.event_name == 'workflow_dispatch'")
-        && value.contains("github.ref == 'refs/heads/")
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    let marker = "github.ref=='refs/heads/";
+    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
+        return false;
+    };
+    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
+        return false;
+    };
+    let branch = &value[start..end];
+    if !valid_branch(branch) {
+        return false;
+    }
+    let ci_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||github.event_name=='workflow_dispatch')"
+    );
+    let release_gate = format!(
+        "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
+    );
+    value == ci_gate || value == release_gate
 }
 
 fn policy_failure(path: &Path, message: &str, failures: &mut usize) {
@@ -1369,6 +1390,22 @@ jobs:
     runs-on: ${{ matrix.runner }}
 ";
         let root = policy_fixture("matrix-untrusted", workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_noncanonical_gate_that_mentions_trusted_fragments(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: SpoofedGate
+on: pull_request
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    runs-on: [self-hosted, velnor]
+";
+        let root = policy_fixture("spoofed-gate", workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }
