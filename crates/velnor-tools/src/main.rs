@@ -4895,7 +4895,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
 
         assert!(args.windows(2).any(|pair| pair == ["--bin", "velnorctl"]));
         assert!(args.windows(2).any(|pair| pair == ["--", "remove"]));
-        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -4921,7 +4923,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(!args.contains(&"--require-docker-socket".to_string()));
         assert!(!args.contains(&"--docker-host-work-dir".to_string()));
-        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -4984,7 +4988,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .windows(2)
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(args.contains(&"--require-docker-socket".to_string()));
-        assert!(!args.iter().any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
