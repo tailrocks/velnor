@@ -313,3 +313,107 @@ degrades every future job forever.
 
 Missing invariant: *no duplicate fetch without a correctness reason, no byte copied that
 could be shared, and no lock held across the network.*
+
+### BC-11 — Expression evaluation is string rewriting, not a typed evaluator
+
+Velnor rewrites expression source over `Option<String>` with a fail-open tail instead of
+parsing to a typed value union as upstream does. The divergences are therefore a family,
+not a list: `"0"`/`"false"` are falsy where upstream makes them truthy
+(`executor.rs:12762-12768` vs `Sdk/DTExpressions/EvaluationResult.cs:50-75`); there is no
+null coercion, so an unknown expression evaluates to its own source text
+(`executor.rs:11817`); the relational operators `<`, `<=`, `>`, `>=` do not exist;
+`startsWith`, `endsWith`, `join` and `fromJSON` do not exist
+(`Sdk/DTExpressions/ExpressionConstants.cs:10-20`); and a condition that fails to evaluate
+is fail-open where upstream fails the step (`Runner.Worker/StepsRunner.cs:237-242`).
+
+Each of these silently changes control flow. `if: startsWith(github.ref, 'refs/tags/')` on
+a branch push is skipped by GitHub and **runs the release step** on Velnor.
+
+Missing invariant: *expressions are parsed and evaluated over the upstream value model, and
+an evaluation error fails the step.*
+
+### BC-12 — `(outcome, conclusion)` is not a value
+
+There is no `StepResult` type carrying outcome and conclusion as a pair. `failure_ignored`
+is threaded beside `exit_code` through five structs, and each hop re-derives the
+conclusion. That is why the same defect keeps reappearing at new sites: parent
+`continue-on-error` is pushed into composite inner steps
+(`runner.rs:9334`, `:9459`), so a composite keeps running past a failure GitHub would stop.
+
+The originally-reported `continue-on-error`/outcome/conclusion incident is genuinely fixed
+on this branch end-to-end (`executor.rs:11334-11352`, `:2172-2176`, `:2209-2232`,
+`:11667-11691`, `runner.rs:11193-11201`, regression test at `runner.rs:17702-17706`), and
+job-level `continue-on-error` is correctly ignored because upstream has no worker-side
+consumer either. The *instance* was fixed; the *class* was not.
+
+### BC-13 — JavaScript actions are not executed
+
+`ExecutableStep::JavaScript` is never constructed by the planner; every JavaScript action
+reaches `bail!` at `runner.rs:9474-9479`. The Node runtime, action `pre`/`post`, and the
+`GITHUB_STATE` → `STATE_*` round trip exist but are exercised only by tests. Velnor instead
+emulates an allowlist of well-known actions through `native_*` adapters. Since GitHub
+Actions compatibility requires executing third-party JavaScript actions, this is a missing
+capability being reported as a supported one.
+
+### BC-14 — Rust acceleration can accept stale artifacts as fresh
+
+`checkout.rs:200-263` pins every file *and directory* mtime to
+`git log -1 --format=%ct`. Cargo decides workspace freshness by comparing source mtime
+against dep-info mtime and never hashes workspace sources, so the pin inverts the direction
+Cargo's model depends on: committer dates are not monotonic across jobs sharing a store, and
+no store key contains a ref. A branch switch to an older commit, an old-ref re-run, a tag
+build, and a rebase or force-push each yield **stale artifacts accepted as fresh**. On
+GitHub-hosted runners this cannot happen because checkout leaves sources at wall-clock now.
+Directory pinning additionally defeats `rerun-if-changed=<dir>` add/remove detection.
+
+A second, unconditional path: `actions/cache` on `target/` is admitted
+(`executor.rs:5292-5307`, `:5671-5675`) and the restore preserves no mtimes, so restored
+dep-info is newer than every pinned source.
+
+The enabling condition is an ephemeral workspace (`runner.rs:8471-8482`) combined with a
+persistent target directory. The persistent-target layer gates on the exact HEAD SHA
+(`executor.rs:6488-6510`); the default mbx managed target has no such gate.
+
+### BC-15 — Trust class is a daemon flag, not a property of the job
+
+`trust_scope` is a daemon-level flag defaulting to `trusted` (`service.rs:192-194`) and
+nothing derives it from the GitHub event. A fork PR and a release build for the same
+repository therefore share one writable mbx store with no authenticity layer — digest
+verification binds a blob to its own digest only. `content/docs/guides/execution.mdx:131-137`
+claims a per-job "admitted trust class" that does not exist.
+
+### BC-16 — Admission fails acquired jobs because another slot is busy
+
+`runner.rs:8944` takes a **process-global one-permit** semaphore (`:118-119`) with
+`try_acquire_owned()` — no wait, immediate `Err` — and the failure path is not a retry:
+`runner.rs:5591-5605` calls `complete_acquired_job_failure(…, "action_admission", …)`, so
+the user gets a red ❌ on their PR purely because another slot was admitting at that
+instant. The guarded work (`admit_job_closure_sync`, `:8958-8983`) is **entirely
+read-only**: blocking `reqwest` GETs of `action.yml` from the Contents API
+(`admission.rs:367`, `:388-392`, `:406-460`) recursed over the action closure, holding the
+single permit for up to the 65 s admission timeout. Nothing in it requires mutual exclusion.
+
+SQLite admission has the identical fail-closed shape (`runner.rs:164-169` →
+`InfrastructureFailure`, category `operational_store` at `:5400-5420`), and the repo's own
+test asserts the behavior (`runner.rs:14795-14812`). `Store` already guarantees a single
+writer through `Mutex<Connection>` + WAL + `busy_timeout` (`store/mod.rs:81`, `:41`), so
+the semaphore adds no correctness — only failure.
+
+Root cause of both: **one undifferentiated blocking pool.** `main.rs:16-20` builds the
+runtime with default `max_blocking_threads`, and `runner.rs:5883` submits the entire job
+execution — minutes to hours — to the same pool as millisecond SQLite writes. The authors
+correctly feared queueing behind long work and chose fail-closed permits instead of pool
+partitioning. Removing the permits without partitioning the pool would trade job failures
+for job stalls, so the two must be fixed together.
+
+The wait is also completely unobservable: no span, timestamp, duration or contention
+counter exists around `runner.rs:5399` or `:5591`.
+
+### BC-17 — No coherent resource model
+
+The job cgroup slice is provisioned at `host_cpus × 95%` regardless of slot count
+(`execution/docker.rs:172-176`); Velnor never injects `CARGO_BUILD_JOBS` or `-j`; and the
+only CPU reading is `getconf _NPROCESSORS_ONLN` (`execution/docker.rs:155`), which ignores
+cgroup quota and cpuset. `--slots 4` on a 16-core host therefore runs roughly 64 compiler
+processes against 15.2 cores of quota: everything is runnable, nothing progresses, and
+nothing explains why. Mysterious idleness in its most literal form.
