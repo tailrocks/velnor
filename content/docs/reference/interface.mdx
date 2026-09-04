@@ -66,20 +66,23 @@ Global options:
 ### Registration and local setup commands
 
 ```sh
+export GITHUB_TOKEN=replace-with-a-token
+
 velnorctl configure \
   --url https://github.com/OWNER/REPO \
-  --pat "$GITHUB_TOKEN" \
   --name velnor \
   --labels velnor,velnor-target-mvp \
   --config-dir /var/lib/velnor/config
 ```
 
-`configure` supports repository, organization, and enterprise URLs. Relevant options are:
+`configure` supports repository, organization, and enterprise URLs. It reads the
+registration credential from the `GITHUB_TOKEN` environment variable; the CLI
+does not accept a command-line credential argument. Relevant options are:
 
 | Option | Meaning |
 | --- | --- |
 | `--url` | GitHub repository, organization, or enterprise URL. |
-| `--pat` | Registration credential; may come from `GITHUB_TOKEN`. Never put it in a shared command history. |
+| `GITHUB_TOKEN` | Environment-only registration credential. Keep it out of command arguments and shared command history. |
 | `--name` | Runner name. |
 | `--labels` | Comma-separated labels. Empty labels become `self-hosted,velnor`. |
 | `--target-mvp-labels` | Add the target MVP Linux label set. |
