@@ -61,6 +61,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// One resolved cache entry. `key` is the entry key that actually matched —
+/// the primary key on an exact hit, or the stored key a restore key matched by
+/// prefix. Both cache wire generations report it back to the client
+/// (`cacheKey` in v1's `ArtifactCacheEntry`, `matched_key` in v2's
+/// `GetCacheEntryDownloadURLResponse`), and `actions/cache` compares it against
+/// the requested primary key to decide whether the hit was exact.
+#[derive(Debug, Clone)]
+struct CacheHit {
+    hash: String,
+    size: u64,
+    key: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CacheService {
     /// Durable storage root; tenant directories live beneath it.
@@ -109,34 +122,28 @@ impl CacheService {
     }
 
     /// Exact match first, then each restore key as a newest-wins prefix scan.
-    fn lookup(
-        &self,
-        keys: &[&str],
-        version: &str,
-        namespace: Option<&str>,
-    ) -> Option<(String, u64)> {
+    fn lookup(&self, keys: &[&str], version: &str, namespace: Option<&str>) -> Option<CacheHit> {
         for (index, key) in keys.iter().enumerate() {
             let hash = entry_hash(key, version);
             if let Some(entry) = self.read_entry(&hash, namespace) {
-                return Some((hash, entry["size"].as_u64().unwrap_or(0)));
+                return Some(CacheHit {
+                    hash,
+                    size: entry["size"].as_u64().unwrap_or(0),
+                    key: (*key).to_owned(),
+                });
             }
             if index == 0 {
                 continue; // only the primary key participates in prefix scans
             }
-            if let Some((hash, size)) = self.prefix_scan(key, version, namespace) {
-                return Some((hash, size));
+            if let Some(hit) = self.prefix_scan(key, version, namespace) {
+                return Some(hit);
             }
         }
         None
     }
 
-    fn prefix_scan(
-        &self,
-        key: &str,
-        version: &str,
-        namespace: Option<&str>,
-    ) -> Option<(String, u64)> {
-        let mut hits: BTreeMap<String, (String, u64)> = BTreeMap::new();
+    fn prefix_scan(&self, key: &str, version: &str, namespace: Option<&str>) -> Option<CacheHit> {
+        let mut hits: BTreeMap<String, CacheHit> = BTreeMap::new();
         let entries = std::fs::read_dir(self.tenant_root(namespace).join("entries")).ok()?;
         for file in entries.flatten() {
             let path = file.path();
@@ -165,7 +172,14 @@ impl CacheService {
             // Newest wins; ties broken by longest key (GitHub favors the most
             // specific restore key on equal timestamps in practice).
             let rank = format!("{created:020}/{:04}", entry_key.len());
-            hits.insert(rank, (hash, entry["size"].as_u64().unwrap_or(0)));
+            hits.insert(
+                rank,
+                CacheHit {
+                    hash,
+                    size: entry["size"].as_u64().unwrap_or(0),
+                    key: entry_key.to_owned(),
+                },
+            );
         }
         hits.into_values().next_back()
     }
@@ -314,7 +328,13 @@ async fn route(
                 .map(|_| respond(StatusCode::OK, json!({"ok": true})))
         }
         (hyper::Method::GET, p) if p.ends_with("/cache") => {
-            lookup_v1(&req, ctx, &namespace).map(|v| respond(StatusCode::OK, v))
+            lookup_v1(&req, ctx, &namespace).map(|entry| match entry {
+                Some(entry) => respond(StatusCode::OK, entry),
+                None => Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(full_body(Bytes::new()))
+                    .unwrap(),
+            })
         }
         (hyper::Method::GET, p) => {
             if let Some(id) = p.rsplit('/').next() {
@@ -395,17 +415,22 @@ where
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn keys_from_query(req: &Request<Incoming>) -> Vec<String> {
-    req.uri()
-        .query()
-        .map(|q| q.to_owned())
-        .unwrap_or_default()
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(k, _)| *k == "keys" || *k == "restoreKeys")
-        .flat_map(|(_, v)| v.split(','))
-        .map(|v| v.replace("%2C", ","))
-        .filter(|v| !v.is_empty())
+/// Lookup keys in request order: primary key first, then restore keys.
+///
+/// `actions/toolkit` sends them as one comma-joined, percent-encoded parameter
+/// (`cache?keys=${encodeURIComponent(keys.join(','))}&version=…`), so the value
+/// must be decoded before it is split — the separators arrive as `%2C`.
+fn keys_from_query<B>(req: &Request<B>) -> Vec<String> {
+    query_pairs(req)
+        .into_iter()
+        .filter(|(name, _)| name == "keys" || name == "restoreKeys")
+        .flat_map(|(_, value)| {
+            value
+                .split(',')
+                .map(ToOwned::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .filter(|key| !key.is_empty())
         .collect()
 }
 
@@ -616,25 +641,40 @@ fn commit_entry(
     Ok(())
 }
 
-fn lookup_v1(req: &Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
+/// v1 `GET _apis/artifactcache/cache?keys=…&version=…`.
+///
+/// The response body is `actions/toolkit`'s `ArtifactCacheEntry`
+/// (`packages/cache/src/internal/contracts.ts`): the client reads
+/// `archiveLocation` for the download and `cacheKey` for the matched key
+/// (`packages/cache/src/internal/cacheHttpClient.ts:115`,
+/// `packages/cache/src/cache.ts`). A miss is HTTP 204 with no body —
+/// `getCacheEntry` returns `null` only on 204, and treats a 200 without
+/// `archiveLocation` as a hard error.
+fn lookup_v1<B>(req: &Request<B>, ctx: &Ctx, namespace: &str) -> Result<Option<Value>> {
     let keys = keys_from_query(req);
     let version = query_param(req, "version").unwrap_or_default();
-    match ctx.service.lookup(
-        &keys.iter().map(String::as_str).collect::<Vec<_>>(),
-        &version,
-        Some(namespace),
-    ) {
-        Some((hash, size)) => Ok(json!({
-            "cacheDownloadUrl": format!("{}/_results/download/{hash}", ctx.public_base),
-            "cacheId": hash,
-            "size": size,
-        })),
-        None => Ok(json!({"__typename": "NotFoundError"})),
-    }
+    Ok(ctx
+        .service
+        .lookup(
+            &keys.iter().map(String::as_str).collect::<Vec<_>>(),
+            &version,
+            Some(namespace),
+        )
+        .map(|hit| {
+            json!({
+                "archiveLocation": format!("{}/_results/download/{}", ctx.public_base, hit.hash),
+                "cacheKey": hit.key,
+                "cacheVersion": version,
+            })
+        }))
 }
 
-async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx, namespace: &str) -> Result<Value> {
-    let body = body_json(req).await?;
+async fn lookup_v2<B>(req: Request<B>, ctx: &mut Ctx, namespace: &str) -> Result<Value>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let body = collect_json(req.into_body(), MAX_JSON_BODY).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
     let mut keys: Vec<String> = vec![key.to_owned()];
@@ -645,27 +685,73 @@ async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx, namespace: &str) -> Re
                 .filter_map(|v| v.as_str().map(str::to_owned)),
         );
     }
-    let _key = keys[0].as_str();
     match ctx.service.lookup(
         &keys.iter().map(String::as_str).collect::<Vec<_>>(),
         version,
         Some(namespace),
     ) {
-        Some((hash, _)) => Ok(json!({
+        // `matched_key` is field 3 of
+        // `github.actions.results.api.v1.GetCacheEntryDownloadURLResponse`
+        // (actions/toolkit `packages/cache/src/generated/results/api/v1/cache.ts`).
+        // `restoreCache` compares it against the requested primary key to
+        // decide exact hit vs restore-key hit and returns it as the cache key,
+        // so omitting it makes every hit look like a restore-key hit and the
+        // entry is re-saved on the next run.
+        Some(hit) => Ok(json!({
             "ok": true,
-            "signedDownloadUrl": format!("{}/_results/download/{hash}", ctx.public_base),
+            "signedDownloadUrl": format!("{}/_results/download/{}", ctx.public_base, hit.hash),
+            "matchedKey": hit.key,
         })),
         None => Ok(json!({"ok": false})),
     }
 }
 
-fn query_param(req: &Request<Incoming>, name: &str) -> Option<String> {
+/// Split a query string into decoded `(name, value)` pairs, preserving order
+/// and repeats. Values are percent-decoded because `actions/toolkit` builds the
+/// v1 lookup URL with `encodeURIComponent(keys.join(','))`, which escapes the
+/// separators — including `,` as `%2C`.
+///
+/// `+` is left literal: `encodeURIComponent` emits `%20` for a space and never
+/// `+`, so decoding `+` as a space would corrupt any cache key containing one.
+fn query_pairs<B>(req: &Request<B>) -> Vec<(String, String)> {
     req.uri()
-        .query()?
+        .query()
+        .unwrap_or_default()
         .split('&')
-        .find_map(|pair| pair.split_once('='))
-        .filter(|(k, _)| *k == name)
-        .map(|(_, v)| v.to_owned())
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| match pair.split_once('=') {
+            Some((name, value)) => (percent_decode(name), percent_decode(value)),
+            None => (percent_decode(pair), String::new()),
+        })
+        .collect()
+}
+
+/// First value for `name`, or `None` when the query carries no such parameter.
+fn query_param<B>(req: &Request<B>, name: &str) -> Option<String> {
+    query_pairs(req)
+        .into_iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(high) = (bytes[index + 1] as char).to_digit(16)
+            && let Some(low) = (bytes[index + 2] as char).to_digit(16)
+        {
+            out.push((high * 16 + low) as u8);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn required_str<'a>(body: &'a Value, field: &str) -> Result<&'a str> {
@@ -883,18 +969,176 @@ mod tests {
         commit_blob(&svc, "linux-rust", "v1", b"newer");
 
         // Exact beats newer prefix hit.
-        let (hash, size) = svc
+        let hit = svc
             .lookup(&["linux-rust-2026", "linux"], "v1", None)
             .unwrap();
-        assert_eq!(size, 3);
-        assert_eq!(hash, entry_hash("linux-rust-2026", "v1"));
+        assert_eq!(hit.size, 3);
+        assert_eq!(hit.hash, entry_hash("linux-rust-2026", "v1"));
+        assert_eq!(hit.key, "linux-rust-2026");
 
-        // Prefix falls back to newest.
-        let (_, size) = svc.lookup(&["linux-other", "linux"], "v1", None).unwrap();
-        assert_eq!(size, 5);
+        // Prefix falls back to newest, and reports the stored key it matched.
+        let hit = svc.lookup(&["linux-other", "linux"], "v1", None).unwrap();
+        assert_eq!(hit.size, 5);
+        assert_eq!(hit.key, "linux-rust");
 
         // Version mismatch misses.
         assert!(svc.lookup(&["linux-rust"], "v9", None).is_none());
+    }
+
+    fn test_ctx(service: CacheService) -> Ctx {
+        Ctx {
+            service: Arc::new(service),
+            public_base: "http://cache.test".to_owned(),
+        }
+    }
+
+    fn get(query: &str) -> Request<Full<Bytes>> {
+        Request::builder()
+            .uri(format!(
+                "http://cache.test/_apis/artifactcache/cache?{query}"
+            ))
+            .body(Full::new(Bytes::new()))
+            .expect("build request")
+    }
+
+    #[test]
+    fn query_param_reads_every_parameter_not_only_the_first() {
+        // `?keys=…&version=…` is exactly the shape actions/toolkit sends
+        // (cacheHttpClient.ts `getCacheEntry`). Reading only the first pair
+        // returned an empty version, and version participates in the entry
+        // hash, so every v1 lookup missed.
+        let req = get("keys=linux-rust&version=abc123");
+        assert_eq!(query_param(&req, "keys").as_deref(), Some("linux-rust"));
+        assert_eq!(query_param(&req, "version").as_deref(), Some("abc123"));
+        assert_eq!(query_param(&req, "absent"), None);
+    }
+
+    #[test]
+    fn query_param_handles_repeats_valueless_pairs_and_encoding() {
+        let req = get("flag&version=a%2Fb%20c&version=second&plus=a+b");
+        // First occurrence wins for a repeated name.
+        assert_eq!(query_param(&req, "version").as_deref(), Some("a/b c"));
+        assert_eq!(query_param(&req, "flag").as_deref(), Some(""));
+        // encodeURIComponent never emits `+` for a space, so `+` stays literal.
+        assert_eq!(query_param(&req, "plus").as_deref(), Some("a+b"));
+        // A stray `%` that is not a valid escape is preserved verbatim.
+        assert_eq!(
+            query_param(&get("version=100%25%zz"), "version").as_deref(),
+            Some("100%%zz")
+        );
+    }
+
+    #[test]
+    fn keys_from_query_splits_the_percent_encoded_comma_joined_list() {
+        // encodeURIComponent(keys.join(',')) escapes the separators as %2C, so
+        // the value must be decoded before it is split.
+        let req = get("keys=primary%2Crestore-one%2Crestore-two&version=v1");
+        assert_eq!(
+            keys_from_query(&req),
+            vec!["primary", "restore-one", "restore-two"]
+        );
+    }
+
+    #[test]
+    fn v1_lookup_returns_the_toolkit_artifact_cache_entry_shape() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let blob = service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(entry_hash("linux-rust-2026", "v1"));
+        std::fs::write(&blob, b"abc").unwrap();
+        commit_entry(&service, "linux-rust-2026", "v1", 3, Some("tenant")).unwrap();
+        let ctx = test_ctx(service);
+
+        let hit = lookup_v1(
+            &get("keys=linux-rust-2026%2Clinux-rust&version=v1"),
+            &ctx,
+            "tenant",
+        )
+        .expect("lookup")
+        .expect("hit");
+        // actions/toolkit packages/cache/src/internal/contracts.ts
+        // `ArtifactCacheEntry`; cacheHttpClient.ts reads `archiveLocation`.
+        assert_eq!(
+            hit["archiveLocation"],
+            json!(format!(
+                "http://cache.test/_results/download/{}",
+                entry_hash("linux-rust-2026", "v1")
+            ))
+        );
+        assert_eq!(hit["cacheKey"], json!("linux-rust-2026"));
+        assert_eq!(hit["cacheVersion"], json!("v1"));
+
+        // A restore-key hit reports the stored key that matched.
+        let hit = lookup_v1(
+            &get("keys=linux-rust-2027%2Clinux&version=v1"),
+            &ctx,
+            "tenant",
+        )
+        .expect("lookup")
+        .expect("hit");
+        assert_eq!(hit["cacheKey"], json!("linux-rust-2026"));
+
+        // A miss carries no entry; the route turns that into HTTP 204, which is
+        // the only status `getCacheEntry` treats as "no cache".
+        assert!(lookup_v1(&get("keys=absent&version=v1"), &ctx, "tenant")
+            .expect("lookup")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn v2_lookup_reports_the_matched_key() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let blob = service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(entry_hash("linux-rust-2026", "v1"));
+        std::fs::write(&blob, b"abc").unwrap();
+        commit_entry(&service, "linux-rust-2026", "v1", 3, Some("tenant")).unwrap();
+        let mut ctx = test_ctx(service);
+
+        let request = |body: Value| {
+            Request::builder()
+                .method(hyper::Method::POST)
+                .uri("http://cache.test/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL")
+                .body(Full::new(Bytes::from(body.to_string())))
+                .expect("build request")
+        };
+
+        // Exact hit: matched_key equals the requested primary key, so
+        // actions/cache reports a cache hit rather than a restore-key hit.
+        let exact = lookup_v2(
+            request(json!({"key": "linux-rust-2026", "version": "v1"})),
+            &mut ctx,
+            "tenant",
+        )
+        .await
+        .expect("lookup");
+        assert_eq!(exact["ok"], json!(true));
+        assert_eq!(exact["matchedKey"], json!("linux-rust-2026"));
+
+        // Restore-key hit: matched_key is the stored key, not the primary.
+        let restored = lookup_v2(
+            request(json!({"key": "linux-rust-2027", "version": "v1", "restoreKeys": ["linux"]})),
+            &mut ctx,
+            "tenant",
+        )
+        .await
+        .expect("lookup");
+        assert_eq!(restored["matchedKey"], json!("linux-rust-2026"));
+
+        let miss = lookup_v2(
+            request(json!({"key": "absent", "version": "v1"})),
+            &mut ctx,
+            "tenant",
+        )
+        .await
+        .expect("lookup");
+        assert_eq!(miss["ok"], json!(false));
     }
 
     #[test]
