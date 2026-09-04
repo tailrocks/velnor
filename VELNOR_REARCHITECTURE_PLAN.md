@@ -643,3 +643,67 @@ discard: path-traversal guards on action paths (upstream has none); SHA-pinned a
 which make the missing download-integrity check moot; and the completion outbox — intent and
 payload checksum journaled before send, crash-replayable — where upstream simply retries
 five times.
+
+### BC-26 — Four uncoordinated output channels, none authoritative, none redacted
+
+Velnor emits diagnostics through four unrelated mechanisms: 8 tracing spans and roughly 8
+tracing events; 74+ free-form `SlotForensics` text lines in `runner.rs`; **189
+`eprintln!`/`println!` calls in `crates/velnor-runner/src`**; and a well-designed typed
+telemetry contract that declares 23 events of which about 7 are ever emitted. There are zero
+`#[instrument]` attributes across 183k lines, and no metrics facility of any kind.
+
+Two of these are P0:
+
+- **Neither of the two highest-volume sinks is redacted.** `telemetry.rs:101-132` and
+  `slot_log.rs:74-90` apply no masking, while three redactors exist elsewhere in the tree.
+  Same enabling condition as BC-24: multiple redactors, and the ones that matter are not on
+  the path.
+- **The only durable timing analytics re-parses a text log line** (`runner.rs:11330`) and
+  sorts by RFC3339 *string* (`:11410`). A log-format change silently zeroes the SLOs rather
+  than failing.
+
+`teardown_ms` is hardcoded to `0` (`runner.rs:6059`) and then compared against a 2 s
+`teardown_p95` SLO, so that SLO cannot fire under any circumstances. `queue_ms` is a
+cross-clock difference `saturating_add`ed into an internal total with no skew estimate.
+Compile telemetry emits `unit_count`, `hits` and `misses` as `0`, while `tools/unit-collector`
+computes exactly those values and is wired to nothing.
+
+Structurally: five of the eight spans use `.entered()` across an `.await`, so the busy/idle
+timings are wrong for precisely the phases that matter; the 189 print sites bypass every
+bound, filter and redactor, with journald as an unbounded disk sink; `SlotForensics` does an
+open-write-close per line, synchronously, from async code, and mirrors each line into a
+globally-mutexed writer whose rotation runs *inside* the lock and whose poisoned-lock path
+silently drops output; and `recent_job_timings` reads 64 MiB per slot into memory to answer a
+status query.
+
+Nothing today answers "why didn't my job start?": `status` prints static configuration and
+`doctor` requires a PAT and answers a different question. Of the 19 lifecycle stages the
+diagnostic timeline requires, 3 are durations, 8 exist only as text, and 8 are unrecorded —
+including every checkout sub-phase and all of Docker preparation.
+
+One point is in better shape than expected: the shell-string heuristics
+(`executor.rs:88-168`) are telemetry-only today and correctly scoped, and the
+correctness-affecting decisions use structured job fields (`declares_sccache` matches an
+action reference, not script text). The risk is that they return a bare
+`Option<&'static str>` with nothing preventing a future change from routing a decision
+through them. One layer out, `crates/velnor-tools/src/audit_ci.rs` makes 120 policy
+decisions by grepping shell text — that one is the bug class already realised.
+
+### BC-27 — There is no benchmark of the product
+
+The benchmark is a ~301-line bash script with five embedded Python heredocs that **never
+invokes Velnor, Docker, or a job**. Every performance claim currently available in this
+project is a claim about `cargo`. It runs n=5, so its reported "p95" is its maximum, and it
+records `platform.processor()` — the architecture, not the CPU model — as environment
+identity. Fault-injection coverage is 6 HTTP cases in one file, 21 of 27 fault classes are
+untested, and there is no soak suite or resource-growth monitor at all.
+
+This is why the program cannot yet believe any performance number, including its own.
+
+Design leverage found while auditing: `CommandRunner` (`executor.rs:199-290`) is the single
+choke point for every host process spawn, so one decorator there yields per-job Docker
+process counts and per-call latencies with no call-site changes — and is the same seam for
+Docker and git fault injection. The Docker subcommand census taken through it
+(`exec` 29, `rm` 19, `network` 13, `inspect` 9) independently corroborates the 12+N minimal
+and 52-72 representative per-job figures in BC-7. `TelemetryLane { Github, Velnor }` already
+encodes the internal-versus-external split the benchmark needs.
