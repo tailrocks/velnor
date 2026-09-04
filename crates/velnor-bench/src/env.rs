@@ -254,6 +254,16 @@ fn git_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
 }
 
 fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
+    // The identity of the image under measurement is not optional, and the
+    // image may legitimately not be on the host yet. Pull it here rather than
+    // recording a gap that a later scenario would silently fill.
+    let present = runner
+        .run("docker", &["image", "inspect", image])
+        .map(|invocation| invocation.ok())
+        .unwrap_or(false);
+    if !present {
+        runner.capture("docker", &["pull", image])?;
+    }
     // RepoDigests is the content identity; fall back to the local image ID,
     // which is still a digest, when the image was never pushed or pulled.
     if let Ok(digests) = runner.capture(
