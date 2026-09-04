@@ -2122,6 +2122,18 @@ struct TargetSurface {
     unsupported: Vec<String>,
 }
 
+const CHECKOUT_SUPPORTED_INPUTS: &[&str] = &[
+    "repository",
+    "ref",
+    "token",
+    "path",
+    "fetch-depth",
+    "clean",
+    "fetch-tags",
+    "persist-credentials",
+    "lfs",
+];
+
 fn target_audit(args: TargetAuditArgs) -> Result<()> {
     if !args.check_target_mvp && !args.self_test {
         bail!("pass --check-target-mvp or --self-test");
@@ -2365,17 +2377,7 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
         && let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping())
     {
         for input in with.keys() {
-            let supported = matches!(
-                input.as_str(),
-                "repository"
-                    | "ref"
-                    | "token"
-                    | "path"
-                    | "fetch-depth"
-                    | "submodules"
-                    | "persist-credentials"
-                    | "lfs"
-            );
+            let supported = CHECKOUT_SUPPORTED_INPUTS.contains(&input.as_str());
             if !supported {
                 surface.unsupported.push(format!(
                     "{workflow_path}: unsupported actions/checkout input {input}"
@@ -2517,10 +2519,8 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("actions/checkout", 46),
         ("actions/deploy-pages", 1),
         ("actions/download-artifact", 3),
-        ("actions/setup-python", 1),
         ("actions/upload-artifact", 6),
         ("actions/upload-pages-artifact", 1),
-        ("baptiste0928/cargo-install", 1),
         ("crazy-max/ghaction-github-runtime", 2),
         ("docker/bake-action", 1),
         ("docker/build-push-action", 1),
@@ -2528,7 +2528,6 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("docker/metadata-action", 1),
         ("docker/setup-buildx-action", 5),
         ("dorny/paths-filter", 5),
-        ("dtolnay/rust-toolchain", 1),
         ("extractions/setup-just", 4),
         ("jdx/mise-action", 13),
         ("mozilla-actions/sccache-action", 7),
@@ -4732,6 +4731,89 @@ jobs:
     #[test]
     fn target_audit_normalizes_uses_and_compacts_values() {
         target_audit_self_test().unwrap();
+    }
+
+    #[test]
+    fn target_capability_surface_stays_backed_by_runner_manifest() {
+        const MANIFEST_SOURCE: &str = include_str!("../../velnor-runner/src/manifest.rs");
+        let manifest_actions = MANIFEST_SOURCE
+            .split_once("pub static ACTIONS: &[ActionCapability] = &[")
+            .and_then(|(_, source)| source.split_once("\n];\n\n/// Exact"))
+            .map(|(source, _)| source)
+            .expect("runner manifest action table must have its expected shape");
+        let manifest_actions_lower = manifest_actions.to_ascii_lowercase();
+
+        for repository in expected_target_uses()
+            .keys()
+            .filter(|repository| !repository.starts_with("./"))
+        {
+            let needle = format!("\"{}\"", repository.to_ascii_lowercase());
+            assert!(
+                manifest_actions_lower.contains(&needle),
+                "target audit advertises {repository}, but runner manifest does not admit it"
+            );
+        }
+
+        let checkout_manifest = manifest_actions
+            .split_once("capability!(\n        \"actions/checkout\",")
+            .and_then(|(_, source)| source.split_once("capability!(\n        \"actions/cache\","))
+            .map(|(source, _)| source)
+            .expect("runner manifest must contain the checkout capability before cache");
+        let input_pattern = Regex::new(
+            r#"InputRule::(?:Any|Literal|RequiredLiteral|Forbidden|Predicate)\(\s*"([^"]+)""#,
+        )
+        .expect("manifest input rule pattern must compile");
+        let manifest_inputs = input_pattern
+            .captures_iter(checkout_manifest)
+            .map(|capture| capture[1].to_string())
+            .collect::<BTreeSet<_>>();
+        let advertised_inputs = CHECKOUT_SUPPORTED_INPUTS
+            .iter()
+            .map(|input| (*input).to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            advertised_inputs, manifest_inputs,
+            "target audit checkout inputs must match the runner manifest"
+        );
+
+        let supported_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  repository: owner/repository
+  ref: main
+  token: token
+  path: checkout
+  fetch-depth: 0
+  clean: "true"
+  fetch-tags: "true"
+  persist-credentials: "false"
+  lfs: "false"
+"#,
+        )
+        .expect("supported checkout inputs must parse");
+        let mut supported_surface = TargetSurface::default();
+        collect_step(&mut supported_surface, "fixture.yml", &supported_step);
+        assert!(
+            supported_surface.unsupported.is_empty(),
+            "manifest-backed checkout inputs must be accepted: {:?}",
+            supported_surface.unsupported
+        );
+
+        let submodules_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  submodules: recursive
+"#,
+        )
+        .expect("checkout submodules input must parse");
+        let mut submodules_surface = TargetSurface::default();
+        collect_step(&mut submodules_surface, "fixture.yml", &submodules_step);
+        assert_eq!(
+            submodules_surface.unsupported,
+            vec!["fixture.yml: unsupported actions/checkout input submodules"]
+        );
     }
 
     #[test]
