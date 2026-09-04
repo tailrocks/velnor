@@ -3,8 +3,7 @@
 //! Asserted from `cargo metadata` so the law holds no matter how manifests
 //! evolve: `velnor-client` meets the daemon only through versioned model DTOs,
 //! `velnor-control` consumes the journal and shared model directly, the action
-//! journal stays limited to foundational model crates, the cache service stays
-//! bounded by the journal, action model, and CAS, the workspace graph is
+//! journal stays limited to foundational model crates, the workspace graph is
 //! acyclic, and no shared crate depends on Clap or Axum. The Axum transport
 //! adapter is owned by the CLI composition crate; it never enters the model,
 //! service, client, or renderer crates.
@@ -18,13 +17,13 @@ use serde_json::Value;
 const WORKSPACE_PACKAGES: [&str; 11] = [
     "velnor-model",
     "velnor-action-model",
-    "velnor-cas",
     "velnor-action-journal",
     "velnor-control",
     "velnor-client",
     "velnor-render",
     "velnorctl",
     "velnor-runner",
+    "velnor-bench",
     "velnor-tools",
     "unit-collector",
 ];
@@ -352,7 +351,7 @@ fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn workspace_has_exactly_the_twelve_expected_packages() {
+fn workspace_package_set_matches_the_declared_members() {
     let metadata = cargo_metadata();
     let mut names: Vec<String> = metadata["packages"]
         .as_array()
@@ -404,7 +403,6 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
     let closure = transitive_closure(&metadata, "velnor-client");
     for forbidden in [
         "velnor-action-model",
-        "velnor-cas",
         "velnor-action-journal",
         "velnor-control",
         "velnor-runner",
@@ -498,7 +496,6 @@ fn shared_crates_never_depend_on_clap_or_axum() {
     for shared in [
         "velnor-model",
         "velnor-action-model",
-        "velnor-cas",
         "velnor-action-journal",
         "velnor-control",
         "velnor-client",

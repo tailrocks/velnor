@@ -3621,21 +3621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "velnor-cas"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "libc",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "unicode-normalization",
- "velnor-action-model",
-]
-
-[[package]]
 name = "velnor-client"
 version = "0.1.0"
 dependencies = [
