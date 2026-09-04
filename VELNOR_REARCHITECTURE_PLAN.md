@@ -3226,3 +3226,38 @@ default-mbx end-to-end proof, VelnorJob benchmark, Docker daemon-resource
 accounting, fault/soak result, provisional recovery fix, or mixed post-order fix
 is claimed. Reserved runner/executor ownership and the coordinated checkout
 error-propagation follow-up remain open.
+
+## 33. Continuation anchor — trust and fixture provenance hardening `b8b95fe`
+
+The benchmark now refuses to treat an arbitrary checkout as the Actions fixture:
+`3ffa772` validates the origin remote against the canonical
+`tailrocks/velnor-actions-fixture` repository, and `1c78b3f` tightens the probe
+regressions. The fixture branch `codex/verifier-completion-fixes` is at `a87bcbf`.
+Its incremental hardening rejects duplicate lanes (`4174d97`), binds L2
+provenance to the actual `produce` job (`963d846`), validates lane/environment
+and numeric/SHA provenance while loading evidence (`c97ec0e`, `cbf0767`), and
+runs fork pull requests GitHub-only (`4268a84`, `a87bcbf`).
+
+The parallel source history through `b8b95fe` is preserved without rewriting:
+immutable workflow policy, base-owned pull-request admission, pinned policy
+runtime, hosted bootstrap, manual-dispatch runner routing, and Velnor job-image
+provisioning are all present. The source branch remains shared with the other
+lead; merge commits retain each remote advancement.
+
+Final proof at this anchor:
+
+| Gate | Result |
+| --- | --- |
+| Source fmt | pass |
+| Source workspace check, all targets, locked | pass |
+| Source workspace Clippy, warnings denied, locked | pass |
+| Source workspace nextest | 2477 passed, 1 skipped; 41 binaries |
+| Fixture `mise run check` against source `b8b95fe` | pass; 41 Python tests, 53 Rust tests, workflow/capability/L2 audits |
+
+This is static and fixture-backed proof. No live dual-lane run, deployed image
+digest, default-mbx end-to-end proof, reachable VelnorJob benchmark, Docker
+daemon-resource accounting, fault/soak result, provisional acquisition recovery,
+or mixed native/JavaScript post-order fix is claimed. Reserved runner/executor
+ownership and checkout traversal error propagation still require coordination;
+the fixture's remaining static-only defaults and no-live-run limitations remain
+explicit rather than promoted to readiness.
