@@ -3401,7 +3401,7 @@ impl WorkflowIr {
         let _ = (runners, trusted);
         let _ = writeln!(
             output,
-            "  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
+            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
         );
     }
 
@@ -7118,7 +7118,7 @@ path-only = { path = "../path-only" }
             "root workflow",
         );
         assert!(root.contains("name: Planning"));
-        assert!(root.contains("name: Policy"));
+        assert!(root.contains("name: Advisory policy"));
         let rust_unit = must_some(
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",
