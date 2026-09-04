@@ -1738,6 +1738,10 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
     units
 }
 
+fn cargo_dependency_name(key: &str) -> &str {
+    key.strip_suffix(".workspace").unwrap_or(key)
+}
+
 fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestFacts {
     let mut facts = CargoManifestFacts {
         root: root.to_owned(),
@@ -1804,7 +1808,7 @@ fn parse_cargo_manifest(root: &str, contents: &str) -> CargoManifestFacts {
             "features" => facts.features.push(key),
             section if is_cargo_dependency_section(section) => {
                 facts.dependencies.push(CargoDependency {
-                    name: key,
+                    name: cargo_dependency_name(&key).to_owned(),
                     package_name: toml_inline_string(&value, "package"),
                     path: toml_inline_string(&value, "path"),
                 });
@@ -6667,6 +6671,40 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn cargo_dependency_parser_normalizes_workspace_names_and_preserves_aliases() {
+        let facts = parse_cargo_manifest(
+            "crates/app",
+            r#"
+[dependencies]
+core.workspace = true
+core-alias = { package = "core", path = "../core" }
+path-only = { path = "../path-only" }
+"#,
+        );
+
+        assert_eq!(
+            facts.dependencies,
+            vec![
+                CargoDependency {
+                    name: "core".to_owned(),
+                    package_name: None,
+                    path: None,
+                },
+                CargoDependency {
+                    name: "core-alias".to_owned(),
+                    package_name: Some("core".to_owned()),
+                    path: Some("../core".to_owned()),
+                },
+                CargoDependency {
+                    name: "path-only".to_owned(),
+                    package_name: None,
+                    path: Some("../path-only".to_owned()),
+                },
+            ]
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the workspace fixture keeps all evidence assertions together"
@@ -6685,7 +6723,7 @@ mod tests {
         must(
             fs::write(
                 root.join("Cargo.toml"),
-                "[workspace]\nmembers = [\n  \"crates/core\",\n  \"crates/app\",\n]\n",
+                "[workspace]\nmembers = [\n  \"crates/core\",\n  \"crates/app\",\n]\n[workspace.dependencies]\ncore = { path = \"crates/core\" }\n",
             ),
             "write workspace manifest",
         );
@@ -6699,7 +6737,7 @@ mod tests {
         must(
             fs::write(
                 app.join("Cargo.toml"),
-                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ncore = { path = \"../core\" }\n[[bin]]\nname = \"app-cli\"\n[[test]]\nname = \"integration\"\n",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\ncore.workspace = true\ncore-alias = { package = \"core\", path = \"../core\" }\n[[bin]]\nname = \"app-cli\"\n[[test]]\nname = \"integration\"\n",
             ),
             "write app manifest",
         );
