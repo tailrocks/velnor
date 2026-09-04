@@ -3394,6 +3394,7 @@ impl WorkflowIr {
             VELNOR_WORKFLOW_REPOSITORY,
             VELNOR_WORKFLOW_SOURCE_REV,
         );
+        *output = output.replace(" --package velnor-workflow", "");
     }
 
     fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -4416,6 +4417,7 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
         format!(
             "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} --package velnor-workflow --bin velnor-workflow\n"
         )
+        .replace(" --package velnor-workflow", "")
     } else {
         String::new()
     }
