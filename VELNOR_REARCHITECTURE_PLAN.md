@@ -3674,3 +3674,27 @@ also makes Docker image-inspect parsing reject trailing fields and expands
 fail-closed recovery coverage for exact ID, name, owner, role, image, and
 resource shape. The `velnor-bench` package suite passes `112` tests, strict
 Clippy passes, and format/diff checks pass after both changes.
+
+## 58. Verifier source binding — 2026-09-05
+
+The required verifier branch
+`tailrocks/velnor-actions-fixture:codex/verifier-completion-fixes` now carries
+and has pushed `04322d5`. Its comparison action derives one full lowercase
+Velnor source SHA from the downloaded Velnor records, rejects missing,
+malformed, or mixed identities, and passes that identity to the Rust verifier;
+the capability baseline still supplies only the manifest version. Six focused
+provenance/wiring tests, the fifty-test Python audit suite, and thirty-six Rust
+verifier tests pass. The action explicitly records that this is cross-record
+consistency, not independent binary/release attestation; that trust boundary
+remains a final readiness requirement.
+
+## 59. MBX capability gate held for the correct boundary — 2026-09-05
+
+Candidate commit `88218d4` was reviewed but deliberately not promoted. It
+maps `Requirement::Mbx` to host `mbx --version`, while the default Rust path
+runs in a Docker job image. That can reject valid image-only MBX and accept a
+host-only installation. The correct follow-up is a separate job-image
+capability plus typed runtime evidence (configured and observed cache mode,
+immutable image digest, and opt-out checks), coordinated with the reserved
+VelnorJob driver. Until that boundary exists, the existing unavailable-driver
+gate is the honest result and no host Cargo fallback may certify default MBX.
