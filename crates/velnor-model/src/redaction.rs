@@ -390,19 +390,24 @@ mod tests {
         }
 
         /// The shifts drop leading bytes so a secret embedded at a non-zero
-        /// offset in a base64 stream still matches. `base64("user:secretpw")`
-        /// contains the shift-2 encoding of `secretpw`, because `"user:"` is
-        /// five bytes and 5 % 3 == 2.
+        /// offset in a base64 stream still matches. `"user:"` is five bytes, so
+        /// the secret starts two bytes past a three-byte group boundary and the
+        /// first whole group of its own encoding begins one byte in: the
+        /// shift-1 form is the one that appears inside `base64("user:secretpw")`,
+        /// and neither the unshifted nor the shift-2 form does.
         #[test]
         fn base64_shifts_cover_the_three_byte_offsets() {
             assert_eq!(base64_string_escape_shift("foobar", 1), "b29iYXI=");
             assert_eq!(base64_string_escape_shift("foobar", 2), "b2Jhcg==");
             let embedded = base64_string_escape("user:secretpw");
-            let shifted = base64_string_escape_shift("secretpw", 2);
-            let overlap = &shifted[..shifted.len() - 4];
+            let aligned = base64_string_escape_shift("secretpw", 1);
             assert!(
-                embedded.contains(overlap),
-                "shift-2 form {shifted} should align inside {embedded}"
+                embedded.contains(aligned.trim_end_matches('=')),
+                "shift-1 form {aligned} should align inside {embedded}"
+            );
+            assert!(
+                !embedded.contains(base64_string_escape("secretpw").trim_end_matches('=')),
+                "the unshifted form is exactly what the shifts exist to cover"
             );
         }
 
