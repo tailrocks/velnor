@@ -3375,3 +3375,21 @@ tests, workflow/actionlint, capability readiness, format/check, and L2
 closure). This remains static/fixture proof: no live dual-lane run, deployed
 image identity, default-mbx end-to-end result, fault/soak result, or
 VelnorJob lifecycle benchmark is claimed.
+
+## 42. Cargo benchmark environment isolation — T-022 `a92074e`
+
+The benchmark's host Cargo driver now removes ambient compiler-wrapper,
+cross-target, flags, and offline-mode overrides before setup, warm-up, metadata,
+and measured commands. Its explicit per-sample target directory, terminal
+policy, incremental policy, and trace settings remain applied. The shared
+process runner exposes this as a narrow `exec_without` operation; existing
+execution and accounting behavior is unchanged.
+
+Focused source proof at `a92074e4a10ab2a53e58c30787db1012120a253d`:
+`velnor-bench` nextest passed (`80` tests), strict package Clippy passed, and
+format/diff checks passed. The fixture baseline was refreshed to this source at
+`d29b0bf`; its full gate passed (`44` Python tests, `53` Rust tests,
+workflow/actionlint, capability readiness, format/check, and L2 closure).
+This remains static/fixture proof: no live dual-lane run, deployed image
+identity, default-mbx end-to-end result, VelnorJob lifecycle benchmark,
+fault/soak result, or reserved runner/executor change is claimed.
