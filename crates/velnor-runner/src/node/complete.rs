@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use velnor_control::journal::{payload_checksum, Event, Journal};
+use velnor_control::journal::{payload_checksum, Event, JobRecord, Journal};
 use velnor_model::{ActorPhase, Generation, JobId, SlotId};
 
 use super::cleanup;
@@ -311,8 +311,20 @@ pub fn ensure_owned(journal: &mut Journal, job_id: &JobId) -> anyhow::Result<Gen
         })
 }
 
-/// Bind `job_id` to the slot that accepted it. `Assigned` is best-effort when
-/// the slot is already Assigned; `JobOwned` must succeed.
+/// Bind `job_id` to the slot that accepted it, from a slot that is still Ready.
+/// `Assigned` is best-effort when the slot is already Assigned; `JobOwned` must
+/// succeed.
+///
+/// Kept, rather than folded into the acquisition API, because its precondition
+/// is the opposite one. `confirm_acquisition` promotes a row that already
+/// exists and already occupies the slot; this creates ownership where there is
+/// no row at all, for callers that acquire without an intent phase. They are
+/// not two ways to do one thing, and collapsing them would mean either
+/// inventing a provisional row nobody probes or letting `confirm_acquisition`
+/// silently create ownership it was written to refuse.
+///
+/// The run-service acquire path no longer uses this: it intends, retargets and
+/// confirms, so the window this whole module exists to close stays closed.
 ///
 /// # Errors
 /// Missing slot or rejected `JobOwned`.
@@ -340,6 +352,8 @@ pub fn intend_acquisition(
     job_id: &JobId,
     slot_id: &SlotId,
     message_id: &str,
+    run_service_url: &str,
+    now: u64,
 ) -> anyhow::Result<Generation> {
     let state = journal.materialized_state()?;
     if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
@@ -358,6 +372,8 @@ pub fn intend_acquisition(
         job_id: job_id.clone(),
         generation,
         message_id: message_id.to_string(),
+        run_service_url: run_service_url.to_string(),
+        intended_unix: now,
     })?;
     if outcome.rejected {
         anyhow::bail!(
@@ -367,6 +383,47 @@ pub fn intend_acquisition(
         );
     }
     Ok(generation)
+}
+
+/// Retarget a provisional row onto the identity the acquire reply named.
+///
+/// The broker message that opens an acquisition names no plan, and `renewjob`
+/// needs one, so a row created before the call cannot be probed. This is the
+/// moment that changes: the 200 carries the run-service plan and job id, and
+/// recording them makes the row recoverable for the first time.
+///
+/// It is deliberately one event. Dropping the message-keyed row and creating
+/// the job-keyed one would free the slot in between and destroy the very
+/// evidence this mechanism exists to keep — the same lost-acquisition window,
+/// a few microseconds wide instead of a network round trip.
+///
+/// The row stays provisional; `confirm_acquisition` promotes it.
+///
+/// # Errors
+/// Journal write failure, or a rejection: the row is gone, already owned, at a
+/// different generation, or the acquired identity is already taken.
+pub fn resolve_acquisition(
+    journal: &mut Journal,
+    provisional_job_id: &JobId,
+    acquired_job_id: &JobId,
+    plan_id: &str,
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let outcome = journal.apply(Event::JobAcquisitionResolved {
+        provisional_job_id: provisional_job_id.clone(),
+        acquired_job_id: acquired_job_id.clone(),
+        plan_id: plan_id.to_string(),
+        generation,
+    })?;
+    if outcome.rejected {
+        anyhow::bail!(
+            "acquisition retarget rejected for {} -> {} at generation {}",
+            provisional_job_id.0,
+            acquired_job_id.0,
+            generation.0
+        );
+    }
+    Ok(())
 }
 
 /// Promote a provisional row after GitHub returned the job.
@@ -411,6 +468,17 @@ pub fn abandon_acquisition(
     Ok(())
 }
 
+/// Outcome of resolving one provisional row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAcquisition {
+    pub job_id: JobId,
+    /// What the run service said, or `Indeterminate` when it was never asked.
+    pub verdict: AcquisitionVerdict,
+    /// The row was dropped and its slot freed: either the probe proved the job
+    /// is not ours, or the row ran out of durable probe budget.
+    pub abandoned: bool,
+}
+
 /// Resolve every provisional row left behind by a crash in the acquire window.
 ///
 /// The oracle is `renewjob`, not the 409 from `acquirejob`: upstream's
@@ -422,26 +490,82 @@ pub fn abandon_acquisition(
 /// An indeterminate probe leaves the row untouched: promoting a job we may not
 /// own would let two runners publish for it, and dropping one we do own would
 /// strand it until the lease expired.
+///
+/// # The probe is bounded, and it has to be
+///
+/// `renewjob` extends the lease as a side effect. A row that keeps coming back
+/// indeterminate would therefore renew, on every restart, the lease of a job
+/// this node has repeatedly failed to make progress on — including the one
+/// path where an indeterminate verdict still moved the lease: a 2xx whose body
+/// fails to parse renews remotely and returns `Err` locally. So every
+/// indeterminate probe charges the row's durable budget, and a row whose budget
+/// is spent is abandoned *without being probed again*, which caps the renewals
+/// one acquisition can ever cause at `MAX_ACQUISITION_PROBES`.
+///
+/// A row the acquire reply never named carries no plan id, so no `renewjob`
+/// call can be built for it at all. It is abandoned immediately rather than
+/// holding a slot for a deadline no probe could ever meet.
+///
+/// # Errors
+/// Journal read or write failure.
 pub fn resolve_provisional_acquisitions<P>(
     journal: &mut Journal,
+    now: u64,
     mut probe: P,
-) -> anyhow::Result<Vec<(JobId, AcquisitionVerdict)>>
+) -> anyhow::Result<Vec<ResolvedAcquisition>>
 where
-    P: FnMut(&JobId) -> AcquisitionVerdict,
+    P: FnMut(&JobRecord) -> AcquisitionVerdict,
 {
     let state = journal.materialized_state()?;
-    let pending: Vec<(JobId, SlotId, Generation)> = state
+    let pending: Vec<JobRecord> = state
         .jobs
         .iter()
         .filter(|job| job.provisional)
-        .map(|job| (job.job_id.clone(), job.slot_id.clone(), job.generation))
+        .cloned()
         .collect();
     let mut resolved = Vec::new();
-    for (job_id, slot_id, generation) in pending {
-        let verdict = probe(&job_id);
-        match verdict {
+    for row in pending {
+        let job_id = row.job_id.clone();
+        let generation = row.generation;
+
+        // Nothing to renew: the acquire reply never named a plan, so this row
+        // can never be settled. Keeping it only holds the slot.
+        if row.plan_id.is_empty() {
+            abandon_acquisition(
+                journal,
+                &job_id,
+                generation,
+                "the acquire reply never named a job, so no renewal can prove ownership",
+            )?;
+            resolved.push(ResolvedAcquisition {
+                job_id,
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: true,
+            });
+            continue;
+        }
+
+        // Budget first, so a spent row costs no further lease renewal.
+        if row.probe_budget_exhausted(now) {
+            abandon_acquisition(
+                journal,
+                &job_id,
+                generation,
+                "the acquisition probe budget is spent; the run service will time the job out",
+            )?;
+            resolved.push(ResolvedAcquisition {
+                job_id,
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: true,
+            });
+            continue;
+        }
+
+        let verdict = probe(&row);
+        let abandoned = match verdict {
             AcquisitionVerdict::Owned => {
-                confirm_acquisition(journal, &job_id, &slot_id, generation)?;
+                confirm_acquisition(journal, &job_id, &row.slot_id, generation)?;
+                false
             }
             AcquisitionVerdict::NotOurs => {
                 abandon_acquisition(
@@ -450,12 +574,43 @@ where
                     generation,
                     "run service reports the job is not held by this runner",
                 )?;
+                true
             }
-            AcquisitionVerdict::Indeterminate => {}
-        }
-        resolved.push((job_id, verdict));
+            AcquisitionVerdict::Indeterminate => {
+                charge_acquisition_probe(journal, &job_id, generation);
+                false
+            }
+        };
+        resolved.push(ResolvedAcquisition {
+            job_id,
+            verdict,
+            abandoned,
+        });
     }
     Ok(resolved)
+}
+
+/// Charge one spent probe to the row's durable budget.
+///
+/// A journal failure here must not abort recovery: the row keeps its previous
+/// count and the next restart charges again. What it must never do is silently
+/// leave the count still — that is the difference between a bounded row and one
+/// that renews forever.
+fn charge_acquisition_probe(journal: &mut Journal, job_id: &JobId, generation: Generation) {
+    match journal.apply(Event::AcquisitionProbeFailed {
+        job_id: job_id.clone(),
+        generation,
+    }) {
+        Err(error) => eprintln!(
+            "Warning: could not charge an acquisition probe for job {}: {error}",
+            job_id.0
+        ),
+        Ok(outcome) if outcome.rejected => eprintln!(
+            "Warning: acquisition probe charge for job {} was rejected by the journal",
+            job_id.0
+        ),
+        Ok(_) => {}
+    }
 }
 
 pub fn accept_job(
@@ -651,7 +806,7 @@ fn ack_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use velnor_control::journal::Event;
+    use velnor_control::journal::{Event, ACQUISITION_RESOLUTION_SECONDS, MAX_ACQUISITION_PROBES};
     use velnor_model::{Generation, SlotId};
 
     fn tmp(label: &str) -> PathBuf {
@@ -773,6 +928,32 @@ mod tests {
         (slot, g)
     }
 
+    /// Drive one acquisition to the point a crash is interesting: the intent is
+    /// durable and the acquire reply has named the job, so the row carries the
+    /// plan `renewjob` needs.
+    fn intend_and_retarget(journal: &mut Journal, slot: &SlotId, message: &str, job: &JobId) {
+        intend_acquisition(
+            journal,
+            &JobId(message.to_owned()),
+            slot,
+            message,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
+        resolve_acquisition(
+            journal,
+            &JobId(message.to_owned()),
+            job,
+            "plan-1",
+            journal.materialized_state().unwrap().slots[0].generation,
+        )
+        .unwrap();
+    }
+
+    const RUN_SERVICE_URL: &str = "https://run.example/run";
+    const INTENDED_UNIX: u64 = 1_000;
+
     /// A crash between `acquirejob` returning 200 and the durable marker used
     /// to leave no local record at all: no renewal, no completion, and the job
     /// lost until its lease expired. The intent row survives that crash, and
@@ -784,18 +965,38 @@ mod tests {
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
-            // Process dies here: GitHub may or may not have returned 200.
+            intend_and_retarget(&mut journal, &slot, "msg-1", &job);
+            // Process dies here, after the 200 and before the durable marker.
         }
 
         let mut journal = restart(&dir);
         let state = journal.materialized_state().unwrap();
         assert_eq!(state.jobs.len(), 1, "the intent survived the crash");
         assert!(state.jobs[0].provisional);
+        assert_eq!(
+            state.jobs[0].job_id, job,
+            "the row is keyed by the acquired identity, not the broker message"
+        );
 
-        let resolved =
-            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::Owned).unwrap();
-        assert_eq!(resolved, vec![(job.clone(), AcquisitionVerdict::Owned)]);
+        let mut probed = Vec::new();
+        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |row| {
+            probed.push((row.plan_id.clone(), row.run_service_url.clone()));
+            AcquisitionVerdict::Owned
+        })
+        .unwrap();
+        assert_eq!(
+            probed,
+            vec![("plan-1".to_owned(), RUN_SERVICE_URL.to_owned())],
+            "the probe is handed everything renewjob needs"
+        );
+        assert_eq!(
+            resolved,
+            vec![ResolvedAcquisition {
+                job_id: job.clone(),
+                verdict: AcquisitionVerdict::Owned,
+                abandoned: false,
+            }]
+        );
         let state = journal.materialized_state().unwrap();
         assert!(
             !state.jobs[0].provisional,
@@ -811,14 +1012,22 @@ mod tests {
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+            intend_and_retarget(&mut journal, &slot, "msg-1", &job);
         }
 
         let mut journal = restart(&dir);
-        let resolved =
-            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::NotOurs)
-                .unwrap();
-        assert_eq!(resolved, vec![(job, AcquisitionVerdict::NotOurs)]);
+        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
+            AcquisitionVerdict::NotOurs
+        })
+        .unwrap();
+        assert_eq!(
+            resolved,
+            vec![ResolvedAcquisition {
+                job_id: job,
+                verdict: AcquisitionVerdict::NotOurs,
+                abandoned: true,
+            }]
+        );
         assert!(
             journal.materialized_state().unwrap().jobs.is_empty(),
             "the slot is freed for the next job"
@@ -829,7 +1038,7 @@ mod tests {
     /// The case that must change nothing. Promoting a job we may not own would
     /// let two runners publish for it; dropping one we do own would strand it
     /// until the lease expired. So an unreachable run service leaves the row
-    /// exactly as it was, for the next attempt.
+    /// exactly as it was, for the next attempt — one probe poorer.
     #[test]
     fn an_indeterminate_probe_leaves_the_row_untouched() {
         let dir = tmp("acquire-window-indeterminate");
@@ -837,20 +1046,133 @@ mod tests {
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+            intend_and_retarget(&mut journal, &slot, "msg-1", &job);
         }
 
         let mut journal = restart(&dir);
-        let resolved =
-            resolve_provisional_acquisitions(&mut journal, |_| AcquisitionVerdict::Indeterminate)
-                .unwrap();
-        assert_eq!(resolved, vec![(job, AcquisitionVerdict::Indeterminate)]);
+        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
+            AcquisitionVerdict::Indeterminate
+        })
+        .unwrap();
+        assert_eq!(
+            resolved,
+            vec![ResolvedAcquisition {
+                job_id: job,
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: false,
+            }]
+        );
         let state = journal.materialized_state().unwrap();
         assert_eq!(state.jobs.len(), 1);
         assert!(
             state.jobs[0].provisional,
             "still provisional, still ours to resolve later"
         );
+        assert_eq!(
+            state.jobs[0].probe_attempts, 1,
+            "the probe that reached no verdict is still charged"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `renewjob` extends the lease as a side effect, and the one indeterminate
+    /// path that still moves it is a 2xx whose body fails to parse: renewed
+    /// remotely, `Err` locally. Without a bound, every restart would renew a
+    /// job this node never manages to run. Assert the renewals stop.
+    #[test]
+    fn the_probe_is_bounded_by_attempts_and_then_frees_the_slot() {
+        let dir = tmp("acquire-probe-bounded");
+        let job = JobId("guid-1".into());
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot, _) = prime_ready_slot(&mut journal);
+        intend_and_retarget(&mut journal, &slot, "msg-1", &job);
+
+        let mut renewals = 0u32;
+        // Far more restarts than the budget allows.
+        for _ in 0..(MAX_ACQUISITION_PROBES * 4) {
+            resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
+                renewals += 1;
+                AcquisitionVerdict::Indeterminate
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            renewals, MAX_ACQUISITION_PROBES,
+            "the lease is renewed at most MAX_ACQUISITION_PROBES times, ever"
+        );
+        assert!(
+            journal.materialized_state().unwrap().jobs.is_empty(),
+            "a row that spent its budget releases the slot"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// The deadline spends the budget on its own, so a node that restarts only
+    /// a few times still stops renewing once the run service would time the job
+    /// out anyway.
+    #[test]
+    fn the_probe_is_bounded_by_its_deadline_even_with_attempts_left() {
+        let dir = tmp("acquire-probe-deadline");
+        let job = JobId("guid-1".into());
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot, _) = prime_ready_slot(&mut journal);
+        intend_and_retarget(&mut journal, &slot, "msg-1", &job);
+
+        let mut probes = 0u32;
+        let resolved = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX + ACQUISITION_RESOLUTION_SECONDS,
+            |_| {
+                probes += 1;
+                AcquisitionVerdict::Owned
+            },
+        )
+        .unwrap();
+        assert_eq!(probes, 0, "a row past its deadline is not probed at all");
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].abandoned);
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A crash before the acquire reply was read leaves a row keyed by the
+    /// broker message, with no plan. No `renewjob` call can be built for it, so
+    /// holding the slot for a six-hour deadline buys nothing; the event log
+    /// keeps the evidence and the slot goes back to work.
+    #[test]
+    fn a_row_the_reply_never_named_is_abandoned_without_a_probe() {
+        let dir = tmp("acquire-window-unnamed");
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            intend_acquisition(
+                &mut journal,
+                &JobId("msg-1".into()),
+                &slot,
+                "msg-1",
+                RUN_SERVICE_URL,
+                INTENDED_UNIX,
+            )
+            .unwrap();
+        }
+
+        let mut journal = restart(&dir);
+        let mut probes = 0u32;
+        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
+            probes += 1;
+            AcquisitionVerdict::Owned
+        })
+        .unwrap();
+        assert_eq!(probes, 0, "there is nothing to renew");
+        assert_eq!(
+            resolved,
+            vec![ResolvedAcquisition {
+                job_id: JobId("msg-1".into()),
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: true,
+            }]
+        );
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -858,11 +1180,27 @@ mod tests {
     #[test]
     fn repeating_the_intent_reuses_the_row() {
         let dir = tmp("acquire-intent-idempotent");
-        let job = JobId("guid-1".into());
+        let job = JobId("msg-1".into());
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let (slot, _) = prime_ready_slot(&mut journal);
-        let first = intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
-        let second = intend_acquisition(&mut journal, &job, &slot, "msg-1").unwrap();
+        let first = intend_acquisition(
+            &mut journal,
+            &job,
+            &slot,
+            "msg-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
+        let second = intend_acquisition(
+            &mut journal,
+            &job,
+            &slot,
+            "msg-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
         assert_eq!(first, second);
         assert_eq!(journal.materialized_state().unwrap().jobs.len(), 1);
         std::fs::remove_dir_all(dir).ok();

@@ -30,7 +30,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 5;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 6;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
@@ -44,6 +44,23 @@ pub const MAX_COMPLETION_ATTEMPTS: u32 = 8;
 /// older than that can no longer be delivered usefully, so holding its slot
 /// hostage buys nothing.
 pub const COMPLETION_RESOLUTION_SECONDS: u64 = 6 * 60 * 60;
+
+/// Durable probes a provisional acquisition may burn before it is abandoned.
+///
+/// Each probe is one full `renewjob` call, made once per slot startup, so this
+/// is a count of restarts and not of HTTP requests. Eight is the completion
+/// budget: past that many restarts the node, not the run service, is what is
+/// broken, and every further probe renews a lease for a job this node has
+/// repeatedly failed to make progress on.
+pub const MAX_ACQUISITION_PROBES: u32 = 8;
+
+/// Wall-clock budget for resolving one provisional acquisition, from the
+/// moment the intent became durable.
+///
+/// The same six hours the completion budget uses, for the same reason: GitHub's
+/// default job timeout is six hours, so a lease renewed past it buys nothing
+/// that the run service will still honour, and holding the slot costs capacity.
+pub const ACQUISITION_RESOLUTION_SECONDS: u64 = 6 * 60 * 60;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -76,7 +93,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     phase TEXT NOT NULL,
     accepted_unix INTEGER NOT NULL DEFAULT 0,
     terminal_conclusion TEXT,
-    provisional INTEGER NOT NULL DEFAULT 0
+    provisional INTEGER NOT NULL DEFAULT 0,
+    plan_id TEXT NOT NULL DEFAULT '',
+    run_service_url TEXT NOT NULL DEFAULT '',
+    probe_attempts INTEGER NOT NULL DEFAULT 0,
+    probe_deadline_unix INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
@@ -383,6 +404,33 @@ pub struct JobRecord {
     /// refuses a provisional row, so no completion can ever be sent against
     /// one. `JobOwned` clears it.
     pub provisional: bool,
+    /// Run-service plan holding this job. Empty until `JobAcquisitionResolved`
+    /// retargets the row onto the identity the acquire reply carried: the
+    /// broker message that opens the acquisition names no plan, and `renewjob`
+    /// needs one, so a row without this cannot be probed.
+    pub plan_id: String,
+    /// Run-service base URL this acquisition was addressed to. Known from the
+    /// broker message, so it is durable from the intent onward and recovery
+    /// never has to guess where to probe.
+    pub run_service_url: String,
+    /// Durable count of spent recovery probes. Only the reducer moves it.
+    pub probe_attempts: u32,
+    /// Wall-clock instant past which this provisional row is unresolvable.
+    pub probe_deadline_unix: u64,
+}
+
+impl JobRecord {
+    /// Whether the recovery budget for a provisional row is spent.
+    ///
+    /// Mirrors `OutboxRecord::budget_exhausted`, and exists for the same
+    /// reason: `renewjob` extends the lease as a side effect, so a job this
+    /// node owns but can never execute must not be probed forever. The
+    /// reducer, not the caller, decides when the row may be abandoned.
+    #[must_use]
+    pub fn probe_budget_exhausted(&self, now: u64) -> bool {
+        self.probe_attempts >= MAX_ACQUISITION_PROBES
+            || (self.probe_deadline_unix > 0 && now >= self.probe_deadline_unix)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,6 +536,38 @@ pub enum Event {
         job_id: JobId,
         generation: Generation,
         message_id: String,
+        /// Where the acquisition was addressed. Carried from the broker message
+        /// so recovery knows which run service to probe without re-deriving it.
+        run_service_url: String,
+        /// When the intent became durable. The reducer is pure, so the probe
+        /// deadline has to be stamped from the caller's clock, exactly as
+        /// `JobOwned` stamps `accepted_unix`.
+        intended_unix: u64,
+    },
+    /// The acquire reply came back and named the job. Retargets the provisional
+    /// row from the broker message identity onto the run-service identity, and
+    /// records the plan so `renewjob` becomes possible.
+    ///
+    /// One event, because the alternative is two: drop the message-keyed row
+    /// and create the job-keyed one. That pair frees the slot in between, which
+    /// destroys exactly the evidence this whole mechanism exists to keep, and
+    /// reintroduces the lost-acquisition window a few microseconds wide.
+    ///
+    /// The row stays provisional. It is promoted by `JobOwned` once the runner
+    /// has committed to running the job, and the window between the two is the
+    /// one a `renewjob` probe can settle for certain.
+    JobAcquisitionResolved {
+        provisional_job_id: JobId,
+        acquired_job_id: JobId,
+        plan_id: String,
+        generation: Generation,
+    },
+    /// One recovery probe was spent without reaching a verdict. Charged to the
+    /// row's durable budget so an unreachable run service cannot make this node
+    /// renew the same lease on every restart forever.
+    AcquisitionProbeFailed {
+        job_id: JobId,
+        generation: Generation,
     },
     /// The provisional row could not be resolved to ownership: `acquirejob`
     /// reported the message gone, or the probe proved another runner holds it.
@@ -836,6 +916,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             job_id,
             generation,
             message_id: _,
+            run_service_url,
+            intended_unix,
         } => {
             // Occupy the slot before calling GitHub, so a crash in the acquire
             // window leaves evidence. This does to the slot exactly what
@@ -861,7 +943,46 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     accepted_unix: 0,
                     terminal_conclusion: None,
                     provisional: true,
+                    // No plan id exists yet: the broker message that opens an
+                    // acquisition names none, and only the acquire reply does.
+                    plan_id: String::new(),
+                    run_service_url,
+                    probe_attempts: 0,
+                    probe_deadline_unix: intended_unix
+                        .saturating_add(ACQUISITION_RESOLUTION_SECONDS),
                 });
+            }
+        }
+        Event::JobAcquisitionResolved {
+            provisional_job_id,
+            acquired_job_id,
+            plan_id,
+            generation,
+        } => {
+            // Only a provisional row may be retargeted, and only onto an
+            // identity nothing else already holds. Rewriting an owned row's
+            // identity would silently move a job that may already have a
+            // terminal result or an outbox payload attached to it.
+            let target_taken = acquired_job_id != provisional_job_id
+                && state.jobs.iter().any(|job| job.job_id == acquired_job_id);
+            let row = state.jobs.iter_mut().find(|job| {
+                job.job_id == provisional_job_id && job.generation == generation && job.provisional
+            });
+            match row {
+                Some(row) if !target_taken => {
+                    row.job_id = acquired_job_id;
+                    row.plan_id = plan_id;
+                }
+                _ => rejected = true,
+            }
+        }
+        Event::AcquisitionProbeFailed { job_id, generation } => {
+            let row = state.jobs.iter_mut().find(|job| {
+                job.job_id == job_id && job.generation == generation && job.provisional
+            });
+            match row {
+                Some(row) => row.probe_attempts = row.probe_attempts.saturating_add(1),
+                None => rejected = true,
             }
         }
         Event::JobAcquisitionLost {
@@ -907,6 +1028,15 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             {
                 rejected = true;
             } else {
+                // Carry the acquisition's addressing across the promotion.
+                // Losing it here would leave an owned row that recovery can no
+                // longer probe if the process dies before the job starts.
+                let acquisition = state
+                    .jobs
+                    .iter()
+                    .find(|job| job.job_id == job_id)
+                    .map(|job| (job.plan_id.clone(), job.run_service_url.clone()));
+                let (plan_id, run_service_url) = acquisition.unwrap_or_default();
                 state.jobs.retain(|job| job.job_id != job_id);
                 state.jobs.push(JobRecord {
                     job_id: job_id.clone(),
@@ -919,6 +1049,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     terminal_conclusion: None,
                     // A 200 came back: this row is now proof of ownership.
                     provisional: false,
+                    plan_id,
+                    run_service_url,
+                    // The row is no longer provisional, so nothing probes it.
+                    probe_attempts: 0,
+                    probe_deadline_unix: 0,
                 });
                 commands.push(SideEffect::StartJob { job_id, generation });
             }
@@ -1283,13 +1418,22 @@ impl Journal {
         // The same rule for v5, whose shape change is in `jobs` rather than
         // `outbox`, so the outbox-only check above cannot see it.
         //
-        // Scoped to exactly a v4 stamp. Older stamps are not evidence of a
-        // mutated shape: a v2 or v3 file opened here may legitimately carry the
-        // current `jobs` shape, because `SCHEMA` creates that table at the
-        // current definition and their own migrations stamp explicitly. Only
-        // the v4-to-v5 step can be silently re-stamped, so only it needs
-        // guarding.
-        if stored == JOURNAL_SCHEMA_VERSION - 1 && table_has_column(&conn, "jobs", "provisional")? {
+        // Scoped to exactly a v4 stamp, written as the literal 4. Older stamps
+        // are not evidence of a mutated shape: a v2 or v3 file opened here may
+        // legitimately carry the current `jobs` shape, because `SCHEMA` creates
+        // that table at the current definition and their own migrations stamp
+        // explicitly. Only the v4-to-v5 step can be silently re-stamped, so
+        // only it needs guarding.
+        //
+        // This was `JOURNAL_SCHEMA_VERSION - 1`, which is the same defect that
+        // bricked every journal on the v5 bump: raising the constant silently
+        // re-aimed the check at a different transition. Version comparisons
+        // name their own version.
+        if stored == 4 && table_has_column(&conn, "jobs", "provisional")? {
+            return Err(outbox_schema_mismatch(stored, outbox_shape));
+        }
+        // And again for v6, whose shape change is also in `jobs`.
+        if stored == 5 && table_has_column(&conn, "jobs", "plan_id")? {
             return Err(outbox_schema_mismatch(stored, outbox_shape));
         }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
@@ -1313,6 +1457,7 @@ impl Journal {
         // dropping the terminal states it does not know.
         migrate_v3_to_v4(&mut conn)?;
         migrate_v4_to_v5(&mut conn)?;
+        migrate_v5_to_v6(&mut conn)?;
         let journal = Self {
             conn,
             path: path.to_path_buf(),
@@ -1695,7 +1840,8 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
 
     let mut statement = conn.prepare(
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion, provisional
+                terminal_conclusion, provisional, plan_id, run_service_url,
+                probe_attempts, probe_deadline_unix
          FROM jobs ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1709,6 +1855,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, i64>(6)?,
             row.get::<_, Option<String>>(7)?,
             row.get::<_, i64>(8)? != 0,
+            row.get::<_, String>(9)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?,
         ))
     })?;
     for row in rows {
@@ -1722,6 +1872,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             accepted_unix,
             terminal_conclusion,
             provisional,
+            plan_id,
+            run_service_url,
+            probe_attempts,
+            probe_deadline_unix,
         ) = row?;
         state.jobs.push(JobRecord {
             job_id: JobId(job_id),
@@ -1733,6 +1887,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
             terminal_conclusion,
             provisional,
+            plan_id,
+            run_service_url,
+            probe_attempts: i64_u32(probe_attempts, "job probe_attempts")?,
+            probe_deadline_unix: i64_u64(probe_deadline_unix, "job probe_deadline_unix")?,
         });
     }
 
@@ -1906,8 +2064,9 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         tx.execute(
             "INSERT INTO jobs (
                 job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion, provisional
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                terminal_conclusion, provisional, plan_id, run_service_url,
+                probe_attempts, probe_deadline_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 job.job_id.0,
                 job.slot_id.0,
@@ -1918,6 +2077,10 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 job.accepted_unix as i64,
                 job.terminal_conclusion.as_deref(),
                 job.provisional as i64,
+                job.plan_id,
+                job.run_service_url,
+                job.probe_attempts as i64,
+                job.probe_deadline_unix as i64,
             ],
         )?;
     }
@@ -2269,6 +2432,43 @@ fn migrate_v4_to_v5(conn: &mut Connection) -> StoreResult<()> {
     Ok(())
 }
 
+/// v6 gives a provisional acquisition the addressing and the bounded budget its
+/// recovery needs: the plan and run-service URL `renewjob` is called with, and
+/// the durable probe counter and deadline that stop this node renewing a lease
+/// it can never make progress on.
+///
+/// Existing rows migrate to empty addressing and a zero budget. Every row
+/// written before this bump is either owned or absent, never provisional, so
+/// nothing probes them and the zeros are never read.
+fn migrate_v5_to_v6(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    // Gate on this step's own target, never `JOURNAL_SCHEMA_VERSION`.
+    if u32::try_from(stored).unwrap_or(0) >= 6 {
+        return Ok(());
+    }
+    if !table_has_column(&tx, "jobs", "plan_id")? {
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN plan_id TEXT NOT NULL DEFAULT '';")?;
+    }
+    if !table_has_column(&tx, "jobs", "run_service_url")? {
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN run_service_url TEXT NOT NULL DEFAULT '';")?;
+    }
+    if !table_has_column(&tx, "jobs", "probe_attempts")? {
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN probe_attempts INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !table_has_column(&tx, "jobs", "probe_deadline_unix")? {
+        tx.execute_batch(
+            "ALTER TABLE jobs ADD COLUMN probe_deadline_unix INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    // Stamp exactly 6, and stamp even when the columns were already present:
+    // refusing to stamp there is what left legitimate upgrades claiming an
+    // older version than the shape they carry.
+    tx.pragma_update(None, "user_version", 6u32)?;
+    tx.commit()?;
+    Ok(())
+}
+
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
     let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let mut columns = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -2343,6 +2543,8 @@ fn event_kind(event: &Event) -> &'static str {
         Event::ControlLive => "control_live",
         Event::JournalWritable => "journal_writable",
         Event::JobAcquisitionIntended { .. } => "job_acquisition_intended",
+        Event::JobAcquisitionResolved { .. } => "job_acquisition_resolved",
+        Event::AcquisitionProbeFailed { .. } => "acquisition_probe_failed",
         Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
         Event::Routing { .. } => "routing",
@@ -4059,6 +4261,10 @@ mod tests {
                     accepted_unix: 1,
                     terminal_conclusion: None,
                     provisional: false,
+                    plan_id: String::new(),
+                    run_service_url: String::new(),
+                    probe_attempts: 0,
+                    probe_deadline_unix: 0,
                 }],
                 ..FleetState::default()
             };
@@ -5037,7 +5243,7 @@ mod tests {
     /// replays events, so this asserts on materialization.
     #[test]
     fn an_upgrade_from_every_older_version_can_still_materialize() {
-        for stamped in [2u32, 3, 4] {
+        for stamped in [2u32, 3, 4, 5] {
             let (dir, journal) = open_tmp(&format!("upgrade-from-v{stamped}"));
             let path = dir.join("journal.db");
             drop(journal);
@@ -5082,6 +5288,285 @@ mod tests {
         }
     }
 
+    /// The genuine v5-to-v6 upgrade: an *older shape* under an older stamp, not
+    /// merely a rewound stamp on a current file.
+    ///
+    /// This is the case the v5 bump got wrong. The columns really are absent,
+    /// so a migration that early-returns, or that stamps without altering the
+    /// table, produces a file that opens fine and then fails forever on the
+    /// first `materialized_state()`. Assert the shape is repaired, the stamp
+    /// lands on exactly the current version, and the state materializes.
+    #[test]
+    fn a_v5_shaped_journal_upgrades_to_v6_and_materializes() {
+        let (dir, journal) = open_tmp("upgrade-v5-shape");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        for column in [
+            "plan_id",
+            "run_service_url",
+            "probe_attempts",
+            "probe_deadline_unix",
+        ] {
+            conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
+                .unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let journal = Journal::open(&path).expect("a real v5 journal must upgrade");
+        journal
+            .load_state()
+            .expect("the upgraded journal must materialize");
+        journal
+            .materialized_state()
+            .expect("the upgraded journal must read its materialized tables");
+
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
+        assert_eq!(JOURNAL_SCHEMA_VERSION, 6, "this test pins the v6 upgrade");
+        for column in [
+            "plan_id",
+            "run_service_url",
+            "probe_attempts",
+            "probe_deadline_unix",
+        ] {
+            assert!(
+                table_has_column(&conn, "jobs", column).unwrap(),
+                "{column} must exist after the upgrade"
+            );
+        }
+        drop(conn);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Helper: a Ready slot carrying one provisional acquisition.
+    fn prime_provisional(journal: &mut Journal, scope: &str, message_job: &str) {
+        prime_ready(journal, scope);
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot(scope),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobAcquisitionIntended {
+                slot_id: slot(scope),
+                job_id: job(message_job),
+                generation: r#gen(),
+                message_id: message_job.into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
+            })
+            .unwrap();
+    }
+
+    /// The retarget is one event because the two-event alternative frees the
+    /// slot in between. Assert the slot never becomes free and no capacity is
+    /// advertised: a permit released here is a second runner picking up work
+    /// this node is already committed to.
+    #[test]
+    fn resolving_an_acquisition_retargets_the_row_without_freeing_the_slot() {
+        let (dir, mut journal) = open_tmp("acquisition-retarget");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+
+        let resolved = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-1".into(),
+                generation: r#gen(),
+            })
+            .unwrap();
+        assert!(!resolved.rejected);
+        assert!(
+            resolved.commands.is_empty(),
+            "retargeting must not advertise a permit"
+        );
+
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        let row = &state.jobs[0];
+        assert_eq!(row.job_id, job("run-service-job-1"));
+        assert_eq!(row.plan_id, "plan-1");
+        assert_eq!(row.run_service_url, "https://run.example/run");
+        assert!(
+            row.provisional,
+            "the retarget records identity, not ownership"
+        );
+        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.advertised_capacity(), 0);
+
+        // The addressing survives promotion: a crash after JobOwned but before
+        // the job starts still leaves something recovery can renew.
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("run-service-job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".into(),
+                accepted_unix: 2_000,
+            })
+            .unwrap();
+        let state = journal.load_state().unwrap();
+        assert!(!state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].run_service_url, "https://run.example/run");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Retargeting is scoped to provisional rows and to free identities.
+    /// Rewriting an owned row's identity would move a job that may already
+    /// carry a terminal result or an outbox payload.
+    #[test]
+    fn only_a_provisional_row_may_be_retargeted_onto_a_free_identity() {
+        let (dir, mut journal) = open_tmp("acquisition-retarget-refusals");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+
+        // Wrong generation.
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("request-1"),
+                    acquired_job_id: job("run-service-job-1"),
+                    plan_id: "plan-1".into(),
+                    generation: Generation(r#gen().0 + 1),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        // Unknown provisional row.
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("request-absent"),
+                    acquired_job_id: job("run-service-job-1"),
+                    plan_id: "plan-1".into(),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: job("request-1"),
+                acquired_job_id: job("run-service-job-1"),
+                plan_id: "plan-1".into(),
+                generation: r#gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("run-service-job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".into(),
+                accepted_unix: 2_000,
+            })
+            .unwrap();
+
+        // An owned row is no longer retargetable.
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("run-service-job-1"),
+                    acquired_job_id: job("run-service-job-2"),
+                    plan_id: "plan-2".into(),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(
+            journal.load_state().unwrap().jobs[0].job_id,
+            job("run-service-job-1")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// `renewjob` extends the lease as a side effect, so an indeterminate probe
+    /// that repeats on every restart would renew a job this node can never make
+    /// progress on, forever. The budget is durable and the reducer owns it.
+    #[test]
+    fn a_provisional_row_carries_a_durable_probe_budget() {
+        let (dir, mut journal) = open_tmp("acquisition-probe-budget");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+
+        let row = journal.load_state().unwrap().jobs[0].clone();
+        assert_eq!(row.probe_attempts, 0);
+        assert_eq!(
+            row.probe_deadline_unix,
+            1_000 + ACQUISITION_RESOLUTION_SECONDS,
+            "the deadline is stamped from the intent's own clock"
+        );
+        assert!(!row.probe_budget_exhausted(1_000));
+        // Time alone spends it, even with attempts left.
+        assert!(row.probe_budget_exhausted(row.probe_deadline_unix));
+
+        for spent in 1..=MAX_ACQUISITION_PROBES {
+            let outcome = journal
+                .apply(Event::AcquisitionProbeFailed {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                })
+                .unwrap();
+            assert!(!outcome.rejected);
+            assert_eq!(journal.load_state().unwrap().jobs[0].probe_attempts, spent);
+        }
+        assert!(journal.load_state().unwrap().jobs[0].probe_budget_exhausted(1_000));
+
+        // The bound is what lets the row terminate and the slot come back.
+        let lost = journal
+            .apply(Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+                reason: "probe budget spent".into(),
+            })
+            .unwrap();
+        assert!(!lost.rejected);
+        assert!(journal.load_state().unwrap().jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A probe charge is refused for a row that is not provisional: an owned
+    /// job is never probed, and letting the counter move there would let a
+    /// caller invent a budget for something the oracle already settled.
+    #[test]
+    fn a_probe_failure_is_refused_for_a_row_that_is_not_provisional() {
+        let (dir, mut journal) = open_tmp("acquisition-probe-owned");
+        prime_provisional(&mut journal, "scope-1", "request-1");
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("request-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: r#gen(),
+                worker: "worker-1".into(),
+                accepted_unix: 2_000,
+            })
+            .unwrap();
+        assert!(
+            journal
+                .apply(Event::AcquisitionProbeFailed {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn a_provisional_row_cannot_back_a_completion() {
         let (dir, mut journal) = open_tmp("provisional-not-owner");
@@ -5098,6 +5583,8 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
 
@@ -5162,6 +5649,8 @@ mod tests {
                 job_id: job("guid-1"),
                 generation: r#gen(),
                 message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         let lost = journal
@@ -5188,6 +5677,8 @@ mod tests {
                 job_id: job("guid-2"),
                 generation: r#gen(),
                 message_id: "msg-2".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         assert!(!reacquire.rejected);
