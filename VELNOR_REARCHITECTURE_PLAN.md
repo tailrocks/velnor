@@ -3584,3 +3584,36 @@ passed, and format/diff checks passed. No live Docker daemon is available on
 this host, so disposable-daemon cold-pull proof, live failure/recovery proof,
 and default-mbx end-to-end evidence remain open. `docker/image-pull` stays
 unrunnable until its isolated daemon/data-root/socket exists.
+
+## 53. Complete old-clone and WIP preservation audit — 2026-09-05
+
+The canonical working directory remains
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
+`perf/docker-rust-mbx`; the old checkout
+`/Users/donbeave/Projects/donbeave/velnor` remains intact and clean. The old
+clone's live branch/worktree tip is an ancestor of canonical `1c1815c`, and it
+has no additional branch, worktree, or stash to merge. The canonical fix
+worktree and detached performance backup are also ancestors of the target.
+
+The old clone had eighteen reflog-only commits and four fsck-only policy
+snapshots that were not protected by live refs. All twenty-two exact commit
+objects were imported into the canonical object database and published as
+immutable `refs/archive/old-clone/reflog-*` or
+`refs/archive/old-clone/unreachable-*` refs. The earlier named dangling policy
+archive refs remain. No checkout, branch, stash, or object was deleted, reset,
+pruned, or force-pushed.
+
+The canonical repository has five preserved WIP stashes. Each exact stash
+commit (including its index/untracked parents) is now published under
+`refs/archive/canonical/stash-*`. The payloads were not blindly applied:
+`stash@{0}` overlaps committed toolchain/runtime/protocol fixes already on the
+target;
+the large `pr534` and port snapshots touch reserved runner/control-plane
+boundaries and stale architecture, one stash is explicitly unrelated, and the
+instruction cleanup conflicts with the active instruction topology. They remain
+recoverable archive inputs for a separately reviewed merge.
+
+This is preservation and ancestry proof, not a claim that every archived WIP
+is correct or belongs in the final branch. Canonical `perf/docker-rust-mbx`
+contains all live branch/worktree content; archive refs retain every discarded
+or uncommitted historical input without introducing unreviewed regressions.
