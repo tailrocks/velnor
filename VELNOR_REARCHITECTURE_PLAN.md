@@ -2997,3 +2997,30 @@ This turn did not author edits to `crates/velnor-runner/src/executor.rs`,
 integration call sites. Concurrent shared-branch commits touch some of those paths and remain in
 the tested snapshot; they are identified in §§18, 20, and 22. The allowed configless acquisition
 regression fix is `e7bcac5`. No forbidden patch was silently presented as completed.
+
+## 24. Continuation anchor — 2026-09-04
+
+The exact requested branch heads were re-resolved before this continuation. The live
+Velnor head is `915cc15057665e461363f9cf87a6bcf27d3ddeea` on
+`origin/perf/docker-rust-mbx`; the live fixture head is
+`0cbec6e3265c59e714a31df5cdd67c7d99462443` on
+`origin/codex/verifier-completion-fixes`. These are newer than the immutable starting
+SHAs in §0 and remain the same requested branches.
+
+The continuation has pushed these focused benchmark hardening packages to the Velnor
+branch: `d7c061a` makes image identity probing read-only and refreshes the digest after a
+successful workload; `9cc2c3f` accounts for concurrent Cargo worker processes through
+isolated runners; and `915cc15` records per-child Linux/macOS wait-time resources so
+per-iteration RSS is not inherited from the process-wide high-water mark. The preceding
+journal, checkout, Docker status, cache, and identity packages remain in the history.
+
+Evidence at this anchor: Velnor fmt, workspace check, workspace Clippy with warnings
+denied, and workspace nextest pass (`2366` passed, `1` skipped); the fixture `mise run
+check` passes against this exact source and includes workflow/capability audits, actionlint,
+`41` Python tests, `49` Rust tests, fmt, check, and L2 closure. No live dual-lane result,
+deployed image digest, default-mbx end-to-end run, or soak result is claimed.
+
+The goal remains open. Highest unresolved classes include the reserved runner/control
+completion and acquisition recovery paths, unavailable VelnorJob benchmark driver,
+unsupported production reads, true network-cold Docker proof, and the broad semantic,
+cancellation, fault, soak, and architecture decomposition work in §§15, 18, and 58.
