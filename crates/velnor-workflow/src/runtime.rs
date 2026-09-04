@@ -689,6 +689,8 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
     let workflows = root.join(".github/workflows");
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
+    let policy_entrypoint = workflows.join("ci-policy.yml");
+    let mut found_policy_entrypoint = false;
     let mut failures = 0;
     for entry in entries {
         let path = entry
@@ -701,6 +703,9 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
             )
         {
             continue;
+        }
+        if path == policy_entrypoint {
+            found_policy_entrypoint = true;
         }
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
@@ -716,6 +721,13 @@ pub(crate) fn enforce_policy(root: &Path) -> Result<(), GeneratorError> {
             continue;
         };
         inspect_workflow(workflow, &path, &mut failures);
+    }
+    if !found_policy_entrypoint {
+        policy_failure(
+            &policy_entrypoint,
+            "required base-owned ci-policy.yml entrypoint is missing",
+            &mut failures,
+        );
     }
     if failures > 0 {
         return Err(GeneratorError::usage(format!(
@@ -1353,6 +1365,10 @@ mod tests {
         std::fs::create_dir_all(root.join(".github/workflows"))?;
         std::fs::create_dir_all(root.join(".github/ci"))?;
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
+        std::fs::write(
+            root.join(".github/workflows/ci-policy.yml"),
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@fe805b984d3e261d3686d7ec670792f8121306bc\n    permissions:\n      contents: read\n",
+        )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
             format!("runners = \"{runners}\"\n"),
