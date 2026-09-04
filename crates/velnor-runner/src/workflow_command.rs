@@ -162,7 +162,11 @@ fn title_case(value: &str) -> String {
 }
 
 fn parse_workflow_command(line: &str) -> Option<WorkflowCommand<'_>> {
-    let line = line.strip_prefix("::")?;
+    // ActionCommand.TryParseV2 (@397b032, src/Runner.Common/ActionCommand.cs):
+    // `message = message.TrimStart()` before the `::` prefix test, so an
+    // indented `  ::add-mask::secret` is still a command. Without the trim the
+    // mask is never registered and the secret is printed verbatim.
+    let line = line.trim_start().strip_prefix("::")?;
     let (header, value) = line.split_once("::")?;
     let (name, properties) = header
         .split_once(' ')
@@ -255,6 +259,17 @@ mod tests {
         let state = parse_workflow_commands("::set-output name=one%2Ctwo::a%0Ab%25c\n");
 
         assert_eq!(state.outputs["one,two"], "a\nb%c");
+    }
+
+    #[test]
+    fn honors_workflow_commands_with_leading_whitespace() {
+        let state = parse_workflow_commands(
+            "  ::add-mask::indented-secret\n\
+             \t::set-output name=answer::42\n",
+        );
+
+        assert_eq!(state.masks, vec!["indented-secret"]);
+        assert_eq!(state.outputs["answer"], "42");
     }
 
     #[test]
