@@ -101,6 +101,37 @@ impl Runner {
         dir: Option<&std::path::Path>,
         env: &[(String, String)],
     ) -> io::Result<&Invocation> {
+        self.exec_inner(program, args, dir, env, &[])
+    }
+
+    /// Run a command while removing selected inherited environment variables.
+    ///
+    /// The removals happen after `env` is applied, so the caller cannot
+    /// accidentally reintroduce a variable it meant to clear. This is useful
+    /// for measurements whose workload must not inherit compiler or target
+    /// overrides from the shell that launched the harness.
+    ///
+    /// # Errors
+    /// The process could not be spawned or waited on.
+    pub fn exec_without<S: AsRef<str>>(
+        &mut self,
+        program: &str,
+        args: &[S],
+        dir: Option<&std::path::Path>,
+        env: &[(String, String)],
+        unset: &[&str],
+    ) -> io::Result<&Invocation> {
+        self.exec_inner(program, args, dir, env, unset)
+    }
+
+    fn exec_inner<S: AsRef<str>>(
+        &mut self,
+        program: &str,
+        args: &[S],
+        dir: Option<&std::path::Path>,
+        env: &[(String, String)],
+        unset: &[&str],
+    ) -> io::Result<&Invocation> {
         let owned: Vec<String> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
         let mut command = Command::new(program);
         command.args(&owned).stdin(Stdio::null());
@@ -109,6 +140,9 @@ impl Runner {
         }
         for (key, value) in env {
             command.env(key, value);
+        }
+        for key in unset {
+            command.env_remove(key);
         }
         let started = Instant::now();
         let output = command_output(&mut command)?;
@@ -399,6 +433,22 @@ mod tests {
             .expect("exec");
         assert!(invocation.ok());
         assert!(invocation.stdout.ends_with("set"), "{}", invocation.stdout);
+        assert_eq!(runner.process_count(), 1);
+    }
+
+    #[test]
+    fn exec_without_removes_a_variable_after_environment_is_applied() {
+        let mut runner = Runner::new();
+        let invocation = runner
+            .exec_without(
+                "/bin/sh",
+                &["-c", "test -z \"${VELNOR_BENCH_UNSET+x}\""],
+                None,
+                &[("VELNOR_BENCH_UNSET".to_owned(), "present".to_owned())],
+                &["VELNOR_BENCH_UNSET"],
+            )
+            .expect("exec");
+        assert!(invocation.ok(), "{}", invocation.stderr);
         assert_eq!(runner.process_count(), 1);
     }
 

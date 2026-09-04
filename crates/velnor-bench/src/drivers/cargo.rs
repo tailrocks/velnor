@@ -104,6 +104,28 @@ const CHECK: CargoCommand = CargoCommand::Workspace {
     extra: &["--workspace", "--all-targets", "--locked"],
 };
 
+/// Ambient variables that can silently turn an ordinary Cargo measurement into
+/// a wrapper, cross-target, offline, or otherwise operator-specific run. The
+/// benchmark sets its own target directory and terminal/incremental policy;
+/// these overrides are removed so a caller's shell cannot change the workload
+/// without the record saying so.
+const AMBIENT_CARGO_ENV_TO_REMOVE: &[&str] = &[
+    "CARGO_BUILD_JOBS",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_TARGET",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_NET_OFFLINE",
+    "RUSTC",
+    "RUSTC_BOOTSTRAP",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTDOC",
+    "RUSTDOCFLAGS",
+    "RUSTFLAGS",
+];
+
 fn plan_for(id: &str) -> Option<Plan> {
     let plan = match id {
         "rust/cold" => Plan {
@@ -337,7 +359,13 @@ impl CargoWorkload {
         let started = Instant::now();
         let invocation = context
             .runner
-            .exec("cargo", args, Some(workspace), &env)
+            .exec_without(
+                "cargo",
+                args,
+                Some(workspace),
+                &env,
+                AMBIENT_CARGO_ENV_TO_REMOVE,
+            )
             .context("spawning cargo")?;
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if !invocation.ok() {
@@ -385,11 +413,12 @@ impl CargoWorkload {
                 })?;
                 let invocation = context
                     .runner
-                    .exec(
+                    .exec_without(
                         "cargo",
                         &["update", "--workspace"],
                         Some(workspace),
                         &[("CARGO_TERM_COLOR".to_owned(), "never".to_owned())],
+                        AMBIENT_CARGO_ENV_TO_REMOVE,
                     )
                     .context("cargo update")?;
                 if !invocation.ok() {
@@ -582,7 +611,7 @@ impl CargoWorkload {
                 .map(|(workspace, target)| {
                     scope.spawn(move || {
                         let mut runner = Runner::new();
-                        let outcome = match runner.exec(
+                        let outcome = match runner.exec_without(
                             "cargo",
                             args,
                             Some(workspace),
@@ -591,6 +620,7 @@ impl CargoWorkload {
                                 ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
                                 ("CARGO_INCREMENTAL".to_owned(), "0".to_owned()),
                             ],
+                            AMBIENT_CARGO_ENV_TO_REMOVE,
                         ) {
                             Ok(invocation) if invocation.ok() => Ok(()),
                             Ok(invocation) => Err(format!(
@@ -688,11 +718,12 @@ fn find_build_script(workspace: &Path) -> Option<PathBuf> {
 fn resolve_package(context: &mut Context, workspace: &Path, kind: PackageKind) -> Result<String> {
     let metadata = context
         .runner
-        .exec(
+        .exec_without(
             "cargo",
             &["metadata", "--format-version", "1", "--locked"],
             Some(workspace),
             &[("CARGO_TERM_COLOR".to_owned(), "never".to_owned())],
+            AMBIENT_CARGO_ENV_TO_REMOVE,
         )
         .context("cargo metadata")?;
     if !metadata.ok() {
@@ -807,6 +838,26 @@ mod tests {
         assert_eq!(
             plan_for("rust/concurrent-jobs").unwrap().workspace,
             Workspace::PerConcurrentJob
+        );
+    }
+
+    #[test]
+    fn cargo_measurements_remove_ambient_workload_overrides() {
+        for variable in [
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_TARGET",
+            "CARGO_NET_OFFLINE",
+            "RUSTFLAGS",
+        ] {
+            assert!(
+                AMBIENT_CARGO_ENV_TO_REMOVE.contains(&variable),
+                "{variable} must not silently alter a cargo-direct measurement"
+            );
+        }
+        assert!(
+            !AMBIENT_CARGO_ENV_TO_REMOVE.contains(&"CARGO_TARGET_DIR"),
+            "the explicit per-sample target directory must remain set"
         );
     }
 
