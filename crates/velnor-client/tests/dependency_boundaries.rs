@@ -13,9 +13,8 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const WORKSPACE_PACKAGES: [&str; 10] = [
+const WORKSPACE_PACKAGES: [&str; 9] = [
     "velnor-model",
-    "velnor-action-model",
     "velnor-control",
     "velnor-client",
     "velnor-render",
@@ -399,8 +398,7 @@ fn velnor_client_transitively_never_reaches_daemon_internals() {
     let metadata = cargo_metadata_resolved();
     let closure = transitive_closure(&metadata, "velnor-client");
     for forbidden in [
-        "velnor-action-model",
-            "velnor-control",
+                "velnor-control",
         "velnor-runner",
         "velnorctl",
         "axum",
@@ -484,8 +482,7 @@ fn shared_crates_never_depend_on_clap_or_axum() {
     let graph = dependency_graph(&cargo_metadata());
     for shared in [
         "velnor-model",
-        "velnor-action-model",
-            "velnor-control",
+                "velnor-control",
         "velnor-client",
         "velnor-render",
     ] {
