@@ -51,7 +51,16 @@ const SETUP_RETRIES: u32 = 5;
 const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
 
 fn is_transient_contention(error: &StoreError) -> bool {
-    error.envelope.reason == "store.locked"
+    matches!(
+        error.envelope.reason.as_str(),
+        "store.locked" | "store.schema.initializing"
+    )
+}
+
+fn incomplete_schema_error() -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.schema.incomplete").with_remediation(
+        "schema_version exists without its singleton row; restore the database from a consistent backup",
+    )
 }
 
 /// Tunables for [`Store::open_with`].
@@ -132,6 +141,9 @@ impl Store {
                     Err(error) if is_transient_contention(&error) && attempt < SETUP_RETRIES => {
                         attempt += 1;
                         std::thread::sleep(SETUP_BACKOFF_STEP * attempt);
+                    }
+                    Err(error) if error.envelope.reason == "store.schema.initializing" => {
+                        return Err(incomplete_schema_error());
                     }
                     Err(error) => return Err(error),
                 }
@@ -275,10 +287,12 @@ fn preflight_schema(conn: &Connection) -> StoreResult<()> {
             .optional()?
             .is_some();
         if !has_version_row {
-            return Err(StoreError::new(ExitClass::Operation, "store.schema.incomplete")
-                .with_remediation(
-                    "schema_version exists without its singleton row; restore the database from a consistent backup",
-                ));
+            return Err(
+                StoreError::new(ExitClass::Unavailable, "store.schema.initializing")
+                    .with_remediation(
+                    "schema metadata is being initialized by another opener; retry the store open",
+                ),
+            );
         }
         migrations::current_version(conn)?;
     }
@@ -286,8 +300,9 @@ fn preflight_schema(conn: &Connection) -> StoreResult<()> {
 }
 
 /// One attempt of the contention-retried setup section: open, WAL
-/// configuration, and meta-table seeding. Any `store.locked` outcome here
-/// is retried by [`Store::open_with`]; everything else fails immediately.
+/// configuration, and meta-table seeding. Contention and the compatibility
+/// setup window are retried by [`Store::open_with`]; everything else fails
+/// immediately.
 fn open_setup(path: &Path) -> StoreResult<Connection> {
     let conn = Connection::open(path).map_err(|error| {
         StoreError::from(error).with_remediation(format!(
@@ -1099,7 +1114,13 @@ mod tests {
                     let active = Arc::clone(&active);
                     thread::spawn(move || {
                         start.wait();
-                        let store = Store::open(path.as_path()).expect("concurrent open");
+                        let store = match Store::open(path.as_path()) {
+                            Ok(store) => store,
+                            Err(error) => {
+                                active.wait();
+                                panic!("concurrent open: {error}");
+                            }
+                        };
                         active.wait();
                         if index < 5 {
                             let slug = format!("daemon-{index}");
