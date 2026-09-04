@@ -3,6 +3,7 @@
 use crate::{
     command_files::{parse_command_file_contents, FileCommand},
     container::Shell,
+    expression::{self, Node},
     fs_copy::NoFollowDestinationDir,
     job_message::{ActionReferenceType, ActionStep},
 };
@@ -98,43 +99,38 @@ fn github_script_step_with_context(
         .and_then(|value| value.as_object())
         .ok_or_else(|| anyhow::anyhow!("script step {} missing inputs object", index + 1))?;
     // GitHub sends script body as a plain literal OR as a format() expression when ${{ }} is used.
-    let script: String = string_input_field(inputs, &["script", "Script"])
-        .map(String::from)
-        .or_else(|| evaluate_script_format_expr(inputs, &["script", "Script"], context_data))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "script step {} missing script input; input keys: {}",
-                index + 1,
-                input_summary(inputs)
-            )
-        })?;
+    let script: String = match string_input_field(inputs, &["script", "Script"]) {
+        Some(script) => Some(script.to_string()),
+        None => match expr_input_field(inputs, &["script", "Script"]) {
+            Some(expr) => Some(render_setup_expression(expr, context_data)?),
+            None => None,
+        },
+    }
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "script step {} missing script input; input keys: {}",
+            index + 1,
+            input_summary(inputs)
+        )
+    })?;
     let shell = string_input_field(inputs, &["shell", "Shell"])
         .or(defaults.shell.as_deref())
         .map(github_shell)
         .transpose()?
         .unwrap_or(Shell::BashDefault);
-    let working_directory = string_input_field(
-        inputs,
-        &[
-            "workingDirectory",
-            "working-directory",
-            "WorkingDirectory",
-            "Working-Directory",
-        ],
-    )
-    .map(String::from)
-    .or_else(|| {
-        evaluate_script_format_expr(
-            inputs,
-            &[
-                "workingDirectory",
-                "working-directory",
-                "WorkingDirectory",
-                "Working-Directory",
-            ],
-            context_data,
-        )
-    })
+    const WORKING_DIRECTORY_NAMES: &[&str] = &[
+        "workingDirectory",
+        "working-directory",
+        "WorkingDirectory",
+        "Working-Directory",
+    ];
+    let working_directory = match string_input_field(inputs, WORKING_DIRECTORY_NAMES) {
+        Some(directory) => Some(directory.to_string()),
+        None => match expr_input_field(inputs, WORKING_DIRECTORY_NAMES) {
+            Some(expr) => Some(render_setup_expression(expr, context_data)?),
+            None => None,
+        },
+    }
     .or_else(|| defaults.working_directory.clone())
     .map(|path| workspace_path(workspace_container, &path))
     .unwrap_or_else(|| workspace_container.to_string());
@@ -358,166 +354,162 @@ fn input_name_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
         .find_map(|name| object.get(*name).and_then(input_value_as_str))
 }
 
-/// Evaluate a GitHub Actions `format()` expression from the inputs map.
-/// Used when the script body is an expression like `format('just clippy "{0}"', matrix.package)`.
-fn evaluate_script_format_expr(
-    inputs: &serde_json::Map<String, Value>,
+/// The `{"expr": "..."}` form the broker sends for an input whose workflow
+/// source contained `${{ }}`, looked up by input name in the inputs map.
+fn expr_input_field<'a>(
+    inputs: &'a serde_json::Map<String, Value>,
     names: &[&str],
-    context_data: &[(String, Value)],
-) -> Option<String> {
-    let map = inputs.get("map").or_else(|| inputs.get("Map"))?;
-    let items = map.as_array()?;
+) -> Option<&'a str> {
+    let items = inputs
+        .get("map")
+        .or_else(|| inputs.get("Map"))?
+        .as_array()?;
     let entry = items.iter().find(|item| {
         item.as_object()
-            .and_then(|obj| input_name_field(obj))
-            .is_some_and(|key| names.iter().any(|n| n.eq_ignore_ascii_case(key)))
+            .and_then(input_name_field)
+            .is_some_and(|key| names.iter().any(|name| name.eq_ignore_ascii_case(key)))
     })?;
     let value = entry
         .as_object()
-        .and_then(|obj| obj.get("value").or_else(|| obj.get("Value")))?;
-    let obj = value.as_object()?;
-    let expr = obj
+        .and_then(|object| object.get("value").or_else(|| object.get("Value")))?
+        .as_object()?;
+    value
         .get("expr")
-        .or_else(|| obj.get("Expr"))
-        .and_then(|v| v.as_str())?;
-    // Eagerly evaluate the format() call so that {{ / }} escape sequences in the
-    // template are resolved (e.g. ${{output}} → ${output} for bash variables).
-    // Args that cannot be resolved from context_data (e.g. steps.X.outputs.Y)
-    // are replaced with a `${{ arg }}` lazy expression so that resolve_expressions
-    // picks them up at step-run time without the nested-}} problem.
-    evaluate_format_expr_with_lazy_args(expr, context_data)
-        .or_else(|| Some(format!("${{{{ {expr} }}}}")))
+        .or_else(|| value.get("Expr"))
+        .and_then(Value::as_str)
 }
 
-fn evaluate_format_expr_with_lazy_args(
+/// Render a broker-sent step input expression at job setup.
+///
+/// Upstream evaluates a step's inputs in `ActionRunner.RunAsync`
+/// (@397b032, src/Runner.Worker/ActionRunner.cs:174-185) via
+/// `PipelineTemplateEvaluator.EvaluateStepInputs`
+/// (src/Sdk/DTPipelines/Pipelines/ObjectTemplating/PipelineTemplateEvaluator.cs:166-191),
+/// whose `context.Errors.Check()` throws a `TemplateValidationException` that
+/// `StepsRunner` turns into a failed step
+/// (src/Runner.Worker/StepsRunner.cs:335-344). Input rendering is therefore
+/// **fail-closed** upstream, unlike `${{ }}` interpolation inside an already
+/// rendered value. An `Err` here propagates out of `github_script_steps_*` and
+/// fails the job (`runner.rs` `step_mapping`).
+///
+/// The one thing upstream never faces is a context that does not exist yet:
+/// it renders at step-run time. Velnor renders once at setup, so a subtree
+/// reading `env`/`steps`/`job`/`jobs`/`runner` or a runner function is handed
+/// on verbatim as `${{ … }}` for the step-time pass, exactly as
+/// `resolve_job_context_expressions` defers such spans in `executor.rs`.
+fn render_setup_expression(expr: &str, context_data: &[(String, Value)]) -> Result<String> {
+    let context = SetupExpressionContext { context_data };
+    let node = expression::parse(expr, &context)
+        .with_context(|| format!("evaluating step input expression `{expr}`"))?;
+    let Some(node) = node else {
+        // `ExpressionParser.cs:60-64` — an empty expression is null, and
+        // `convert_to_string` of null is the empty string.
+        return Ok(String::new());
+    };
+
+    // A `format()` call is the shape GitHub compiles a `run:` body into. Its
+    // template carries the script's literal `{`/`}` as `{{`/`}}` escapes, so
+    // deferring the whole call verbatim would both re-emit those escapes and
+    // truncate the `${{ … }}` span at the first `}}`. Render the template now
+    // and defer only the arguments that cannot be evaluated yet.
+    if let Node::Function { name, args } = &node
+        && name.eq_ignore_ascii_case("format")
+        && !args.is_empty()
+        && let Some(rendered) = render_format_call(expr, args, &context)?
+    {
+        return Ok(rendered);
+    }
+
+    if expression::reads_runtime_context(&node) {
+        return Ok(format!("${{{{ {} }}}}", expr.trim()));
+    }
+    expression::evaluate_node(&node, &context)
+        .map(|value| value.convert_to_string())
+        .with_context(|| format!("evaluating step input expression `{expr}`"))
+}
+
+/// Render a `format(template, args…)` call, deferring individual arguments.
+///
+/// Returns `Ok(None)` when the argument spans cannot be recovered verbatim or
+/// the template itself is not knowable yet; the caller then falls back to
+/// deferring or evaluating the whole tree.
+fn render_format_call(
     expr: &str,
-    context_data: &[(String, Value)],
-) -> Option<String> {
-    let inner = expr.trim().strip_prefix("format(")?.strip_suffix(')')?;
-    let parts = split_format_args(inner);
-    if parts.is_empty() {
-        return None;
+    args: &[Node],
+    context: &SetupExpressionContext<'_>,
+) -> Result<Option<String>> {
+    if expression::reads_runtime_context(&args[0]) {
+        return Ok(None);
     }
-    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-    let placeholder_open = "\x00LBRACE\x00";
-    let placeholder_close = "\x00RBRACE\x00";
-    let mut result = template
-        .replace("''", "'")
-        .replace("{{", placeholder_open)
-        .replace("}}", placeholder_close);
-    for (i, arg) in parts[1..].iter().enumerate() {
-        let value = if let Some(v) = resolve_context_path(arg.trim(), context_data) {
-            v
+    let Some((_, spans)) = expression::function_call_argument_spans(expr) else {
+        return Ok(None);
+    };
+    if spans.len() != args.len() {
+        return Ok(None);
+    }
+    let template = expression::evaluate_node(&args[0], context)
+        .with_context(|| format!("evaluating step input expression `{expr}`"))?
+        .convert_to_string();
+
+    let rendered = expression::eval::format_template(&template, args.len() - 1, |index| {
+        let argument = &args[index + 1];
+        if expression::reads_runtime_context(argument) {
+            // Verbatim hand-off to the step-time pass.
+            Ok(expression::Value::string(format!(
+                "${{{{ {} }}}}",
+                spans[index + 1]
+            )))
         } else {
-            // Unresolvable at setup time → lazy ${{ arg }} for runtime resolution
-            format!("${{{{ {} }}}}", arg.trim())
-        };
-        result = result.replace(&format!("{{{i}}}"), &value);
-    }
-    result = result
-        .replace(placeholder_open, "{")
-        .replace(placeholder_close, "}");
-    Some(result)
-}
-
-/// Evaluate a GitHub Actions `format(template, args...)` expression.
-/// Returns the formatted string with `{N}` placeholders replaced by resolved context values.
-pub fn evaluate_github_format(expr: &str, context_data: &[(String, Value)]) -> Option<String> {
-    let expr = expr.trim();
-    let inner = expr
-        .strip_prefix("format(")
-        .and_then(|s| s.strip_suffix(')'))?;
-
-    // Split on commas not inside quotes (simple greedy parser for well-formed expressions)
-    let parts = split_format_args(inner);
-    if parts.is_empty() {
-        return None;
-    }
-
-    // First arg is the template (single-quoted string)
-    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-
-    // Remaining args are context expressions like `matrix.package`
-    // Use a placeholder during {N} substitution to avoid touching {{ and }} escape sequences.
-    let placeholder_open = "\x00LBRACE\x00";
-    let placeholder_close = "\x00RBRACE\x00";
-    let mut result = template
-        .replace("''", "'") // escaped single quotes in single-quoted string
-        .replace("{{", placeholder_open)
-        .replace("}}", placeholder_close);
-    for (i, arg) in parts[1..].iter().enumerate() {
-        let resolved = resolve_context_path(arg.trim(), context_data).unwrap_or_default();
-        result = result.replace(&format!("{{{i}}}"), &resolved);
-    }
-    // Restore escaped braces: {{ → { and }} → }
-    result = result
-        .replace(placeholder_open, "{")
-        .replace(placeholder_close, "}");
-    Some(result)
-}
-
-fn split_format_args(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_single_quote = false;
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' if !in_single_quote => {
-                in_single_quote = true;
-                current.push(ch);
-            }
-            '\'' if in_single_quote => {
-                if chars.peek() == Some(&'\'') {
-                    // escaped quote ''
-                    current.push(ch);
-                    current.push(chars.next().unwrap());
-                } else {
-                    in_single_quote = false;
-                    current.push(ch);
-                }
-            }
-            ',' if !in_single_quote => {
-                parts.push(current.trim().to_string());
-                current = String::new();
-            }
-            _ => current.push(ch),
+            expression::evaluate_node(argument, context)
         }
-    }
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-    parts
+    })
+    .with_context(|| format!("evaluating step input expression `{expr}`"))?;
+    Ok(Some(rendered))
 }
 
-/// Resolve a dot-path context expression like `matrix.package` from context_data.
-fn resolve_context_path(path: &str, context_data: &[(String, Value)]) -> Option<String> {
-    let mut parts = path.splitn(2, '.');
-    let top = parts.next()?;
-    let rest = parts.next();
-    let top_value = context_data
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(top))
-        .map(|(_, v)| v)?;
-    match rest {
-        None => Some(value_to_string(top_value)),
-        Some(rest) => {
-            let mut cur = top_value;
-            for key in rest.split('.') {
-                cur = cur.get(key)?;
-            }
-            Some(value_to_string(cur))
-        }
+/// The setup-time expression environment: the job message's context data, and
+/// nothing that only exists once steps run.
+struct SetupExpressionContext<'a> {
+    context_data: &'a [(String, Value)],
+}
+
+impl expression::ParseEnvironment for SetupExpressionContext<'_> {
+    fn is_named_value(&self, name: &str) -> bool {
+        expression::ROOT_CONTEXTS
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(name))
+    }
+
+    fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
+        expression::RUNNER_FUNCTIONS
+            .iter()
+            .find(|(known, _, _)| known.eq_ignore_ascii_case(name))
+            .map(|(_, min, max)| (*min, *max))
     }
 }
 
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
+impl expression::EvaluationContext for SetupExpressionContext<'_> {
+    /// A context the job message did not carry is null, which
+    /// `convert_to_string` renders as `""` — upstream's coercion
+    /// (`Sdk/Value.cs`), not the old resolver's "leave the text alone".
+    fn named_value(&self, name: &str) -> expression::Value {
+        self.context_data
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| expression::eval::from_serde_json(value))
+            .unwrap_or(expression::Value::Null)
+    }
+
+    /// Never reached: `reads_runtime_context` defers any tree containing a
+    /// runner function before evaluation starts.
+    fn call_function(
+        &self,
+        name: &str,
+        _args: &[expression::Value],
+    ) -> std::result::Result<expression::Value, expression::ExpressionError> {
+        Err(expression::ExpressionError::evaluation(format!(
+            "{name}() cannot be evaluated before the job runs"
+        )))
     }
 }
 
@@ -1794,44 +1786,194 @@ mod tests {
 
     #[test]
     fn evaluates_format_expr_with_context() {
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             "format('just clippy \"{0}\"', matrix.package)",
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"package": "app-b"}),
             )],
-        );
-        assert_eq!(result.as_deref(), Some("just clippy \"app-b\""));
+        )
+        .unwrap();
+        assert_eq!(result, "just clippy \"app-b\"");
     }
 
     #[test]
     fn evaluates_format_expr_with_escaped_braces() {
         // {{ and }} in GitHub format() are escape sequences for literal { and }
         let expr = "format('{{\\n  echo stats ({0})\\n}} >> \"${{ENV}}\"\\n', matrix.config.lane)";
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             expr,
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"config": {"lane": "velnor"}}),
             )],
-        );
+        )
+        .unwrap();
         let expected = "{\\n  echo stats (velnor)\\n} >> \"${ENV}\"\\n";
-        assert_eq!(result.as_deref(), Some(expected));
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn evaluates_format_expr_multi_arg() {
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             "format('python3 write.py \"{0}\" \"{1}\"', matrix.package, matrix.config.lane)",
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"package": "app-a", "config": {"lane": "velnor"}}),
             )],
+        )
+        .unwrap();
+        assert_eq!(result, "python3 write.py \"app-a\" \"velnor\"");
+    }
+
+    fn matrix_context(value: serde_json::Value) -> Vec<(String, Value)> {
+        vec![("matrix".to_string(), value)]
+    }
+
+    /// D3 — `Sdk/Value.cs` truthiness: every non-empty string is truthy,
+    /// `"0"` and `"false"` included. The deleted resolver had no truthiness at
+    /// all, so a `&&`/`||` in a step input silently rewrote to text.
+    #[test]
+    fn setup_expression_string_truthiness_matches_upstream() {
+        let context = matrix_context(serde_json::json!({"zero": "0", "no": "false", "empty": ""}));
+        assert_eq!(
+            render_setup_expression("matrix.zero && 'yes'", &context).unwrap(),
+            "yes"
         );
         assert_eq!(
-            result.as_deref(),
-            Some("python3 write.py \"app-a\" \"velnor\"")
+            render_setup_expression("matrix.no && 'yes'", &context).unwrap(),
+            "yes"
         );
+        assert_eq!(
+            render_setup_expression("matrix.empty && 'yes'", &context).unwrap(),
+            ""
+        );
+    }
+
+    /// D4 — a value the job message never carried is null, and null converts
+    /// to the empty string (`Sdk/Value.cs`). The deleted resolver returned
+    /// `None` for a missing path, which the caller turned into a literal
+    /// `${{ … }}` left in the script.
+    #[test]
+    fn setup_expression_missing_value_coerces_to_empty_string() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        assert_eq!(
+            render_setup_expression("format('[{0}]', matrix.absent)", &context).unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            render_setup_expression("format('[{0}]', matrix.absent.deeper)", &context).unwrap(),
+            "[]"
+        );
+    }
+
+    /// D5 — relational operators. The deleted resolver had none; `>` was just
+    /// text it could not resolve.
+    #[test]
+    fn setup_expression_supports_relational_operators() {
+        let context = matrix_context(serde_json::json!({"version": 14, "name": "beta"}));
+        assert_eq!(
+            render_setup_expression("matrix.version >= 12", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("matrix.version < 12", &context).unwrap(),
+            "false"
+        );
+        // Upstream compares a string to a number by coercing the string
+        // (`Sdk/Value.cs`), so a non-numeric string is NaN and every relation
+        // is false.
+        assert_eq!(
+            render_setup_expression("matrix.name > 1", &context).unwrap(),
+            "false"
+        );
+    }
+
+    /// D6 — the function set the deleted resolver did not have.
+    #[test]
+    fn setup_expression_supports_the_full_function_set() {
+        let context = matrix_context(serde_json::json!({
+            "package": "velnor-runner",
+            "list": ["a", "b"],
+            "json": "{\"lane\": \"fast\"}"
+        }));
+        assert_eq!(
+            render_setup_expression("startsWith(matrix.package, 'velnor')", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("endsWith(matrix.package, 'runner')", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("join(matrix.list, '+')", &context).unwrap(),
+            "a+b"
+        );
+        assert_eq!(
+            render_setup_expression("fromJSON(matrix.json).lane", &context).unwrap(),
+            "fast"
+        );
+        assert_eq!(
+            render_setup_expression("contains(matrix.package, 'run')", &context).unwrap(),
+            "true"
+        );
+    }
+
+    /// A span that reads a context which does not exist until steps run is
+    /// deferred verbatim to the step-time pass — per argument, so the
+    /// template's `{{`/`}}` escapes are still resolved now and the deferred
+    /// span carries no nested `}}`.
+    #[test]
+    fn setup_expression_defers_runtime_context_arguments_verbatim() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        assert_eq!(
+            render_setup_expression(
+                "format('echo {0} ${{{0}}} {1}', matrix.package, steps.build.outputs.sha)",
+                &context
+            )
+            .unwrap(),
+            "echo app ${app} ${{ steps.build.outputs.sha }}"
+        );
+        // A whole tree that reads runtime state and is not a format() call is
+        // handed on unchanged.
+        assert_eq!(
+            render_setup_expression("env.MODE == 'release'", &context).unwrap(),
+            "${{ env.MODE == 'release' }}"
+        );
+    }
+
+    /// Fail-closed: upstream's `EvaluateStepInputs` runs
+    /// `context.Errors.Check()`, which throws and fails the step
+    /// (`PipelineTemplateEvaluator.cs:166-191`,
+    /// `StepsRunner.cs:335-344`). An unevaluatable span must not be passed
+    /// through as text the shell then runs.
+    #[test]
+    fn setup_expression_is_fail_closed() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        // Unrecognized named-value (`ExpressionParser.cs:144-147`).
+        assert!(render_setup_expression("nope.value", &context).is_err());
+        // Unrecognized function.
+        assert!(render_setup_expression("bogus('x')", &context).is_err());
+        // Unexpected end of expression.
+        assert!(render_setup_expression("format('{0}', ", &context).is_err());
+        // A format string referencing an argument that was not supplied
+        // (`Format.cs:41`).
+        assert!(render_setup_expression("format('{0} {1}', matrix.package)", &context).is_err());
+
+        // And it fails the step mapping, not just the expression.
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([{
+            "enabled": true,
+            "reference": { "type": "Script" },
+            "inputs": {
+                "map": [{
+                    "Key": {"lit": "script", "type": 0},
+                    "Value": {"expr": "format('{0} {1}', matrix.package)", "type": 3}
+                }],
+                "type": 2
+            }
+        }]))
+        .unwrap();
+        assert!(github_script_steps_with_context(&steps, "/__w", &[], &context).is_err());
     }
 
     #[test]
