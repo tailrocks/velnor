@@ -67,7 +67,8 @@ pub trait Workload {
     /// The workload failed; a failed iteration is never summarised.
     fn iterate(&mut self, context: &mut Context) -> Result<Observation>;
 
-    /// Cleanup after the last iteration. Failures are reported, not fatal.
+    /// Cleanup after preparation or iteration, including failures. Cleanup
+    /// failures are reported alongside the primary workload error.
     fn teardown(&mut self, context: &mut Context) -> Result<()> {
         let _ = context;
         Ok(())
@@ -100,11 +101,92 @@ pub fn build(scenario: &Scenario, driver: Driver) -> Result<Box<dyn Workload>> {
 /// # Errors
 /// Preparation or any iteration failed.
 pub fn run(workload: &mut dyn Workload, context: &mut Context) -> Result<Vec<Observation>> {
-    workload.prepare(context)?;
-    let mut observations = Vec::with_capacity(context.iterations);
-    for _ in 0..context.iterations {
-        observations.push(workload.iterate(context)?);
+    if let Err(error) = workload.prepare(context) {
+        return finish_with_teardown(workload, context, Err(error));
     }
-    workload.teardown(context)?;
-    Ok(observations)
+
+    let result = (|| {
+        let mut observations = Vec::with_capacity(context.iterations);
+        for _ in 0..context.iterations {
+            observations.push(workload.iterate(context)?);
+        }
+        Ok(observations)
+    })();
+    finish_with_teardown(workload, context, result)
+}
+
+fn finish_with_teardown<T>(
+    workload: &mut dyn Workload,
+    context: &mut Context,
+    result: Result<T>,
+) -> Result<T> {
+    match (result, workload.teardown(context)) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(teardown_error)) => {
+            Err(error.context(format!("workload teardown also failed: {teardown_error:#}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct CleanupProbe {
+        fail_prepare: bool,
+        teardown_calls: usize,
+    }
+
+    impl Workload for CleanupProbe {
+        fn prepare(&mut self, _context: &mut Context) -> Result<()> {
+            if self.fail_prepare {
+                anyhow::bail!("prepare failure");
+            }
+            Ok(())
+        }
+
+        fn iterate(&mut self, _context: &mut Context) -> Result<Observation> {
+            anyhow::bail!("iteration failure");
+        }
+
+        fn teardown(&mut self, _context: &mut Context) -> Result<()> {
+            self.teardown_calls += 1;
+            Ok(())
+        }
+    }
+
+    fn context() -> Context {
+        Context {
+            work_root: std::env::temp_dir(),
+            velnor_repo: std::env::temp_dir(),
+            job_image: String::new(),
+            iterations: 1,
+            concurrency: 1,
+            runner: Runner::new(),
+        }
+    }
+
+    #[test]
+    fn teardown_runs_when_preparation_fails() {
+        let mut workload = CleanupProbe {
+            fail_prepare: true,
+            teardown_calls: 0,
+        };
+        let error = run(&mut workload, &mut context()).expect_err("prepare must fail");
+        assert_eq!(error.to_string(), "prepare failure");
+        assert_eq!(workload.teardown_calls, 1);
+    }
+
+    #[test]
+    fn teardown_runs_when_an_iteration_fails() {
+        let mut workload = CleanupProbe {
+            fail_prepare: false,
+            teardown_calls: 0,
+        };
+        let error = run(&mut workload, &mut context()).expect_err("iteration must fail");
+        assert_eq!(error.to_string(), "iteration failure");
+        assert_eq!(workload.teardown_calls, 1);
+    }
 }
