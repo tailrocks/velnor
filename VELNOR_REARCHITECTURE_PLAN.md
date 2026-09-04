@@ -1605,3 +1605,74 @@ propagating it into the job as `CARGO_BUILD_JOBS` and the mbx scheduler's share.
 P2 work. Dispatched as T-016.
 
 The landed admission fix is named as the model for how the remaining packages should land.
+
+### BC-28 partially resolved — the job image, measured rather than estimated
+
+Both images were actually built (the `mise_github_token` secret was obtainable via
+`gh auth token`), so these are measured unpacked sizes taken inside the running container, not
+computed figures. Baseline built from a `git archive` snapshot per the evidence rule.
+
+| Area | Before | After | Δ |
+| --- | --- | --- | --- |
+| clang/LLVM | 448 MiB | 128 MiB | −320 |
+| Docker Engine (dockerd, containerd, shim, runc) | 222 | 0 | −222 |
+| Docker client + Buildx | 111 (apt) | 98 (`docker:29-cli`) | −13 |
+| pyenv `-dev` deps, `libsqlite3-dev`, misc | — | — | −~128 |
+| **Whole image** | **4503 MiB** | **3820 MiB** | **−683 MiB (−15.2%)** |
+| installed packages | 377 | 313 | −64 |
+
+Each removal was confirmed rather than assumed: no `bindgen` in `Cargo.lock` and the mold
+adapter asserts no clang linker; jobs use the host Engine through the lease proxy and nothing
+starts a daemon; `MISE_PYTHON_COMPILE=0` plus an `install_only_stripped` CPython URL means
+Python is never compiled; `rusqlite` is `bundled`. Two facts only a real build could establish:
+Ubuntu 26.04 has **no `docker-cli` package**, and `docker-buildx` depends on `docker.io`, so
+removing only `docker.io` would have saved literally zero bytes — the client and Buildx now come
+from a digest-pinned `docker:29-cli`.
+
+**The layer inversion had a deeper cause than layer order.** `docker/job-mise.lock` *mirrors*
+the Rust channel, so any layer copying the lock is invalidated by a Rust bump regardless of
+where the `COPY` sits. A stage now strips that mirror — it is a bare version echo with no URL
+and no checksum, unlike every other entry — and the non-Rust toolchain layer is keyed on the
+stripped copy. Proven by simulating a 1.98.1 → 1.98.2 bump and rebuilding: the toolchain layer
+reported `CACHED` where previously that edit rebuilt everything.
+
+**Laziness was tried and the evidence rejected it.** Building the image without cosign showed it
+reinstalled anyway: mise's `exec_auto_install` makes *any* `mise exec` materialise the entire
+configured toolset, so a tool still listed in `job-mise.toml` is not lazy — it is deferred to
+the worst possible moment, the first `mise exec` of every job. Unblocking it requires either
+`exec_auto_install=false` fleet-wide, which changes tool resolution for every user workflow, or
+removing the tool from the mise config and giving its adapter a pinned source. hadolint is
+blocked differently: its adapter runs the binary directly instead of calling
+`locked_mise_install` as the cosign, mold and just adapters do — and that inconsistency is the
+real bug class. The browser and font stack stays because `playwright install-deps` at job time
+would need root apt with network, which the one-toolchain contract forbids.
+
+Version bumps taken and verified in the built image: gh 2.100.0, protoc 36.1, **mbx 1.7.0**,
+cargo-nextest 0.9.143, mise v2026.9.1. protoc 36's breaking changes are gated on edition 2026 or
+concern other languages, and this repository has no `.proto` files.
+
+**mbx 1.7.0 changes an assumption Velnor should know about.** 1.6.0 could let Cargo compile a
+dependent against metadata produced before a mid-compile source edit; 1.7.0 deletes the modeled
+outputs and **fails the build** instead. So any job that writes into the workspace while a cargo
+build runs — parallel steps, or a cache restore landing on sources — now gets a hard failure
+rather than a silent stale artifact. That is the correct behavior and it is also the same defect
+class as BC-14, fixed upstream. Its cache-key changes additionally mean the host-persistent
+`/var/cache/mbx` stores take a one-time warm-cache miss on the first job after this ships.
+
+| ID | Change | Commits |
+| --- | --- | --- |
+| T-012 | Job image reduced 4503 → 3820 MiB; layer invalidation inverted back; five tool versions bumped and reconciled across environments. | `f1e272f`, `709583a` |
+
+**Blocked, and the block is itself a finding.** sccache 0.16.0 → 0.17.0 and mold 2.41.0 →
+2.42.0 could not be taken, because both versions are also hardcoded in `executor.rs`
+(`:4866-4867` asserts `sccache 0.16.0` "must be preinstalled"; `MOLD_LOCKED_VERSION` at `:4972`,
+asserted at `:26795`) and in four workflow files. Bumping only `docker/` would break those
+adapters at job time.
+
+This is exactly the coupling the new pin-integrity gate exists to catch, and it does not yet
+cover it: the gate validates mise configs, lockfiles and the declared mirrors in
+`config/version-pins.json`, but not version constants embedded in Rust source. Extending it
+there is the follow-up that unblocks both bumps.
+
+Also stale and needing a follow-up: `README.md:8` and
+`content/docs/guides/execution.mdx:123` still name mbx 1.6.0.
