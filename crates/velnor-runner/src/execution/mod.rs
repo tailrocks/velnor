@@ -6,8 +6,8 @@
 
 mod artifacts;
 mod backend;
-pub mod cancel;
 mod cache_transport;
+pub mod cancel;
 mod docker;
 mod firecracker;
 mod guest;
