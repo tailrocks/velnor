@@ -1185,6 +1185,32 @@ mod tests {
         repo
     }
 
+    fn complete_trace(sid: &str, bytes: u64) -> String {
+        format!(
+            "{{\"event\":\"version\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000001Z\",\"evt\":\"4\",\"exe\":\"2.50.1\"}}\n{{\"event\":\"data\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000002Z\",\"key\":\"bytes-received\",\"value\":{bytes}}}\n{{\"event\":\"exit\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000003Z\",\"code\":0}}\n{{\"event\":\"atexit\",\"sid\":\"{sid}\",\"thread\":\"main\",\"time\":\"2026-09-05T00:00:00.000004Z\",\"code\":0}}\n"
+        )
+    }
+
+    fn test_cargo_workspace(parent: &Path, name: &str) -> PathBuf {
+        let workspace = parent.join(name);
+        std::fs::create_dir_all(workspace.join("src")).expect("create Cargo workspace");
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n"
+            ),
+        )
+        .expect("write Cargo manifest");
+        std::fs::write(workspace.join("src/lib.rs"), "pub fn worker() {}\n")
+            .expect("write Cargo source");
+        std::fs::write(
+            workspace.join("build.rs"),
+            "fn main() {\n    let status = std::process::Command::new(\"git\")\n        .arg(\"--version\")\n        .status()\n        .expect(\"run git\");\n    assert!(status.success());\n}\n",
+        )
+        .expect("write Cargo build script");
+        workspace
+    }
+
     #[test]
     fn every_rust_scenario_with_a_cargo_fallback_has_a_plan() {
         for scenario in crate::scenario::MATRIX {
@@ -1482,24 +1508,33 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_workers_are_recorded_by_the_parent_runner() {
-        let worktree = std::env::temp_dir();
+    fn concurrent_workers_write_and_merge_isolated_trace_files() {
+        let root = test_path("concurrent-workers");
+        let first_workspace = test_cargo_workspace(&root, "workspace-0");
+        let second_workspace = test_cargo_workspace(&root, "workspace-1");
+        let first_target = root.join("target-0");
+        let second_target = root.join("target-1");
+        let scratch = ScratchOwner::new();
+        let trace_files = vec![
+            trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 0),
+            trace_file_path_for_worker(&root, "test/concurrent", scratch.nonce, scratch.id, 1, 1),
+        ];
         let harness = CargoWorkload {
             plan: plan_for("rust/concurrent-jobs").expect("concurrent plan"),
             scenario: "rust/concurrent-jobs",
             scratch: ScratchOwner {
                 worktrees: vec![
                     OwnedWorktree {
-                        path: worktree.clone(),
+                        path: first_workspace,
                         state: WorktreeState::Registered,
                     },
                     OwnedWorktree {
-                        path: worktree.clone(),
+                        path: second_workspace,
                         state: WorktreeState::Registered,
                     },
                 ],
-                targets: vec![worktree.clone(), worktree.clone()],
-                ..ScratchOwner::new()
+                targets: vec![first_target, second_target],
+                ..scratch
             },
             package: None,
             iteration: 0,
@@ -1513,17 +1548,29 @@ mod tests {
             concurrency: 2,
             runner: Runner::new(),
         };
-        let trace_files = vec![
-            trace_file_path_for_worker(&worktree, "test/concurrent", 1, 1, 1, 0),
-            trace_file_path_for_worker(&worktree, "test/concurrent", 1, 1, 1, 1),
-        ];
 
         harness
-            .run_concurrent(&mut context, &["--version".to_owned()], &trace_files)
+            .run_concurrent(&mut context, &["check".to_owned()], &trace_files)
             .expect("cargo workers");
 
         assert_eq!(context.runner.process_count(), 2);
         assert_eq!(context.runner.count_of("cargo"), 2);
+        let first = GitCounters::from_event_file(&trace_files[0]).expect("first worker trace");
+        let second = GitCounters::from_event_file(&trace_files[1]).expect("second worker trace");
+        assert!(first.processes > 0);
+        assert!(second.processes > 0);
+        let merged = read_trace_files(&trace_files).expect("merge worker traces");
+        assert_eq!(
+            merged.processes,
+            first.processes.saturating_add(second.processes)
+        );
+        assert_eq!(
+            merged.received_bytes,
+            first.received_bytes.saturating_add(second.received_bytes)
+        );
+        assert!(trace_files.iter().all(|path| path.exists()));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1547,14 +1594,9 @@ mod tests {
         let first = root.join("worker-0.jsonl");
         let second = root.join("worker-1.jsonl");
         let ambient = root.join("ambient.jsonl");
-        let stream = |bytes| {
-            format!(
-                "{{\"event\":\"version\"}}\n{{\"event\":\"data\",\"key\":\"bytes-received\",\"value\":{bytes}}}\n"
-            )
-        };
-        std::fs::write(&first, stream(11)).expect("write first trace");
-        std::fs::write(&second, stream(22)).expect("write second trace");
-        std::fs::write(&ambient, stream(1000)).expect("write ambient trace");
+        std::fs::write(&first, complete_trace("worker-0", 11)).expect("write first trace");
+        std::fs::write(&second, complete_trace("worker-1", 22)).expect("write second trace");
+        std::fs::write(&ambient, complete_trace("ambient", 1000)).expect("write ambient trace");
 
         let counters = read_trace_files(&[first.clone(), second.clone()]).expect("merge traces");
         assert_eq!(counters.received_bytes, 33);
@@ -1633,12 +1675,7 @@ mod tests {
 
         let disk_before = tree_bytes(&measured_root);
         let trace_file = trace_file_path_for_worker(&work_root, "rust/cold", 1, 1, 1, 0);
-        std::fs::write(
-            &trace_file,
-            br#"{"event":"version"}
-{"event":"data","key":"bytes-received","value":123}"#,
-        )
-        .expect("write trace");
+        std::fs::write(&trace_file, complete_trace("cold-worker", 123)).expect("write trace");
 
         assert_eq!(tree_bytes(&measured_root), disk_before);
         let git = GitCounters::from_event_file(&trace_file).expect("read trace");
