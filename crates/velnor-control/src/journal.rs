@@ -25,10 +25,25 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
 /// must not apply events (N-1 must not clobber an N writer's log).
-pub const JOURNAL_SCHEMA_VERSION: u32 = 3;
+///
+/// Every terminal-affecting event rides a bump here. `Journal::open` stamps
+/// the current version onto an older journal *before* any event may be
+/// written, so a binary that predates the bump refuses the file outright
+/// instead of decoding it with an incomplete event vocabulary.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 4;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
+
+/// Durable send attempts a completion may burn before it is unresolvable.
+/// Each attempt is one full transport retry loop, not one HTTP request.
+pub const MAX_COMPLETION_ATTEMPTS: u32 = 8;
+
+/// Wall-clock budget for resolving one completion, from the moment its intent
+/// became durable. GitHub's own default job timeout is six hours; a payload
+/// older than that can no longer be delivered usefully, so holding its slot
+/// hostage buys nothing.
+pub const COMPLETION_RESOLUTION_SECONDS: u64 = 6 * 60 * 60;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -59,7 +74,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     attempt INTEGER NOT NULL,
     worker TEXT NOT NULL,
     phase TEXT NOT NULL,
-    accepted_unix INTEGER NOT NULL DEFAULT 0
+    accepted_unix INTEGER NOT NULL DEFAULT 0,
+    terminal_conclusion TEXT
 );
 CREATE TABLE IF NOT EXISTS outbox (
     job_id TEXT PRIMARY KEY,
@@ -69,7 +85,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     intended INTEGER NOT NULL DEFAULT 0,
     send_started INTEGER NOT NULL DEFAULT 0,
     remote_acked INTEGER NOT NULL DEFAULT 0,
-    created_unix INTEGER NOT NULL
+    created_unix INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    deadline_unix INTEGER NOT NULL DEFAULT 0,
+    permanent INTEGER NOT NULL DEFAULT 0,
+    abandoned INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -198,7 +218,7 @@ fn pending_outbox_blocks_admission(
     generation: Generation,
 ) -> bool {
     state.outbox.iter().any(|row| {
-        if !row.intended || row.remote_acked {
+        if !row.is_pending() {
             return false;
         }
         if row.slot_id == *slot_id && row.generation == generation {
@@ -284,7 +304,7 @@ fn oldest_outbox_age_seconds(outbox: &[OutboxRecord]) -> u64 {
     let now = unix_now();
     outbox
         .iter()
-        .filter(|row| row.intended && !row.remote_acked)
+        .filter(|row| row.is_pending())
         .map(|row| now.saturating_sub(row.created_unix))
         .max()
         .unwrap_or(0)
@@ -346,6 +366,10 @@ pub struct JobRecord {
     pub worker: String,
     pub phase: ActorPhase,
     pub accepted_unix: u64,
+    /// Terminal conclusion recorded by `JobTerminalResult` before the
+    /// completion payload was serialised. Recovery must reuse this instead of
+    /// synthesising a failure for a job that had already finished green.
+    pub terminal_conclusion: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,6 +382,35 @@ pub struct OutboxRecord {
     pub send_started: bool,
     pub remote_acked: bool,
     pub created_unix: u64,
+    /// Durable count of exhausted send attempts. Only the reducer moves it.
+    pub attempts: u32,
+    /// Wall-clock instant past which this completion is unresolvable.
+    pub deadline_unix: u64,
+    /// The remote rejected the payload in a way retrying cannot change.
+    pub permanent: bool,
+    /// Bounded terminal state: the completion could not be resolved inside its
+    /// attempt and time budget. The send claim is never released, so this can
+    /// never become a second terminal send; it only stops the row from
+    /// blocking admission forever.
+    pub abandoned: bool,
+}
+
+impl OutboxRecord {
+    /// A row still owed to the remote service.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.intended && !self.remote_acked && !self.abandoned
+    }
+
+    /// Whether the recovery budget for this row is spent. The reducer refuses
+    /// `CompletionUnresolvable` for a row that still has budget, so the
+    /// terminal state can never be asserted by a caller's say-so alone.
+    #[must_use]
+    pub fn budget_exhausted(&self, now: u64) -> bool {
+        self.permanent
+            || self.attempts >= MAX_COMPLETION_ATTEMPTS
+            || (self.deadline_unix > 0 && now >= self.deadline_unix)
+    }
 }
 
 /// Intent events. The reducer never performs I/O.
@@ -425,6 +478,16 @@ pub enum Event {
         job_id: JobId,
         generation: Generation,
     },
+    /// The job produced a terminal result. Written *before* the completion
+    /// payload is serialised, so a crash in that window leaves durable proof
+    /// of what the job actually concluded. Without it, recovery can only guess,
+    /// and guessing turns a green job into a synthetic failure.
+    JobTerminalResult {
+        job_id: JobId,
+        generation: Generation,
+        /// Wire conclusion string as the run service will be told it.
+        conclusion: String,
+    },
     CompletionIntended {
         job_id: JobId,
         generation: Generation,
@@ -441,6 +504,29 @@ pub enum Event {
     RemoteObservedTerminal {
         job_id: JobId,
         generation: Generation,
+    },
+    /// One completion send attempt was spent without reaching a terminal
+    /// acknowledgement. This is the durable attempt counter: recovery is
+    /// bounded because every failed attempt costs budget that survives a
+    /// crash, rather than restarting from zero on each controller cycle.
+    CompletionAttemptFailed {
+        job_id: JobId,
+        generation: Generation,
+        /// The remote refused the payload in a way retrying cannot change.
+        permanent: bool,
+    },
+    /// Bounded terminal state for a completion that can never be acknowledged.
+    ///
+    /// The reducer refuses this unless the row's durable attempt or time
+    /// budget is actually spent, so it cannot be asserted by a caller's
+    /// say-so. It marks the row abandoned and frees the slot; it never sets
+    /// `remote_acked` and never releases the send claim, so an abandoned
+    /// completion can never become a second terminal send on any generation.
+    CompletionUnresolvable {
+        job_id: JobId,
+        generation: Generation,
+        /// Operator-facing explanation, recorded immutably in the log.
+        reason: String,
     },
     /// A live job worker disappeared without a terminal completion (for
     /// example killed by a daemon drain or an OS reboot). The job cannot
@@ -466,7 +552,7 @@ pub enum Event {
     CanaryObserved {
         status: CanaryStatus,
     },
-    /// Installed apt generation is live. Additive: N-1 readers skip unknown kinds.
+    /// Installed apt generation is live.
     PackageActivated {
         apt_version: String,
         generation: u64,
@@ -513,6 +599,14 @@ pub enum SideEffect {
         slot_id: SlotId,
         generation: Generation,
     },
+}
+
+/// One completion the node gave up on, read back from the immutable log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvableCompletion {
+    pub job_id: JobId,
+    pub generation: Generation,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -740,6 +834,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     worker,
                     phase: ActorPhase::Assigned,
                     accepted_unix,
+                    terminal_conclusion: None,
                 });
                 commands.push(SideEffect::StartJob { job_id, generation });
             }
@@ -753,6 +848,42 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 }
             } else {
                 rejected = true;
+            }
+        }
+        Event::JobTerminalResult {
+            job_id,
+            generation,
+            conclusion,
+        } => {
+            let slot_generation =
+                state
+                    .jobs
+                    .iter()
+                    .find(|job| job.job_id == job_id)
+                    .and_then(|job| {
+                        state
+                            .slots
+                            .iter()
+                            .find(|slot| slot.slot_id == job.slot_id)
+                            .map(|slot| slot.generation)
+                    });
+            match state.jobs.iter_mut().find(|job| job.job_id == job_id) {
+                Some(job)
+                    if job.generation == generation
+                        && slot_generation == Some(generation)
+                        && job_occupies_slot(job.phase)
+                        // A terminal result is written once. A second, different
+                        // conclusion for the same job generation is a caller bug,
+                        // never a correction.
+                        && job
+                            .terminal_conclusion
+                            .as_ref()
+                            .is_none_or(|recorded| *recorded == conclusion) =>
+                {
+                    job.terminal_conclusion = Some(conclusion);
+                    job.phase = ActorPhase::Completing;
+                }
+                _ => rejected = true,
             }
         }
         Event::CompletionIntended {
@@ -778,8 +909,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     // issue more than one terminal send.
                     let row = &state.outbox[outbox_index];
                     if row.generation != generation
-                        || !row.intended
-                        || row.remote_acked
+                        || !row.is_pending()
                         || row.payload_sha256 != payload_sha256
                         || !outbox_owner_is_proven(&state, row)
                     {
@@ -788,6 +918,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         state.jobs[job_index].phase = ActorPhase::Completing;
                     }
                 } else {
+                    let created = unix_now();
                     state.jobs[job_index].phase = ActorPhase::Completing;
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
@@ -797,7 +928,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         intended: true,
                         send_started: false,
                         remote_acked: false,
-                        created_unix: unix_now(),
+                        created_unix: created,
+                        attempts: 0,
+                        deadline_unix: created.saturating_add(COMPLETION_RESOLUTION_SECONDS),
+                        permanent: false,
+                        abandoned: false,
                     });
                     commands.push(SideEffect::SendCompletion {
                         job_id,
@@ -814,8 +949,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 let valid = {
                     let row = &state.outbox[index];
                     row.generation == generation
-                        && row.intended
-                        && !row.remote_acked
+                        && row.is_pending()
                         && !row.send_started
                         && outbox_owner_is_proven(&state, row)
                 };
@@ -834,13 +968,69 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 let valid = {
                     let row = &state.outbox[index];
                     row.generation == generation
-                        && row.intended
+                        && row.is_pending()
                         && row.send_started
-                        && !row.remote_acked
                         && outbox_owner_is_proven(&state, row)
                 };
                 if valid {
                     state.outbox[index].remote_acked = true;
+                    commands.push(SideEffect::DeleteOutbox {
+                        job_id: job_id.clone(),
+                        generation,
+                    });
+                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
+                } else {
+                    rejected = true;
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::CompletionAttemptFailed {
+            job_id,
+            generation,
+            permanent,
+        } => {
+            if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
+                let valid = {
+                    let row = &state.outbox[index];
+                    row.generation == generation
+                        && row.is_pending()
+                        && row.send_started
+                        && outbox_owner_is_proven(&state, row)
+                };
+                if valid {
+                    state.outbox[index].attempts = state.outbox[index].attempts.saturating_add(1);
+                    state.outbox[index].permanent |= permanent;
+                } else {
+                    rejected = true;
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::CompletionUnresolvable {
+            job_id,
+            generation,
+            reason: _,
+        } => {
+            if let Some(index) = state.outbox.iter().position(|row| row.job_id == job_id) {
+                let valid = {
+                    let row = &state.outbox[index];
+                    row.generation == generation
+                        && row.is_pending()
+                        && outbox_owner_is_proven(&state, row)
+                        // The budget must already be spent in durable state.
+                        // Recovery is bounded because the budget only ever
+                        // shrinks, never because a caller says it is done.
+                        && row.budget_exhausted(unix_now())
+                };
+                if valid {
+                    // `remote_acked` deliberately stays false and the send
+                    // claim is never released: this is a local abandonment,
+                    // not a delivery, and it must never authorize a second
+                    // terminal send on this or any later generation.
+                    state.outbox[index].abandoned = true;
                     commands.push(SideEffect::DeleteOutbox {
                         job_id: job_id.clone(),
                         generation,
@@ -861,10 +1051,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     // send; preserve its slot ownership until remote
                     // terminal acknowledgement supplies the second proof.
                     let pending_outbox = state.outbox.iter().any(|row| {
-                        row.job_id == job_id
-                            && row.generation == generation
-                            && row.intended
-                            && !row.remote_acked
+                        row.job_id == job_id && row.generation == generation && row.is_pending()
                     });
                     if !pending_outbox {
                         restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
@@ -929,10 +1116,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             state.package_apt_version = apt_version;
         }
         Event::PackageRetireIntended { generation } => {
-            let pending_outbox = state
-                .outbox
-                .iter()
-                .any(|row| row.intended && !row.remote_acked);
+            let pending_outbox = state.outbox.iter().any(OutboxRecord::is_pending);
             if generation != state.package_generation || !state.jobs.is_empty() || pending_outbox {
                 rejected = true;
             } else {
@@ -997,7 +1181,10 @@ impl Journal {
         if stored > JOURNAL_SCHEMA_VERSION {
             return Err(journal_schema_newer());
         }
-        if stored == 2 && matches!(outbox_shape, OutboxSchema::V3) {
+        // Physical shape ahead of the recorded version means a writer mutated
+        // the tables without stamping `PRAGMA user_version`. Refuse rather
+        // than guess which vocabulary wrote the events.
+        if outbox_shape_rank(outbox_shape) > version_outbox_rank(stored) {
             return Err(outbox_schema_mismatch(stored, outbox_shape));
         }
         let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
@@ -1014,6 +1201,12 @@ impl Journal {
         if matches!(outbox_shape, OutboxSchema::V2) {
             migrate_v2_to_v3(&mut conn)?;
         }
+        // Upgrade the physical shape and stamp the current version *before*
+        // any event may be written. An older binary that reopens this file
+        // then hits `journal.schema.newer` and refuses it, instead of
+        // decoding a v4 log with a v3 event vocabulary and silently dropping
+        // the terminal states it does not know.
+        migrate_v3_to_v4(&mut conn)?;
         let journal = Self {
             conn,
             path: path.to_path_buf(),
@@ -1021,11 +1214,6 @@ impl Journal {
         // Verify all existing event checksums once. The controller's steady
         // state must not replay an ever-growing log every two seconds.
         journal.load_state()?;
-        if stored == 0 {
-            journal
-                .conn
-                .pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
-        }
         Ok(journal)
     }
 
@@ -1199,6 +1387,72 @@ impl Journal {
         Ok(false)
     }
 
+    /// Terminal conclusion durably recorded before the completion payload was
+    /// serialised, if any. Recovery uses it instead of inventing a failure for
+    /// a job whose real result is already known.
+    ///
+    /// # Errors
+    /// SQLite read failures.
+    pub fn recorded_terminal_conclusion(
+        &self,
+        job_id: &JobId,
+        generation: Generation,
+    ) -> StoreResult<Option<String>> {
+        Ok(self
+            .materialized_state()?
+            .jobs
+            .into_iter()
+            .find(|job| job.job_id == *job_id && job.generation == generation)
+            .and_then(|job| job.terminal_conclusion))
+    }
+
+    /// Completions abandoned in a bounded terminal state. This is the operator
+    /// surface: the materialized outbox drops an abandoned row so a later job
+    /// attempt is not blocked, and the immutable log keeps the evidence.
+    ///
+    /// # Errors
+    /// SQLite reads, checksum mismatch, or an undecodable event.
+    pub fn unresolvable_completions(&self) -> StoreResult<Vec<UnresolvableCompletion>> {
+        let mut statement = self.conn.prepare(
+            "SELECT payload, checksum
+             FROM events
+             WHERE kind = 'completion_unresolvable'
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![MAX_TERMINAL_ACK_SCAN_ROWS], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (payload, checksum) = row?;
+            if sha256_hex(payload.as_bytes()) != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation("an abandoned completion event failed integrity verification"));
+            }
+            let event: Event = serde_json::from_str(&payload).map_err(|_| {
+                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
+                    .with_remediation("an abandoned completion event could not be decoded")
+            })?;
+            if let Event::CompletionUnresolvable {
+                job_id,
+                generation,
+                reason,
+            } = event
+            {
+                found.push(UnresolvableCompletion {
+                    job_id,
+                    generation,
+                    reason,
+                });
+            }
+        }
+        Ok(found)
+    }
+
     /// Pending completion outbox rows that still need remote reconciliation.
     ///
     /// # Errors
@@ -1208,7 +1462,7 @@ impl Journal {
             .materialized_state()?
             .outbox
             .into_iter()
-            .filter(|row| row.intended && !row.remote_acked)
+            .filter(OutboxRecord::is_pending)
             .collect())
     }
 }
@@ -1233,14 +1487,18 @@ fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
             )
             .with_remediation("the event log failed integrity verification"));
         }
-        let event: Event = match serde_json::from_str(&payload) {
-            Ok(event) => event,
-            Err(_) => {
-                // Newer writer's unknown envelope: N-1 skips it. Checksum
-                // already matched, so this is not corruption.
-                continue;
-            }
-        };
+        // The version gate in `open` already refused a journal newer than this
+        // binary and stamped the current version onto an older one, so every
+        // event in a journal we accepted must decode. An envelope that does
+        // not is a writer that changed the vocabulary without bumping
+        // `JOURNAL_SCHEMA_VERSION`; skipping it would silently drop terminal
+        // state and re-drive a completion that was already resolved.
+        let event: Event = serde_json::from_str(&payload).map_err(|error| {
+            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+                .with_remediation(format!(
+                    "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
+                ))
+        })?;
         let outcome = reduce(state, event);
         state = outcome.state;
     }
@@ -1330,7 +1588,8 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
         state.capacity_invalid || state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
 
     let mut statement = conn.prepare(
-        "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix
+        "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                terminal_conclusion
          FROM jobs ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1342,10 +1601,20 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, i64>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     for row in rows {
-        let (job_id, slot_id, generation, attempt, worker, phase, accepted_unix) = row?;
+        let (
+            job_id,
+            slot_id,
+            generation,
+            attempt,
+            worker,
+            phase,
+            accepted_unix,
+            terminal_conclusion,
+        ) = row?;
         state.jobs.push(JobRecord {
             job_id: JobId(job_id),
             slot_id: SlotId(slot_id),
@@ -1354,12 +1623,13 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             worker,
             phase: parse_actor_phase(&phase)?,
             accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
+            terminal_conclusion,
         });
     }
 
     let mut statement = conn.prepare(
         "SELECT job_id, slot_id, generation, payload_sha256, intended, send_started,
-                remote_acked, created_unix
+                remote_acked, created_unix, attempts, deadline_unix, permanent, abandoned
          FROM outbox ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |row| {
@@ -1372,6 +1642,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, i64>(5)?,
             row.get::<_, i64>(6)?,
             row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, i64>(9)?,
+            row.get::<_, i64>(10)?,
+            row.get::<_, i64>(11)?,
         ))
     })?;
     for row in rows {
@@ -1384,6 +1658,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             send_started,
             remote_acked,
             created_unix,
+            attempts,
+            deadline_unix,
+            permanent,
+            abandoned,
         ) = row?;
         let slot_id = slot_id.ok_or_else(|| outbox_owner_unknown(&job_id, generation))?;
         state.outbox.push(OutboxRecord {
@@ -1395,6 +1673,10 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             send_started: sqlite_bool(send_started, "outbox send_started")?,
             remote_acked: sqlite_bool(remote_acked, "outbox remote_acked")?,
             created_unix: i64_u64(created_unix, "outbox created_unix")?,
+            attempts: i64_u32(attempts, "outbox attempts")?,
+            deadline_unix: i64_u64(deadline_unix, "outbox deadline_unix")?,
+            permanent: sqlite_bool(permanent, "outbox permanent")?,
+            abandoned: sqlite_bool(abandoned, "outbox abandoned")?,
         });
     }
     Ok(state)
@@ -1514,8 +1796,9 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     for job in &state.jobs {
         tx.execute(
             "INSERT INTO jobs (
-                job_id, slot_id, generation, attempt, worker, phase, accepted_unix
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                terminal_conclusion
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 job.job_id.0,
                 job.slot_id.0,
@@ -1524,17 +1807,22 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 job.worker,
                 job.phase.as_str(),
                 job.accepted_unix as i64,
+                job.terminal_conclusion.as_deref(),
             ],
         )?;
     }
     for row in &state.outbox {
-        if row.remote_acked {
+        // Acknowledged and abandoned rows are both terminal: the immutable
+        // event log keeps their evidence, and dropping them here is what lets
+        // GitHub redeliver the same job id on a later attempt.
+        if row.remote_acked || row.abandoned {
             continue;
         }
         tx.execute(
             "INSERT INTO outbox (
-                job_id, slot_id, generation, payload_sha256, intended, send_started, remote_acked, created_unix
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                job_id, slot_id, generation, payload_sha256, intended, send_started,
+                remote_acked, created_unix, attempts, deadline_unix, permanent, abandoned
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 row.job_id.0,
                 row.slot_id.0,
@@ -1544,6 +1832,10 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 row.send_started as i64,
                 row.remote_acked as i64,
                 row.created_unix as i64,
+                row.attempts as i64,
+                row.deadline_unix as i64,
+                row.permanent as i64,
+                row.abandoned as i64,
             ],
         )?;
     }
@@ -1585,6 +1877,28 @@ enum OutboxSchema {
     Missing,
     V2,
     V3,
+    V4,
+}
+
+/// Ordering of physical outbox shapes, oldest first.
+fn outbox_shape_rank(shape: OutboxSchema) -> u32 {
+    match shape {
+        // A missing table is created by `SCHEMA` at the current shape, so it
+        // never counts as ahead of any recorded version.
+        OutboxSchema::Missing => 0,
+        OutboxSchema::V2 => 2,
+        OutboxSchema::V3 => 3,
+        OutboxSchema::V4 => 4,
+    }
+}
+
+/// Highest physical outbox shape a recorded `PRAGMA user_version` may carry.
+fn version_outbox_rank(version: u32) -> u32 {
+    match version {
+        // A brand new file has no recorded version and no rows to misread.
+        0 => JOURNAL_SCHEMA_VERSION,
+        other => other,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1610,6 +1924,20 @@ fn outbox_schema_shape(conn: &Connection) -> StoreResult<OutboxSchema> {
         return Ok(OutboxSchema::Missing);
     }
 
+    let v4_columns = [
+        ("job_id", "TEXT", 0, None, 1),
+        ("slot_id", "TEXT", 1, None, 0),
+        ("generation", "INTEGER", 1, None, 0),
+        ("payload_sha256", "TEXT", 1, None, 0),
+        ("intended", "INTEGER", 1, Some("0"), 0),
+        ("send_started", "INTEGER", 1, Some("0"), 0),
+        ("remote_acked", "INTEGER", 1, Some("0"), 0),
+        ("created_unix", "INTEGER", 1, None, 0),
+        ("attempts", "INTEGER", 1, Some("0"), 0),
+        ("deadline_unix", "INTEGER", 1, Some("0"), 0),
+        ("permanent", "INTEGER", 1, Some("0"), 0),
+        ("abandoned", "INTEGER", 1, Some("0"), 0),
+    ];
     let v3_columns = [
         ("job_id", "TEXT", 0, None, 1),
         ("slot_id", "TEXT", 1, None, 0),
@@ -1665,7 +1993,9 @@ fn outbox_schema_shape(conn: &Connection) -> StoreResult<OutboxSchema> {
     if index_shapes != canonical_indexes {
         return Err(outbox_schema_invalid("index set"));
     }
-    if matches_columns(&v3_columns) {
+    if matches_columns(&v4_columns) {
+        Ok(OutboxSchema::V4)
+    } else if matches_columns(&v3_columns) {
         Ok(OutboxSchema::V3)
     } else if matches_columns(&v2_columns) {
         Ok(OutboxSchema::V2)
@@ -1756,9 +2086,53 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> StoreResult<()> {
          DROP TABLE outbox;
          ALTER TABLE outbox_v3 RENAME TO outbox;",
     )?;
+    // Stamp exactly v3: `migrate_v3_to_v4` runs next and owns the final
+    // version. Stamping the current version here would make that step
+    // early-return and leave a v3 shape claiming to be v4.
+    tx.pragma_update(None, "user_version", 3u32)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Add the bounded-terminal-state columns and stamp schema v4.
+///
+/// Idempotent and retryable: a crash mid-upgrade leaves either the old shape
+/// or the new one, never a partially stamped version. Existing pending rows
+/// inherit a deadline measured from when their intent became durable, so an
+/// upgrade cannot silently extend a completion's budget to infinity.
+fn migrate_v3_to_v4(conn: &mut Connection) -> StoreResult<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) == JOURNAL_SCHEMA_VERSION {
+        return Ok(());
+    }
+    if !table_has_column(&tx, "outbox", "attempts")? {
+        tx.execute_batch(
+            "ALTER TABLE outbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE outbox ADD COLUMN deadline_unix INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE outbox ADD COLUMN permanent INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE outbox ADD COLUMN abandoned INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    tx.execute(
+        "UPDATE outbox SET deadline_unix = created_unix + ?1 WHERE deadline_unix = 0",
+        params![COMPLETION_RESOLUTION_SECONDS as i64],
+    )?;
+    if !table_has_column(&tx, "jobs", "terminal_conclusion")? {
+        tx.execute_batch("ALTER TABLE jobs ADD COLUMN terminal_conclusion TEXT;")?;
+    }
     tx.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> StoreResult<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    Ok(columns.any(|name| {
+        name.map(|name| name.eq_ignore_ascii_case(column))
+            .unwrap_or(false)
+    }))
 }
 
 fn outbox_owner_inconsistent(job_id: &str, generation: i64) -> StoreError {
@@ -1804,7 +2178,10 @@ fn event_generation(event: &Event) -> Generation {
         | Event::Assigned { generation, .. }
         | Event::JobOwned { generation, .. }
         | Event::JobStarted { generation, .. }
+        | Event::JobTerminalResult { generation, .. }
         | Event::CompletionIntended { generation, .. }
+        | Event::CompletionAttemptFailed { generation, .. }
+        | Event::CompletionUnresolvable { generation, .. }
         | Event::CompletionSendStarted { generation, .. }
         | Event::RemoteAcked { generation, .. }
         | Event::JobWorkerLost { generation, .. }
@@ -1835,7 +2212,10 @@ fn event_kind(event: &Event) -> &'static str {
         Event::Assigned { .. } => "assigned",
         Event::JobOwned { .. } => "job_owned",
         Event::JobStarted { .. } => "job_started",
+        Event::JobTerminalResult { .. } => "job_terminal_result",
         Event::CompletionIntended { .. } => "completion_intended",
+        Event::CompletionAttemptFailed { .. } => "completion_attempt_failed",
+        Event::CompletionUnresolvable { .. } => "completion_unresolvable",
         Event::CompletionSendStarted { .. } => "completion_send_started",
         Event::RemoteAcked { .. } => "remote_acked",
         Event::RemoteObservedTerminal { .. } => "remote_observed_terminal",
@@ -1968,6 +2348,565 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(!outcome.rejected);
         }
+    }
+
+    /// Drive one slot to a running job so completion tests start from the
+    /// exact state the runner reaches before it produces a terminal result.
+    fn prime_running_job(journal: &mut Journal, slot_name: &str, job_name: &str) -> Generation {
+        let g = r#gen();
+        prime_ready(journal, slot_name);
+        for event in [
+            Event::ReadyAttempt {
+                slot_id: slot(slot_name),
+                generation: g,
+            },
+            Event::Assigned {
+                slot_id: slot(slot_name),
+                job_id: job(job_name),
+                generation: g,
+            },
+            Event::JobOwned {
+                job_id: job(job_name),
+                slot_id: slot(slot_name),
+                attempt: 1,
+                generation: g,
+                worker: "worker-1".into(),
+                accepted_unix: 0,
+            },
+            Event::JobStarted {
+                job_id: job(job_name),
+                generation: g,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        g
+    }
+
+    fn outbox_row(journal: &Journal, job_name: &str) -> Option<OutboxRecord> {
+        journal
+            .materialized_state()
+            .unwrap()
+            .outbox
+            .into_iter()
+            .find(|row| row.job_id == job(job_name))
+    }
+
+    /// Burn the durable attempt budget the way the controller does.
+    fn exhaust_attempts(journal: &mut Journal, job_name: &str, generation: Generation) {
+        for _ in 0..MAX_COMPLETION_ATTEMPTS {
+            assert!(
+                !journal
+                    .apply(Event::CompletionAttemptFailed {
+                        job_id: job(job_name),
+                        generation,
+                        permanent: false,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_result_is_durable_before_any_payload_exists() {
+        let (_dir, mut journal) = open_tmp("terminal-result");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job("job-1"),
+                    generation: g,
+                    conclusion: "succeeded".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        // Crash point C5: the terminal result is durable, the outbox is not.
+        let state = journal.materialized_state().unwrap();
+        let row = state.jobs.iter().find(|row| row.job_id == job("job-1"));
+        let row = row.expect("job survives");
+        assert_eq!(row.phase, ActorPhase::Completing);
+        assert_eq!(row.terminal_conclusion.as_deref(), Some("succeeded"));
+        assert!(state.outbox.is_empty());
+        assert_eq!(
+            journal
+                .recorded_terminal_conclusion(&job("job-1"), g)
+                .unwrap()
+                .as_deref(),
+            Some("succeeded"),
+            "recovery must read the real conclusion instead of inventing a failure"
+        );
+    }
+
+    #[test]
+    fn terminal_result_replay_is_idempotent_and_never_rewritten() {
+        let (_dir, mut journal) = open_tmp("terminal-result-replay");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        let result = Event::JobTerminalResult {
+            job_id: job("job-1"),
+            generation: g,
+            conclusion: "succeeded".into(),
+        };
+        assert!(!journal.apply(result.clone()).unwrap().rejected);
+        let before = event_count(&journal);
+        assert!(!journal.apply(result).unwrap().rejected);
+        assert_eq!(event_count(&journal), before, "replay must not append");
+        assert!(
+            journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job("job-1"),
+                    generation: g,
+                    conclusion: "failed".into(),
+                })
+                .unwrap()
+                .rejected,
+            "a recorded conclusion is never corrected in place"
+        );
+    }
+
+    #[test]
+    fn terminal_result_on_a_stale_generation_is_rejected() {
+        let (_dir, mut journal) = open_tmp("terminal-result-stale");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job("job-1"),
+                    generation: g.next(),
+                    conclusion: "succeeded".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+    }
+
+    #[test]
+    fn pending_completion_carries_a_durable_attempt_budget_and_deadline() {
+        let (_dir, mut journal) = open_tmp("completion-budget");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation: g,
+                    payload_sha256: "sum".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let row = outbox_row(&journal, "job-1").expect("row");
+        assert_eq!(row.attempts, 0);
+        assert!(!row.permanent);
+        assert!(!row.abandoned);
+        assert_eq!(
+            row.deadline_unix,
+            row.created_unix + COMPLETION_RESOLUTION_SECONDS
+        );
+        assert!(row.is_pending());
+        assert!(!row.budget_exhausted(row.created_unix));
+        assert!(row.budget_exhausted(row.deadline_unix));
+    }
+
+    #[test]
+    fn attempt_counter_survives_reopen_so_recovery_cannot_restart_from_zero() {
+        let (dir, mut journal) = open_tmp("attempt-counter");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        for _ in 0..3 {
+            assert!(
+                !journal
+                    .apply(Event::CompletionAttemptFailed {
+                        job_id: job("job-1"),
+                        generation: g,
+                        permanent: false,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+        drop(journal);
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        assert_eq!(outbox_row(&reopened, "job-1").unwrap().attempts, 3);
+        assert_eq!(reopened.load_state().unwrap().outbox[0].attempts, 3);
+    }
+
+    #[test]
+    fn attempt_failure_before_the_send_claim_is_rejected() {
+        let (_dir, mut journal) = open_tmp("attempt-before-claim");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        assert!(
+            journal
+                .apply(Event::CompletionAttemptFailed {
+                    job_id: job("job-1"),
+                    generation: g,
+                    permanent: false,
+                })
+                .unwrap()
+                .rejected,
+            "an attempt cannot fail before it was claimed"
+        );
+    }
+
+    #[test]
+    fn unresolvable_is_refused_while_the_completion_still_has_budget() {
+        let (_dir, mut journal) = open_tmp("unresolvable-early");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        assert!(
+            journal
+                .apply(Event::CompletionUnresolvable {
+                    job_id: job("job-1"),
+                    generation: g,
+                    reason: "impatient caller".into(),
+                })
+                .unwrap()
+                .rejected,
+            "the terminal state must be provable from durable state, not asserted"
+        );
+        assert!(outbox_row(&journal, "job-1").unwrap().is_pending());
+    }
+
+    #[test]
+    fn exhausted_completion_reaches_a_bounded_terminal_state_and_frees_the_slot() {
+        let (_dir, mut journal) = open_tmp("unresolvable-bounded");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        // Before: the pending row is a hard admission barrier.
+        let blocked = journal.materialized_state().unwrap();
+        assert!(pending_outbox_blocks_admission(
+            &blocked,
+            &slot("scope-1"),
+            g
+        ));
+        exhaust_attempts(&mut journal, "job-1", g);
+
+        let outcome = journal
+            .apply(Event::CompletionUnresolvable {
+                job_id: job("job-1"),
+                generation: g,
+                reason: "send budget exhausted".into(),
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        assert!(outcome.commands.contains(&SideEffect::DeleteOutbox {
+            job_id: job("job-1"),
+            generation: g,
+        }));
+
+        let state = journal.materialized_state().unwrap();
+        assert!(state.outbox.is_empty(), "terminal rows leave the outbox");
+        assert!(state.jobs.is_empty(), "the slot's job is released");
+        assert!(!pending_outbox_blocks_admission(
+            &state,
+            &slot("scope-1"),
+            g
+        ));
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        assert_eq!(state.health().oldest_outbox_entry_seconds, 0);
+
+        // The operator surface is the immutable log, not the dropped row.
+        let abandoned = journal.unresolvable_completions().unwrap();
+        assert_eq!(abandoned.len(), 1);
+        assert_eq!(abandoned[0].job_id, job("job-1"));
+        assert_eq!(abandoned[0].reason, "send budget exhausted");
+
+        // A permanently unacknowledgeable completion never becomes a second
+        // terminal send: the claim stands and no ack was forged.
+        assert!(
+            journal
+                .apply(Event::CompletionSendStarted {
+                    job_id: job("job-1"),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            journal
+                .apply(Event::RemoteAcked {
+                    job_id: job("job-1"),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
+    }
+
+    #[test]
+    fn a_permanent_remote_refusal_spends_the_whole_budget_at_once() {
+        let (_dir, mut journal) = open_tmp("unresolvable-permanent");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        assert!(
+            !journal
+                .apply(Event::CompletionAttemptFailed {
+                    job_id: job("job-1"),
+                    generation: g,
+                    permanent: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::CompletionUnresolvable {
+                    job_id: job("job-1"),
+                    generation: g,
+                    reason: "run service refused the payload".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.pending_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_freed_slot_admits_the_next_job_after_a_completion_is_abandoned() {
+        let (_dir, mut journal) = open_tmp("unresolvable-readmit");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        exhaust_attempts(&mut journal, "job-1", g);
+        journal
+            .apply(Event::CompletionUnresolvable {
+                job_id: job("job-1"),
+                generation: g,
+                reason: "send budget exhausted".into(),
+            })
+            .unwrap();
+        assert!(
+            !journal
+                .apply(Event::ReadyAttempt {
+                    slot_id: slot("scope-1"),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot("scope-1"),
+                    job_id: job("job-2"),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected,
+            "one unacknowledgeable completion must not wedge the slot forever"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_job_id_can_be_redelivered_on_a_later_attempt() {
+        let (_dir, mut journal) = open_tmp("unresolvable-redeliver");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "sum".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: g,
+            })
+            .unwrap();
+        exhaust_attempts(&mut journal, "job-1", g);
+        journal
+            .apply(Event::CompletionUnresolvable {
+                job_id: job("job-1"),
+                generation: g,
+                reason: "send budget exhausted".into(),
+            })
+            .unwrap();
+        for event in [
+            Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: g,
+            },
+            Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: g,
+            },
+            Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 2,
+                generation: g,
+                worker: "worker-2".into(),
+                accepted_unix: 0,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job("job-1"),
+                    generation: g,
+                    payload_sha256: "second-sum".into(),
+                })
+                .unwrap()
+                .rejected,
+            "the second attempt gets a fresh outbox row and a fresh claim"
+        );
+        let row = outbox_row(&journal, "job-1").unwrap();
+        assert_eq!(row.payload_sha256, "second-sum");
+        assert!(!row.send_started);
+        assert_eq!(row.attempts, 0);
+    }
+
+    #[test]
+    fn a_version_behind_its_physical_shape_is_refused_without_mutation() {
+        let (dir, journal) = open_tmp("stamp-behind-shape");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION - 1)
+            .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        // The tables carry the current vocabulary but the stamp does not.
+        // Some writer mutated the shape without stamping; guessing which
+        // vocabulary wrote the events is exactly what must never happen.
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_journal_written_by_a_newer_binary_is_refused_not_reinterpreted() {
+        let (dir, journal) = open_tmp("refuse-newer");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION + 1)
+            .unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.schema.newer");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn a_v3_shape_claiming_the_current_version_is_repaired_not_misread() {
+        let (dir, journal) = open_tmp("v3-shape-upgrade");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE outbox;
+             CREATE TABLE outbox (
+                 job_id TEXT PRIMARY KEY,
+                 slot_id TEXT NOT NULL,
+                 generation INTEGER NOT NULL,
+                 payload_sha256 TEXT NOT NULL,
+                 intended INTEGER NOT NULL DEFAULT 0,
+                 send_started INTEGER NOT NULL DEFAULT 0,
+                 remote_acked INTEGER NOT NULL DEFAULT 0,
+                 created_unix INTEGER NOT NULL
+             );
+             INSERT INTO outbox (
+                 job_id, slot_id, generation, payload_sha256, intended,
+                 send_started, remote_acked, created_unix
+             ) VALUES ('job-1', 'scope-1', 1, 'sum', 1, 1, 0, 1000);
+             ALTER TABLE jobs DROP COLUMN terminal_conclusion;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 3u32).unwrap();
+        drop(conn);
+
+        let migrated = Journal::open(&path).unwrap();
+        let row = outbox_row(&migrated, "job-1").expect("pending row survives");
+        assert!(row.is_pending());
+        assert_eq!(row.attempts, 0);
+        assert_eq!(
+            row.deadline_unix,
+            1000 + COMPLETION_RESOLUTION_SECONDS,
+            "an upgrade must not extend an existing completion's budget to infinity"
+        );
+        drop(migrated);
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
     }
 
     #[test]
@@ -2242,10 +3181,11 @@ mod tests {
              ",
         )
         .unwrap();
+        let fixture_payload = r#"{"type":"control_live"}"#;
         seed.execute(
             "INSERT INTO events (generation, kind, payload, checksum)
-             VALUES (1, 'stale_capacity_fixture', '{}', ?1)",
-            [sha256_hex(b"{}")],
+             VALUES (1, 'control_live', ?1, ?2)",
+            params![fixture_payload, sha256_hex(fixture_payload.as_bytes())],
         )
         .unwrap();
         seed.execute("PRAGMA user_version = 2", []).unwrap();
@@ -2471,7 +3411,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
         let slot_id_not_null: i64 = conn
             .query_row(
                 "SELECT \"notnull\" FROM pragma_table_info('outbox') WHERE name = 'slot_id'",
@@ -3708,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_event_kind_does_not_drop_known_state() {
+    fn unknown_event_kind_is_a_hard_error_not_a_skip() {
         let (dir, mut journal) = open_tmp("unk");
         journal.apply(Event::ControlLive).unwrap();
         drop(journal);
@@ -3722,8 +4662,11 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let state = Journal::open(&path).unwrap().load_state().unwrap();
-        assert!(state.control_live);
+        // Skipping it would drop terminal state and re-drive a completion the
+        // writer had already resolved. The version gate is what keeps an
+        // older binary from ever reaching this log in the first place.
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.unknown");
         std::fs::remove_dir_all(dir).ok();
     }
 
