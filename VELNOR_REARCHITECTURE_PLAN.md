@@ -101,7 +101,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `protocol.rs` run-service/broker error contracts | opus-lead | claimed — T-002 |
 | `deny.toml` + `mise.toml` deny task | opus-lead | claimed — T-003 |
 | `crates/velnor-runner/Cargo.toml` tokio feature set | opus-lead | claimed — T-003 |
-| `crates/velnor-runner/src/docker_lease.rs` (job Docker request authorization and unlabeled cleanup) | codex-lead | claimed — T-004 |
+| `crates/velnor-runner/src/docker_lease.rs` (job Docker request authorization and unlabeled cleanup) | codex-lead | complete — T-004 (`3749065`) |
 
 ## 8. Discovered bug classes
 
