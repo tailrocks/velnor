@@ -13,8 +13,10 @@ document for the duration of this effort; it is deleted when the work lands.
 Both branch heads were re-resolved against `origin` at program start and matched the
 SHAs recorded in the goal, so no newer head substitution was required.
 
-Upstream semantic source of truth: `actions/runner`. The exact latest stable release
-tag and source commit are being resolved live and recorded in §4.
+Upstream semantic source of truth: `actions/runner`, resolved live to the latest
+stable release **v2.337.0** (published 2026-08-26), source commit
+`397b032cbf865e9c3ddfab89d533ec19325e1273`. Velnor pins the same version in
+`crates/velnor-runner/src/protocol.rs:30`, and the pin is drift-gated in code.
 
 ## 1. Coordination protocol (two concurrent leads)
 
@@ -88,13 +90,68 @@ _Pending synthesis._
 
 ## 7. Ownership claims
 
+Claim a boundary here before writing to it. Read-only investigation needs no claim.
+
 | Boundary | Lead | Status |
 | --- | --- | --- |
-| _(none claimed yet)_ | | |
+| `rust-toolchain.toml` (toolchain channel pin) | opus-lead | claimed — T-001 |
+| `protocol.rs` run-service/broker error contracts | opus-lead | claimed — T-002 |
+| `deny.toml` + `mise.toml` deny task | opus-lead | claimed — T-003 |
+| `crates/velnor-runner/Cargo.toml` tokio feature set | opus-lead | claimed — T-003 |
 
 ## 8. Discovered bug classes
 
-_Pending wave 1 reports._
+### BC-1 — Wire contract copied from C# property names, not `DataMember` names
+
+`crates/velnor-runner/src/protocol.rs:1814-1823` parses the run-service error body as
+`{"source", "code"}`. Upstream `src/Sdk/RSWebApi/Contracts/RunServiceError.cs` at
+v2.337.0 serialises `{"source", "statusCode", "errorMessage"}` — the C# *property* is
+named `Code`, but the wire name is `statusCode`. Velnor copied the property name.
+Verified directly against upstream source, not documentation.
+
+Consequence: `CompletionAcknowledgement::RemoteObservedTerminal` is unreachable in
+production, so a genuine "job already terminal" 404 is classified as a permanent
+failure instead of being absorbed.
+
+The bug class is broader than this one field: any contract transcribed from upstream
+C# property names rather than `DataMember` names has the same defect, and Velnor's own
+tests fabricate the same wrong shape (`protocol.rs:7717`, `:7764`), so the test suite
+structurally cannot catch it. The invariant that was missing: *wire field names must be
+derived from the upstream serialisation attribute, and fixtures must be built from the
+upstream contract rather than from Velnor's own parser.*
+
+### BC-2 — Outbox rows have no terminal state other than success
+
+Chained from BC-1. A completion that can never be acknowledged leaves the outbox row at
+`send_started=1, remote_acked=0`. `pending_outbox_blocks_admission`
+(`crates/velnor-control/src/journal.rs:195`) then rejects every slot-admission event
+forever, and the controller's `reconcile` propagates the replay error every cycle
+(`crates/velnor-runner/src/node/controller.rs:1551`). The `Event` enum
+(`journal.rs:366-482`) has no abandon/expire variant. One unacknowledgeable completion
+permanently wedges a slot.
+
+Missing invariant: *every durable in-flight record must have a bounded path to a
+terminal state.*
+
+### BC-3 — Lost-completion window between acquire and durable marker
+
+`acquirejob` returns 200 at `crates/velnor-runner/src/runner.rs:5145`; the durable
+marker is written at `runner.rs:5328`. A crash in that window leaves no local record at
+all: no renewal, no completion, and the job is lost until lease expiry.
+
+Missing invariant: *ownership must be durably recorded no later than the moment it is
+acquired.* Target fix is a provisional marker written **before** `acquirejob`, using the
+409 "already acquired" reply as the ownership oracle.
+
+### BC-4 — Toolchain pinned to a `.0` release with no channel freshness manager
+
+`rust-toolchain.toml:2` pins `1.98.0`. The actual latest stable is `1.98.1`
+(2026-09-01, released 2026-09-03) whose entire content is a fix for a **vtable
+miscompilation** (rust#161441). Velnor dispatches execution backends through trait
+objects, so this is on the hot path, and every artifact currently shipped is built with
+the defective release. `1.97.1` was also a miscompilation backport, so `.0` pinning is a
+repeating structural exposure — and Renovate has no manager covering the toolchain
+channel. The class fix is the missing manager, not just the bump.
 
 ## 9. Observed bottlenecks and benchmark baseline
 
@@ -110,3 +167,5 @@ _Pending synthesis._
 | --- | --- |
 | 2026-09-04 | Branch heads re-resolved; both matched the recorded starting SHAs. |
 | 2026-09-04 | Wave 1 investigations launched (I-01 … I-09). |
+| 2026-09-04 | Wave 2 investigations launched (I-10 … I-16). |
+| 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
