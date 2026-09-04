@@ -3452,3 +3452,36 @@ workflow/actionlint, capability readiness, format/check, and L2 closure).
 This remains static/fixture proof: no live dual-lane run, deployed image
 identity, default-mbx end-to-end result, VelnorJob lifecycle benchmark,
 fault/soak result, or reserved runner/executor change is claimed.
+
+## 46. Cargo benchmark scratch ownership — T-025 `67eed833`, `7a53150`
+
+Cargo benchmark workloads now own a unique scratch root, detached worktrees,
+target directories, and trace files. Ownership is registered before side
+effects; teardown removes Git registrations before filesystem paths, attempts
+all cleanup actions, retains failed ownership for retry, treats missing paths
+as already clean, and preserves the primary prepare/iteration failure. The
+scratch identity includes process, timestamp nonce, and an atomic owner ID;
+trace filenames use the same identity.
+
+Focused source proof at `7a53150188919dd170fba9c88f447811565675ef`:
+`velnor-bench` package tests passed (`94`), strict package Clippy passed, and
+format/diff checks passed. Tests cover prepare and iteration failure cleanup,
+trace/target/root ownership, idempotent missing paths, cleanup aggregation,
+and retry retention. No live runner-driven benchmark or fixture baseline
+refresh is claimed.
+
+## 47. Docker benchmark scratch ownership — T-025 slice `19c66ba`
+
+Docker-direct workloads now allocate a unique per-workload scratch root.
+Build contexts and job workspace binds are scoped below it; disk accounting is
+scoped to that root. Container and network names are registered before daemon
+side effects, and teardown attempts owned containers, networks, unique build
+images, and scratch paths in order while retaining failed ownership and
+aggregating cleanup errors. The outer workload runner already invokes this
+teardown after prepare and iteration failures.
+
+Focused source proof at `19c66ba43c30822b6ea93956bfd2dce774fc8fb5`:
+`velnor-bench` package tests passed (`96`), strict package Clippy passed, and
+format/diff checks passed. This slice does not claim borrowed-image-safe cold
+pull semantics, full Docker Engine resource labels, live daemon fault proof,
+or end-to-end runner/fixture evidence; those remain separate work.
