@@ -31,7 +31,7 @@ const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .gith
 const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const VELNOR_POLICY_WORKFLOW_REV: &str = "47f06562126e8a3cfa08db7b668a21d60def7f1a";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "20b940278fb11c993910aaf201e55a19b802bdf0";
@@ -2716,10 +2716,6 @@ fn release_spec(profile: &EstateProfile) -> Option<ReleaseSpec> {
     release_contract_complete(&spec).then_some(spec)
 }
 
-#[cfg(test)]
-fn catalog_config(profile: &'static EstateProfile, runners: RunnerMode) -> ProjectConfig {
-    catalog_config_with_default_branch(profile, runners, "main")
-}
 fn catalog_config_with_default_branch(
     profile: &'static EstateProfile,
     runners: RunnerMode,
@@ -7627,7 +7623,7 @@ path-only = { path = "../path-only" }
         must(
             fs::write(
                 workflows.join("ci-policy.yml"),
-                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@47f06562126e8a3cfa08db7b668a21d60def7f1a\n    with:\n      policy-revision: 47f06562126e8a3cfa08db7b668a21d60def7f1a\n    permissions:\n      contents: read\n",
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@12da6232672f039e42c21fe9dff00085856ef92d\n    with:\n      policy-revision: 12da6232672f039e42c21fe9dff00085856ef92d\n    permissions:\n      contents: read\n",
             ),
             "write policy entrypoint",
         );
