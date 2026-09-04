@@ -118,7 +118,8 @@ pub fn held_job_claim_ids(run_root: &Path) -> Result<BTreeSet<String>> {
             return Err(error).with_context(|| format!("read {}", claims.display()));
         }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read an entry in {}", claims.display()))?;
         let path = entry.path();
         if !path.is_file() {
             continue;
