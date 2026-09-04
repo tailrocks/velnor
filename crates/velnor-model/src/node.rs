@@ -4,7 +4,7 @@
 //! live session, and a proven executor. Generation tokens make stale actors
 //! unable to complete or clean up a newer generation's work.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Serialize};
 
 use crate::ExecutionBackendKind;
 
@@ -386,12 +386,36 @@ impl NotReady {
 
 /// Proof that a slot may be advertised. Constructed only when every
 /// precondition holds; there is no `Ready` without this value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReadyProof {
-    pub permit_held: bool,
-    pub routing_valid: bool,
-    pub session_live: bool,
-    pub executor_proven: bool,
+    permit_held: bool,
+    routing_valid: bool,
+    session_live: bool,
+    executor_proven: bool,
+}
+
+impl<'de> Deserialize<'de> for ReadyProof {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            permit_held: bool,
+            routing_valid: bool,
+            session_live: bool,
+            executor_proven: bool,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::try_new(
+            wire.permit_held,
+            wire.routing_valid,
+            wire.session_live,
+            wire.executor_proven,
+        )
+        .map_err(|_| D::Error::custom("ready proof has an unmet precondition"))
+    }
 }
 
 impl ReadyProof {
@@ -449,6 +473,36 @@ mod tests {
         assert!(ReadyProof::try_new(true, true, false, true).is_err());
         assert!(ReadyProof::try_new(true, true, true, false).is_err());
         assert!(ReadyProof::try_new(true, true, true, true).is_ok());
+    }
+
+    #[test]
+    fn ready_proof_deserialization_cannot_bypass_invariant() {
+        let fields = [
+            "permit_held",
+            "routing_valid",
+            "session_live",
+            "executor_proven",
+        ];
+        let all_false = "{\"permit_held\":false,\"routing_valid\":false,\"session_live\":false,\"executor_proven\":false}";
+        assert!(serde_json::from_str::<ReadyProof>(all_false).is_err());
+
+        for (index, field) in fields.into_iter().enumerate() {
+            let mut values = [true; 4];
+            values[index] = false;
+            let payload = format!(
+                "{{\"permit_held\":{},\"routing_valid\":{},\"session_live\":{},\"executor_proven\":{}}}",
+                values[0], values[1], values[2], values[3]
+            );
+            assert!(
+                serde_json::from_str::<ReadyProof>(&payload).is_err(),
+                "deserialization must reject {field}=false"
+            );
+        }
+
+        let proof = ReadyProof::try_new(true, true, true, true).unwrap();
+        let encoded = serde_json::to_string(&proof).unwrap();
+        let decoded = serde_json::from_str::<ReadyProof>(&encoded).unwrap();
+        assert_eq!(decoded, proof);
     }
 
     #[test]

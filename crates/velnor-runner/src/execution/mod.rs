@@ -113,6 +113,14 @@ pub trait VsockChannel {
     /// Drop a completed control connection so a resumed guest can accept a
     /// fresh session after snapshot preparation.
     fn reset(&mut self) {}
+    /// A handle that can send `Cancel` to a running guest from another thread.
+    ///
+    /// `None` for channels with no real connection behind them, such as the
+    /// in-process test double: there is no guest to stop gracefully, and the
+    /// caller falls back to terminating the jailer.
+    fn cancel_handle(&mut self) -> Option<guest_runtime::GuestCancelHandle> {
+        None
+    }
 }
 
 use std::path::{Path, PathBuf};

@@ -2865,20 +2865,34 @@ source. The rule that caught all three is the same one: verify before implementi
 
 ## 22. Concurrent hardening — stale fencing and action-tree isolation
 
-The shared branch now contains two bounded follow-ups from the post-handoff audit:
+The shared branch now contains four bounded follow-ups from the post-handoff audit:
 
 - `111ed1d` hardens the durable journal boundary. `SlotStale` is rejected when any job on the
   slot is in `Assigned`, `Starting`, `Running`, or `Completing`; the reducer leaves state and
   commands unchanged. Idle same-generation slots still fence. The test covers all four occupied
   phases and the persisted journal path.
+- `a1e64dd` closes the failed-acquire capacity leak. `JobAcquisitionLost` now removes only the
+  provisional row, restores the exact same-generation slot through its registration/readiness
+  proof, advertises capacity when it is healthy, and permits the next acquire immediately.
 - `d8fcfb2` mounts the fetched action tree at `/__a:ro` in the job, Node-action, and Docker-action
   containers. Workspace, temp, and tool mounts remain writable. Container tests assert both the
   read-only mount and absence of the old writable form.
+- `b665fae` makes `ReadyProof` an opaque model capability. Its deserializer routes every wire
+  value through `try_new`, so an all-false or partially false serialized proof cannot satisfy a
+  readiness check; the existing JSON shape remains unchanged.
+- `ac85ea1` adds a microVM guest-cancel hook, but a read-only review found the jailer is
+  registered before that hook while cancellation fan-out preserves registration order. The
+  graceful guest stop is therefore not proven at this tip; the ordering fix remains in the other
+  lead's reserved `execution/firecracker.rs` and `execution/cancel.rs`.
+- `931ac8a` wires recovery of a durable provisional acquire through the `renewjob` ownership
+  oracle. It is integrated, but its transport and controller call sites remain part of the other
+  lead's runner boundary.
 
-The fixture baseline was refreshed to `d8fcfb2637a2fd1882e93777540bc39188ed7a47` and pushed as
-`a1ede53`; its full gate passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
+The fixture baseline is synchronized to `e6a55beaec6759912e38d51199dfd32248973396`; its latest
+generated export was already present on the shared fixture branch, and the full fixture gate at
+that integrated tip passed with 49 Rust tests, 38 Python tests, workflow/actionlint,
 formatting, workspace, capability, and L2 closure checks.
 
 These changes do not claim the remaining cancellation gaps are solved. Node sidecar cancellation,
-mixed native/JavaScript post-action ordering, and the production cancellation-token wiring remain
-in the other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
+mixed native/JavaScript post-action ordering, and the microVM registration order remain in the
+other lead's reserved `runner.rs`, `executor.rs`, and `execution/**` worktrees.
