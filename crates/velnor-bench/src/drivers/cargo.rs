@@ -503,9 +503,10 @@ impl Workload for CargoWorkload {
         // process/resource census and establish the disk baseline immediately
         // before the command; snapshot all observation inputs before restore.
         context.runner.reset();
+        let trace_file = trace_file_path(&context.work_root, self.scenario, self.iteration);
+        clear_trace_file(&trace_file)?;
         let disk_before = tree_bytes(&root);
         let started = Instant::now();
-        let trace_file = root.join(format!("git-trace-{}.jsonl", self.iteration));
         let command_ms = if self.plan.workspace == Workspace::PerConcurrentJob {
             self.run_concurrent(context, &args)?
         } else {
@@ -626,6 +627,23 @@ impl CargoWorkload {
             bail!("concurrent jobs failed: {}", failures.join("; "));
         }
         Ok(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+fn trace_file_path(work_root: &Path, scenario: &str, iteration: u64) -> PathBuf {
+    work_root.join(format!(
+        "{}-git-trace-{iteration}.jsonl",
+        scenario.replace('/', "_")
+    ))
+}
+
+fn clear_trace_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("removing stale git trace {}", path.display()))
+        }
     }
 }
 
@@ -874,6 +892,31 @@ mod tests {
         touch(&path).expect("touch");
         assert_eq!(std::fs::read(&path).expect("read"), b"contents");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn git_trace_is_outside_disk_measurement_but_counters_are_preserved() {
+        let work_root = std::env::temp_dir().join(format!(
+            "velnor-bench-cargo-trace-root-{}",
+            std::process::id()
+        ));
+        let measured_root = work_root.join("rust_cold");
+        std::fs::create_dir_all(&measured_root).expect("create measured root");
+
+        let disk_before = tree_bytes(&measured_root);
+        let trace_file = trace_file_path(&work_root, "rust/cold", 1);
+        std::fs::write(
+            &trace_file,
+            br#"{"event":"version"}
+{"event":"data","key":"bytes-received","value":123}"#,
+        )
+        .expect("write trace");
+
+        assert_eq!(tree_bytes(&measured_root), disk_before);
+        let git = GitCounters::from_event_file(&trace_file).expect("read trace");
+        assert_eq!(git.received_bytes, 123);
+
+        let _ = std::fs::remove_dir_all(work_root);
     }
 
     #[test]
