@@ -524,11 +524,9 @@ fn ensure_success(code: i32, operation: &str, stderr: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc, Barrier,
-        },
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier,
     };
 
     use super::*;
