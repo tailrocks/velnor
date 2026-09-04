@@ -1070,3 +1070,110 @@ occurrence may not be.
 
 The fix itself is correct and is on the branch; it is not being re-committed, because that
 would require rewriting a shared branch's history to gain nothing but a tidier message.
+
+## 5. Target architecture (synthesized)
+
+The full synthesis is in `.rearch/reports/20-synthesis.md`, produced by an independent agent
+that read all sixteen investigations, verified the load-bearing claims against source, and
+resolved fourteen contradictions between them. A red-team review of it is under way; nothing
+below is settled until that returns.
+
+### Root causes
+
+The roughly thirty recorded bug classes collapse to seven causes plus one amplifier:
+
+- **RC-1 — the executing control flow is not the modelled state machine.** An 826-line
+  function drives execution while four write-only projections model it. Accounts for BC-2,
+  BC-3, BC-5, and the missing stage timeline.
+- **RC-2 — cancellation is not an input to execution.** One missing edge:
+  `execute_script_job` takes no token. Accounts for BC-6 entirely, plus the missing job wall
+  clock and the dead typed cancel API.
+- **RC-3 — contracts are transcribed rather than derived, and fixtures are built from the
+  transcription.** Wire names taken from C# property names; expressions as string rewriting
+  over `Option<String>`. Accounts for BC-1, BC-11, BC-12, BC-25 and the semantic divergences.
+- **RC-4 — a control exists at one construction site while the same operation has others.**
+  Measured at 20 of 34 security findings. Accounts for BC-7, BC-24, BC-26, BC-29 and the
+  artifact-store path defect. The remedy is always to delete the unsafe overload.
+- **RC-5 — trust, capacity and resource are ambient process facts rather than derived job
+  properties.** BC-15, BC-17, BC-21, BC-22.
+- **RC-6 — durable in-flight records have no bounded terminal state.** The completion outbox,
+  the disk-pressure park, the teardown loop, five unbounded retries.
+- **RC-7 — verification is self-referential.** BC-18 through BC-20 and BC-27. It blocks
+  nothing, which is exactly why it goes first and in parallel: until it lands, no other result
+  can be believed.
+- **Amplifier** — a 117k-line crate with dead-code linting disabled over 40% of itself, an
+  `anyhow` interior, and a `pub` surface sized for a consumer that uses 12 of 360 items. Not a
+  cause; the reason the seven stayed invisible.
+
+### Shape of the target
+
+Typestate `Slot` and `Job<S>` with the generation held *inside* each state and `fence()`
+refusing an occupied slot by signature; cancellation as a required field of `Running`, with
+job timeout as just another `CancelReason`; the completion outbox kept — it is better than
+upstream — plus a typed error module, a `CompletionUnresolvable` event, a `JobTerminalResult`
+event and deletion of the unjournaled branch; a typed synchronous Docker facade owning
+`JobResources` and a daemon-generation fact cache; one evaluator over the upstream value union
+and one `StepResult` carrying outcome and conclusion as a pair; `TrustClass` derived from the
+job's event, failing closed to fork-PR, with `CacheNamespace::path()` as the sole path
+constructor; a `StoreCatalog`, one `HostCapacity` from `statvfs`, one lease-honouring
+reclaimer, and disk pressure as a total state machine; a `HostBudget` from cgroup quota
+propagated *into* the job as `CARGO_BUILD_JOBS`, with per-slot execution threads; a typed
+`FailureClass` with `anyhow` banned from signatures; and `JobStage` rows with a
+machine-readable `wait_reason`, redacted at the subscriber.
+
+The pieces compose because each subsystem's invariant becomes a *field of a job state* rather
+than a convention. 28 invariants are stated with their enforcing mechanism; 11 are
+compiler-checked. The load-bearing ones: fencing an occupied slot is a signature error; the
+send claim is non-`Clone` and consumed by `send()`; the cancellation token is a required field
+of `Running`; `TrustClass` has no `Default`; there is one path constructor and one masker;
+evidence whose fields are all literals is rejected as unfalsifiable; and a manifest entry with
+no adapter and a JavaScript runtime is a build failure.
+
+### Two findings the synthesis produced on its own
+
+**The triplicated clap argument tree has already diverged, on the field that gates mounting
+the host Docker socket.** `service.rs:194` declares the trust scope defaulting to `trusted`
+while `velnorctl/runtime.rs:71` declares it `public`. The organization audit had recorded the
+three copies as "currently in sync", which the synthesis names as the single most consequential
+over-reach in the whole set — an over-reach toward optimism. Two binaries ship with different
+defaults for a security-relevant gate.
+
+**`jdx/mr-boxington-action` is admitted with no native adapter**, and the repository's own test
+asserts this, so it hard-fails at planning: admitted but unexecutable. That is the same shape
+as BC-23's capability-surface over-claim, seen from the manifest side.
+
+### Ordering
+
+P0: the verification oracle (parallel, and first, because it unblocks belief in everything
+else) · toolchain (landed) · completion durability · lifecycle typestate · cancellation ·
+admission and pool partitioning (landed) · trust derivation · the one-site security controls.
+P1: Docker facade · image and BuildKit · Rust acceleration · checkout · semantics · capability
+surface. P2: storage, capacity and GC · resource model · observability · benchmark, fault and
+soak. P3: deletions, error taxonomy, decomposition, hygiene.
+
+Seven package pairs must be serialized because they touch the same architectural boundary;
+five can run fully in parallel.
+
+### Corrections the synthesis made to this plan
+
+- **BC-25 over-recorded.** Two cache findings were entered here as confirmed when the
+  underlying report stated they could not be resolved without an `actions/toolkit` oracle.
+  They have since been resolved against that oracle and fixed (`1a49c0c`), but the record was
+  ahead of its evidence at the time it was written.
+- **BC-8** is confirmed withdrawn: only the capability-surface over-claim survives.
+- The organization audit's deletion ledger is inflated by the 3,021 lines of the expression
+  module, which does not exist at the starting SHA. The real figure is roughly 8,900 lines,
+  not 11,900.
+- Several report recommendations preceded their own evidence: the Docker client verdict was
+  reached before the measurements that report itself said were required; the persistent-target
+  layer was called "inert" when `publish_persistent_target` in fact `bail!`s on a symlinked
+  target, making it an active failure mode; the BuildKit trust isolation was called "proven"
+  on the assumption of a per-job untrusted class that does not exist; and the claim that no
+  acceleration opt-out exists is wrong, since `MBX_DISABLE` is workflow-settable.
+
+### Not worth fixing structurally
+
+BC-8 as recorded; the CAS TOCTOU (the crate is being deleted); zip handling in maintainer-only
+tooling; the `recursion_limit` warning (raise the limit — the real fix falls out of
+decomposition); the benchmark script's defects (it is deleted, not repaired); and
+`audit_ci.rs` grepping shell text (CI-only, and fixed as a side effect of the verifier work).
