@@ -4040,10 +4040,14 @@ mod tests {
         fs::write(&regular, b"old\n").expect("seed regular file");
         fs::set_permissions(&regular, fs::Permissions::from_mode(0o640))
             .expect("set regular file mode");
-        {
-            let _umask = UmaskGuard::new(0o0777);
-            write_policy_file(&dir.path, "regular.json", b"new\n").expect("write regular file");
-        }
+        // Deliberately no umask guard here. umask applies to *creation*, and
+        // this rewrites a file that already exists, so a hostile mask proves
+        // nothing the assertion below does not already prove. It did cost
+        // something: `umask` is process-global, so setting 0o0777 while sibling
+        // test threads created files handed them mode-0 directories and a
+        // spurious EACCES — a cross-test failure that read as flakiness and was
+        // twice attributed to unrelated code.
+        write_policy_file(&dir.path, "regular.json", b"new\n").expect("write regular file");
         assert_eq!(fs::read(&regular).expect("read regular file"), b"new\n");
         assert_eq!(
             fs::metadata(&regular)
