@@ -1180,3 +1180,22 @@ BC-8 as recorded; the CAS TOCTOU (the crate is being deleted); zip handling in m
 tooling; the `recursion_limit` warning (raise the limit — the real fix falls out of
 decomposition); the benchmark script's defects (it is deleted, not repaired); and
 `audit_ci.rs` grepping shell text (CI-only, and fixed as a side effect of the verifier work).
+
+## 13. Completed work packages (continued)
+
+| ID | Change | Commits (fixture branch) |
+| --- | --- | --- |
+| V-1 | **BC-18/BC-19 resolved: the oracle can now fail.** The `Evidence` type and its binary are deleted, along with `write-result.py` and `compare-results.py`, so a workflow can no longer author an evidence value — the root fix, not a patch. A new dependency-free `crates/verifier` reads provenance from the job environment only and cross-checks the lane against `RUNNER_ENVIRONMENT`; its collectors measure exit statuses, files, environment effects, command files and runner-computed step outcomes, and there is no collector for a literal. Readiness now binds to a real `velnor-runner capabilities export` and **fails without one**, comparing admitted actions by set identity rather than cardinality. Normalization is a closed provenance allowlist whose totality and disjointness are unit-tested; a single-lane compare is an error. Proven by 16 mutation tests — including the exact kache↔mr-boxington swap at constant cardinality that the old cardinality check passed — plus 8 baseline-binding mutations and 3 citation tests. | `78d8413`, `ee4b81f`, `ba075b4`, `e9cc336`, `58b58ba`, `c256f16` |
+
+Two findings from that work enlarge the record: the false-coverage rows were **21**, not the 7
+first reported — each citing a workflow that never mentions the action; and the two repositories'
+admitted-action sets differ by exactly one substitution in each direction
+(`kunobi-ninja/kache-action` only in the fixture, `jdx/mr-boxington-action` only in the runner)
+at identical cardinality of 30, which is precisely the drift the old check could not see.
+
+Not yet verified in CI: the workflow conversions pass actionlint and the local gate, but no
+live dual-lane run has executed them. The two things most likely to surface there are the
+`velnor-runner capabilities export` lookup in `collect-evidence` — if that binary is absent from
+`PATH` in a Velnor job, Velnor-lane records will lack their build identity and the comparator
+will fail the run, which is correct behavior but is a failure — and any observation that
+legitimately differs between lanes now that nothing is silently dropped.
