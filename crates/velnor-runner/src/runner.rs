@@ -8460,7 +8460,7 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = DockerJobEngine::new(command_runner)
+    let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
@@ -8647,7 +8647,7 @@ fn execute_script_job_inner(
                 order: post_order,
             });
         }
-        let mut service_executor = DockerJobEngine::new(command_runner);
+        let mut service_executor = DockerJobEngine::inert(command_runner);
         service_executor.cleanup_services(&plan.execution.job_container)?;
         let stop_log = StepLog {
             step_id: stop_step_id,
@@ -8843,7 +8843,7 @@ impl TeardownHandle {
         } = self;
         // Keep the duplicate-job claim owned by this teardown until every
         // cleanup operation, including BuildKit cleanup, has completed.
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
@@ -8864,7 +8864,7 @@ impl TeardownHandle {
             .name("velnor-buildkit-cleanup".into())
             .spawn(move || -> Result<()> {
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+                let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
                 let result = executor
                     .cleanup_job_buildkit(&worker_container)
                     .context("BuildKit teardown");
@@ -9001,7 +9001,7 @@ struct PrecreatedJobEnvironment {
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         Self::spawn_with(container, |container| {
-            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
             // Hand the guard out of the thread-local executor BEFORE it is
             // dropped; the running container keeps using the proxied socket.
@@ -9074,7 +9074,7 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         // Hand the pre-create thread's guard to the cleanup executor: its
         // cleanup drops the guard only AFTER the abandoned environment's
         // container is removed, so the proxy never dies under a live mount.
