@@ -3,19 +3,29 @@
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
 use super::isolation::IsolationIdentity;
 use super::ExecutionWorld;
+use crate::docker::facts::{self, Fact, FactLifetime};
 use crate::executor::CommandRunner;
-#[cfg(not(test))]
-use std::{
-    sync::{Mutex, OnceLock},
-    time::SystemTime,
-};
+use std::path::Path;
 use velnor_model::JobConclusion;
 
-#[cfg(not(test))]
+/// The drop-in that sets the job slice's CPU quota. Its modification time is
+/// the generation of every host fact derived from the slice's configuration.
 const JOB_CGROUP_DROPIN: &str = "/etc/systemd/system/velnor-jobs.slice.d/10-host-cpu.conf";
 
-#[cfg(not(test))]
-static DOCKER_BOUNDARY_PROOF: OnceLock<Mutex<Option<SystemTime>>> = OnceLock::new();
+/// The Engine's cgroup driver and cgroup version.
+///
+/// A daemon-generation fact: it is fixed by the daemon's configuration at
+/// startup and can only change when `dockerd` restarts. It used to be fetched
+/// once per job through `docker info`, the Engine's heaviest read endpoint,
+/// and thrown away by any non-zero `docker` exit — including an ordinary
+/// failing user step, which cannot change a cgroup driver.
+static CGROUP_DRIVER: Fact<String> = Fact::new("docker-info-cgroup", FactLifetime::Daemon);
+
+/// The `CPUQuota=` the job slice's unit configuration declares.
+///
+/// A host fact: it changes only when the drop-in on disk changes, which is the
+/// generation it is keyed on.
+static SLICE_UNIT_QUOTA: Fact<String> = Fact::new("job-slice-unit-quota", FactLifetime::Host);
 
 /// Host Docker execution. Uses `/var/run/docker.sock` (via the job lease).
 #[derive(Debug, Default)]
@@ -122,31 +132,38 @@ impl DockerBackend {
 pub(crate) fn verify_docker_job_cgroup_boundary(
     runner: &mut dyn CommandRunner,
 ) -> Result<(), ExecutionError> {
-    let driver = runner
-        .run(
-            "docker",
-            &[
-                "info".into(),
-                "--format".into(),
-                "{{.CgroupDriver}} {{.CgroupVersion}}".into(),
-            ],
-        )
-        .map_err(|error| {
-            invalidate_docker_job_cgroup_boundary();
-            ExecutionError::DockerPreflight(format!("docker cgroup probe: {error}"))
-        })?;
-    if driver.code != 0 {
-        invalidate_docker_job_cgroup_boundary();
-        return Err(ExecutionError::DockerPreflight(format!(
-            "docker info cgroup probe exited {}: {}",
-            driver.code, driver.stderr
-        )));
-    }
+    // A fact learned through a runner that does not spawn host processes is not
+    // a fact about this host, so it is never cached as one.
+    let host_runner = runner.is_host_process_runner();
+    let driver = CGROUP_DRIVER.get_or_try_init(
+        host_runner.then(facts::daemon).flatten(),
+        || -> Result<String, ExecutionError> {
+            let driver = runner
+                .run(
+                    "docker",
+                    &[
+                        "info".into(),
+                        "--format".into(),
+                        "{{.CgroupDriver}} {{.CgroupVersion}}".into(),
+                    ],
+                )
+                .map_err(|error| {
+                    ExecutionError::DockerPreflight(format!("docker cgroup probe: {error}"))
+                })?;
+            if driver.code != 0 {
+                return Err(ExecutionError::DockerPreflight(format!(
+                    "docker info cgroup probe exited {}: {}",
+                    driver.code, driver.stderr
+                )));
+            }
+            Ok(driver.stdout)
+        },
+    )?;
 
-    if driver.stdout.split_whitespace().collect::<Vec<_>>() != ["systemd", "2"] {
+    if driver.split_whitespace().collect::<Vec<_>>() != ["systemd", "2"] {
         return Err(ExecutionError::DockerPreflight(format!(
             "Docker job cgroup boundary requires systemd cgroup driver on cgroup v2; got {:?}",
-            driver.stdout.trim()
+            driver.trim()
         )));
     }
 
@@ -198,66 +215,43 @@ pub(crate) fn verify_docker_job_cgroup_boundary(
         )));
     }
 
-    #[cfg(not(test))]
-    if let Some(marker_mtime) = job_cgroup_dropin_mtime()
-        && DOCKER_BOUNDARY_PROOF
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some_and(|proof_mtime| proof_mtime == marker_mtime)
-    {
-        return Ok(());
-    }
-
-    let unit = runner
-        .run("systemctl", &["cat".into(), slice.into()])
-        .map_err(|error| {
-            ExecutionError::DockerPreflight(format!(
-                "systemd configuration probe for {slice}: {error}"
-            ))
-        })?;
-    if unit.code != 0 {
+    // The unit's declared quota is a host fact keyed on the drop-in that sets
+    // it. The comparison below runs every time even on a cache hit, so a
+    // changed expectation is still rejected.
+    let declared_quota = SLICE_UNIT_QUOTA.get_or_try_init(
+        host_runner
+            .then(|| facts::host(Path::new(JOB_CGROUP_DROPIN)))
+            .flatten(),
+        || -> Result<String, ExecutionError> {
+            let unit = runner
+                .run("systemctl", &["cat".into(), slice.into()])
+                .map_err(|error| {
+                    ExecutionError::DockerPreflight(format!(
+                        "systemd configuration probe for {slice}: {error}"
+                    ))
+                })?;
+            if unit.code != 0 {
+                return Err(ExecutionError::DockerPreflight(format!(
+                    "systemd configuration probe for {slice} exited {}: {}",
+                    unit.code, unit.stderr
+                )));
+            }
+            Ok(unit
+                .stdout
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("CPUQuota="))
+                .next_back()
+                .unwrap_or_default()
+                .to_string())
+        },
+    )?;
+    if declared_quota != format!("{expected_quota}%") {
         return Err(ExecutionError::DockerPreflight(format!(
-            "systemd configuration probe for {slice} exited {}: {}",
-            unit.code, unit.stderr
+            "Docker job cgroup boundary requires CPUQuota={expected_quota}% on {slice}; got {declared_quota:?}"
         )));
     }
-    let effective_quota = unit
-        .stdout
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("CPUQuota="))
-        .next_back()
-        .unwrap_or_default();
-    if effective_quota != format!("{expected_quota}%") {
-        return Err(ExecutionError::DockerPreflight(format!(
-            "Docker job cgroup boundary requires CPUQuota={expected_quota}% on {slice}; got {effective_quota:?}"
-        )));
-    }
 
-    #[cfg(not(test))]
-    if let Some(marker_mtime) = job_cgroup_dropin_mtime() {
-        *DOCKER_BOUNDARY_PROOF
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(marker_mtime);
-    }
     Ok(())
-}
-
-#[cfg(not(test))]
-fn job_cgroup_dropin_mtime() -> Option<SystemTime> {
-    std::fs::metadata(JOB_CGROUP_DROPIN)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-}
-
-pub(crate) fn invalidate_docker_job_cgroup_boundary() {
-    #[cfg(not(test))]
-    if let Some(cache) = DOCKER_BOUNDARY_PROOF.get() {
-        *cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
 }
 
 fn systemd_slice_state(

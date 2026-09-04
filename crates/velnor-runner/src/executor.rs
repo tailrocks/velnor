@@ -199,6 +199,15 @@ pub struct SpawnedProcess {
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 
+    /// True when this runner spawns real host processes.
+    ///
+    /// Host- and daemon-generation facts are facts only when they were learned
+    /// from the host. A test double or a guest-side runner answers `false`, and
+    /// what it reports is never cached as a fact about this host.
+    fn is_host_process_runner(&self) -> bool {
+        false
+    }
+
     /// Spawn without waiting. Default refuses so accidental long waits stay fail-closed.
     ///
     /// # Errors
@@ -513,6 +522,10 @@ pub(crate) fn configure_host_docker_command(
 }
 
 impl CommandRunner for ProcessCommandRunner {
+    fn is_host_process_runner(&self) -> bool {
+        true
+    }
+
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
         let mut command = Command::new(program);
         configure_host_docker_command(&mut command, program, args)?;

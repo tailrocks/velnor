@@ -7778,6 +7778,11 @@ fn execute_script_job_inner(
             billing_owner_id,
         );
     }
+    // Every runner slot is its own process running one job at a time, so this
+    // guard's process-global counters are exactly job scope. It reports the
+    // job's host `docker` invocation count and per-class latency however the
+    // job ends, including every early return below.
+    let _docker_invocations = crate::docker::begin_job(&job.job_id);
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.

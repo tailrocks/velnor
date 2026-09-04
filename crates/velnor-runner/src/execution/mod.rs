@@ -29,7 +29,6 @@ pub use backend::{
     ValidatedService, ValidatedStep,
 };
 pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
-pub(crate) use docker::invalidate_docker_job_cgroup_boundary;
 pub(crate) use docker::verify_docker_job_cgroup_boundary;
 pub use docker::DockerBackend;
 pub use firecracker::{
