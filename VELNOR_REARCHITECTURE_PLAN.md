@@ -485,8 +485,9 @@ separate scenarios; and neither repository asserts the other's use of a compatib
 
 ### BC-21 — Fork pull requests can write state the next trusted job executes
 
-`cargo_target_trust_scope()` reads the daemon environment variable `VELNOR_TRUST_SCOPE`
-(`github_adapter.rs:211-213`) and the shipped unit sets it to `trusted`
+**[RESOLVED in `dc06705` — see §15. Retained for the record.]**
+`cargo_target_trust_scope()` read the daemon environment variable `VELNOR_TRUST_SCOPE`
+(`github_adapter.rs:211-213`) and the shipped unit set it to `trusted`
 (`debian/velnor.env:42`). `validate_job_trust_policy` then returns `Ok(())` immediately for
 a trusted scope *before it looks at the job at all* (`runner.rs:6155-6157`). There is no
 `event_name`, `head_repository` or fork check, and no repository allowlist, anywhere in the
@@ -1911,3 +1912,67 @@ Once the baseline lands, the sixteen admitted mr-boxington inputs split cleanly:
 `server-url`, `namespace`, `token`, `token-file`, `oidc-audience` and `server-mode` select a
 remote cache backend and should be recorded `admission_only` under this fixture's local-only
 store policy.
+
+### The trust split-brain is closed, and trust now fails closed
+
+`dc06705`. Every claim was verified before editing, and the blast radius was larger than
+recorded: the ambient `std::env::var` read fed **six** store paths — `container.rs:1046`,
+`:1073`, `:1097`, `:1120` (cargo bin, mise installs, mise binaries, playwright),
+`storage.rs:107` (`cache_class_path`, the class root for every canonical store) and
+`executor.rs:9438` (the persistent actions cache) — while the CLI-derived value gated the Docker
+socket, container options (`github_adapter.rs:504`), service-container privilege (`:514`), host
+ports (`:536`, `:568`), user secrets (`executor.rs:3611`) and the job trust policy
+(`runner.rs:6321`).
+
+**A fourth ambient read was found and fixed**, and its location is the sharpest detail in this
+finding: `node/prove.rs:417` `runtime_trust_scope()` also read the environment directly,
+overriding the configured scope *in the node routing-proof evidence*. The code whose job is to
+detect trust incoherence was itself a source of it.
+
+The structural fix, in a new `crates/velnor-runner/src/trust_scope.rs`: a single
+`TrustScopeArg` clap declaration flattened into both binaries, so there is no second
+declaration to diverge; `trust_scope::resolve()` as the only constructor of a `TrustScope` whose
+inner value is private, called once at the argument-conversion boundary, publishing to a
+write-once cell with exactly one writer — **first resolution wins and a later one is refused, so
+trust cannot widen after startup**. Both `std::env::var` reads and `cargo_target_trust_scope_from`
+are deleted; nothing outside clap reads `VELNOR_TRUST_SCOPE`; an unresolved process fails closed
+to `untrusted`.
+
+Threading a parameter into all six consumers would have required editing files owned by other
+agents, so the value is resolved once and published instead. Under `cfg(test)` the cell is
+per-thread, so one test's resolution cannot leak into another's store paths.
+
+**The default is now `untrusted`, and this is a deliberate breaking change.** The shipped
+`velnor.env` ships `untrusted` with an explicit warning. A pool that legitimately runs only
+first-party code must now grant `trusted` deliberately; until it does it loses the Docker socket,
+privileged options, privileged service containers, host ports and user secrets, and its stores
+move to the untrusted namespace at the cost of one cold-cache job. That is the correct direction:
+the previous default failed open, and the flag that was supposed to close it did not reach the
+stores.
+
+The proving test sets `VELNOR_TRUST_SCOPE=trusted` **and** `--trust-scope public` at the same
+time and asserts through the real `github_job_container_spec` that all six gates and all seven
+trust-scoped store paths observe `public`, with no `trusted` component anywhere. A second test in
+`crates/velnorctl/tests/trust_scope_single_source.rs` renders the flag from both binaries' clap
+commands and fails if the name, default or environment binding differ.
+
+### The same duplication class remains in the rest of the argument trees
+
+Only the trust-scope flag was unified. These four still diverge between `service.rs` and
+`velnorctl/runtime.rs`, so which limits a job receives depends on which binary launched it:
+
+| Flag | `service.rs` | `velnorctl/runtime.rs` |
+| --- | --- | --- |
+| `job_cpus` | `""` | `"2"` |
+| `job_memory` | `""` | `"4g"` |
+| `job_peak_bytes` | 30 GiB | 4 GiB |
+| `node_action_image` | `""` | `"velnor/node-actions:latest"` |
+
+The empty values on the `service.rs` side are exactly the condition recorded in BC-17 — mbx and
+Cargo sizing themselves to the whole machine because nothing tells them otherwise. So this is
+not a missing default but a *divergent* one, and it is being handed to the resource-budget
+package with the instruction to derive these from the host budget rather than pick a side, and
+to add the same cross-binary guard test even if it does not unify them.
+
+Also still to correct: `content/docs/getting-started.mdx:88` documents
+`VELNOR_TRUST_SCOPE=trusted`.
