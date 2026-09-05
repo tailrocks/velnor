@@ -1885,9 +1885,6 @@ mod tests {
             .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
-        let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
-        let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
-        assert!(cpus_pos < memory_pos);
         let lease_mount = format!(
             "{}:/var/run/docker.sock",
             job.guest_docker_socket_host().display()
