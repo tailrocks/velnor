@@ -35,9 +35,9 @@ use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -106,6 +106,8 @@ impl CacheService {
         std::fs::create_dir_all(root.join("blobs")).context("create gha-cache tenant blobs dir")?;
         std::fs::create_dir_all(root.join("entries"))
             .context("create gha-cache tenant entries dir")?;
+        std::fs::create_dir_all(root.join("reservations"))
+            .context("create gha-cache tenant reservations dir")?;
         Ok(())
     }
 
@@ -113,6 +115,12 @@ impl CacheService {
         self.tenant_root(namespace)
             .join("entries")
             .join(format!("{hash}.json"))
+    }
+
+    fn reservation_path(&self, id: &str, namespace: Option<&str>) -> PathBuf {
+        self.tenant_root(namespace)
+            .join("reservations")
+            .join(format!("{id}.json"))
     }
 
     fn read_entry(&self, hash: &str, namespace: Option<&str>) -> Option<Value> {
@@ -230,6 +238,156 @@ struct Ctx {
     public_base: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct V1Reservation {
+    key: String,
+    version: String,
+    expected_size: u64,
+}
+
+impl V1Reservation {
+    fn as_json(&self) -> Value {
+        json!({
+            "key": self.key,
+            "version": self.version,
+            "cacheSize": self.expected_size,
+        })
+    }
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)
+        .with_context(|| format!("open directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("sync directory {}", path.display()))?;
+    Ok(())
+}
+
+/// Atomically publish JSON only when the destination does not already exist.
+/// The temporary file is flushed before its hard link becomes visible, so a
+/// restart cannot observe a partial reservation or entry record.
+fn atomically_create_json(path: &Path, value: &Value) -> Result<bool> {
+    let parent = path.parent().context("JSON publication has no parent")?;
+    std::fs::create_dir_all(parent).context("create JSON publication directory")?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("JSON publication has no file name")?;
+    let tmp = parent.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let cleanup = TemporaryUpload::new(tmp.clone());
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .context("create temporary JSON publication")?;
+        file.write_all(value.to_string().as_bytes())
+            .context("write temporary JSON publication")?;
+        file.sync_all().context("sync temporary JSON publication")?;
+    }
+
+    match std::fs::hard_link(&tmp, path) {
+        Ok(()) => {
+            drop(cleanup);
+            sync_directory(parent)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            drop(cleanup);
+            Ok(false)
+        }
+        Err(error) => Err(error).context("publish JSON without replacing existing record"),
+    }
+}
+
+fn parse_v1_reservation(value: Value, id: &str) -> Result<V1Reservation> {
+    let key = value["key"]
+        .as_str()
+        .context("v1 cache reservation has no key")?;
+    let version = value["version"]
+        .as_str()
+        .context("v1 cache reservation has no version")?;
+    let expected_size = value["cacheSize"]
+        .as_u64()
+        .context("v1 cache reservation has no valid cacheSize")?;
+    if expected_size > MAX_BODY {
+        anyhow::bail!("v1 cache reservation exceeds {MAX_BODY} bytes");
+    }
+    if entry_hash(key, version) != id {
+        anyhow::bail!("v1 cache reservation does not match cache id");
+    }
+    Ok(V1Reservation {
+        key: key.to_owned(),
+        version: version.to_owned(),
+        expected_size,
+    })
+}
+
+fn read_v1_reservation(
+    service: &CacheService,
+    id: &str,
+    namespace: &str,
+) -> Result<Option<V1Reservation>> {
+    validate_cache_id(id)?;
+    let path = service.reservation_path(id, Some(namespace));
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read v1 cache reservation {id}")),
+    };
+    let value: Value =
+        serde_json::from_slice(&raw).with_context(|| format!("parse v1 cache reservation {id}"))?;
+    parse_v1_reservation(value, id).map(Some)
+}
+
+fn load_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Result<V1Reservation> {
+    read_v1_reservation(service, id, namespace)?.context("v1 cache reservation is missing")
+}
+
+fn persist_v1_reservation(
+    service: &CacheService,
+    id: &str,
+    reservation: &V1Reservation,
+    namespace: &str,
+) -> Result<()> {
+    service.ensure_tenant(namespace)?;
+    let path = service.reservation_path(id, Some(namespace));
+    if let Some(existing) = read_v1_reservation(service, id, namespace)? {
+        if existing == *reservation {
+            return Ok(());
+        }
+        anyhow::bail!("v1 cache reservation does not match existing reservation");
+    }
+
+    if atomically_create_json(&path, &reservation.as_json())? {
+        return Ok(());
+    }
+
+    let existing = read_v1_reservation(service, id, namespace)?
+        .context("v1 cache reservation disappeared during creation")?;
+    if existing == *reservation {
+        Ok(())
+    } else {
+        anyhow::bail!("v1 cache reservation does not match concurrent reservation")
+    }
+}
+
+fn clear_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Result<()> {
+    let path = service.reservation_path(id, Some(namespace));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove published v1 cache reservation {id}"));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
 fn cache_namespace(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"velnor-actions-cache-tenant\0");
@@ -320,8 +478,11 @@ async fn route(
             .await
             .map(|v| respond(StatusCode::OK, v)),
         (hyper::Method::PUT, p) => {
-            let id = p.rsplit('/').next().unwrap_or_default().to_owned();
-            upload(req, ctx, &id, &namespace)
+            let (id, v1) = match v2_upload_id(p) {
+                Some(id) => (id.to_owned(), false),
+                None => (p.rsplit('/').next().unwrap_or_default().to_owned(), true),
+            };
+            upload(req, ctx, &id, &namespace, v1)
                 .await
                 .map(|_| respond(StatusCode::OK, json!({"ok": true})))
         }
@@ -382,6 +543,19 @@ async fn route(
     }
 }
 
+fn v2_upload_id(path: &str) -> Option<&str> {
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut segments = path.rsplit('/');
+    let id = segments.next()?;
+    if segments.next() != Some("upload") || segments.next() != Some("_results") {
+        return None;
+    }
+    validate_cache_id(id).ok()?;
+    Some(id)
+}
+
 fn respond_unauthorized() -> Response<ResponseBody> {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
@@ -396,7 +570,11 @@ fn full_body(body: impl Into<Bytes>) -> ResponseBody {
         .boxed_unsync()
 }
 
-async fn body_json(req: Request<Incoming>) -> Result<Value> {
+async fn body_json<B>(req: Request<B>) -> Result<Value>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     collect_json(req.into_body(), MAX_JSON_BODY).await
 }
 
@@ -432,11 +610,17 @@ fn keys_from_query<B>(req: &Request<B>) -> Vec<String> {
         .collect()
 }
 
-async fn reserve(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
+async fn reserve<B>(req: Request<B>, ctx: &Ctx, namespace: &str) -> Result<Value>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
-    let size = body["cacheSize"].as_u64().unwrap_or(0);
+    let size = body["cacheSize"]
+        .as_u64()
+        .context("missing or invalid cacheSize")?;
     if size > MAX_BODY {
         return Ok(json!({"__typename": "BadRequestError"}));
     }
@@ -444,6 +628,12 @@ async fn reserve(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<V
     if ctx.service.entry_path(&hash, Some(namespace)).exists() {
         return Ok(json!({"__typename": "ConflictError", "message": "already exists"}));
     }
+    let reservation = V1Reservation {
+        key: key.to_owned(),
+        version: version.to_owned(),
+        expected_size: size,
+    };
+    persist_v1_reservation(&ctx.service, &hash, &reservation, namespace)?;
     Ok(json!({"cacheId": hash}))
 }
 
@@ -461,17 +651,109 @@ async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Resul
     }))
 }
 
-async fn upload(req: Request<Incoming>, ctx: &Ctx, id: &str, namespace: &str) -> Result<()> {
+#[derive(Debug, Clone, Copy)]
+enum BlobPublication {
+    Replace,
+    NoReplace,
+}
+
+fn validate_existing_v1_entry(
+    service: &CacheService,
+    id: &str,
+    reservation: &V1Reservation,
+    namespace: &str,
+) -> Result<()> {
+    let entry_path = service.entry_path(id, Some(namespace));
+    let entry_metadata = std::fs::symlink_metadata(&entry_path)
+        .with_context(|| format!("stat existing v1 cache entry {id}"))?;
+    if !entry_metadata.file_type().is_file() {
+        anyhow::bail!("existing v1 cache entry is not a regular file");
+    }
+    let raw =
+        std::fs::read(&entry_path).with_context(|| format!("read existing v1 cache entry {id}"))?;
+    let entry: Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("parse existing v1 cache entry {id}"))?;
+    if entry["key"].as_str() != Some(reservation.key.as_str())
+        || entry["version"].as_str() != Some(reservation.version.as_str())
+        || entry["blob"].as_str() != Some(id)
+        || entry["size"].as_u64() != Some(reservation.expected_size)
+    {
+        anyhow::bail!("existing v1 cache entry does not match reservation");
+    }
+
+    let blob_path = service.tenant_root(Some(namespace)).join("blobs").join(id);
+    let blob_metadata = std::fs::symlink_metadata(&blob_path)
+        .with_context(|| format!("stat existing v1 cache blob {id}"))?;
+    if !blob_metadata.file_type().is_file() {
+        anyhow::bail!("existing v1 cache blob is not a regular file");
+    }
+    if blob_metadata.len() != reservation.expected_size {
+        anyhow::bail!(
+            "existing v1 cache blob size mismatch: reservation records {}, file has {}",
+            reservation.expected_size,
+            blob_metadata.len()
+        );
+    }
+    Ok(())
+}
+
+async fn upload<B>(req: Request<B>, ctx: &Ctx, id: &str, namespace: &str, v1: bool) -> Result<()>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let declared_size = request_content_length(&req)?;
-    store_upload(
+
+    if !v1 {
+        store_upload(
+            req.into_body(),
+            &ctx.service,
+            id,
+            declared_size,
+            None,
+            MAX_BODY,
+            Some(namespace),
+            BlobPublication::Replace,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let reservation = load_v1_reservation(&ctx.service, id, namespace)?;
+    if let Some(declared_size) = declared_size
+        && declared_size != reservation.expected_size
+    {
+        anyhow::bail!(
+            "cache upload size mismatch: reserved {}, declared {declared_size}",
+            reservation.expected_size
+        );
+    }
+    if ctx.service.entry_path(id, Some(namespace)).exists() {
+        validate_existing_v1_entry(&ctx.service, id, &reservation, namespace)?;
+    }
+
+    let actual_size = store_upload(
         req.into_body(),
         &ctx.service,
         id,
         declared_size,
+        Some(reservation.expected_size),
         MAX_BODY,
         Some(namespace),
+        BlobPublication::NoReplace,
     )
     .await?;
+
+    if !commit_entry_without_overwrite(
+        &ctx.service,
+        &reservation.key,
+        &reservation.version,
+        actual_size,
+        Some(namespace),
+    )? {
+        validate_existing_v1_entry(&ctx.service, id, &reservation, namespace)?;
+    }
+    clear_v1_reservation(&ctx.service, id, namespace)?;
     Ok(())
 }
 
@@ -493,8 +775,10 @@ async fn store_upload<B>(
     service: &CacheService,
     id: &str,
     declared_size: Option<u64>,
+    expected_size: Option<u64>,
     max_bytes: u64,
     namespace: Option<&str>,
+    publication: BlobPublication,
 ) -> Result<u64>
 where
     B: Body<Data = Bytes> + Unpin,
@@ -503,6 +787,18 @@ where
     validate_cache_id(id)?;
     if declared_size.is_some_and(|size| size > max_bytes) {
         anyhow::bail!("declared cache upload size exceeds {max_bytes} bytes");
+    }
+    if let Some(expected_size) = expected_size {
+        if expected_size > max_bytes {
+            anyhow::bail!("expected cache upload size exceeds {max_bytes} bytes");
+        }
+        if let Some(declared_size) = declared_size
+            && declared_size != expected_size
+        {
+            anyhow::bail!(
+                "cache upload size mismatch: expected {expected_size}, declared {declared_size}"
+            );
+        }
     }
 
     let blob_dir = service.tenant_root(namespace).join("blobs");
@@ -532,6 +828,9 @@ where
         if actual_size > max_bytes {
             anyhow::bail!("actual cache upload size exceeds {max_bytes} bytes");
         }
+        if expected_size.is_some_and(|size| actual_size > size) {
+            anyhow::bail!("actual cache upload size exceeds reserved cacheSize");
+        }
         for chunk in bytes.chunks(TRANSFER_CHUNK_BYTES) {
             file.write_all(chunk).await?;
         }
@@ -544,15 +843,72 @@ where
             "cache upload size mismatch: declared {declared_size}, received {actual_size}"
         );
     }
+    if let Some(expected_size) = expected_size
+        && expected_size != actual_size
+    {
+        anyhow::bail!(
+            "cache upload size mismatch: reserved {expected_size}, received {actual_size}"
+        );
+    }
     file.flush().await?;
+    file.sync_all().await?;
     drop(file);
 
     let dst = blob_dir.join(id);
-    tokio::fs::rename(&tmp, &dst)
-        .await
-        .context("publish completed cache upload")?;
+    match publication {
+        BlobPublication::Replace => {
+            tokio::fs::rename(&tmp, &dst)
+                .await
+                .context("publish completed cache upload")?;
+        }
+        BlobPublication::NoReplace => match std::fs::hard_link(&tmp, &dst) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if !files_are_identical(&tmp, &dst)? {
+                    anyhow::bail!("refusing to overwrite existing cache blob with different bytes");
+                }
+            }
+            Err(error) => {
+                return Err(error).context("publish cache upload without replacing existing blob");
+            }
+        },
+    }
     drop(cleanup);
+    sync_directory(&blob_dir).context("sync cache blob directory after publication")?;
     Ok(actual_size)
+}
+
+fn files_are_identical(left: &Path, right: &Path) -> Result<bool> {
+    let left_metadata = std::fs::symlink_metadata(left).context("stat temporary cache upload")?;
+    let right_metadata = std::fs::symlink_metadata(right).context("stat existing cache blob")?;
+    if !left_metadata.file_type().is_file() || !right_metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    if left_metadata.len() != right_metadata.len() {
+        return Ok(false);
+    }
+
+    let mut left_file = std::fs::File::open(left).context("open temporary cache upload")?;
+    let mut right_file = std::fs::File::open(right).context("open existing cache blob")?;
+    let mut left_buffer = [0u8; TRANSFER_CHUNK_BYTES];
+    let mut right_buffer = [0u8; TRANSFER_CHUNK_BYTES];
+    loop {
+        let left_read = left_file
+            .read(&mut left_buffer)
+            .context("read temporary cache upload")?;
+        let right_read = right_file
+            .read(&mut right_buffer)
+            .context("read existing cache blob")?;
+        if left_read != right_read {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+        if left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+    }
 }
 
 struct TemporaryUpload {
@@ -610,6 +966,36 @@ fn commit_entry(
     size: u64,
     namespace: Option<&str>,
 ) -> Result<()> {
+    let (hash, entry) = validated_entry(ctx, key, version, size, namespace)?;
+    std::fs::create_dir_all(ctx.tenant_root(namespace).join("entries"))?;
+    std::fs::write(ctx.entry_path(&hash, namespace), entry.to_string())?;
+    ctx.enforce_budget(namespace)?;
+    Ok(())
+}
+
+fn commit_entry_without_overwrite(
+    ctx: &CacheService,
+    key: &str,
+    version: &str,
+    size: u64,
+    namespace: Option<&str>,
+) -> Result<bool> {
+    let (hash, entry) = validated_entry(ctx, key, version, size, namespace)?;
+    std::fs::create_dir_all(ctx.tenant_root(namespace).join("entries"))?;
+    if !atomically_create_json(&ctx.entry_path(&hash, namespace), &entry)? {
+        return Ok(false);
+    }
+    ctx.enforce_budget(namespace)?;
+    Ok(true)
+}
+
+fn validated_entry(
+    ctx: &CacheService,
+    key: &str,
+    version: &str,
+    size: u64,
+    namespace: Option<&str>,
+) -> Result<(String, Value)> {
     let hash = entry_hash(key, version);
     let blob = ctx.tenant_root(namespace).join("blobs").join(&hash);
     let metadata = std::fs::metadata(&blob).context("stat uploaded cache blob")?;
@@ -630,13 +1016,10 @@ fn commit_entry(
         "size": actual,
         "created_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0),
     });
-    std::fs::create_dir_all(ctx.tenant_root(namespace).join("entries"))?;
-    std::fs::write(ctx.entry_path(&hash, namespace), entry.to_string())?;
-    ctx.enforce_budget(namespace)?;
-    Ok(())
+    Ok((hash, entry))
 }
 
 /// v1 `GET _apis/artifactcache/cache?keys=…&version=…`.
@@ -1031,6 +1414,22 @@ mod tests {
         }
     }
 
+    fn post_json(body: Value) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(hyper::Method::POST)
+            .uri("http://cache.test/_apis/artifactcache/cache/reserve")
+            .body(Full::new(Bytes::from(body.to_string())))
+            .expect("build request")
+    }
+
+    fn put_body(body: &'static [u8]) -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(hyper::Method::PUT)
+            .uri("http://cache.test/_apis/artifactcache/cache/upload")
+            .body(Full::new(Bytes::from_static(body)))
+            .expect("build request")
+    }
+
     fn get_at_host(host: &str, query: &str) -> Request<Full<Bytes>> {
         Request::builder()
             .uri(format!("http://{host}/_apis/artifactcache/cache?{query}"))
@@ -1096,6 +1495,23 @@ mod tests {
     }
 
     #[test]
+    fn v2_upload_route_requires_exact_suffix_and_cache_id() {
+        let id = entry_hash("route", "v1");
+        assert_eq!(
+            v2_upload_id(&format!("/_results/upload/{id}")),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            v2_upload_id(&format!("/cache/_results/upload/{id}")),
+            Some(id.as_str())
+        );
+        assert!(v2_upload_id("/_results/upload/not-a-cache-id").is_none());
+        assert!(v2_upload_id(&format!("/_results/upload/{id}/extra")).is_none());
+        assert!(v2_upload_id(&format!("/_results/not-upload/{id}")).is_none());
+        assert!(v2_upload_id(&format!("/not-results/upload/{id}")).is_none());
+    }
+
+    #[test]
     fn query_param_reads_every_parameter_not_only_the_first() {
         // `?keys=…&version=…` is exactly the shape actions/toolkit sends
         // (cacheHttpClient.ts `getCacheEntry`). Reading only the first pair
@@ -1131,6 +1547,230 @@ mod tests {
             keys_from_query(&req),
             vec!["primary", "restore-one", "restore-two"]
         );
+    }
+
+    #[tokio::test]
+    async fn v1_reserve_put_publishes_lookup_hit_and_clears_reservation() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let key = "v1-rust-cache";
+        let version = "v1";
+        let contents = b"abc";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": key,
+                "version": version,
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            "tenant",
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap();
+        assert!(ctx.service.reservation_path(id, Some("tenant")).exists());
+
+        // A fresh service instance must recover the durable reservation.
+        let reopened = test_ctx(test_service(dir.path()));
+        assert_eq!(
+            load_v1_reservation(&reopened.service, id, "tenant").unwrap(),
+            V1Reservation {
+                key: key.to_owned(),
+                version: version.to_owned(),
+                expected_size: contents.len() as u64,
+            }
+        );
+
+        upload(put_body(contents), &reopened, id, "tenant", true)
+            .await
+            .unwrap();
+
+        assert!(!reopened
+            .service
+            .reservation_path(id, Some("tenant"))
+            .exists());
+        let hit = lookup_v1(&get("keys=v1-rust-cache&version=v1"), &reopened, "tenant")
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!(key));
+        assert_eq!(hit["cacheVersion"], json!(version));
+    }
+
+    #[tokio::test]
+    async fn v1_duplicate_distinct_uploads_do_not_overwrite_the_winner() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let key = "v1-race";
+        let version = "v1";
+        let first_body = b"first-body";
+        let second_body = b"other-body";
+        let reserved = reserve(
+            post_json(json!({
+                "key": key,
+                "version": version,
+                "cacheSize": first_body.len(),
+            })),
+            &ctx,
+            "tenant",
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap();
+
+        let first_upload = upload(put_body(first_body), &ctx, id, "tenant", true);
+        let second_upload = upload(put_body(second_body), &ctx, id, "tenant", true);
+        let (first_result, second_result) = tokio::join!(first_upload, second_upload);
+
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        let winner = if first_result.is_ok() {
+            first_body
+        } else {
+            second_body
+        };
+        let blob = ctx
+            .service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(id);
+        assert_eq!(std::fs::read(blob).unwrap(), winner);
+        assert!(ctx.service.entry_path(id, Some("tenant")).exists());
+    }
+
+    #[tokio::test]
+    async fn v1_retry_clears_matching_stale_reservation_after_entry_publication() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let key = "v1-retry";
+        let version = "v1";
+        let contents = b"retry-body";
+        let reserved = reserve(
+            post_json(json!({
+                "key": key,
+                "version": version,
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            "tenant",
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap();
+        let reservation = V1Reservation {
+            key: key.to_owned(),
+            version: version.to_owned(),
+            expected_size: contents.len() as u64,
+        };
+
+        upload(put_body(contents), &ctx, id, "tenant", true)
+            .await
+            .unwrap();
+        persist_v1_reservation(&ctx.service, id, &reservation, "tenant").unwrap();
+        assert!(ctx.service.reservation_path(id, Some("tenant")).exists());
+
+        upload(put_body(contents), &ctx, id, "tenant", true)
+            .await
+            .unwrap();
+
+        assert!(!ctx.service.reservation_path(id, Some("tenant")).exists());
+        assert!(ctx.service.entry_path(id, Some("tenant")).exists());
+    }
+
+    #[tokio::test]
+    async fn v1_upload_rejects_missing_reservation() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let id = entry_hash("missing-reservation", "v1");
+
+        let error = upload(put_body(b"abc"), &ctx, &id, "tenant", true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("reservation is missing"));
+        assert!(!ctx.service.entry_path(&id, Some("tenant")).exists());
+        assert!(!ctx
+            .service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(id)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn v1_upload_size_mismatch_leaves_no_entry_and_keeps_reservation() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let key = "size-mismatch";
+        let version = "v1";
+        let reserved = reserve(
+            post_json(json!({
+                "key": key,
+                "version": version,
+                "cacheSize": 4,
+            })),
+            &ctx,
+            "tenant",
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap();
+
+        let error = upload(put_body(b"abc"), &ctx, id, "tenant", true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("reserved 4, received 3"));
+        assert!(!ctx.service.entry_path(id, Some("tenant")).exists());
+        assert!(!ctx
+            .service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(id)
+            .exists());
+        assert!(ctx.service.reservation_path(id, Some("tenant")).exists());
+    }
+
+    #[tokio::test]
+    async fn v1_upload_rejects_mismatched_reservation() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let ctx = test_ctx(service);
+        let id = entry_hash("original", "v1");
+        let reservation_path = ctx.service.reservation_path(&id, Some("tenant"));
+        std::fs::write(
+            reservation_path,
+            json!({
+                "key": "different",
+                "version": "v1",
+                "cacheSize": 3,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = upload(put_body(b"abc"), &ctx, &id, "tenant", true)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("does not match cache id"));
+        assert!(!ctx.service.entry_path(&id, Some("tenant")).exists());
+        assert!(!ctx
+            .service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(id)
+            .exists());
     }
 
     #[test]
@@ -1259,8 +1899,10 @@ mod tests {
             &service,
             &id,
             None,
+            None,
             4,
             None,
+            BlobPublication::Replace,
         )
         .await
         .unwrap_err();
@@ -1291,8 +1933,10 @@ mod tests {
             &service,
             &id,
             None,
+            None,
             MAX_BODY,
             None,
+            BlobPublication::Replace,
         )
         .await
         .unwrap_err();
@@ -1317,8 +1961,10 @@ mod tests {
             &service,
             &id,
             Some(4),
+            None,
             MAX_BODY,
             None,
+            BlobPublication::Replace,
         )
         .await
         .unwrap_err();
