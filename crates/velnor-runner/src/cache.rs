@@ -802,7 +802,7 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
     };
     let _entry_lock = (matches!(
         candidate.store,
-        CacheStore::ActionsCache | CacheStore::Targets
+        CacheStore::ActionsCache | CacheStore::Artifacts | CacheStore::Targets
     ))
     .then(|| CacheEntryLock::exclusive(lock_path))
     .transpose()?;
@@ -1801,6 +1801,38 @@ mod tests {
             .unwrap();
         remover.join().unwrap();
         assert!(!entry.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifacts_gc_waits_for_active_restore_lock() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-artifact-lock-{}", uuid::Uuid::new_v4()));
+        let run_bucket = root.join("_velnor_artifacts/run-1");
+        fs::create_dir_all(&run_bucket).unwrap();
+        fs::write(run_bucket.join("artifact"), b"artifact").unwrap();
+        let restore_lock = CacheEntryLock::shared(&run_bucket).unwrap();
+        let candidate = EvictionCandidate {
+            path: run_bucket.clone(),
+            store: CacheStore::Artifacts,
+            scope: vec!["run-1".into()],
+            bytes: 8,
+            reason: "test".into(),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let remover =
+            std::thread::spawn(move || sender.send(remove_candidate(&candidate)).unwrap());
+
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(run_bucket.join("artifact").is_file());
+        drop(restore_lock);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        remover.join().unwrap();
+        assert!(!run_bucket.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
