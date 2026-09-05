@@ -1321,8 +1321,8 @@ mod tests {
             reached,
             vec![
                 "hook:vsock-cancel",
-                "container:velnor-buildkit-1",
                 "pgid:4242",
+                "container:velnor-buildkit-1",
                 "container:velnor-job-1",
                 "container:velnor-service-1-postgres",
             ],
@@ -1361,6 +1361,20 @@ mod tests {
 
         token.fan_out_once();
 
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec![
+                "hook:zzz-hook",
+                "pgid:42",
+                "container:zzz-action",
+                "container:aaa-buildkit",
+            ]
+        );
+        token.force();
         assert_eq!(
             token
                 .outcomes()
