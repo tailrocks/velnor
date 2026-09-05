@@ -25,6 +25,29 @@ fn is_docker_control_env(name: &str) -> bool {
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
 }
 
+fn append_flags_without_cpu(command: &mut impl FlagSink, options: &[String]) {
+    let mut index = 0;
+    while index < options.len() {
+        let option = &options[index];
+        if option == "--cpus" {
+            index += 1;
+            if options
+                .get(index)
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if option.starts_with("--cpus=") {
+            index += 1;
+            continue;
+        }
+        command.flag(option.clone());
+        index += 1;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreTrustClass {
     Untrusted,
@@ -44,8 +67,8 @@ pub struct JobContainerSpec {
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
     pub env: Vec<(String, String)>,
-    /// Daemon-enforced Docker resource limits. Appended after workflow
-    /// createOptions so operator policy wins for shared warm-runner hosts.
+    /// Daemon-enforced Docker resource limits. CPU limits are normalized with
+    /// workflow createOptions into one runner-owned value before emission.
     pub resource_options: Vec<String>,
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
@@ -95,8 +118,8 @@ impl JobContainerSpec {
         named.then(|| slot.to_path_buf())
     }
 
-    /// A `--cpus` limit already declared for this container, by the operator
-    /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or by the workflow's createOptions.
+    /// The tightest valid `--cpus` limit declared by the operator
+    /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
     fn declared_container_cpus(&self) -> Option<f64> {
         [&self.resource_options, &self.options]
             .into_iter()
@@ -153,6 +176,23 @@ impl JobContainerSpec {
             .collect()
     }
 
+    /// Append workflow and daemon flags while replacing every declared CPU
+    /// limit with the runner-derived hard cap. Docker's last duplicate flag
+    /// wins, so leaving an operator value in argv would let it silently defeat
+    /// the smaller per-slot limit.
+    fn append_container_options(&self, command: &mut DockerCommand, budget: &SlotBudget) {
+        if let Some(cpu_option) = budget.docker_cpu_option() {
+            append_flags_without_cpu(command, &self.options);
+            append_flags_without_cpu(command, &self.resource_options);
+            command.flags(cpu_option);
+        } else {
+            // No derived hard cap exists. Retain explicit policy instead of
+            // widening the container by deleting the only known limit.
+            command.flags(self.options.iter().cloned());
+            command.flags(self.resource_options.iter().cloned());
+        }
+    }
+
     /// Daemon-derived CPU and memory budget for this job.
     ///
     /// Appended after workflow environment and workflow createOptions, so a
@@ -164,8 +204,7 @@ impl JobContainerSpec {
     /// sized through its documented `MBX_SCHEDULER_*` contract instead of its
     /// "logical CPUs / 85% of physical memory" defaults, neither of which can
     /// see the slice quota. An unobservable budget produces nothing at all.
-    fn append_resource_budget(&self, command: &mut DockerCommand) {
-        let budget = self.slot_budget();
+    fn append_resource_budget(&self, command: &mut DockerCommand, budget: &SlotBudget) {
         for (name, value) in budget.job_env() {
             command.env(name, value);
         }
@@ -173,13 +212,6 @@ impl JobContainerSpec {
             "VELNOR_JOB_BUDGET",
             budget.notice(&self.workflow_budget_overrides()),
         );
-        // Only the daemon may pin the container's own quota, and only when no
-        // explicit limit is already in force.
-        if self.declared_container_cpus().is_none()
-            && let Some(option) = budget.docker_cpu_option()
-        {
-            command.flags(option);
-        }
     }
 
     fn append_rust_acceleration(&self, command: &mut DockerCommand) {
@@ -358,8 +390,8 @@ impl JobContainerSpec {
             args.env(name.clone(), value.clone());
         }
         self.append_ownership_labels(args);
-        args.flags(self.options.iter().cloned());
-        args.flags(self.resource_options.iter().cloned());
+        let budget = self.slot_budget();
+        self.append_container_options(args, &budget);
         // Docker creates the actual workload in dockerd's cgroup, not in the
         // Velnor worker process. Keep the outer job below the package-owned
         // aggregate cap; the job lease proxy applies the same policy to
@@ -395,7 +427,7 @@ impl JobContainerSpec {
         // The machine budget divided by the number of provisioned slots. Last,
         // so neither workflow environment nor workflow createOptions can widen
         // this job's share of a host it cannot see.
-        self.append_resource_budget(args);
+        self.append_resource_budget(args, &budget);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
@@ -1510,7 +1542,7 @@ mod tests {
         assert!(notice.contains("overrides workflow-set CARGO_BUILD_JOBS"));
     }
 
-    /// A declared container limit is policy: it narrows the job's share and is
+    /// A declared container limit is folded into the runner-owned cap and is
     /// never joined by a second `--cpus`.
     #[test]
     fn a_declared_cpu_limit_narrows_the_share_and_stays_single() {
@@ -1524,7 +1556,8 @@ mod tests {
         assert!(args.contains(&"MAKEFLAGS=-j1".to_owned()));
     }
 
-    /// The tightest declared limit wins, whichever side declared it.
+    /// The tightest declared limit wins, whichever side declared it, while the
+    /// final argv contains one normalized runner-owned flag.
     #[test]
     fn the_tightest_declared_cpu_limit_sizes_the_job() {
         let mut job = spec();
@@ -1533,7 +1566,32 @@ mod tests {
         let prepared = job.start_args().unwrap();
         let args = rendered(&prepared);
         assert!(args.contains(&"CARGO_BUILD_JOBS=1".to_owned()));
-        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 2);
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
+        assert_eq!(args[cpus_index + 1], "1");
+    }
+
+    #[test]
+    fn normalized_cpu_limit_preserves_other_workflow_and_daemon_flags() {
+        let mut job = spec();
+        job.options = vec!["--cpus=64".into(), "--label".into(), "workflow".into()];
+        job.resource_options = vec!["--memory".into(), "8g".into(), "--cpus".into(), "4".into()];
+        let expected = job
+            .slot_budget()
+            .docker_cpu_option()
+            .expect("the test host exposes a CPU budget");
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == expected.as_slice()));
+        assert!(!args.iter().any(|arg| arg == "--cpus=64"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--memory" && pair[1] == "8g"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--label" && pair[1] == "workflow"));
     }
 
     #[test]

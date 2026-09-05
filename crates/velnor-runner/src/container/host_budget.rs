@@ -80,12 +80,10 @@ pub(crate) struct HostBudget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlotBudget {
     pub(crate) slots: NonZeroU32,
-    /// Whole CPUs this slot may keep busy. Compiler drivers count in whole
-    /// jobs, so the share is floored for their concurrency setting. The
-    /// fractional remainder is retained in `docker_cpu_milli` for the hard
-    /// container limit; otherwise a sub-CPU slot would be rounded up here and
-    /// the aggregate slot budget could be exceeded.
-    pub(crate) cpus: Observation<NonZeroU32>,
+    /// Whole CPUs this slot may advertise to integer-only compiler drivers.
+    /// The value is floored and may be zero when the slot has a fractional
+    /// share; zero means no integer concurrency claim is emitted.
+    pub(crate) cpus: Observation<u64>,
     /// Fractional CPU share for Docker, in milli-CPUs. Unlike `cpus`, this may
     /// be below one: Docker accepts `--cpus 0.5`, while Cargo still needs an
     /// integer `CARGO_BUILD_JOBS` value.
@@ -182,8 +180,7 @@ impl HostBudget {
         let cpus = match &docker_cpu_milli {
             Observation::Observed(milli) => {
                 let share = milli / 1000;
-                let share = u32::try_from(share).unwrap_or(u32::MAX).max(1);
-                Observation::Observed(NonZeroU32::new(share).unwrap_or(NonZeroU32::MIN))
+                Observation::Observed(share)
             }
             Observation::Unobservable(reason) => Observation::Unobservable(reason.clone()),
         };
@@ -214,18 +211,11 @@ impl SlotBudget {
         let Some(cap_milli) = cpu_milli_from_cpus(container_cpus) else {
             return self;
         };
-        if let Observation::Observed(cpus) = self.docker_cpu_milli {
-            self.docker_cpu_milli = Observation::Observed(cpus.min(cap_milli));
-        } else {
-            self.docker_cpu_milli = Observation::Observed(cap_milli);
+        if let Observation::Observed(cpus) = &mut self.docker_cpu_milli {
+            *cpus = (*cpus).min(cap_milli);
         }
-
-        let cap = u32::try_from(cap_milli / 1000).unwrap_or(u32::MAX);
-        let cap = NonZeroU32::new(cap).unwrap_or(NonZeroU32::MIN);
-        if let Observation::Observed(cpus) = self.cpus {
-            self.cpus = Observation::Observed(cpus.min(cap));
-        } else {
-            self.cpus = Observation::Observed(cap);
+        if let Observation::Observed(cpus) = &mut self.cpus {
+            *cpus = (*cpus).min(cap_milli / 1000);
         }
         self
     }
@@ -255,7 +245,7 @@ impl SlotBudget {
     ///   which sees the slice quota, so both are stated explicitly.
     pub(crate) fn job_env(&self) -> Vec<(String, String)> {
         let mut env = Vec::new();
-        if let Some(cpus) = self.cpus.value() {
+        if let Some(cpus) = self.cpus.value().filter(|cpus| **cpus > 0) {
             env.push(("CARGO_BUILD_JOBS".to_owned(), cpus.to_string()));
             env.push(("MAKEFLAGS".to_owned(), format!("-j{cpus}")));
             env.push(("MBX_SCHEDULER_CPUS".to_owned(), cpus.to_string()));
@@ -688,7 +678,7 @@ mod tests {
         );
         let budget = HostBudget::observe(root.path(), Some(16));
         let slot = budget.per_slot(NonZeroU32::MIN);
-        assert_eq!(slot.cpus.value().unwrap().get(), 15);
+        assert_eq!(slot.cpus, Observation::Observed(15));
         assert_eq!(slot.docker_cpu_milli, Observation::Observed(15_200));
         assert_eq!(
             slot.docker_cpu_option(),
@@ -697,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_cpu_slot_keeps_one_compiler_job_but_fractional_docker_cap() {
+    fn a_sub_cpu_slot_does_not_advertise_integer_capacity() {
         let root = SyntheticRoot::new("a_sub_cpu_slot_keeps_one_compiler_job");
         write(
             root.path(),
@@ -707,8 +697,9 @@ mod tests {
         let budget = HostBudget::observe(root.path(), Some(2));
         let slots = NonZeroU32::new(4).unwrap();
         let slot = budget.per_slot(slots);
-        assert_eq!(slot.cpus.value().unwrap().get(), 1);
+        assert_eq!(slot.cpus, Observation::Observed(0));
         assert_eq!(slot.docker_cpu_milli, Observation::Observed(500));
+        assert!(slot.job_env().is_empty());
         assert_eq!(
             slot.docker_cpu_option(),
             Some(["--cpus".to_owned(), "0.5".to_owned()])
@@ -730,10 +721,10 @@ mod tests {
         );
         let budget = HostBudget::observe(root.path(), Some(16));
         let slot = budget.per_slot(NonZeroU32::new(2).unwrap());
-        assert_eq!(slot.cpus.value().unwrap().get(), 8);
+        assert_eq!(slot.cpus, Observation::Observed(8));
 
         let narrowed = slot.clone().capped_by_container_cpus(Some(2.0));
-        assert_eq!(narrowed.cpus.value().unwrap().get(), 2);
+        assert_eq!(narrowed.cpus, Observation::Observed(2));
         assert_eq!(narrowed.docker_cpu_milli, Observation::Observed(2000));
         assert_eq!(
             narrowed.docker_cpu_option(),
@@ -741,15 +732,16 @@ mod tests {
         );
 
         let fractional = slot.clone().capped_by_container_cpus(Some(0.5));
-        assert_eq!(fractional.cpus.value().unwrap().get(), 1);
+        assert_eq!(fractional.cpus, Observation::Observed(0));
         assert_eq!(fractional.docker_cpu_milli, Observation::Observed(500));
+        assert!(fractional.job_env().is_empty());
         assert_eq!(
             fractional.docker_cpu_option(),
             Some(["--cpus".to_owned(), "0.5".to_owned()])
         );
 
         let widened = slot.capped_by_container_cpus(Some(64.0));
-        assert_eq!(widened.cpus.value().unwrap().get(), 8);
+        assert_eq!(widened.cpus, Observation::Observed(8));
         assert_eq!(widened.docker_cpu_milli, Observation::Observed(8000));
     }
 
