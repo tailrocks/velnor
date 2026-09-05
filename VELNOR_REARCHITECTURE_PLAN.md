@@ -4166,3 +4166,21 @@ recoverable; no worktree or branch was deleted or force-pushed. Lifecycle
 drain, broker ACK ordering, timeout recovery, and cache lease omissions remain
 separate reserved runner-boundary findings and are not silently claimed by
 this branch.
+
+## 90. Canonical head advanced after the provenance record — 2026-09-05
+
+The previous section recorded the code head `7da1186`, then commit `267b445`
+added the canonical integration record and advanced the requested branch. The
+branch is clean at `267b445` and its tracked remote agrees. The verifier's
+source inventory and generated capability baseline must therefore bind to
+`267b445`, even though the workflow and manifest content digests are unchanged
+by that documentation-only commit. No capability-content change is implied.
+
+Fresh parallel audit confirms the safe consolidation boundary: all local
+worktree tips except the archived MBX-scenario experiment are ancestors of the
+canonical branch; the old clone has no unique refs; and the sole dirty
+checkout patch is superseded by canonical fail-closed hydration handling. The
+following remain unresolved architecture work, not silently certified:
+broker durable-intent failure atomicity, Run Service fallback/error typing,
+bounded live-log framing and step-summary acknowledgement, timeout recovery,
+and live default-MBX/readiness proof.
