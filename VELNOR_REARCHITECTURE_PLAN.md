@@ -4127,3 +4127,13 @@ passed the readiness audit. The only generated change was
 `codex/verifier-completion-fixes`. Its contract audit, 50 Python tests, and
 diff check pass. This is provenance synchronization, not a capability-content
 change or a claim that full Velnor production readiness is complete.
+
+## 88. Verifier historical inventory claim corrected — 2026-09-05
+
+Verifier commit `a98df34` updates its current identity fields to fixture
+`62fc276ec4c99524e43fa9c9fa9e40f04a04aef3` and Velnor
+`c57786af83a65428ca697cf5867abcdc26eb9539`. It also marks the older
+`coverage/source-workflow-inventory.md` scan at `dfc5777` as historical because
+the generated workflow surface changed later at `630acdd`. The inventory is no
+longer presented as current parity evidence; a fresh source scan is still
+required before a verifier readiness claim.
