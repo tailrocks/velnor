@@ -540,6 +540,9 @@ fn build_rootfs(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(0o755)).map_err(
+            |error| MicroVmPreflightFailure::new("guest.rootfs", format!("chmod root: {error}")),
+        )?;
         for relative in ["tmp", "var/tmp"] {
             std::fs::set_permissions(tree.join(relative), std::fs::Permissions::from_mode(0o1777))
                 .map_err(|error| {
@@ -605,7 +608,7 @@ fn rootfs_image_args(tree: &Path, output: &Path) -> Vec<String> {
         "-L".into(),
         "velnor-guest".into(),
         "-E".into(),
-        "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,root_perms=0755,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
+        "hash_seed=00000000-0000-0000-0000-000000000002,root_owner=0:0,lazy_itable_init=0,lazy_journal_init=0,nodiscard,no_copy_xattrs".into(),
         "-d".into(),
         tree.display().to_string(),
         output.display().to_string(),
@@ -752,6 +755,7 @@ mod tests {
             .expect("mke2fs -d directory");
         assert_eq!(directory, "/work/rootfs-tree");
         assert!(!directory.ends_with(".tar"));
+        assert!(!args.iter().any(|arg| arg.contains("root_perms")));
     }
 
     #[test]
