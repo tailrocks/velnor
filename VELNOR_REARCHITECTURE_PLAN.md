@@ -4081,3 +4081,14 @@ policy changes. Their exact current heads are preserved under
 `refs/archive/remote/`; no branch or worktree was deleted, pruned, reset, or
 force-pushed. Only the independently verified current-toolchain lint fixes were
 ported to the canonical branch.
+
+## 85. Exact branch heads re-resolved before the next architecture wave — 2026-09-05
+
+The original immutable baselines remain the values in §0. Re-resolution against
+the requested branch lines now finds Velnor
+`perf/docker-rust-mbx@eefa543eb478124e988857b5f63d9f5219493b47` and verifier
+`codex/verifier-completion-fixes@04322d5c7e7e11f37a312e084fc354cf54dc80da`;
+both local heads match their origin tracking refs. The verifier worktree has
+no applicable `AGENTS.md`; Velnor's repository-level rules were read before
+delegation. The verifier plan's older identity fields are now stale evidence,
+not a branch substitution or readiness claim, and must be re-derived in V0.
