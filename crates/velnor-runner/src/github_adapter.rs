@@ -26,6 +26,7 @@ pub struct GitHubJobContainerPaths {
     pub execution_backend: velnor_model::ExecutionBackendKind,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
     paths: GitHubJobContainerPaths,

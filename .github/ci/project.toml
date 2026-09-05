@@ -7,13 +7,13 @@ runners = "both"
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
-detected = ["cargo-deny-policy", "cargo-lockfile", "cargo-nextest-policy", "mise-rust-toolchain", "package-manager:bun:.", "package-manager:npm:crates/velnor-workflow/tests/fixtures/polyglot", "package-script:.:build", "package-script:.:typecheck", "package-script:crates/velnor-workflow/tests/fixtures/polyglot:lint", "package-script:crates/velnor-workflow/tests/fixtures/polyglot:test", "renovate-configuration", "rust-binaries:unit-collector:1", "rust-binaries:velnor-bench:1", "rust-binaries:velnor-runner:3", "rust-binaries:velnor-tools:1", "rust-binaries:velnor-workflow:1", "rust-binaries:velnorctl:1", "rust-build-script:velnor-runner", "rust-features:velnor-runner:4", "rust-features:velnorctl:2", "rust-test-targets:unit-collector:1", "rust-test-targets:velnor-client:1", "rust-test-targets:velnor-control:1", "rust-test-targets:velnor-model:1", "rust-test-targets:velnor-render:1", "rust-test-targets:velnor-runner:1", "rust-test-targets:velnor-workflow:1", "rust-test-targets:velnorctl:1", "rust-workspace-members:11"]
-limitations = ["No test script is declared in package.json; no package test command was invented.", "Project code, build scripts, task runners, and commands are never executed during analysis.", "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.", "Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.", "Rust build scripts are watched but their system dependencies and generated outputs are not inferred."]
+detected = ["cargo-deny-policy", "cargo-lockfile", "cargo-nextest-policy", "mise-rust-toolchain", "package-manager:bun:.", "package-script:.:build", "package-script:.:typecheck", "renovate-configuration", "rust-binaries:unit-collector:1", "rust-binaries:velnor-bench:1", "rust-binaries:velnor-runner:3", "rust-binaries:velnor-tools:1", "rust-binaries:velnor-workflow:1", "rust-binaries:velnorctl:1", "rust-build-script:velnor-runner", "rust-features:velnor-runner:4", "rust-features:velnorctl:2", "rust-test-targets:unit-collector:1", "rust-test-targets:velnor-client:1", "rust-test-targets:velnor-control:1", "rust-test-targets:velnor-model:1", "rust-test-targets:velnor-render:1", "rust-test-targets:velnor-runner:1", "rust-test-targets:velnor-workflow:1", "rust-test-targets:velnorctl:1", "rust-workspace-members:10"]
+limitations = ["Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.", "No test script is declared in package.json; no package test command was invented.", "Project code, build scripts, task runners, and commands are never executed during analysis.", "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.", "Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.", "Rust build scripts are watched but their system dependencies and generated outputs are not inferred."]
 
 [workflow]
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
-files = ["ci-pr.yml", "ci-policy.yml", "ci-main.yml", "nightly.yml", "maintenance.yml", "ci-bun-velnor.yml", "ci-docker-docker.yml", "ci-docker-crates-velnor-workflow-tests-fixtures-polyglot.yml", "ci-docs-docs.yml", "ci-gradle-crates-velnor-workflow-tests-fixtures-polyglot.yml", "ci-node-fixture.yml", "ci-opentofu-opentofu.yml", "ci-rust-fixture.yml", "ci-rust-policy.yml", "ci-rust-unit-collector.yml", "ci-rust-velnor-bench.yml", "ci-rust-velnor-client.yml", "ci-rust-velnor-control.yml", "ci-rust-velnor-model.yml", "ci-rust-velnor-render.yml", "ci-rust-velnor-runner.yml", "ci-rust-velnor-tools.yml", "ci-rust-velnor-workflow.yml", "ci-rust-velnorctl.yml"]
+files = ["ci-pr.yml", "ci-policy.yml", "ci-main.yml", "nightly.yml", "maintenance.yml", "ci-bun-velnor.yml", "ci-docker-docker.yml", "ci-docs-docs.yml", "ci-opentofu-opentofu.yml", "ci-rust-policy.yml", "ci-rust-unit-collector.yml", "ci-rust-velnor-bench.yml", "ci-rust-velnor-client.yml", "ci-rust-velnor-control.yml", "ci-rust-velnor-model.yml", "ci-rust-velnor-render.yml", "ci-rust-velnor-runner.yml", "ci-rust-velnor-tools.yml", "ci-rust-velnor-workflow.yml", "ci-rust-velnorctl.yml"]
 
 [release]
 enabled = false
@@ -41,15 +41,6 @@ pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 [[unit]]
-id = "docker-crates-velnor-workflow-tests-fixtures-polyglot"
-label = "Docker (crates/velnor-workflow/tests/fixtures/polyglot)"
-kind = "docker"
-root = "crates/velnor-workflow/tests/fixtures/polyglot"
-watch = ["crates/velnor-workflow/tests/fixtures/polyglot/**"]
-pr_commands = ["docker build --file 'crates/velnor-workflow/tests/fixtures/polyglot/Dockerfile' --tag local-ci:crates-velnor-workflow-tests-fixtures-polyglot-dockerfile 'crates/velnor-workflow/tests/fixtures/polyglot'"]
-full_commands = ["docker build --file 'crates/velnor-workflow/tests/fixtures/polyglot/Dockerfile' --tag local-ci:crates-velnor-workflow-tests-fixtures-polyglot-dockerfile 'crates/velnor-workflow/tests/fixtures/polyglot'"]
-
-[[unit]]
 id = "docs"
 label = "Documentation"
 kind = "docs"
@@ -59,30 +50,6 @@ pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\"
 full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
-paths = ["~/.npm"]
-
-[[unit]]
-id = "gradle-crates-velnor-workflow-tests-fixtures-polyglot"
-label = "Gradle (crates/velnor-workflow/tests/fixtures/polyglot)"
-kind = "gradle"
-root = "crates/velnor-workflow/tests/fixtures/polyglot"
-watch = ["crates/velnor-workflow/tests/fixtures/polyglot/**/*.gradle", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.gradle.kts", "crates/velnor-workflow/tests/fixtures/polyglot/gradle/**", "crates/velnor-workflow/tests/fixtures/polyglot/src/**"]
-pr_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && gradle check --no-daemon"]
-full_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && gradle check --no-daemon"]
-[unit.cache]
-key_files = ["crates/velnor-workflow/tests/fixtures/polyglot/gradle/wrapper/gradle-wrapper.properties", "crates/velnor-workflow/tests/fixtures/polyglot/gradle/libs.versions.toml"]
-paths = ["~/.gradle/caches", "~/.gradle/wrapper"]
-
-[[unit]]
-id = "node-fixture"
-label = "Node.js package (fixture)"
-kind = "node"
-root = "crates/velnor-workflow/tests/fixtures/polyglot"
-watch = ["crates/velnor-workflow/tests/fixtures/polyglot/package.json", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.js", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.jsx", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.ts", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.tsx", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.json", "crates/velnor-workflow/tests/fixtures/polyglot/bun.lock", "crates/velnor-workflow/tests/fixtures/polyglot/bun.lockb", "crates/velnor-workflow/tests/fixtures/polyglot/package-lock.json", "crates/velnor-workflow/tests/fixtures/polyglot/package-lock.json"]
-pr_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm ci", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm run lint", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm run test"]
-full_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm ci", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm run lint", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && npm run test"]
-[unit.cache]
-key_files = ["crates/velnor-workflow/tests/fixtures/polyglot/package.json", "crates/velnor-workflow/tests/fixtures/polyglot/package-lock.json"]
 paths = ["~/.npm"]
 
 [[unit]]
@@ -96,18 +63,6 @@ full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_
 [unit.cache]
 key_files = ["**/.terraform.lock.hcl"]
 paths = ["~/.terraform.d/plugin-cache"]
-
-[[unit]]
-id = "rust-fixture"
-label = "Rust crate (fixture)"
-kind = "rust"
-root = "crates/velnor-workflow/tests/fixtures/polyglot"
-watch = ["crates/velnor-workflow/tests/fixtures/polyglot/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", ".cargo/**", "crates/velnor-workflow/tests/fixtures/polyglot/**/*.rs", "crates/velnor-workflow/tests/fixtures/polyglot/src/**", "crates/velnor-workflow/tests/fixtures/polyglot/tests/**", "crates/velnor-workflow/tests/fixtures/polyglot/examples/**", "crates/velnor-workflow/tests/fixtures/polyglot/benches/**", "Cargo.toml"]
-pr_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo clippy --locked --all-targets --all-features --package 'fixture' -- -D warnings", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo nextest run --locked --all-features --package 'fixture'"]
-full_commands = ["cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo clippy --locked --all-targets --all-features --package 'fixture' -- -D warnings", "cd -- 'crates/velnor-workflow/tests/fixtures/polyglot' && cargo nextest run --locked --all-features --package 'fixture'"]
-[unit.cache]
-key_files = ["crates/velnor-workflow/tests/fixtures/polyglot/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
-paths = ["~/.cargo/registry", "~/.cargo/git"]
 
 [[unit]]
 id = "rust-policy"
