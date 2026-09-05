@@ -4109,3 +4109,7 @@ migration is a separate ownership-boundary change: it must replace every live,
 durable, and `ops` call site atomically, preserve the union of per-step masks,
 and delete the weaker fallback rather than leave two implementations. No
 runner migration is claimed by this package.
+
+The follow-up `27fc38b` adds the runner's `U+0085`, `U+2028`, and `U+2029`
+JSON control-character escapes and vectors for them. The model redaction
+package now has ten focused tests passing; no runner call site was changed.
