@@ -21,6 +21,48 @@ pub const MANIFEST_VERSION: u32 = 12;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
+/// Load the optional repository release workflow for contract tests.
+///
+/// The CI generator deliberately removes the legacy publisher while
+/// `.github/ci/project.toml` keeps release `enabled = false`. Keep the release
+/// assertions live when a separately reviewed publisher is present, but make
+/// its absence an explicit, testable policy state rather than a compile-time
+/// source-path failure.
+#[cfg(test)]
+pub(crate) fn release_workflow_text() -> Option<String> {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workflow_path = repository_root.join(".github/workflows/release.yml");
+    match std::fs::read_to_string(&workflow_path) {
+        Ok(workflow) => Some(workflow),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let config_path = repository_root.join(".github/ci/project.toml");
+            let config_text = std::fs::read_to_string(&config_path).unwrap_or_else(|read_error| {
+                panic!(
+                    "release workflow is absent and generator policy cannot be read from {}: {read_error}",
+                    config_path.display()
+                )
+            });
+            let config: toml::Value = toml::from_str(&config_text).unwrap_or_else(|parse_error| {
+                panic!("release workflow is absent and generator policy is invalid: {parse_error}")
+            });
+            let enabled = config
+                .get("release")
+                .and_then(|release| release.get("enabled"))
+                .and_then(toml::Value::as_bool);
+            assert_eq!(
+                enabled,
+                Some(false),
+                "release workflow is absent without an explicit disabled policy"
+            );
+            None
+        }
+        Err(error) => panic!(
+            "read optional release workflow {}: {error}",
+            workflow_path.display()
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
     pub version: u32,
@@ -1989,9 +2031,11 @@ mod tests {
 
     #[test]
     fn release_workflow_action_refs_are_compiled_into_the_manifest() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let mut uses = Vec::new();
         collect_uses(&workflow, &mut uses);
 
@@ -2070,9 +2114,11 @@ mod tests {
 
     #[test]
     fn release_signers_use_validated_tag_ref_not_raw_commit() {
-        let workflow_text = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(workflow_text).expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         assert!(workflow_text.contains("EXPECTED_TAG_REF"));
         assert!(workflow_text.contains("git ls-remote --exit-code origin"));
         assert!(workflow_text.contains("$2 == expected \"^{}\""));
@@ -2168,7 +2214,9 @@ mod tests {
 
     #[test]
     fn release_workflow_reads_platforms_from_imagetools_inspect_schema() {
-        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow) = release_workflow_text() else {
+            return;
+        };
         for architecture in ["amd64", "arm64"] {
             let selector = format!(
                 ".manifest.manifests[] | select(.platform.architecture==\"{architecture}\") | .digest"
@@ -2182,9 +2230,11 @@ mod tests {
 
     #[test]
     fn deb_staging_binds_package_runner_to_build_and_binary_sidecar() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["build"]["steps"]
             .as_sequence()
             .expect("build job steps");
@@ -2286,9 +2336,11 @@ mod tests {
 
     #[test]
     fn release_creation_binds_packaged_runner_to_recorded_binary() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["release"]["steps"]
             .as_sequence()
             .expect("release job steps");
@@ -2327,7 +2379,9 @@ mod tests {
 
     #[test]
     fn release_record_derives_manifest_version_from_compiled_artifact() {
-        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow) = release_workflow_text() else {
+            return;
+        };
         assert!(
             workflow.contains("manifest_version=\"$(jq -er '.version"),
             "release assembly must read the compiled manifest version"
@@ -2344,9 +2398,11 @@ mod tests {
 
     #[test]
     fn release_record_downloads_compiled_tool_before_independent_verification() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["release"]["steps"]
             .as_sequence()
             .expect("release job steps");
