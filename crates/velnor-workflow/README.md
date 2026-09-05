@@ -21,3 +21,19 @@ Project commands remain explicit shell command strings in the checked-in TOML;
 the binary owns selection, dependency ordering, policy, release validation,
 and workflow file ownership. The ownership sidecar keeps the historical path
 `.github/ci/.github-actions-generator-state` for safe adoption of older trees.
+
+Generated jobs install the runtime through the versioned composite action
+(mise-action model: declare a revision, get the binary on PATH, cached)
+instead of an inline `cargo install`, so toolchain setup stays centralized:
+
+```yaml
+- name: Set up Velnor workflow runtime
+  if: ${{ runner.environment == 'github-hosted' }}
+  uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@<full-SHA>
+  with:
+    rev: <full-SHA>
+```
+
+The action isolates the install from job-level toolchain wrappers (for
+example an `RUSTC_WRAPPER` pointing at an `sccache` that is set up later in
+the job) and caches the cargo install keyed by revision and runner OS.

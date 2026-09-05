@@ -28,7 +28,7 @@ const OWNERSHIP_STATE: &str = ".github/ci/.github-actions-generator-state";
 const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\n";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
-const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
+const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
@@ -3184,7 +3184,8 @@ impl WorkflowIr {
             }
         }
         // Auxiliary schedules must not create or satisfy the branch-protection
-        // check. Only the PR and main workflows own the stable required check.
+        // check. Only the PR and main workflows own the stable `ci-required`
+        // check that repository rulesets gate on.
         if kind != WorkflowKind::Nightly {
             self.render_required(
                 &mut output,
@@ -3300,10 +3301,10 @@ impl WorkflowIr {
             .map(|job| format!("needs['{job}'].result == 'success'"))
             .collect::<Vec<_>>()
             .join(" && ");
-        let check_name = if include_policy { "main" } else { "required" };
+        let check_name = "ci-required";
         let _ = writeln!(
             output,
-            "  required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
             needs.join(", "),
             yaml_scalar(&self.github_runner)
         );
@@ -3435,10 +3436,11 @@ impl WorkflowIr {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} velnor-workflow --bin velnor-workflow\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
-            VELNOR_WORKFLOW_REPOSITORY,
+            VELNOR_WORKFLOW_SETUP_ACTION,
+            VELNOR_WORKFLOW_SOURCE_REV,
             VELNOR_WORKFLOW_SOURCE_REV,
         );
     }
@@ -3795,11 +3797,11 @@ impl WorkflowIr {
         &self,
         output: &mut String,
         runners: RunnerMode,
-        stable: bool,
+        _stable: bool,
         trusted: bool,
         include_policy: bool,
     ) {
-        let check_name = if stable { "required" } else { "main" };
+        let check_name = "ci-required";
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
@@ -3841,7 +3843,7 @@ impl WorkflowIr {
         };
         let _ = writeln!(
             output,
-            "  required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
             needs.join(", "),
             yaml_scalar(&self.github_runner),
         );
@@ -4480,7 +4482,7 @@ fn yaml_scalar(value: &str) -> String {
 fn workflow_runtime_setup(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} velnor-workflow --bin velnor-workflow\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
+            "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}\n        with:\n          rev: {VELNOR_WORKFLOW_SOURCE_REV}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
@@ -6561,19 +6563,17 @@ mod tests {
     }
 
     #[test]
-    fn hosted_runtime_install_selects_the_multi_binary_workspace_package() {
+    fn hosted_runtime_setup_uses_the_versioned_setup_action() {
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
-            "scan fixture for hosted install command",
+            "scan fixture for hosted runtime setup",
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
-        assert!(workflow.contains(
-            "cargo install --locked --git https://github.com/tailrocks/velnor.git --rev "
-        ));
-        assert!(workflow.contains("velnor-workflow --bin velnor-workflow"));
-        assert!(!workflow.contains(&format!(
-            "--rev {VELNOR_WORKFLOW_SOURCE_REV} --bin velnor-workflow"
-        )));
+        let setup_reference =
+            format!("uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}");
+        assert!(workflow.contains(&setup_reference));
+        assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
+        assert!(!workflow.contains("cargo install --locked --git"));
     }
 
     #[test]
@@ -7249,7 +7249,7 @@ path-only = { path = "../path-only" }
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("name: CI\nrun-name: CI / main"));
-        assert!(workflow.contains("  required:\n    name: main"));
+        assert!(workflow.contains("  ci-required:\n    name: ci-required"));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
@@ -7577,6 +7577,7 @@ path-only = { path = "../path-only" }
         assert!(pr.contains("name: CI\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
         assert!(pr.contains("merge_group:"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
         assert!(!pr.contains("branches: [main]"));
         assert!(main.contains("name: CI\nrun-name: CI / main"));
         assert!(main.contains("branches: [main]"));
@@ -7586,7 +7587,7 @@ path-only = { path = "../path-only" }
         assert!(nightly.contains("schedule:"));
         assert!(nightly.contains("workflow_dispatch:"));
         assert!(!nightly.contains("pull_request:"));
-        assert!(!nightly.contains("  required:\n    name: required"));
+        assert!(!nightly.contains("name: ci-required"));
         assert_eq!(
             must(
                 runtime::scope_for_event_values("push", None),
@@ -8699,7 +8700,9 @@ path-only = { path = "../path-only" }
         assert!(main.contains("workflow_dispatch:"));
         assert!(main.contains("refs/heads/main"));
         assert!(main.contains("runs-on: [self-hosted, velnor-target-mvp]"));
-        assert!(!nightly.contains("name: required"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
+        assert!(main.contains("  ci-required:\n    name: ci-required"));
+        assert!(!nightly.contains("name: ci-required"));
         assert!(nightly.contains("schedule:"));
         assert_eq!(
             runtime::scope_for_event_values("push", None)
