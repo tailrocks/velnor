@@ -934,14 +934,17 @@ fn link_object_store(source: &Path, destination: &Path) -> Result<(usize, u64)> 
     let mut bytes = 0u64;
     let mut pending = vec![PathBuf::new()];
     while let Some(relative) = pending.pop() {
-        let Ok(entries) = fs::read_dir(source.join(&relative)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
+        let directory = source.join(&relative);
+        let entries = fs::read_dir(&directory)
+            .with_context(|| format!("read mirror object directory {}", directory.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("read mirror object entry in {}", directory.display()))?;
             let name = entry.file_name();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("read type of mirror object {}", path.display()))?;
             let child = relative.join(&name);
             if file_type.is_dir() {
                 // `info/` holds regenerable caches, and an `alternates` file
@@ -2171,6 +2174,30 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.root).ok();
         }
+    }
+
+    #[test]
+    fn link_object_store_fails_when_an_object_directory_cannot_be_read() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-hydration-error-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("not-a-directory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, "object-store placeholder").unwrap();
+
+        let error = link_object_store(&source, &root.join("destination")).unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("read mirror object directory"),
+            "missing directory context: {rendered}"
+        );
+        assert!(
+            rendered.contains(&source.display().to_string()),
+            "missing source path context: {rendered}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
