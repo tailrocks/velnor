@@ -6,9 +6,9 @@ name: Release
 # Dockerfile present, size > 1MB, arch/version match — the "empty-deb incident"
 # guard) are folded in below. One tagged commit produces one coherent, acyclic
 # release record binding: source SHA -> crate version -> per-arch binary/deb
-# Velnor remains the release default. During a fully drained recovery window,
-# `VELNOR_AUTOMATIC_LANES=github` selects GitHub for automatic tag releases;
-# `velnor` and `both` remain explicit, validated values.
+# GitHub is the only admitted release lane until Velnor proves the isolated
+# user-namespace capability required by the guest-image build. Explicit Velnor
+# requests fail closed; they never silently substitute GitHub.
 # digests -> OCI image digest -> compiled-manifest hash -> APT coordinate.
 #
 # This workflow holds NO APT credential and performs NO consumer write/dispatch
@@ -22,10 +22,10 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: velnor (default) | github | both
+        description: github (the only admitted release lane)
         type: choice
-        default: velnor
-        options: [velnor, github, both]
+        default: github
+        options: [github]
       tag:
         description: Existing release tag to (re)build coherently (e.g. v0.1.121).
         type: string
@@ -46,7 +46,7 @@ jobs:
   lane-admission:
     name: Resolve release lanes
     timeout-minutes: 5
-    runs-on: ${{ 'ubuntu-26.04' }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -58,7 +58,7 @@ jobs:
       - name: Validate requested lanes and required capabilities
         id: route
         env:
-          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'velnor' }}
+          REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'github' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -67,11 +67,11 @@ jobs:
               echo "lanes=github" >> "$GITHUB_OUTPUT"
               ;;
             velnor|both)
-              echo "::error::release lanes '$REQUESTED_LANES' fail capability check '$VELNOR_MISSING_CAPABILITY'; Velnor implementation requirement '$VELNOR_IMPLEMENTATION_REQUIREMENT' remains open; refusing GitHub substitution" >&2
+              echo "::error::release lane '$REQUESTED_LANES' fails capability check '$VELNOR_MISSING_CAPABILITY'; Velnor implementation requirement '$VELNOR_IMPLEMENTATION_REQUIREMENT' remains open; refusing GitHub substitution" >&2
               exit 1
               ;;
             *)
-              echo "::error::invalid release lanes '$REQUESTED_LANES'; expected velnor, github, or both" >&2
+              echo "::error::invalid release lane '$REQUESTED_LANES'; expected github" >&2
               exit 1
               ;;
           esac
@@ -80,7 +80,7 @@ jobs:
     needs: lane-admission
     name: Resolve + gate release identity
     timeout-minutes: 20
-    runs-on: ${{ needs.lane-admission.outputs.lanes == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     outputs:
       lane: ${{ needs.lane-admission.outputs.lanes }}
       version: ${{ steps.gate.outputs.version }}
@@ -182,7 +182,7 @@ jobs:
     needs: identity
     name: Final pre-publication default-branch gate
     timeout-minutes: 10
-    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     outputs:
       default_branch_commit: ${{ steps.gate.outputs.default_branch_commit }}
       tag_ref: ${{ steps.gate.outputs.tag_ref }}
@@ -272,7 +272,7 @@ jobs:
     needs: [identity, release_gate]
     name: Compile release metadata once
     timeout-minutes: 30
-    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
@@ -358,7 +358,7 @@ jobs:
     needs: [identity, release_gate, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
-    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -467,7 +467,7 @@ jobs:
     # lane-admission permits this GitHub-hosted implementation only for the
     # explicit github lane. Velnor/both fail before release side effects until
     # Velnor provides the required isolated user-namespace capability.
-    runs-on: ${{ matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    runs-on: ubuntu-24.04
     env:
       CACHE_LANE: GitHub
       CARGO_INCREMENTAL: "0"
@@ -577,7 +577,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - arch: arm64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
@@ -845,7 +845,7 @@ jobs:
     needs: [identity, release_gate, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
-    runs-on: ${{ needs.identity.outputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -1127,7 +1127,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
+    uses: ./.github/workflows/ci-release-package-signer.yml
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
@@ -1139,7 +1139,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
+    uses: ./.github/workflows/ci-release-package-signer.yml
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
@@ -1151,7 +1151,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
+    uses: ./.github/workflows/ci-release-package-signer.yml
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
@@ -1163,7 +1163,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c # 2026.8.33
+    uses: ./.github/workflows/ci-release-package-signer.yml
     with:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
