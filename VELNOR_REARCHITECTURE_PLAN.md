@@ -4092,3 +4092,20 @@ both local heads match their origin tracking refs. The verifier worktree has
 no applicable `AGENTS.md`; Velnor's repository-level rules were read before
 delegation. The verifier plan's older identity fields are now stale evidence,
 not a branch substitution or readiness claim, and must be re-derived in V0.
+
+## 86. Shared masker contract prepared for runner migration — 2026-09-05
+
+`98c9354` extends `velnor-model::SecretMasker` to the complete value-encoder
+surface already implemented by the runner: standard and shifted Base64,
+command-line and expression escaping, JSON, URI, XML, quote trimming, and both
+PowerShell ampersand forms. Existing multiline, minimum-length,
+leftmost-longest, and literal-fallback behavior remains covered; nine focused
+model tests pass. The benchmark documentation correction is `4ba8fbe`, which
+now points at the runner-owned Docker metrics instead of claiming its
+`CommandRunner` seam is missing.
+
+The private runner `Masker`/`MaskPatterns` remains in `runner.rs`. Its direct
+migration is a separate ownership-boundary change: it must replace every live,
+durable, and `ops` call site atomically, preserve the union of per-step masks,
+and delete the weaker fallback rather than leave two implementations. No
+runner migration is claimed by this package.
