@@ -1961,27 +1961,9 @@ pub(crate) fn run_host_docker_bounded(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("run docker {}", args.join(" ")))?;
-    let pid = child.id();
-    let (cancel, cancelled) = std::sync::mpsc::channel();
-    let expired = Arc::new(AtomicBool::new(false));
-    let expired_thread = Arc::clone(&expired);
     let started = std::time::Instant::now();
-    let killer = std::thread::spawn(move || {
-        if cancelled.recv_timeout(timeout).is_err() {
-            // Record expiry before the kill, so the SIGKILL that follows is
-            // never mistaken for the command's own exit status.
-            expired_thread.store(true, Ordering::SeqCst);
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
-        }
-    });
-    let output = child
-        .wait_with_output()
+    let (output, expired) = wait_for_child_with_timeout(child, timeout)
         .with_context(|| format!("wait docker {}", args.join(" ")))?;
-    let _ = cancel.send(());
-    let _ = killer.join();
-    let expired = expired.load(Ordering::SeqCst);
     crate::docker::observe(
         op,
         started.elapsed(),
@@ -2003,6 +1985,71 @@ pub(crate) fn run_host_docker_bounded(
         bail!("docker {} failed: {}", args.join(" "), stderr);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Reap a Docker CLI child while keeping its timeout kill tied to the live
+/// [`std::process::Child`] handle.
+///
+/// A watchdog that retains only `Child::id()` has a PID-reuse race: the child
+/// can exit and be reaped just before the watchdog's timeout branch runs, and
+/// the numeric PID can then belong to an unrelated host process. Polling and
+/// killing through the owned handle closes that race. The pipes are drained on
+/// reader threads so a verbose Docker CLI cannot deadlock while this thread
+/// waits for its exit.
+fn wait_for_child_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Result<(std::process::Output, bool)> {
+    let mut stdout = child.stdout.take().context("capture timed child stdout")?;
+    let mut stderr = child.stderr.take().context("capture timed child stderr")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+
+    let started = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    timed_out = true;
+                    // `Child::kill` addresses the still-owned child handle,
+                    // never a bare PID that may already have been recycled.
+                    let _ = child.kill();
+                    break child.wait().context("reap timed-out Docker child");
+                }
+                std::thread::sleep(Duration::from_millis(10).min(remaining));
+            }
+            Err(error) => {
+                // Do not leave a child running if the status probe itself
+                // fails. Reap it before returning the probe error.
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(anyhow::Error::new(error).context("poll Docker child status"));
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("timed child stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("timed child stderr reader panicked"))??;
+    Ok((
+        std::process::Output {
+            status: status?,
+            stdout,
+            stderr,
+        },
+        timed_out,
+    ))
 }
 
 fn host_docker_command(args: &[String]) -> Result<std::process::Command> {
@@ -3567,6 +3614,21 @@ fn normalize_chunked_request_header(header: &[u8], body_len: usize) -> Result<Ve
 mod tests {
     use super::*;
     use anyhow::anyhow;
+
+    #[test]
+    fn timed_child_kill_uses_owned_handle_and_reaps_child() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exec sleep 5"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn timed child");
+        let (output, timed_out) =
+            wait_for_child_with_timeout(child, Duration::from_millis(20)).expect("wait child");
+
+        assert!(timed_out);
+        assert!(!output.status.success());
+    }
 
     #[test]
     fn job_network_guard_defused_drop_is_noop() {
