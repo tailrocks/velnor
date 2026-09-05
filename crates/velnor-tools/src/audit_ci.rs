@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
 
@@ -659,26 +659,15 @@ fn checkout_remote_default(
     // verified index blob below, so sparse omission cannot become a false
     // negative or a hard failure.
     let sparse_input = b"/*\n!/*/\n/.github/\n/docs/\n/scripts/\n/operational/\n/fleet/\n";
-    let mut sparse = Command::new("git")
+    let sparse = Command::new("git")
         .current_dir(&path)
         .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("configure sparse checkout for {repository}"))?;
-    use std::io::Write as _;
-    sparse
-        .stdin
-        .as_mut()
-        .context("git sparse-checkout stdin unavailable")?
-        .write_all(sparse_input)
-        .context("write sparse-checkout patterns")?;
-    if !sparse
-        .wait()
-        .context("wait for git sparse-checkout")?
-        .success()
-    {
+    if let Err(error) = configure_sparse_checkout(sparse, repository, sparse_input) {
         let _ = fs::remove_dir_all(&path);
-        bail!("configure sparse checkout for {repository}");
+        return Err(error);
     }
     let checkout = Command::new("git")
         .current_dir(&path)
@@ -691,6 +680,43 @@ fn checkout_remote_default(
     }
     verify_checkout_identity(&path, repository, default_branch, head_sha, false)?;
     Ok(RemoteCheckout { path })
+}
+
+fn configure_sparse_checkout(
+    mut sparse: Child,
+    repository: &str,
+    sparse_input: &[u8],
+) -> Result<()> {
+    let mut reaped = false;
+    let result = (|| {
+        use std::io::Write as _;
+
+        sparse
+            .stdin
+            .as_mut()
+            .context("git sparse-checkout stdin unavailable")?
+            .write_all(sparse_input)
+            .context("write sparse-checkout patterns")?;
+        // Close stdin before waiting so git receives EOF even on platforms
+        // where Child::wait does not close the pipe early enough.
+        sparse.stdin.take();
+        let status = sparse.wait().context("wait for git sparse-checkout")?;
+        reaped = true;
+        if !status.success() {
+            bail!("configure sparse checkout for {repository}");
+        }
+        Ok(())
+    })();
+
+    if result.is_err() && !reaped {
+        kill_and_reap(&mut sparse);
+    }
+    result
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn verify_local_default(
@@ -3208,6 +3234,24 @@ mod tests {
 
     fn has_rule(findings: &[Finding], rule: &str) -> bool {
         findings.iter().any(|finding| finding.rule == rule)
+    }
+
+    #[test]
+    fn sparse_checkout_early_error_reaps_child_and_preserves_error() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let child = command.spawn().unwrap();
+        let started = std::time::Instant::now();
+
+        let error = configure_sparse_checkout(child, "test-repository", b"patterns").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("git sparse-checkout stdin unavailable"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     const BASE: &str = r#"
