@@ -11,7 +11,6 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc, Mutex, OnceLock,
@@ -2867,8 +2866,8 @@ async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
 const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Returns a problem description when any of the slot's writable roots is
-/// low on space. Best-effort (`df` failures are treated as healthy — a
-/// broken probe must not park the fleet).
+/// low on space. An unmeasurable root is also a problem: admission cannot
+/// prove that the next job has its required disk budget.
 fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<String> {
     let mut roots: Vec<&Path> = vec![config_base];
     if let Some(work_dir) = work_dir {
@@ -2893,9 +2892,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
         }
     }
     for root in roots {
-        if let Some(free) = free_space_bytes(root)
-            && free < DISK_MIN_FREE_BYTES
-        {
+        let free = match free_space_bytes(root) {
+            Some(free) => free,
+            None => {
+                return Some(format!(
+                    "cannot measure disk space at {}; refusing admission",
+                    root.display()
+                ));
+            }
+        };
+        if free < DISK_MIN_FREE_BYTES {
             let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
             let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
             if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
@@ -2911,7 +2917,15 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
                 .map(|file| file.backend())
                 .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
             let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
-            let free = free_space_bytes(root).unwrap_or(free);
+            let free = match free_space_bytes(root) {
+                Some(free) => free,
+                None => {
+                    return Some(format!(
+                        "cannot remeasure disk space at {}; refusing admission",
+                        root.display()
+                    ));
+                }
+            };
             if free < DISK_MIN_FREE_BYTES {
                 return Some(format!(
                     "low disk space at {} ({} MiB free, need {} MiB)",
@@ -2925,22 +2939,12 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     None
 }
 
-/// Free bytes on the filesystem holding `path`, via `df -Pk` (POSIX output,
-/// no extra crate). `None` when the probe itself fails.
+/// Free bytes on the filesystem holding `path`, via the bounded `statvfs`
+/// authority shared by disk admission. `None` means the probe failed.
 fn free_space_bytes(path: &Path) -> Option<u64> {
-    let probe = if path.exists() {
-        path
-    } else {
-        path.parent().filter(|parent| parent.exists())?
-    };
-    let output = Command::new("df").arg("-Pk").arg(probe).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().nth(1)?;
-    let available_kib: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
-    Some(available_kib * 1024)
+    crate::host_capacity::HostCapacity::probe(path)
+        .ok()
+        .map(|capacity| capacity.available_bytes)
 }
 
 /// Classify an operator-supplied GitHub token. `None` means the shape is
@@ -20666,7 +20670,7 @@ runs:
     #[test]
     fn abandoned_precreated_environment_cleanup_takes_lease() {
         let test_binary = std::env::current_exe().expect("test binary path");
-        let status = Command::new(test_binary)
+        let status = std::process::Command::new(test_binary)
             .args([
                 "--exact",
                 "runner::tests::abandoned_precreated_environment_cleanup_takes_lease_child",
