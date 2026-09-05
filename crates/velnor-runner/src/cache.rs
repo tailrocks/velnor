@@ -15,6 +15,7 @@ use crate::{
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const LEASE_STALE_AFTER: Duration = Duration::from_secs(24 * 3600);
 
 /// Minimum time a store must have been untouched before the *emergency*
 /// reclaimer may delete it.
@@ -180,23 +181,16 @@ fn run_gc(
         .as_ref()
         .map(|layout| layout.run_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
-    let _destructive_locks = if args.dry_run {
+    let _gc_leader = if args.dry_run {
         None
     } else {
-        Some((
-            GcLeaderLock::acquire(&run_root)?,
-            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?,
-        ))
+        Some(GcLeaderLock::acquire(&run_root)?)
     };
-    let in_use_scopes = match crate::capacity::active_scopes(&run_root, Duration::from_secs(86400))
-    {
-        Ok(scopes) => scopes,
-        Err(error) if args.force_no_lease_check => {
-            eprintln!("WARNING: bypassing active-scope lease check: {error:#}");
-            BTreeSet::new()
-        }
-        Err(error) => return Err(error).context("read active cache-scope leases"),
-    };
+    let in_use_scopes = snapshot_active_scopes(
+        &run_root,
+        &BTreeSet::new(),
+        args.force_no_lease_check,
+    )?;
 
     let listing = cache_listing_with_layout(work_root, false, storage_layout.as_ref())?;
     let max_age = args
@@ -242,6 +236,26 @@ fn run_gc(
         .map(|layout| layout.log_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
+        let still_unclaimed = match cache_candidate_is_still_unclaimed(
+            &run_root,
+            &candidate,
+            &policy.in_use_scopes,
+            args.force_no_lease_check,
+        ) {
+            Ok(still_unclaimed) => still_unclaimed,
+            Err(error) => {
+                append_gc_history(&log_root, &candidate, Some(&policy), "failed")?;
+                eprintln!(
+                    "cache gc revalidation failed for {}: {error:#}",
+                    candidate.path.display()
+                );
+                continue;
+            }
+        };
+        if !still_unclaimed {
+            append_gc_history(&log_root, &candidate, Some(&policy), "skipped-live")?;
+            continue;
+        }
         let result = remove_candidate(&candidate);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
         append_gc_history(&log_root, &candidate, Some(&policy), outcome)?;
@@ -323,6 +337,25 @@ impl GcLeaderLock {
             .with_context(|| "another gc holds the lock")?;
         Ok(Self { _file: file })
     }
+}
+
+/// Snapshot lease claims while blocking lease publication, then release the
+/// filesystem-wide coordinator before any store traversal or mutation.
+fn snapshot_active_scopes(
+    run_root: &Path,
+    in_use_scopes: &BTreeSet<String>,
+    force_no_lease_check: bool,
+) -> Result<BTreeSet<String>> {
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    let mut active_scopes = in_use_scopes.clone();
+    match crate::capacity::active_scopes(run_root, LEASE_STALE_AFTER) {
+        Ok(scopes) => active_scopes.extend(scopes),
+        Err(error) if force_no_lease_check => {
+            eprintln!("WARNING: bypassing active-scope lease check: {error:#}");
+        }
+        Err(error) => return Err(error).context("read active cache-scope leases"),
+    }
+    Ok(active_scopes)
 }
 
 fn append_gc_history(
@@ -716,14 +749,7 @@ fn reclaim_work_root_with_layout(
         }
         Err(error) => return Err(error),
     };
-    // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
-    // starting a job cannot race between this snapshot and candidate deletion.
-    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
-    let mut active_scopes = in_use_scopes.clone();
-    active_scopes.extend(crate::capacity::active_scopes(
-        run_root,
-        Duration::from_secs(24 * 3600),
-    )?);
+    let active_scopes = snapshot_active_scopes(run_root, in_use_scopes, false)?;
     let mut entries = cache_listing_with_layout(work_root, emergency, layout)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
@@ -770,6 +796,10 @@ fn reclaim_work_root_with_layout(
             bytes: entry.bytes,
             reason: "reclaim-target".into(),
         };
+        if !cache_candidate_is_still_unclaimed(run_root, &candidate, &active_scopes, false)? {
+            append_gc_history(log_root, &candidate, None, "skipped-live")?;
+            continue;
+        }
         match remove_candidate(&candidate) {
             Ok(()) => {
                 report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
@@ -792,6 +822,20 @@ fn reclaim_work_root_with_layout(
     // Keep the explicit operator function available; only a future caller that
     // holds the matching BuildKit lease may invoke it.
     Ok(report)
+}
+
+fn cache_candidate_is_still_unclaimed(
+    run_root: &Path,
+    candidate: &EvictionCandidate,
+    initially_active: &BTreeSet<String>,
+    force_no_lease_check: bool,
+) -> Result<bool> {
+    let active_scopes = snapshot_active_scopes(run_root, initially_active, force_no_lease_check)?;
+    Ok(!cache_scope_is_in_use(
+        candidate.store,
+        &candidate.scope,
+        &active_scopes,
+    ))
 }
 
 fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
@@ -1249,8 +1293,16 @@ fn add_candidate(
 }
 
 fn in_use(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
-    let candidate = format!("{}/{}", entry.store, entry.scope_key());
-    policy.in_use_scopes.iter().any(|active| {
+    cache_scope_is_in_use(entry.store, &entry.scope, &policy.in_use_scopes)
+}
+
+fn cache_scope_is_in_use(
+    store: CacheStore,
+    scope: &[String],
+    active_scopes: &BTreeSet<String>,
+) -> bool {
+    let candidate = format!("{store}/{}", scope.join("/"));
+    active_scopes.iter().any(|active| {
         candidate == *active
             || candidate
                 .strip_prefix(active)

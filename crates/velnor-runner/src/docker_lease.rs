@@ -141,6 +141,7 @@ impl DockerLeasePolicy {
             );
         }
         if segments.as_slice() == ["networks", "create"] && method == "POST" {
+            validate_network_create_request(request)?;
             return authorize_docker_route(
                 AuthorizedDockerRoute::Create(DockerResourceKind::Network),
                 upgrade,
@@ -1581,6 +1582,8 @@ pub fn rewrite_docker_api_request(
     inject_ownership_labels_value(&mut value, job_id, daemon_id)?;
     if path.ends_with("/containers/create") {
         inject_job_cgroup_parent_value(&mut value)?;
+    } else if path.ends_with("/networks/create") {
+        validate_network_create_value(&value)?;
     } else if path.ends_with("/volumes/create") {
         reject_unsafe_volume_create_value(&value)?;
     }
@@ -1595,6 +1598,165 @@ pub fn rewrite_docker_api_request(
     out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", labeled.len()).as_bytes());
     out.extend_from_slice(&labeled);
     Ok(out)
+}
+
+/// Keep the network-create capability to Docker's private, runner-compatible
+/// bridge shape. Network creation is a host-affecting route: labels alone do
+/// not constrain driver plugins, IPAM, or daemon network options.
+fn validate_network_create_request(request: &[u8]) -> Result<()> {
+    let body = docker_request_body(request)?;
+    let value = parse_create_value(body).context("parse Docker network create request")?;
+    validate_network_create_value(&value)
+}
+
+fn validate_network_create_value(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("Docker network create body must be a JSON object")?;
+    let allowed = [
+        "name",
+        "driver",
+        "checkduplicate",
+        "internal",
+        "attachable",
+        "ingress",
+        "enableipv6",
+        "ipv6",
+        "ipam",
+        "options",
+        "labels",
+    ];
+    let mut normalized = BTreeSet::new();
+    for key in object.keys() {
+        let lower = key.to_ascii_lowercase();
+        if !normalized.insert(lower.clone()) {
+            bail!("Docker network create contains duplicate case-insensitive field {key:?}");
+        }
+        if !allowed.contains(&lower.as_str()) {
+            bail!("Docker network create field {key:?} is not permitted");
+        }
+    }
+
+    let name = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Name"))
+        .map(|(_, value)| value)
+        .context("Docker network create must name the network")?
+        .as_str()
+        .context("Docker network create Name must be a string")?;
+    if name.trim() != name {
+        bail!("Docker network create Name must not have surrounding whitespace");
+    }
+    validate_owned_resource_id(name, "Docker network name")?;
+
+    if let Some(driver) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Driver"))
+        .map(|(_, value)| value)
+    {
+        if driver.as_str() != Some("bridge") {
+            bail!("Docker network create permits only the bridge driver");
+        }
+    }
+    if let Some(check_duplicate) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("CheckDuplicate"))
+        .map(|(_, value)| value)
+    {
+        if !check_duplicate.is_boolean() {
+            bail!("Docker network create CheckDuplicate must be a boolean");
+        }
+    }
+
+    for field in ["Internal", "Attachable", "Ingress", "EnableIPv6", "IPv6"] {
+        if let Some(value) = object
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(field))
+            .map(|(_, value)| value)
+        {
+            if value.as_bool() != Some(false) {
+                bail!("Docker network create {field} must be false");
+            }
+        }
+    }
+
+    if let Some(options) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Options"))
+        .map(|(_, value)| value)
+    {
+        if !options.as_object().is_some_and(Map::is_empty) {
+            bail!("Docker network create Options must be empty");
+        }
+    }
+    if let Some(ipam) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("IPAM"))
+        .map(|(_, value)| value)
+    {
+        validate_empty_network_ipam(ipam)?;
+    }
+    if let Some(labels) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Labels"))
+        .map(|(_, value)| value)
+    {
+        let labels = match labels {
+            Value::Null => None,
+            Value::Object(labels) => Some(labels),
+            _ => bail!("Docker network create Labels must be an object"),
+        };
+        if let Some(labels) = labels {
+            if labels.keys().any(|key| key.eq_ignore_ascii_case(JOB_ID_LABEL)
+                || key.eq_ignore_ascii_case(DAEMON_ID_LABEL))
+            {
+                bail!("Docker network create cannot supply runner ownership labels");
+            }
+            if labels.values().any(|value| !value.is_string()) {
+                bail!("Docker network create label values must be strings");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_empty_network_ipam(value: &Value) -> Result<()> {
+    let object = value
+        .as_object()
+        .context("Docker network create IPAM must be an object")?;
+    let allowed = ["driver", "config", "options"];
+    let mut normalized = BTreeSet::new();
+    for key in object.keys() {
+        let lower = key.to_ascii_lowercase();
+        if !normalized.insert(lower.clone()) || !allowed.contains(&lower.as_str()) {
+            bail!("Docker network create IPAM field {key:?} is not permitted");
+        }
+    }
+    if let Some(driver) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Driver"))
+        .map(|(_, value)| value)
+        && !matches!(driver.as_str(), Some("") | Some("default"))
+    {
+        bail!("Docker network create IPAM driver must be default");
+    }
+    if let Some(config) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Config"))
+        .map(|(_, value)| value)
+        && !config.as_array().is_some_and(Vec::is_empty)
+    {
+        bail!("Docker network create IPAM Config must be empty");
+    }
+    if let Some(options) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Options"))
+        .map(|(_, value)| value)
+        && !options.as_object().is_some_and(Map::is_empty)
+    {
+        bail!("Docker network create IPAM Options must be empty");
+    }
+    Ok(())
 }
 
 /// Force every job-created Docker container into the runner-owned aggregate

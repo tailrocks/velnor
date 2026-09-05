@@ -30,12 +30,12 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 7;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 8;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
 const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
-const MAX_TERMINAL_ACK_SCAN_ROWS: i64 = 1_024;
+const MAX_TERMINAL_EVIDENCE_ROWS: i64 = 1_024;
 
 /// Durable send attempts a completion may burn before it is unresolvable.
 /// Each attempt is one full transport retry loop, not one HTTP request.
@@ -74,6 +74,15 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_generation_kind_id_idx
     ON events (generation, kind, id DESC);
+CREATE TABLE IF NOT EXISTS terminal_acks (
+    job_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    event_id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    checksum TEXT NOT NULL,
+    UNIQUE (job_id, generation),
+    FOREIGN KEY (event_id) REFERENCES events(id)
+);
 CREATE TABLE IF NOT EXISTS slots (
     slot_id TEXT PRIMARY KEY,
     generation INTEGER NOT NULL,
@@ -1456,9 +1465,11 @@ impl Journal {
             conn,
             path: path.to_path_buf(),
         };
-        // Verify all existing event checksums once. The controller's steady
-        // state must not replay an ever-growing log every two seconds.
-        journal.load_state()?;
+        // Verify event envelopes and checksums once, but use the transactional
+        // materialized projection for the current state. Opening a controller
+        // must not reduce an ever-growing immutable log before every cycle.
+        verify_event_log(&journal.conn)?;
+        journal.materialized_state()?;
         Ok(journal)
     }
 
@@ -1549,6 +1560,7 @@ impl Journal {
         }
         let mut outcomes = Vec::new();
         let mut pending = Vec::new();
+        let mut heartbeat_projection = Vec::new();
         for mut event in std::iter::once(first_event).chain(events) {
             stamp_event(&mut event);
             let outcome = reduce(state.clone(), event.clone());
@@ -1557,26 +1569,76 @@ impl Journal {
                     outcome.commands.is_empty() && outcome.state == state;
                 state = outcome.state.clone();
                 if !unchanged_without_commands {
-                    let payload = serde_json::to_string(&event).map_err(|error| {
-                        StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                    if let Event::SlotHeartbeat {
+                        slot_id,
+                        generation,
+                        pid,
+                    } = &event
+                    {
+                        let heartbeat_unix = state
+                            .slots
+                            .iter()
+                            .find(|slot| {
+                                slot.slot_id == *slot_id && slot.generation == *generation
+                            })
+                            .map(|slot| slot.heartbeat_unix)
+                            .ok_or_else(heartbeat_projection_missing)?;
+                        heartbeat_projection.push((
+                            slot_id.clone(),
+                            *generation,
+                            *pid,
+                            heartbeat_unix,
+                        ));
+                    } else {
+                        let payload = serde_json::to_string(&event).map_err(|error| {
+                            StoreError::new(
+                                velnor_model::ExitClass::Operation,
+                                "journal.encode.failed",
+                            )
                             .with_remediation(error.to_string())
-                    })?;
-                    pending.push((event_generation(&event), event_kind(&event), payload));
+                        })?;
+                        let terminal_ack = terminal_ack_parts(&event)
+                            .map(|(job_id, generation)| (job_id.clone(), generation));
+                        pending.push((
+                            event_generation(&event),
+                            event_kind(&event),
+                            payload,
+                            terminal_ack,
+                        ));
+                    }
                 }
             }
             outcomes.push(outcome);
         }
         if pending.is_empty() {
+            if !heartbeat_projection.is_empty() {
+                persist_heartbeat_projection(&transaction, &state, &heartbeat_projection)?;
+                transaction.commit()?;
+            }
             return Ok(outcomes);
         }
 
         let tx = transaction;
-        for (generation, kind, payload) in pending {
+        for (generation, kind, payload, terminal_ack) in pending {
             let checksum = sha256_hex(payload.as_bytes());
             tx.execute(
                 "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, ?2, ?3, ?4)",
                 params![generation.0 as i64, kind, payload, checksum],
             )?;
+            if let Some((job_id, ack_generation)) = terminal_ack {
+                tx.execute(
+                    "INSERT INTO terminal_acks (
+                         job_id, generation, event_id, kind, checksum
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        job_id.0,
+                        ack_generation.0 as i64,
+                        tx.last_insert_rowid(),
+                        kind,
+                        checksum,
+                    ],
+                )?;
+            }
         }
         persist_state(&tx, &state)?;
         tx.commit()?;
@@ -1591,67 +1653,72 @@ impl Journal {
         load_state_from_conn(&self.conn)
     }
 
-    /// Check durable terminal acknowledgement evidence without replaying the
-    /// full event log. The controller uses this bounded, indexed query during
-    /// every reconciliation cycle after local cleanup may have failed.
+    /// Check durable terminal acknowledgement evidence without replaying or
+    /// scanning the event log. The exact `(job_id, generation)` projection is
+    /// committed with its source event and validates that source on read.
     pub fn has_remote_terminal_ack(
         &self,
         job_id: &JobId,
         generation: Generation,
     ) -> StoreResult<bool> {
-        let mut statement = self.conn.prepare(
-            "SELECT payload, checksum
-             FROM events
-             WHERE generation = ?1
-               AND kind IN ('remote_acked', 'remote_observed_terminal')
-             ORDER BY id DESC
-             LIMIT ?2",
-        )?;
-        let rows = statement.query_map(
-            params![generation.0 as i64, MAX_TERMINAL_ACK_SCAN_ROWS + 1],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        let mut scanned = 0;
-        for row in rows {
-            scanned += 1;
-            if scanned > MAX_TERMINAL_ACK_SCAN_ROWS {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.terminal_ack.scan.bound",
-                )
-                .with_remediation(
-                    "the terminal acknowledgement history exceeded the bounded recovery scan; preserve the journal and compact it through the retention path",
-                ));
-            }
-            let (payload, checksum) = row?;
-            if sha256_hex(payload.as_bytes()) != checksum {
-                return Err(StoreError::new(
-                    velnor_model::ExitClass::Conflict,
-                    "journal.checksum.mismatch",
-                )
-                .with_remediation(
-                    "the terminal acknowledgement event failed integrity verification",
-                ));
-            }
-            let event: Event = serde_json::from_str(&payload).map_err(|_| {
-                StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
-                    .with_remediation("the terminal acknowledgement event could not be decoded")
-            })?;
-            if matches!(
-                event,
-                Event::RemoteAcked {
-                    job_id: ref event_job_id,
-                    generation: event_generation,
-                }
-                | Event::RemoteObservedTerminal {
-                    job_id: ref event_job_id,
-                    generation: event_generation,
-                } if event_job_id == job_id && event_generation == generation
-            ) {
-                return Ok(true);
-            }
+        let projection = self
+            .conn
+            .query_row(
+                "SELECT event_id, kind, checksum
+                 FROM terminal_acks
+                 WHERE job_id = ?1 AND generation = ?2",
+                params![job_id.0, generation.0 as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((event_id, kind, projection_checksum)) = projection else {
+            return Ok(false);
+        };
+        if event_id <= 0 {
+            return Err(terminal_ack_projection_invalid(
+                "the source event id is not positive",
+            ));
         }
-        Ok(false)
+        let source = self
+            .conn
+            .query_row(
+                "SELECT payload, checksum
+                 FROM events WHERE id = ?1",
+                params![event_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((payload, source_checksum)) = source else {
+            return Err(terminal_ack_projection_invalid(
+                "the source event is missing",
+            ));
+        };
+        if projection_checksum != source_checksum {
+            return Err(terminal_ack_projection_invalid(
+                "the projection checksum does not match the source event",
+            ));
+        }
+        let event = decode_verified_event(&payload, &source_checksum)?;
+        let Some((event_job_id, event_generation)) = terminal_ack_parts(&event) else {
+            return Err(terminal_ack_projection_invalid(
+                "the source event is not a terminal acknowledgement",
+            ));
+        };
+        if kind != event_kind(&event)
+            || event_job_id != job_id
+            || event_generation != generation
+        {
+            return Err(terminal_ack_projection_invalid(
+                "the projection key does not match the structured source event",
+            ));
+        }
+        Ok(true)
     }
 
     /// Terminal conclusion durably recorded before the completion payload was
@@ -1685,9 +1752,9 @@ impl Journal {
              FROM events
              WHERE kind IN ('completion_unresolvable', 'completion_payload_lost')
              ORDER BY id DESC
-             LIMIT ?1",
+            LIMIT ?1",
         )?;
-        let rows = statement.query_map(params![MAX_TERMINAL_ACK_SCAN_ROWS], |row| {
+        let rows = statement.query_map(params![MAX_TERMINAL_EVIDENCE_ROWS], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         let mut found = Vec::new();
@@ -1875,17 +1942,101 @@ fn load_state_from_conn(conn: &Connection) -> StoreResult<FleetState> {
         // not is a writer that changed the vocabulary without bumping
         // `JOURNAL_SCHEMA_VERSION`; skipping it would silently drop terminal
         // state and re-drive a completion that was already resolved.
-        let event: Event = serde_json::from_str(&payload).map_err(|error| {
-            StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
-                .with_remediation(format!(
-                    "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
-                ))
-        })?;
+        let event = decode_verified_event(&payload, &checksum)?;
         let outcome = reduce(state, event);
         state = outcome.state;
     }
+    overlay_heartbeat_projection(conn, &mut state)?;
     state.capacity_invalid = state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
     Ok(state)
+}
+
+/// Verify immutable event evidence without reducing the complete history.
+/// Materialized state is loaded separately by `Journal::open`, while this
+/// check keeps checksum and envelope failures fail-closed.
+fn verify_event_log(conn: &Connection) -> StoreResult<()> {
+    let mut statement = conn.prepare(
+        "SELECT generation, kind, payload, checksum
+         FROM events ORDER BY id ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (generation, kind, payload, checksum) = row?;
+        let event = decode_verified_event(&payload, &checksum)?;
+        if i64_u64(generation, "event generation")? != event_generation(&event).0
+            || kind != event_kind(&event)
+        {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.event.metadata.mismatch",
+            )
+            .with_remediation(
+                "the event metadata does not match its structured payload; preserve the journal for forensics",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decode_verified_event(payload: &str, checksum: &str) -> StoreResult<Event> {
+    if sha256_hex(payload.as_bytes()) != checksum {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.checksum.mismatch",
+        )
+        .with_remediation("the event log failed integrity verification"));
+    }
+    serde_json::from_str(payload).map_err(|error| {
+        StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.unknown")
+            .with_remediation(format!(
+                "event could not be decoded by schema version {JOURNAL_SCHEMA_VERSION}; preserve the journal and reopen it with the binary that wrote it: {error}"
+            ))
+    })
+}
+
+/// Heartbeats are observations, not state-machine history. New writes update
+/// the durable slot projection without creating an immutable event. Overlaying
+/// that projection keeps explicit event replay equivalent to the current
+/// materialized view while retaining support for historical heartbeat events.
+fn overlay_heartbeat_projection(conn: &Connection, state: &mut FleetState) -> StoreResult<()> {
+    let mut statement = conn.prepare(
+        "SELECT slot_id, generation, pid, heartbeat_unix
+         FROM slots ORDER BY rowid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (slot_id, generation, pid, heartbeat_unix) = row?;
+        let Ok(generation) = u64::try_from(generation) else {
+            continue;
+        };
+        let Some(slot) = state
+            .slots
+            .iter_mut()
+            .find(|slot| slot.slot_id.0 == slot_id && slot.generation.0 == generation)
+        else {
+            // Materialized-only rows are intentionally not inferred into an
+            // event replay. The materialized view remains authoritative for
+            // scheduling, while replay remains a view of immutable history.
+            continue;
+        };
+        slot.pid = pid.map(|value| i64_u32(value, "slot pid")).transpose()?;
+        slot.heartbeat_unix = i64_u64(heartbeat_unix, "slot heartbeat_unix")?;
+    }
+    Ok(())
 }
 
 fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
@@ -2166,6 +2317,26 @@ fn outbox_owner_unknown(job_id: &str, generation: i64) -> StoreError {
     ))
 }
 
+fn heartbeat_projection_missing() -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.heartbeat.projection.missing",
+    )
+    .with_remediation(
+        "the accepted heartbeat has no matching materialized slot; preserve the journal and repair the projection",
+    )
+}
+
+fn terminal_ack_projection_invalid(reason: &str) -> StoreError {
+    StoreError::new(
+        velnor_model::ExitClass::Conflict,
+        "journal.terminal_ack.projection.invalid",
+    )
+    .with_remediation(format!(
+        "preserve the journal and repair the terminal acknowledgement projection: {reason}"
+    ))
+}
+
 fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
     tx.execute("DELETE FROM slots", [])?;
     tx.execute("DELETE FROM jobs", [])?;
@@ -2272,6 +2443,58 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             "INSERT INTO meta (key, value) VALUES (?1, ?2)",
             params![key, value],
         )?;
+    }
+    Ok(())
+}
+
+/// Persist observation-only heartbeat changes without appending them to the
+/// immutable event stream. The caller holds the same immediate transaction
+/// used to reduce the events, so a crash leaves either the old projection or
+/// the complete new projection.
+fn persist_heartbeat_projection(
+    tx: &rusqlite::Transaction<'_>,
+    state: &FleetState,
+    heartbeats: &[(SlotId, Generation, u32, u64)],
+) -> StoreResult<()> {
+    for (slot_id, generation, pid, heartbeat_unix) in heartbeats {
+        let Some(slot) = state
+            .slots
+            .iter()
+            .find(|slot| slot.slot_id == *slot_id && slot.generation == *generation)
+        else {
+            return Err(heartbeat_projection_missing());
+        };
+        let updated = tx.execute(
+            "UPDATE slots
+             SET pid = ?1, heartbeat_unix = ?2
+             WHERE slot_id = ?3 AND generation = ?4",
+            params![
+                i64::from(*pid),
+                *heartbeat_unix as i64,
+                slot_id.0,
+                generation.0 as i64,
+            ],
+        )?;
+        if updated == 0 {
+            tx.execute(
+                "INSERT INTO slots (
+                     slot_id, generation, phase, permit_held, routing_valid,
+                     session_live, executor_proven, registered, pid, heartbeat_unix
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    slot.slot_id.0,
+                    slot.generation.0 as i64,
+                    slot.phase.as_str(),
+                    slot.permit_held as i64,
+                    slot.routing_valid as i64,
+                    slot.session_live as i64,
+                    slot.executor_proven as i64,
+                    slot.registered as i64,
+                    Some(i64::from(*pid)),
+                    *heartbeat_unix as i64,
+                ],
+            )?;
+        }
     }
     Ok(())
 }
@@ -2724,6 +2947,14 @@ fn state_capacity_invalid(state: &FleetState) -> bool {
     // Count every row: stale state must not evade detection through an
     // unheld permit, non-ready phase, or malformed/non-numeric slot ID.
     state.capacity_declared && state.slots.len() > state.desired_ready as usize
+}
+
+fn terminal_ack_parts(event: &Event) -> Option<(&JobId, Generation)> {
+    match event {
+        Event::RemoteAcked { job_id, generation }
+        | Event::RemoteObservedTerminal { job_id, generation } => Some((job_id, *generation)),
+        _ => None,
+    }
 }
 
 fn event_generation(event: &Event) -> Generation {

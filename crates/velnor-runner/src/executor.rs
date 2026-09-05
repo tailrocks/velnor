@@ -27,7 +27,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc, Arc, Mutex, OnceLock,
@@ -191,7 +191,11 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
-/// Token for a long-lived child (jailer). Kill uses the retained pid.
+/// Token for a long-lived child (jailer).
+///
+/// The pid remains public for compatibility with execution events and process
+/// group registration. Process control is only valid while the matching owned
+/// child handle remains in the executor registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedProcess {
     pub pid: u32,
@@ -609,9 +613,104 @@ fn node_action_image(runtime: &str, fallback: &str) -> String {
     }
 }
 
-fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
-    static CHILDREN: OnceLock<Mutex<HashMap<u32, Child>>> = OnceLock::new();
+const SPAWNED_CHILD_REAP_INTERVAL: Duration = Duration::from_millis(100);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Owns one host child until it has been observed and reaped.
+///
+/// `Child` is deliberately kept beside every operation that can return an
+/// error. Dropping an unreaped child only closes Rust's handle; it does not
+/// terminate the host process, so the owner makes error cleanup explicit.
+struct OwnedChild {
+    child: Child,
+}
+
+impl OwnedChild {
+    fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.child.wait()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.child.kill()
+    }
+
+    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
+    /// Best-effort cleanup for a path that already has a primary error.
+    fn reap_after_error(&mut self) {
+        let _ = self.kill();
+        let _ = self.wait();
+    }
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if self.try_wait().ok().flatten().is_none() {
+            self.reap_after_error();
+        }
+    }
+}
+
+fn spawned_child_registry() -> &'static Mutex<HashMap<u32, OwnedChild>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<u32, OwnedChild>>> = OnceLock::new();
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn spawned_children() -> &'static Mutex<HashMap<u32, OwnedChild>> {
+    static REAPER: OnceLock<()> = OnceLock::new();
+    REAPER.get_or_init(|| {
+        if let Err(error) = thread::Builder::new()
+            .name("velnor-child-reaper".to_string())
+            .spawn(reap_spawned_children_loop)
+        {
+            tracing::error!(error = %error, "failed to start spawned child reaper");
+        }
+    });
+    spawned_child_registry()
+}
+
+fn reap_spawned_children_loop() {
+    loop {
+        thread::sleep(SPAWNED_CHILD_REAP_INTERVAL);
+        reap_spawned_children();
+    }
+}
+
+/// Reap children that exited without an explicit kill request.
+fn reap_spawned_children() {
+    let mut children = spawned_child_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    children.retain(|pid, child| match child.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(child_pid = *pid, error = %error, "failed to reap spawned child");
+            true
+        }
+    });
 }
 
 #[derive(Default)]
@@ -768,6 +867,7 @@ impl CommandRunner for ProcessCommandRunner {
     }
 
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
+        reap_spawned_children();
         let mut command = Command::new(program);
         configure_host_docker_command(&mut command, program, args)?;
         own_process_group(&mut command);
@@ -782,32 +882,23 @@ impl CommandRunner for ProcessCommandRunner {
         spawned_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pid, child);
+            .insert(pid, OwnedChild::new(child));
         Ok(SpawnedProcess { pid })
     }
 
     fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
-        if let Some(mut child) = spawned_children()
+        reap_spawned_children();
+        let mut children = spawned_children()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&process.pid)
-        {
-            child
-                .kill()
-                .with_context(|| format!("kill {}", process.pid))?;
-            child
-                .wait()
-                .with_context(|| format!("wait for {}", process.pid))?;
-            return Ok(());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let child = children.get_mut(&process.pid).ok_or_else(|| {
+            anyhow::anyhow!("no owned child for pid {}; refusing raw-pid fallback", process.pid)
+        })?;
+        let result = kill_and_wait_owned(child, process.pid);
+        if result.is_ok() {
+            children.remove(&process.pid);
         }
-        let status = Command::new("kill")
-            .args(["-TERM", &process.pid.to_string()])
-            .status()
-            .with_context(|| format!("kill {}", process.pid))?;
-        if !status.success() {
-            bail!("kill {} exited {:?}", process.pid, status.code());
-        }
-        Ok(())
+        result
     }
 
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
