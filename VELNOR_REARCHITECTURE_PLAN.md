@@ -4210,3 +4210,89 @@ parallel invocation executed `1583` tests: `1580` passed, while
 timing-sensitive assertions. Each exact test passed when rerun in isolation;
 the cache change did not touch either path. The result is recorded as a
 parallel-scheduling flake, not a clean parallel gate.
+
+## 93. Restart handoff — 2026-09-05
+
+Stop point for the next continuation:
+
+- Canonical checkout: `/Users/donbeave/Projects/tailrocks/velnor-project/velnor`.
+- Working branch: `perf/docker-rust-mbx`.
+- Canonical and `origin/perf/docker-rust-mbx` both point at
+  `e8223f5574a10ea8076e682a29495e2bee8ff1c8` (`ci: remove stale required
+  workflow`). The worktree is clean; no interrupted worker patch remains.
+- `origin/main` is `b5c666f9bf8c3b8942b361358e205c65f0393b63`, already merged by
+  `e38d93f`. The merge retained the current rearchitecture where the older
+  main snapshot conflicted; the stale no-CI `ci-required.yml` placeholder was
+  then removed because generated active CI workflows exist.
+- No push is pending. Do not force-push or reset this shared branch.
+
+Completed in this continuation:
+
+- `b0dc163` durably publishes GHA cache v1 entries after validated upload and
+  atomic blob/entry publication; focused cache tests passed.
+- `e38d93f` integrates the requested main-branch history.
+- `e8223f5` removes the contradictory stale required-workflow placeholder.
+- Verifier branch `codex/verifier-completion-fixes` is separately clean and
+  synchronized at `9d0363953cb37e95430dff51bf97bff41badbe68` in
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-actions-fixture`.
+  Its runner-source checkout binding is `aa1b944`; its generated provenance
+  metadata is `9d036395`.
+
+Preservation boundary:
+
+- The old clone `/Users/donbeave/Projects/donbeave/velnor` is clean at
+  `ae72e3a86e77bf8b68cc8f616ec88814ffc849ea`; it has no known unique work to
+  port. Use the canonical checkout above for all new work.
+- Preserve the dirty worktree
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-checkout-hydration-errors-20260905`.
+  It has only `crates/velnor-runner/src/checkout.rs` modified. The patch is a
+  weaker duplicate of the canonical fail-closed hydration fix; do not reset,
+  stash, or merge it casually.
+- All other local sibling tips are ancestors of the canonical branch except
+  the held MBX experiment `codex/scenario-mbx-requirements-20260905` at
+  `88218d4`. Its recovery ref is
+  `refs/archive/branch/codex-scenario-mbx-requirements-20260905`; do not merge
+  wholesale. It keys admission to host-local `mbx --version`, which can reject
+  valid image-only MBX or accept irrelevant host MBX.
+- The old remote setup line is preserved at
+  `refs/archive/remote/chore/setup-velnor-workflow-action-20260905` (`1352011`),
+  and old main at `refs/archive/remote/main-20260905` (`b5c666f`). Port only
+  independently verified changes from those archives.
+
+Next bounded work, not yet started:
+
+1. Docker cancellation: in `crates/velnor-runner/src/executor.rs`, make the
+   live started-container step path adopt `execution::cancel::active()` when
+   present, while retaining inert cancellation for cleanup/test engines and
+   preserving post-step cancellation semantics. Add deterministic executor
+   tests proving Docker/MBX subprocess cancellation and unchanged argv. Do
+   not broaden into `runner.rs` or `controller.rs` without ownership review.
+2. Durable worker lifecycle: `node/controller.rs` still has process-local
+   child ownership/maps, so controller restart cannot adopt, drain, or clean
+   active workers. Build durable worker-control handoff and restart tests.
+3. Protocol correctness: durable intent must precede Busy ACK; add Run Service
+   URL fallback, typed transport errors, bounded live-log framing, and strict
+   step-summary acknowledgement.
+4. Verifier trust handoff: current CI invokes readiness without a real
+   `--capabilities-export`/runner-source handoff. Build the real Velnor runner,
+   export capability plus run-bound source/runner identity, upload it, and
+   make compare-evidence consume the authenticated export. Do not claim
+   readiness from metadata alone.
+5. Storage/benchmark gates: finish injective cache-key handling, live lease
+   publication and bounded GC/resource admission, plus a real remote MBX
+   benchmark driver with stage metrics and fault/soak evidence.
+
+Restart commands:
+
+```bash
+cd /Users/donbeave/Projects/tailrocks/velnor-project/velnor
+git switch perf/docker-rust-mbx
+git pull --ff-only origin perf/docker-rust-mbx
+git status --short --branch
+```
+
+Continue with disjoint file ownership, Luna max-reasoning agents, small
+incremental commits, and `git commit -s` including
+`Co-authored-by: Codex <codex@openai.com>`. Re-check remote parity before every
+push. The complete task specification remains at
+`/Users/donbeave/.codex-chainargos/attachments/c421e50d-ded9-4c83-8080-b938af6484fa/pasted-text-1.txt`.
