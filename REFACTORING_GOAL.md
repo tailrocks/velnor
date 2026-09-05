@@ -1,3 +1,5 @@
+# Velnor refactoring goal
+
 You are leading a long-running, multi-agent rearchitecture of **Velnor**.
 
 You are not here to make a small improvement, clean up a few bugs, or finish the previous Mr. Boxington experiment.
@@ -10,7 +12,7 @@ The objective is not the smallest diff.
 
 The objective is the best Velnor.
 
-# 1. Exact repositories and branches
+## 1. Exact repositories and branches
 
 Work against these exact branch lines.
 
@@ -45,28 +47,28 @@ The two repositories are one system for purposes of this goal:
 
 A change to Velnor that requires verifier changes is incomplete until both sides agree.
 
-# 2. Mission
+## 2. Mission
 
 Build Velnor into a runner where a user can reasonably ask:
 
 > Why didn't my job start immediately?
-
+>
 > Why did the runner sit there doing nothing?
-
+>
 > Why did this workflow work on GitHub-hosted but behave differently on Velnor?
-
+>
 > Why was the second Rust build still slow?
-
+>
 > Why did two concurrent builds fight each other?
-
+>
 > Why did a runner restart lose the result?
-
+>
 > Why is cleanup holding the next job?
-
+>
 > Why is disk usage growing without bound?
-
+>
 > Why did this cache unexpectedly miss?
-
+>
 > Why did this step behave differently from actions/runner?
 
 and the architectural goal is that these questions should almost never arise.
@@ -75,7 +77,7 @@ For every state of an accepted workload, Velnor should have a deterministic expl
 
 The design should feel boringly predictable under normal operation, concurrency, failure, cancellation, restart, resource pressure, and long-running use.
 
-# 3. Product priority
+## 3. Product priority
 
 The product priority is:
 
@@ -100,7 +102,7 @@ Architectural cleanliness that makes the hot path slower without a real capabili
 
 Among designs that are correct, choose the fastest and simplest design supported by evidence.
 
-# 4. How to decide what should be fixed
+## 4. How to decide what should be fixed
 
 Judge every piece of work by whether it **should** be done.
 
@@ -148,7 +150,7 @@ Expensive is not impossible.
 
 If feasibility is uncertain, investigate, prototype, measure, and prove it.
 
-# 5. Bug-fixing rule: eliminate bug classes
+## 5. Bug-fixing rule: eliminate bug classes
 
 Treat every bug as architectural evidence.
 
@@ -171,7 +173,7 @@ Use a symptom-level patch only if the root architectural correction is demonstra
 
 Do not preserve an enabling architecture merely because restructuring it is more work.
 
-# 6. Mandatory agent/model routing
+## 6. Mandatory agent/model routing
 
 This is a multi-agent goal.
 
@@ -321,7 +323,7 @@ At the end use fresh Opus 5 High agents for at least:
 
 Do not allow an implementation agent to be its own final verifier.
 
-# 7. Parallel implementation model
+## 7. Parallel implementation model
 
 Represent the work as a dependency graph.
 
@@ -346,7 +348,7 @@ Bad parallel work:
 
 The coordinator owns integration.
 
-# 8. Write the plan before broad implementation
+## 8. Write the plan before broad implementation
 
 Before broad implementation, create a living master plan in the Velnor repository:
 
@@ -398,7 +400,7 @@ Do not treat the initial plan as immutable.
 
 When implementation reveals that the plan was wrong, change the plan.
 
-# 9. Important known starting observations
+## 9. Important known starting observations
 
 The following are **starting hypotheses/evidence**, not conclusions.
 
@@ -544,7 +546,7 @@ Do not assume either way.
 
 Reproduce against the exact branch build and build comprehensive semantic coverage for the entire class.
 
-# 10. Pure Rust policy
+## 10. Pure Rust policy
 
 Velnor's own runtime functionality must be implemented in Rust.
 
@@ -572,7 +574,7 @@ Do not leave Python as the core verifier architecture.
 
 A long-running production-grade Rust runner should be tested by deterministic compiled tooling, not a growing pile of ad-hoc Python scripts.
 
-# 11. Upstream GitHub runner is the semantic source of truth
+## 11. Upstream GitHub runner is the semantic source of truth
 
 For GitHub Actions behavior, `actions/runner` is the source of truth.
 
@@ -593,7 +595,7 @@ Do not implement behavior because it "seems like GitHub."
 
 For each Velnor capability, identify the corresponding upstream ownership/code path where feasible.
 
-# 12. Build a GitHub semantic compatibility model
+## 12. Build a GitHub semantic compatibility model
 
 Do not think of compatibility as isolated adapter functions.
 
@@ -671,7 +673,7 @@ Do not claim generic GitHub Actions parity if only a subset exists.
 
 Instead, maintain a machine-readable supported capability model and make unsupported inputs fail early and explicitly.
 
-# 13. Turn lifecycle into explicit state machines
+## 13. Turn lifecycle into explicit state machines
 
 The current architecture should be examined for implicit boolean/state combinations.
 
@@ -744,7 +746,7 @@ Explicitly own:
 
 There must be one owner and one cleanup contract per resource.
 
-# 14. Crash consistency and completion
+## 14. Crash consistency and completion
 
 Treat job completion as a distributed systems problem.
 
@@ -773,7 +775,7 @@ Ensure stale runner processes/generations cannot publish as current owners.
 
 Fault-inject process death at every meaningful lifecycle boundary.
 
-# 15. Cancellation must become first-class
+## 15. Cancellation must become first-class
 
 Cancellation is not "kill the container."
 
@@ -813,7 +815,7 @@ Add fixture differential tests for:
 * repeated cancellation;
 * daemon shutdown while cancellation occurs.
 
-# 16. Docker is the highest-priority backend
+## 16. Docker is the highest-priority backend
 
 Docker is the default packaged backend and the primary optimization target.
 
@@ -852,7 +854,7 @@ Measure separately:
 
 Produce command/API call traces for representative jobs.
 
-# 17. Investigate a native Rust Docker Engine path
+## 17. Investigate a native Rust Docker Engine path
 
 The current Docker CLI path is a major investigation target.
 
@@ -891,7 +893,7 @@ A native API migration is justified if it provides either:
 * measurable hot-path improvement; or
 * materially stronger lifecycle/cancellation correctness with no meaningful regression.
 
-# 18. Remove repeated Docker discovery work
+## 18. Remove repeated Docker discovery work
 
 Search for repeated:
 
@@ -920,7 +922,7 @@ Invalidate them when Docker daemon identity/generation changes.
 
 Do not cache facts that can become incorrect without an invalidation mechanism.
 
-# 19. Container creation and image architecture
+## 19. Container creation and image architecture
 
 Treat the job image as executable architecture.
 
@@ -952,7 +954,7 @@ But do not make the default image enormous for rare compatibility tools if a fas
 
 Benchmark image-size versus startup tradeoffs.
 
-# 20. Mr. Boxington architecture
+## 20. Mr. Boxington architecture
 
 Re-research Mr. Boxington from current source.
 
@@ -985,7 +987,7 @@ Do not merely bump the version.
 
 Understand whether the new implementation changes assumptions in Velnor.
 
-# 21. Default Rust experience
+## 21. Default Rust experience
 
 The desired default experience is ordinary commands:
 
@@ -1027,7 +1029,7 @@ Provide an explicit opt-out.
 
 The opt-out should be understandable and deterministic.
 
-# 22. Do not stack compiler caches accidentally
+## 22. Do not stack compiler caches accidentally
 
 The default path must have one clear compiler/build acceleration architecture.
 
@@ -1052,7 +1054,7 @@ Investigate whether sccache even needs to remain baked into the default job imag
 
 If not, remove it from the default image and install/provide it only through the explicit compatibility path.
 
-# 23. Persistent Cargo state
+## 23. Persistent Cargo state
 
 Exploit the fact that a Velnor node is persistent.
 
@@ -1080,7 +1082,7 @@ But never permit untrusted cache poisoning.
 
 Measure both reuse and isolation cost.
 
-# 24. Trust and cache architecture
+## 24. Trust and cache architecture
 
 Model trust explicitly.
 
@@ -1107,7 +1109,7 @@ Fork PRs must not write state consumed by trusted builds unless the cache mechan
 
 Keep namespace decisions explicit in types/configuration.
 
-# 25. Filesystem and checkout
+## 25. Filesystem and checkout
 
 Profile checkout independently from compilation.
 
@@ -1147,7 +1149,7 @@ Measure:
 
 No duplicate network fetch should occur without a correctness reason.
 
-# 26. Rust fingerprint stability
+## 26. Rust fingerprint stability
 
 The runner already contains behavior intended to stabilize mtimes/fingerprints between worktrees.
 
@@ -1168,7 +1170,7 @@ Never manipulate timestamps in a way that allows stale output.
 
 Create tests specifically designed to detect false cache hits.
 
-# 27. Resource scheduling
+## 27. Resource scheduling
 
 Velnor, Cargo, mbx, Docker and BuildKit must not independently believe they own the whole machine.
 
@@ -1204,7 +1206,7 @@ Benchmark at least:
 
 Avoid both oversubscription and artificial serialization.
 
-# 28. BuildKit
+## 28. BuildKit
 
 BuildKit must be treated as persistent expensive infrastructure.
 
@@ -1227,7 +1229,7 @@ Do not create/destroy expensive BuildKit infrastructure for every job if safely 
 
 Do not share mutable BuildKit state across trust boundaries without a safety model.
 
-# 29. Garbage collection and disk ownership
+## 29. Garbage collection and disk ownership
 
 There should be one understandable host disk model.
 
@@ -1262,7 +1264,7 @@ Test disk exhaustion and near-exhaustion.
 
 Job acquisition must not enter an indefinite "waiting for disk" state.
 
-# 30. Async architecture
+## 30. Async architecture
 
 Audit all blocking operations on Tokio workers and all `spawn_blocking` usage.
 
@@ -1301,7 +1303,7 @@ Eliminate:
 * locks held across unrelated slow operations;
 * process-global mutexes that serialize independent jobs.
 
-# 31. Error taxonomy
+## 31. Error taxonomy
 
 Do not turn every failure into `anyhow` text at architectural boundaries.
 
@@ -1337,7 +1339,7 @@ Every retry requires:
 * observability;
 * idempotence analysis.
 
-# 32. Timeouts
+## 32. Timeouts
 
 Inventory every timeout and retry constant.
 
@@ -1371,7 +1373,7 @@ Expose stage information so an operator can always distinguish:
 * completion;
 * teardown.
 
-# 33. No mysterious idleness
+## 33. No mysterious idleness
 
 This is a first-class product requirement.
 
@@ -1405,7 +1407,7 @@ Provide a concise operator-visible diagnostic timeline.
 
 Do not require reading raw debug logs to answer "why didn't it start?"
 
-# 34. Observability must be cheap
+## 34. Observability must be cheap
 
 Keep instrumentation structured.
 
@@ -1425,7 +1427,7 @@ Do not use ad-hoc parsing of scripts such as looking for `cargo build` text as t
 
 Telemetry heuristics may exist, but correctness must not depend on them.
 
-# 35. Production panic policy
+## 35. Production panic policy
 
 Audit production code for:
 
@@ -1446,7 +1448,7 @@ Where external input can violate it, return a typed error.
 
 Remove broad `#![allow(dead_code)]` and similar allowances when they are hiding stale architecture.
 
-# 36. Dependency/API modernization
+## 36. Dependency/API modernization
 
 Perform a complete direct-dependency audit.
 
@@ -1481,7 +1483,7 @@ Avoid compiling blocking clients, crypto backends, protocols, or other heavy fea
 
 Run supply-chain/security checks.
 
-# 37. Benchmark architecture
+## 37. Benchmark architecture
 
 Create a first-class Rust benchmark/measurement tool rather than relying primarily on shell + Python.
 
@@ -1508,7 +1510,7 @@ Capture environment identity:
 
 Separate internal Velnor latency from external GitHub network/scheduling latency.
 
-# 38. End-to-end runner benchmarks
+## 38. End-to-end runner benchmarks
 
 Measure at least:
 
@@ -1586,7 +1588,7 @@ Collect:
 
 Do not report one lucky run.
 
-# 39. Comparative performance
+## 39. Comparative performance
 
 At minimum benchmark Velnor against an official self-hosted `actions/runner` installation on the same host class for identical workflows.
 
@@ -1603,7 +1605,7 @@ For Rust-heavy workloads, measure both:
 * runner overhead excluding compile;
 * total workflow wall clock.
 
-# 40. Profile before optimizing
+## 40. Profile before optimizing
 
 Use appropriate tooling:
 
@@ -1628,7 +1630,7 @@ For every claimed hot-path optimization record:
 5. after measurement;
 6. conclusion.
 
-# 41. `velnor-actions-fixture` must become the executable specification
+## 41. `velnor-actions-fixture` must become the executable specification
 
 Re-derive its capability baseline from the exact target Velnor branch.
 
@@ -1640,7 +1642,7 @@ Require live evidence.
 
 No stale evidence may establish readiness.
 
-# 42. Redesign Rust fixture scenarios
+## 42. Redesign Rust fixture scenarios
 
 Separate at least these scenarios:
 
@@ -1698,7 +1700,7 @@ Run independent simultaneous Rust jobs against one Velnor host.
 
 Measure compile deduplication/resource scheduling and overall completion.
 
-# 43. Fixture should compare semantics, not implementation details
+## 43. Fixture should compare semantics, not implementation details
 
 For ordinary parity tests, compare observable GitHub semantics.
 
@@ -1721,7 +1723,7 @@ The fixture's own `AGENTS.md` principle remains important:
 
 **Fix fixture failures in Velnor.**
 
-# 44. Convert first-party verifier logic to Rust
+## 44. Convert first-party verifier logic to Rust
 
 The verifier currently contains Python-based:
 
@@ -1749,7 +1751,7 @@ Test the verifier itself.
 
 The oracle must not be less reliable than the system it certifies.
 
-# 45. Differential tests
+## 45. Differential tests
 
 For supported semantics, run the identical fixture on:
 
@@ -1776,7 +1778,7 @@ Especially cover:
 * failed JS actions;
 * failed Docker actions.
 
-# 46. Fault-injection suite
+## 46. Fault-injection suite
 
 Production readiness cannot be proved only by happy paths.
 
@@ -1818,7 +1820,7 @@ After each fault prove:
 * recoverable durable state;
 * useful diagnostics.
 
-# 47. Soak testing
+## 47. Soak testing
 
 Add long-running stress tests.
 
@@ -1848,7 +1850,7 @@ Monitor:
 
 The 500th job should not be mysteriously slower because the runner leaked state.
 
-# 48. Security and isolation verification
+## 48. Security and isolation verification
 
 Retain or improve fail-closed behavior.
 
@@ -1873,7 +1875,7 @@ Test:
 
 Performance optimization must not weaken isolation.
 
-# 49. Code organization
+## 49. Code organization
 
 Do not organize code around historical implementation files.
 
@@ -1909,7 +1911,7 @@ Use visibility intentionally.
 
 Prefer narrow APIs and types that encode invariants.
 
-# 50. Remove compatibility architecture
+## 50. Remove compatibility architecture
 
 Breaking changes are allowed.
 
@@ -1929,7 +1931,7 @@ When replacing an architecture, finish the replacement.
 
 Do not leave `old_*`, `legacy_*`, `v1`/`v2` duplication unless two versions are genuinely simultaneously required by an external protocol.
 
-# 51. Latest APIs, not newest-for-novelty
+## 51. Latest APIs, not newest-for-novelty
 
 Use current stable APIs.
 
@@ -1941,7 +1943,7 @@ A point release fixing compiler correctness should be treated as urgent.
 
 Modernization should reduce complexity, remove workarounds, improve safety, or unlock measurable performance.
 
-# 52. Tests belong with architecture
+## 52. Tests belong with architecture
 
 Whenever architecture changes, update tests at the same time.
 
@@ -1961,7 +1963,7 @@ Use:
 
 Do not create brittle tests that prevent future internal optimization without protecting behavior.
 
-# 53. Performance regression gates
+## 53. Performance regression gates
 
 Create a durable benchmark baseline.
 
@@ -1977,7 +1979,7 @@ Separate:
 
 Track history.
 
-# 54. Documentation follows the final architecture
+## 54. Documentation follows the final architecture
 
 Do not spend early effort documenting transitional states.
 
@@ -2005,7 +2007,7 @@ Do not write migration documentation unless it is genuinely needed.
 
 This is a research branch with breaking changes.
 
-# 55. Priority ordering for execution
+## 55. Priority ordering for execution
 
 Use this priority hierarchy.
 
@@ -2071,7 +2073,7 @@ Do these after architectural problems are addressed.
 
 Do not spend the run polishing cosmetic documentation while P0/P1 issues remain.
 
-# 56. Implementation loop for every work package
+## 56. Implementation loop for every work package
 
 For each meaningful change:
 
@@ -2100,7 +2102,7 @@ Never use:
 
 as completion evidence.
 
-# 57. Required final verification
+## 57. Required final verification
 
 Before declaring completion, run the complete relevant Velnor gates.
 
@@ -2130,7 +2132,7 @@ Do not certify source while testing an old deployed image.
 
 Record image digest and Velnor commit in fixture evidence.
 
-# 58. Completion criteria
+## 58. Completion criteria
 
 This goal is not complete because:
 
@@ -2143,7 +2145,7 @@ This goal is not complete because:
 
 It is complete only when all of the following are true.
 
-### Architecture
+## Architecture
 
 * major runner lifecycles have coherent ownership;
 * no known P0/P1 architectural defect remains without a demonstrated technical block;
@@ -2209,7 +2211,7 @@ It is complete only when all of the following are true.
 * docs match implementation;
 * independent Opus final reviewers have no unresolved high-severity finding.
 
-# 59. Required final report
+## 59. Required final report
 
 At the end produce one concise but evidence-rich engineering report containing:
 
@@ -2247,7 +2249,7 @@ At the end produce one concise but evidence-rich engineering report containing:
 
 Every benchmark claim must identify the environment and sample methodology.
 
-# 60. Final working rule
+## 60. Final working rule
 
 Do not stop after analysis.
 

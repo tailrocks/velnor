@@ -395,11 +395,11 @@ impl ExpressionSpan {
         self.end
     }
 
-    pub(crate) fn source<'a>(self, value: &'a str) -> &'a str {
+    pub(crate) fn source(self, value: &str) -> &str {
         &value[self.start..self.end]
     }
 
-    pub(crate) fn expression<'a>(self, value: &'a str) -> &'a str {
+    pub(crate) fn expression(self, value: &str) -> &str {
         &value[self.expression_start..self.expression_end]
     }
 }

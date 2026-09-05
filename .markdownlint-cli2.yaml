@@ -1,0 +1,8 @@
+# Repository markdown policy for the generated docs unit, which runs
+# markdownlint-cli2 with stock settings and auto-discovers this file.
+# MD013 (80-column source lines) is disabled: rendered markdown wraps on
+# its own, and bare URLs cannot be wrapped to fit any limit. Everything
+# else stays at default strictness.
+config:
+  default: true
+  MD013: false

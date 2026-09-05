@@ -1653,19 +1653,17 @@ fn validate_network_create_value(value: &Value) -> Result<()> {
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("Driver"))
         .map(|(_, value)| value)
+        && driver.as_str() != Some("bridge")
     {
-        if driver.as_str() != Some("bridge") {
-            bail!("Docker network create permits only the bridge driver");
-        }
+        bail!("Docker network create permits only the bridge driver");
     }
     if let Some(check_duplicate) = object
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("CheckDuplicate"))
         .map(|(_, value)| value)
+        && !check_duplicate.is_boolean()
     {
-        if !check_duplicate.is_boolean() {
-            bail!("Docker network create CheckDuplicate must be a boolean");
-        }
+        bail!("Docker network create CheckDuplicate must be a boolean");
     }
 
     for field in ["Internal", "Attachable", "Ingress", "EnableIPv6", "IPv6"] {
@@ -1673,10 +1671,9 @@ fn validate_network_create_value(value: &Value) -> Result<()> {
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(field))
             .map(|(_, value)| value)
+            && value.as_bool() != Some(false)
         {
-            if value.as_bool() != Some(false) {
-                bail!("Docker network create {field} must be false");
-            }
+            bail!("Docker network create {field} must be false");
         }
     }
 
@@ -1684,10 +1681,9 @@ fn validate_network_create_value(value: &Value) -> Result<()> {
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("Options"))
         .map(|(_, value)| value)
+        && !options.as_object().is_some_and(Map::is_empty)
     {
-        if !options.as_object().is_some_and(Map::is_empty) {
-            bail!("Docker network create Options must be empty");
-        }
+        bail!("Docker network create Options must be empty");
     }
     if let Some(ipam) = object
         .iter()
