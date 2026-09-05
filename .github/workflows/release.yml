@@ -282,6 +282,7 @@ jobs:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       SCCACHE_GHA_ENABLED: "false"
       SCCACHE_CACHE_SIZE: 20G
+      VELNOR_RELEASE_BUILD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -584,6 +585,7 @@ jobs:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       SCCACHE_GHA_ENABLED: "false"
       SCCACHE_CACHE_SIZE: 20G
+      VELNOR_RELEASE_BUILD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -650,8 +652,21 @@ jobs:
             --disable-strategies compile --no-confirm --force
           cargo-deb --version
 
-      - name: Build (release-build embeds source SHA + tag; fails on drift)
-        run: cargo zigbuild -p velnor-runner -p velnorctl -p velnor-tools --release --locked --features release-build --target ${{ matrix.target }}
+      - name: Build release binaries (identity + every deb asset)
+        run: |
+          set -euo pipefail
+          # release-build is a feature of velnor-runner and velnorctl only.
+          # The deb also ships velnor-tools and velnor-workflow, so build those
+          # packages explicitly without inventing a feature they do not own.
+          cargo zigbuild -p velnor-runner \
+            --bin velnor-runner --bin velnor-guest-agent \
+            --release --locked --features release-build --target "${{ matrix.target }}"
+          cargo zigbuild -p velnorctl \
+            --release --locked --features release-build --target "${{ matrix.target }}"
+          cargo zigbuild -p velnor-tools \
+            --release --locked --target "${{ matrix.target }}"
+          cargo zigbuild -p velnor-workflow \
+            --release --locked --target "${{ matrix.target }}"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
