@@ -2515,10 +2515,22 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
+    // One-shot modes keep fail-fast semantics. The packaged long-running
+    // daemon must keep its startup gate inside the same retry contract as the
+    // rest of daemon startup: a transient journal/filesystem failure must not
+    // turn into a systemd restart storm, while no slot may register until the
+    // gate succeeds.
+    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+    if supervised && let Ok(config_base) = daemon_config_dir(&args) {
+        start_drain_listener(config_base);
+    }
+
     // Reclaim credentials abandoned by a prior daemon before any slot can
     // accept a job. This runs once per daemon process, outside pass retries.
-    reap_stale_checkout_credentials()
-        .context("reap stale checkout credentials at daemon startup")?;
+    reap_checkout_credentials_at_startup(supervised).await?;
+    if draining() {
+        return Ok(());
+    }
 
     // Operator-facing fail-fast: a token that is structurally impossible
     // (missing, or a literal unexpanded ${...} placeholder — systemd
@@ -2534,16 +2546,6 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     {
         eprintln!("GITHUB_TOKEN problem: {problem}");
         crate::sd_notify::status(&format!("token problem: {problem}"));
-    }
-
-    // One-shot modes (dry runs, --once, no-URL local mode) keep their
-    // fail-fast semantics: they are used by tests and tooling that must see
-    // errors. The packaged long-running daemon (url + not once + not dry-run)
-    // must never give up — every failure is retried with backoff forever.
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
-
-    if supervised && let Ok(config_base) = daemon_config_dir(&args) {
-        start_drain_listener(config_base);
     }
 
     // P1: host the GitHub cache contract when the operator enables it. The
@@ -2609,6 +2611,40 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Reclaim abandoned checkout credentials before daemon registration.
+///
+/// One-shot invocations return the error immediately so callers receive a
+/// truthful failure. A supervised daemon retries the same startup gate with
+/// the normal bounded backoff and drain handling; it never accepts work while
+/// the credential journal cannot be inspected.
+async fn reap_checkout_credentials_at_startup(supervised: bool) -> Result<()> {
+    let mut attempt = 0_u32;
+    loop {
+        match reap_stale_checkout_credentials()
+            .context("reap stale checkout credentials at daemon startup")
+        {
+            Ok(_) => return Ok(()),
+            Err(error) if !supervised => return Err(error),
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                let delay = supervised_retry_delay_for_error(attempt, &error);
+                let detail = sanitized_retry_error(&error);
+                eprintln!(
+                    "daemon startup credential reap failed: {detail}; retrying in {}s",
+                    delay.as_secs()
+                );
+                crate::sd_notify::status(&format!(
+                    "startup credential cleanup failing; retrying in {}s",
+                    delay.as_secs()
+                ));
+                if sleep_slot_retry_or_drain(delay).await {
+                    return Ok(());
                 }
             }
         }
