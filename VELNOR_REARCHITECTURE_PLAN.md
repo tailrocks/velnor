@@ -4342,3 +4342,33 @@ worktree remains clean at
 Keep the dirty checkout-hydration worktree named in §93 untouched. Commit
 small, sign with `git commit -s`, include the Codex co-author trailer, and push
 only after checking `HEAD...origin/perf/docker-rust-mbx` parity.
+
+## 95. Third restart handoff — merge worktree partially edited — 2026-09-05
+
+This pause occurred during the next continuation attempt:
+
+- Canonical Velnor is still clean at
+  `perf/docker-rust-mbx@976516fd65b875acacca7e864479cedcd778f2a6`, equal to
+  `origin/perf/docker-rust-mbx` (`0/0`). No canonical code change was made in
+  this attempt.
+- `origin/main` remains
+  `008be2bd9143c9e10afadfa128fb04a389f26133` and is not merged.
+- The isolated merge worktree is
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current`
+  on `codex/merge-main-20260905`. It still contains the merge of `origin/main`
+  into `f5f28ca`, with 18 generated workflow files unmerged. A resolver made
+  partial working-tree edits in those files, but no commit exists. Preserve
+  this worktree and inspect its conflict markers/stages before continuing; do
+  not abort, reset, stash, or delete it casually.
+- Five audit workers and one workflow resolver were halted. No Docker
+  cancellation fix or other implementation from this attempt reached the
+  canonical branch.
+
+The next run should resume from §95, resolve and review the isolated merge
+first, then stage one coherent merge commit only after generated-state,
+workflow, Rust, and verifier checks pass. Keep canonical Velnor at the path
+above, keep the verifier at
+`/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-actions-fixture`
+on its clean `codex/verifier-completion-fixes` branch, and keep the dirty
+checkout-hydration worktree untouched. The complete architecture objective is
+still open.
