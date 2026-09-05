@@ -3946,7 +3946,7 @@ passes, along with the runner compile gate and focused container, budget, and
 GitHub-adapter suites.
 
 The legacy slot-directory discovery helpers remain only under test
-configuration to document the rejected failure mode. Full runner completion is
-still open: one intermittent `git_mirror` lease test currently reports
-`WouldBlock` under the complete suite and is being investigated before any
-lock-related change.
+configuration to document the rejected failure mode. The first complete-suite
+run saw one transient `git_mirror` lease-test `WouldBlock`; its exact targeted
+test and a clean complete-suite rerun passed. The runner library gate now
+passes `1577` tests with one ignored, so no lock-related code change was made.
