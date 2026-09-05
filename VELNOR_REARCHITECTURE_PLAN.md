@@ -3932,8 +3932,7 @@ its worktree at `refs/archive/worktree/checkout-hydration-errors-20260905`.
 The non-ancestor MBX scenario branch was likewise preserved at
 `refs/archive/branch/codex-scenario-mbx-requirements-20260905`; it remains
 unmerged because its host-side MBX probe cannot prove the in-container default
-job path. Authoritative typed slot-count propagation remains the next resource
-correctness gate.
+job path. Authoritative typed slot-count propagation is recorded in §75.
 
 ## 75. Authoritative slot topology carried into every job — 2026-09-05
 
@@ -3950,3 +3949,18 @@ configuration to document the rejected failure mode. The first complete-suite
 run saw one transient `git_mirror` lease-test `WouldBlock`; its exact targeted
 test and a clean complete-suite rerun passed. The runner library gate now
 passes `1577` tests with one ignored, so no lock-related code change was made.
+
+## 76. Mise seed containers use the bounded ownership boundary — 2026-09-05
+
+`b3fb6f2` replaces the legacy raw `docker create`/`docker cp`/`docker rm`
+sequence with the existing bounded `docker run --rm` seed command. The
+transient container now carries daemon/job labels, a deterministic seed name,
+and the package cgroup parent; a per-store lock serializes sibling-slot seeds,
+and startup reclaim includes the named seed class. The selected job image is
+seeded, rather than silently using only the daemon default.
+
+Focused seed/container checks, the runner compile gate, and the full runner
+library suite passed serially (`1577` passed, one ignored). Parallel full-suite
+runs intermittently hit unrelated filesystem lock-test contention; each
+affected test passes exactly in isolation, so no speculative lock patch was
+made.
