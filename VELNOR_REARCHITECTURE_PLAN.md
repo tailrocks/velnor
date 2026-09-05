@@ -4200,3 +4200,13 @@ full runner library gate passes when its two existing timing-sensitive tests
 are rerun in isolation (`1580` parallel tests passed; both isolated reruns
 passed). This closes Host-header cache URL poisoning; cross-daemon cache
 storage synchronization and bounded cache reclamation remain separate work.
+
+## 92. Parallel runner verification wording corrected — 2026-09-05
+
+Section 91's shorthand "full runner library gate passes" was imprecise. The
+parallel invocation executed `1583` tests: `1580` passed, while
+`git_mirror::tests::checkout_reader_lease_blocks_mirror_repair` and
+`runner::tests::action_admission_slots_are_concurrent_and_waiting` failed on
+timing-sensitive assertions. Each exact test passed when rerun in isolation;
+the cache change did not touch either path. The result is recorded as a
+parallel-scheduling flake, not a clean parallel gate.
