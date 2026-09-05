@@ -4052,8 +4052,9 @@ their mutually exclusive sccache store and disable MBX.
 
 The existing preflight regression now asserts the MBX probe alongside the
 other required job tools. This proves the configured default image contract;
-workflow-specific image overrides remain subject to their own image contract.
-The focused preflight test, formatting, and diff checks pass.
+workflow-specific `container.image` overrides are not covered by this startup
+probe and need a separate job-image capability contract. The focused preflight
+test, formatting, and diff checks pass.
 
 ## 83. Current-toolchain lint fixes are carried into the canonical branch — 2026-09-05
 
@@ -4064,3 +4065,19 @@ the journal schema helper. The entire stale line was not merged because it is
 based on `b5c666f` and would replace the current rearchitecture's workflow and
 fixture policy. The ported source fixes are independently verified by all
 control tests (`268` passed) and clippy with `-D warnings`.
+
+## 84. Stale parallel refs remain recoverable — 2026-09-05
+
+The final branch/worktree audit found no unmerged sibling tip beyond the
+already archived MBX-scenario experiment and no lost checkout-hydration edits;
+all other local worktree tips are ancestors of `perf/docker-rust-mbx`. The old
+clone at `/Users/donbeave/Projects/donbeave/velnor` is clean and its
+`ae72e3a` tip is an ancestor of the canonical branch.
+
+The remote `origin/main` snapshot and the parallel
+`origin/chore/setup-velnor-workflow-action` line remain non-ancestors because
+they carry an older workflow snapshot plus unreviewed setup-action/fixture
+policy changes. Their exact current heads are preserved under
+`refs/archive/remote/`; no branch or worktree was deleted, pruned, reset, or
+force-pushed. Only the independently verified current-toolchain lint fixes were
+ported to the canonical branch.
