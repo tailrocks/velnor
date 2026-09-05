@@ -4113,3 +4113,17 @@ runner migration is claimed by this package.
 The follow-up `27fc38b` adds the runner's `U+0085`, `U+2028`, and `U+2029`
 JSON control-character escapes and vectors for them. The model redaction
 package now has ten focused tests passing; no runner call site was changed.
+
+## 87. Verifier capability provenance synchronized — 2026-09-05
+
+The verifier refresh was rerun through its supported
+`VELNOR_SOURCE_DIR=... just refresh-capability-baseline` recipe against
+canonical Velnor `perf/docker-rust-mbx@c57786af83a65428ca697cf5867abcdc26eb9539`.
+It re-exported manifest v12 from crate `0.1.250`, preserved capability identity
+`23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and
+passed the readiness audit. The only generated change was
+`coverage/velnor-capabilities.json` provenance; verifier commit
+`62fc276ec4c99524e43fa9c9fa9e40f04a04aef3` is pushed to
+`codex/verifier-completion-fixes`. Its contract audit, 50 Python tests, and
+diff check pass. This is provenance synchronization, not a capability-content
+change or a claim that full Velnor production readiness is complete.
