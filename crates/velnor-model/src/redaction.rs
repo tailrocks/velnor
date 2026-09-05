@@ -139,7 +139,7 @@ impl SecretMasker {
                     continue;
                 };
                 let start = cursor + offset;
-                let should_select = selected.map_or(true, |(selected_start, selected_pattern)| {
+                let should_select = selected.is_none_or(|(selected_start, selected_pattern)| {
                     start < selected_start
                         || (start == selected_start && pattern.len() > selected_pattern.len())
                 });

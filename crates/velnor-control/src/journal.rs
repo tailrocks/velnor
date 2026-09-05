@@ -2662,9 +2662,10 @@ fn repair_historic_jobs_shape(tx: &rusqlite::Transaction<'_>, stored: u32) -> St
     Ok(())
 }
 
-fn job_schema_columns(
-    conn: &Connection,
-) -> StoreResult<Vec<(String, String, i64, Option<String>, i64)>> {
+/// One `PRAGMA table_info` row: name, type, not-null, default, primary-key flag.
+type TableColumn = (String, String, i64, Option<String>, i64);
+
+fn job_schema_columns(conn: &Connection) -> StoreResult<Vec<TableColumn>> {
     let mut statement = conn.prepare("PRAGMA table_info(jobs)")?;
     Ok(statement
         .query_map([], |row| {
