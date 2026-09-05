@@ -25,11 +25,16 @@ fn is_docker_control_env(name: &str) -> bool {
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
 }
 
-fn append_flags_without_cpu(command: &mut impl FlagSink, options: &[String]) {
+fn append_flags_without_limits(
+    command: &mut impl FlagSink,
+    options: &[String],
+    strip_cpu: bool,
+    strip_memory: bool,
+) {
     let mut index = 0;
     while index < options.len() {
         let option = &options[index];
-        if option == "--cpus" {
+        if strip_cpu && option == "--cpus" {
             index += 1;
             if options
                 .get(index)
@@ -39,13 +44,98 @@ fn append_flags_without_cpu(command: &mut impl FlagSink, options: &[String]) {
             }
             continue;
         }
-        if option.starts_with("--cpus=") {
+        if strip_cpu && option.starts_with("--cpus=") {
+            index += 1;
+            continue;
+        }
+        if strip_memory && option == "--memory" {
+            index += 1;
+            if options
+                .get(index)
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if strip_memory && option.starts_with("--memory=") {
             index += 1;
             continue;
         }
         command.flag(option.clone());
         index += 1;
     }
+}
+
+fn parse_memory_options(options: &[String]) -> io::Result<Vec<u64>> {
+    let mut limits = Vec::new();
+    let mut index = 0;
+    while index < options.len() {
+        let option = &options[index];
+        let value = if option == "--memory" {
+            let value = options.get(index + 1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "docker --memory option is missing its value",
+                )
+            })?;
+            if value.starts_with('-') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "docker --memory option has an invalid value",
+                ));
+            }
+            index += 2;
+            value.as_str()
+        } else if let Some(value) = option.strip_prefix("--memory=") {
+            index += 1;
+            value
+        } else {
+            index += 1;
+            continue;
+        };
+        let Some(bytes) = parse_docker_memory_bytes(value) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "docker --memory option has an invalid value",
+            ));
+        };
+        limits.push(bytes);
+    }
+    Ok(limits)
+}
+
+/// Parse the RAM units accepted by Docker's `--memory` flag. Normalize to
+/// bytes before comparing limits so a larger textual unit cannot bypass the
+/// derived per-slot cap.
+fn parse_docker_memory_bytes(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    if number.is_empty() || number == "." || number.matches('.').count() > 1 {
+        return None;
+    }
+    let number = number.parse::<f64>().ok()?;
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+    let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        "" | "b" => 1_u64,
+        "k" | "kb" | "ki" | "kib" => 1_u64 << 10,
+        "m" | "mb" | "mi" | "mib" => 1_u64 << 20,
+        "g" | "gb" | "gi" | "gib" => 1_u64 << 30,
+        "t" | "tb" | "ti" | "tib" => 1_u64 << 40,
+        "p" | "pb" | "pi" | "pib" => 1_u64 << 50,
+        _ => return None,
+    };
+    let bytes = number * multiplier as f64;
+    if !bytes.is_finite() || bytes < 1.0 || bytes > u64::MAX as f64 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(bytes.floor() as u64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,8 +157,9 @@ pub struct JobContainerSpec {
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
     pub env: Vec<(String, String)>,
-    /// Daemon-enforced Docker resource limits. CPU limits are normalized with
-    /// workflow createOptions into one runner-owned value before emission.
+    /// Daemon-enforced Docker resource limits. CPU and memory limits are
+    /// normalized with workflow createOptions into runner-owned values before
+    /// emission.
     pub resource_options: Vec<String>,
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
@@ -140,6 +231,17 @@ impl JobContainerSpec {
             .min_by(f64::total_cmp)
     }
 
+    /// The tightest valid Docker memory limit declared by the operator or
+    /// workflow createOptions. Invalid or incomplete limits are rejected by
+    /// `start_args` instead of being silently dropped while enforcing policy.
+    fn declared_container_memory(&self) -> io::Result<Option<u64>> {
+        let mut limits = Vec::new();
+        for options in [&self.options, &self.resource_options] {
+            limits.extend(parse_memory_options(options)?);
+        }
+        Ok(limits.into_iter().min())
+    }
+
     /// The share of the machine this job may use.
     ///
     /// The packaged `velnor-jobs.slice` quota is an *aggregate* ceiling for
@@ -180,17 +282,50 @@ impl JobContainerSpec {
     /// limit with the runner-derived hard cap. Docker's last duplicate flag
     /// wins, so leaving an operator value in argv would let it silently defeat
     /// the smaller per-slot limit.
-    fn append_container_options(&self, command: &mut DockerCommand, budget: &SlotBudget) {
-        if let Some(cpu_option) = budget.docker_cpu_option() {
-            append_flags_without_cpu(command, &self.options);
-            append_flags_without_cpu(command, &self.resource_options);
-            command.flags(cpu_option);
+    fn append_container_options(
+        &self,
+        command: &mut DockerCommand,
+        budget: &SlotBudget,
+    ) -> io::Result<()> {
+        let cpu_option = budget.docker_cpu_option();
+        let memory_cap = budget
+            .memory_bytes
+            .value()
+            .copied()
+            .filter(|bytes| *bytes > 0);
+        let declared_memory = self.declared_container_memory()?;
+
+        if cpu_option.is_some() || memory_cap.is_some() {
+            append_flags_without_limits(
+                command,
+                &self.options,
+                cpu_option.is_some(),
+                memory_cap.is_some(),
+            );
+            append_flags_without_limits(
+                command,
+                &self.resource_options,
+                cpu_option.is_some(),
+                memory_cap.is_some(),
+            );
         } else {
             // No derived hard cap exists. Retain explicit policy instead of
             // widening the container by deleting the only known limit.
             command.flags(self.options.iter().cloned());
             command.flags(self.resource_options.iter().cloned());
         }
+
+        if let Some(cpu_option) = cpu_option {
+            command.flags(cpu_option);
+        }
+        if let Some(memory_cap) = memory_cap {
+            // An explicit operator/workflow value may narrow the derived
+            // share, never widen it. The final Docker flag is the one source
+            // of truth after all user options have been expanded.
+            let memory = declared_memory.map_or(memory_cap, |declared| declared.min(memory_cap));
+            command.flags(["--memory".to_owned(), memory.to_string()]);
+        }
+        Ok(())
     }
 
     /// Daemon-derived CPU and memory budget for this job.
@@ -391,7 +526,7 @@ impl JobContainerSpec {
         }
         self.append_ownership_labels(args);
         let budget = self.slot_budget();
-        self.append_container_options(args, &budget);
+        self.append_container_options(args, &budget)?;
         // Docker creates the actual workload in dockerd's cgroup, not in the
         // Velnor worker process. Keep the outer job below the package-owned
         // aggregate cap; the job lease proxy applies the same policy to
@@ -1514,6 +1649,12 @@ mod tests {
         assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
         let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
         assert_eq!(args[cpus_index + 1], jobs);
+        if let Some(memory) = job.slot_budget().memory_bytes.value().copied() {
+            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
+            assert_eq!(args[memory_index + 1], memory.to_string());
+        } else {
+            assert!(!args.iter().any(|arg| arg == "--memory"));
+        }
         assert!(args.iter().any(|arg| arg.starts_with("VELNOR_JOB_BUDGET=")));
     }
 
@@ -1586,12 +1727,73 @@ mod tests {
         assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
         assert!(args.windows(2).any(|pair| pair == expected.as_slice()));
         assert!(!args.iter().any(|arg| arg == "--cpus=64"));
-        assert!(args
-            .windows(2)
-            .any(|pair| pair[0] == "--memory" && pair[1] == "8g"));
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected_memory = derived_memory
+                .min(parse_docker_memory_bytes("8g").unwrap())
+                .to_string();
+            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "--memory" && pair[1] == expected_memory));
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        }
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--label" && pair[1] == "workflow"));
+    }
+
+    #[test]
+    fn a_declared_memory_limit_narrows_the_share() {
+        let mut job = spec();
+        job.options = vec!["--memory=1m".into()];
+        job.resource_options.clear();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected = derived_memory.min(1 << 20).to_string();
+            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "--memory" && pair[1] == expected));
+        } else {
+            assert!(args.iter().any(|arg| arg == "--memory=1m"));
+        }
+    }
+
+    #[test]
+    fn a_large_declared_memory_limit_cannot_widen_the_share() {
+        let mut job = spec();
+        job.options = vec!["--memory".into(), "64t".into()];
+        job.resource_options.clear();
+        let expected = job.slot_budget().memory_bytes.value().copied();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        if let Some(expected) = expected {
+            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
+            assert_eq!(args[memory_index + 1], expected.to_string());
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "64t"]));
+        }
+    }
+
+    #[test]
+    fn invalid_declared_memory_limit_fails_closed() {
+        let mut job = spec();
+        job.options = vec!["--memory".into(), "not-a-size".into()];
+        job.resource_options.clear();
+        let error = job.start_args().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn docker_memory_units_normalize_before_comparison() {
+        assert_eq!(parse_docker_memory_bytes("123"), Some(123));
+        assert_eq!(parse_docker_memory_bytes("1.5g"), Some(1_610_612_736));
+        assert_eq!(parse_docker_memory_bytes("512MiB"), Some(536_870_912));
+        assert_eq!(parse_docker_memory_bytes("0"), None);
+        assert_eq!(parse_docker_memory_bytes("-1g"), None);
+        assert_eq!(parse_docker_memory_bytes("garbage"), None);
     }
 
     #[test]
@@ -1884,7 +2086,14 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
-        assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected_memory = derived_memory.min(parse_docker_memory_bytes("8g").unwrap());
+            assert!(args
+                .windows(2)
+                .any(|pair| { pair[0] == "--memory" && pair[1] == expected_memory.to_string() }));
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        }
         let lease_mount = format!(
             "{}:/var/run/docker.sock",
             job.guest_docker_socket_host().display()

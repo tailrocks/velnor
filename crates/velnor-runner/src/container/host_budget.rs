@@ -231,6 +231,19 @@ impl SlotBudget {
             .map(|milli| ["--cpus".to_owned(), format_cpu_milli(*milli)])
     }
 
+    /// `--memory` for this job's container, when the budget is known.
+    ///
+    /// The environment value below sizes mbx, but it cannot stop a compiler,
+    /// linker, service, or nested Docker container from consuming the whole
+    /// aggregate cgroup. Keep the Docker limit in exact bytes so rounding
+    /// never widens the slot's share.
+    pub(crate) fn docker_memory_option(&self) -> Option<[String; 2]> {
+        self.memory_bytes
+            .value()
+            .filter(|bytes| **bytes > 0)
+            .map(|bytes| ["--memory".to_owned(), bytes.to_string()])
+    }
+
     /// The environment that makes the budget real inside the job.
     ///
     /// * `CARGO_BUILD_JOBS` is Cargo's own job cap, and mbx documents it as the
@@ -757,6 +770,19 @@ mod tests {
                 .into_iter()
                 .find(|(name, _)| name == "MBX_SCHEDULER_MEMORY"),
             Some(("MBX_SCHEDULER_MEMORY".to_owned(), "3481MiB".to_owned()))
+        );
+    }
+
+    #[test]
+    fn memory_share_has_an_exact_docker_limit() {
+        let root = SyntheticRoot::new("memory_share_has_an_exact_docker_limit");
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        let budget = HostBudget::observe(root.path(), Some(8));
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        let expected = (16_777_216_u64 * 1024 / 100 * 85) / 4;
+        assert_eq!(
+            slot.docker_memory_option(),
+            Some(["--memory".to_owned(), expected.to_string()])
         );
     }
 
