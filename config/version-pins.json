@@ -43,10 +43,6 @@
           "pattern": "sccache v?(?<version>[0-9][0-9.]*)"
         },
         {
-          "file": ".github/workflows/ci-rust-fixture.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
           "file": ".github/workflows/ci-rust-policy.yml",
           "pattern": "version: v(?<version>[0-9][0-9.]*)"
         },
