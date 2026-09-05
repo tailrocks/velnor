@@ -103,31 +103,24 @@ version, job image digest, and the runner configuration including slot count.
 driver's observable set, so a container-only measurement can never be read as a
 claim about job acquisition latency.
 
-## Instrumentation the product still owes this harness
+## Instrumentation boundary
 
-Both of these are in files owned by other work in flight, so they are recorded
-here rather than applied.
+The runner already records per-job host-Docker metrics at its `CommandRunner`
+seam. The benchmark still needs a trusted bridge that reads those typed
+`velnor.docker` fields into `BenchRecord`; the harness's `sys::Runner` counters
+must not be presented as the runner's process census.
 
-### 1. A `CommandRunner` decorator for the per-job process census
+### 1. Consume the runner's per-job Docker metrics
 
 `crates/velnor-runner/src/executor.rs` defines `trait CommandRunner` as the
-single choke point for every host process spawn. A counting decorator around it
-is the only place that can produce a *per-job* Docker invocation count and
-per-call latency without touching a single call site:
+single choke point for every host process spawn. The product-side
+`crates/velnor-runner/src/docker/metrics.rs` scope records invocation count,
+closed operation class, latency, timeout, and exit status, and emits totals on
+all job exits. Wire those fields into the benchmark's Docker observations; do
+not recreate a second call-site counter.
 
-```rust
-pub struct CountingRunner<R: CommandRunner> {
-    inner: R,
-    counts: BTreeMap<String, u64>,   // program -> invocations
-    latencies: Vec<(String, Duration)>,
-}
-```
-
-It must wrap every method that spawns (`run`, `run_timeout`, `run_with_env`,
-`run_streaming*`, `run_with_stdin*`, `spawn`), because the default method bodies
-delegate but the implementations override them. Until it exists, this crate's
-`sys::Runner` counts only the processes *the harness itself* spawns, which is a
-strict subset of a real job's process count.
+Until that bridge exists, this crate's `sys::Runner` counts only processes the
+harness itself spawns, which is a strict subset of a real job's process count.
 
 ### 2. Per-phase checkout spans and GIT_TRACE2 counters
 
