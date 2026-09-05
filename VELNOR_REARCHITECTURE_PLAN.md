@@ -3995,3 +3995,18 @@ The full serial runner library gate passes (`1578` passed, `1` ignored), and
 all-target compile, format, and diff checks pass. The generated workflow
 ownership boundary is preserved; the disabled release state is not silently
 treated as a successful publisher.
+
+## 79. Reap abandoned checkout credentials at daemon startup — 2026-09-05
+
+`f5914c4` calls `checkout::reap_stale_checkout_credentials()` once from the
+daemon startup path, before runner registration and broker polling. Checkout
+steps still retain their per-step fail-closed reaper call, but an idle daemon
+no longer waits for the next checkout before removing credentials left by a
+crashed process. Reaper failures stop daemon startup instead of allowing a
+runner to accept work while stale credential state is uninspectable.
+
+The change is limited to the existing daemon boundary; direct one-shot runs
+and child job passes do not acquire a second startup sweep. Formatting,
+`git diff --check`, the all-target runner compile gate, and the focused
+abandoned-credential test pass. No unstable daemon-startup integration test
+was added because the current startup path has no network-free seam.
