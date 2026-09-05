@@ -3905,3 +3905,15 @@ consolidated post-tip test or CI result is recorded in the commit history, and
 this documentation-only update ran no code tests; therefore no passing-suite
 claim is made. The existing live Docker/disposable-daemon, child-process census,
 VelnorJob, and default-MBX job-image evidence gates remain open.
+
+## 73. Expression, caller, Docker-network, and test hardening — 2026-09-05
+
+The follow-on hardening landed in `3e5d143` (fail-closed expression
+interpolation), `684506a` (production callers use checked interpolation), and
+`27b8aa7` (Docker job network-create payload allowlist). Test alignment landed
+in `0f6ed83` (resource-flag assertions) and `d1da77f` (forced cancellation
+target phase). Stopped-agent state remains archived at
+`refs/archive/canonical/stopped-agents-20260905`.
+
+Checks passed. Targeted test execution was blocked by host Cargo saturation;
+full completion is not claimed.
