@@ -38,7 +38,7 @@ use crate::{
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
         checkout_plan, checkout_plans, checkout_step_id, cleanup_checkout_credentials,
-        configure_safe_directory, CheckoutPlan,
+        configure_safe_directory, reap_stale_checkout_credentials, CheckoutPlan,
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
@@ -2514,6 +2514,11 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
+
+    // Reclaim credentials abandoned by a prior daemon before any slot can
+    // accept a job. This runs once per daemon process, outside pass retries.
+    reap_stale_checkout_credentials()
+        .context("reap stale checkout credentials at daemon startup")?;
 
     // Operator-facing fail-fast: a token that is structurally impossible
     // (missing, or a literal unexpanded ${...} placeholder — systemd
