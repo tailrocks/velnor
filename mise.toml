@@ -63,7 +63,7 @@ grep -q "^  push:" "$workflow"
 grep -q "      - 'v\\[0-9\\]\\*'" "$workflow"
 grep -q -- "--features release-build" "$workflow"
 grep -q "tailrocks/velnor-actions/.github/workflows/package-signer.yml@" "$workflow"
-grep -q "tailrocks/velnor-apt" "$docs"
+grep -q "apt-get install" "$docs"
 """
 
 [tasks.actionlint]
