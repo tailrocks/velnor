@@ -296,8 +296,40 @@ impl TerminationTarget {
     pub const fn termination_rank(&self) -> u8 {
         match self {
             Self::Hook { .. } => 0,
-            _ => 1,
+            Self::ProcessGroup { .. } => 1,
+            Self::Container {
+                role: ContainerRole::DockerAction | ContainerRole::BuildKit,
+                ..
+            } => 2,
+            Self::Container {
+                role: ContainerRole::Job | ContainerRole::Service,
+                ..
+            } => 3,
         }
+    }
+
+    /// Deterministic ordering within one fan-out pass.
+    fn termination_order(&self) -> (u8, u8) {
+        let subrank = match self {
+            Self::Hook { .. } | Self::ProcessGroup { .. } => 0,
+            Self::Container {
+                role: ContainerRole::DockerAction,
+                ..
+            } => 0,
+            Self::Container {
+                role: ContainerRole::BuildKit,
+                ..
+            } => 1,
+            Self::Container {
+                role: ContainerRole::Job,
+                ..
+            } => 0,
+            Self::Container {
+                role: ContainerRole::Service,
+                ..
+            } => 1,
+        };
+        (self.termination_rank(), subrank)
     }
 
     /// Stable identity used for deduplication and log lines.
@@ -440,13 +472,24 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
 /// that a fast exit is observed promptly, long enough not to spin.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+fn deadline_after(start: Instant, duration: Duration) -> Instant {
+    start.checked_add(duration).unwrap_or(start)
+}
+
+fn wait_until_deadline(deadline: Instant, now: &dyn Fn() -> Instant, sleep: &dyn Fn(Duration)) {
+    let remaining = deadline.saturating_duration_since(now());
+    if !remaining.is_zero() {
+        sleep(remaining);
+    }
+}
+
 fn wait_until_gone(
     alive: &dyn Fn() -> bool,
     grace: Duration,
     deadline: Instant,
     sleep: &dyn Fn(Duration),
 ) -> bool {
-    let until = (Instant::now() + grace).min(deadline);
+    let until = deadline_after(Instant::now(), grace).min(deadline);
     loop {
         if !alive() {
             return true;
@@ -588,16 +631,24 @@ struct Registry {
     /// cancelled job sends a second kill to a container that is already gone
     /// and records a duplicate outcome.
     terminated: std::collections::HashSet<u64>,
+    /// Targets currently being processed by another fan-out pass. A failed
+    /// target is removed from this set and stays eligible for the next pass.
+    in_flight: std::collections::HashSet<u64>,
 }
 
 struct Inner {
     level: AtomicU8,
     reason: Mutex<Option<CancelReason>>,
+    /// Serializes request-time state capture so the absolute forced deadline
+    /// is recorded before any fan-out worker can start.
+    request_state: Mutex<()>,
     /// Delay from the first request to forced escalation, seeded from the
     /// server-supplied cancel timeout.
     /// Millis until forced escalation. Mutable because the grace arrives with
     /// the server's cancellation message, after the token exists.
     forced_after_ms: AtomicU64,
+    /// Absolute monotonic deadline captured at the first cancellation request.
+    forced_deadline: Mutex<Option<Instant>>,
     registry: Mutex<Registry>,
     next_id: AtomicU64,
     /// Set once so repeated cancellation never starts a second fan-out.
@@ -698,9 +749,11 @@ impl JobCancellation {
         Self(Arc::new(Inner {
             level: AtomicU8::new(CancelLevel::None.as_u8()),
             reason: Mutex::new(None),
+            request_state: Mutex::new(()),
             forced_after_ms: AtomicU64::new(
                 u64::try_from(forced_after.as_millis()).unwrap_or(u64::MAX),
             ),
+            forced_deadline: Mutex::new(None),
             registry: Mutex::new(Registry::default()),
             next_id: AtomicU64::new(0),
             fan_out_started: AtomicBool::new(false),
@@ -753,6 +806,14 @@ impl JobCancellation {
         Duration::from_millis(self.0.forced_after_ms.load(Ordering::SeqCst))
     }
 
+    fn forced_deadline(&self) -> Option<Instant> {
+        *self
+            .0
+            .forced_deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Replace the grace before escalation with the one the server asked for.
     ///
     /// Upstream's `JobCancelMessage` carries a timeout and the listener honours
@@ -761,7 +822,12 @@ impl JobCancellation {
     /// escalation timer is already running, so a late message cannot extend a
     /// cancellation that is already counting down.
     pub fn set_forced_after(&self, grace: Duration) {
-        if self.0.fan_out_started.load(Ordering::SeqCst) {
+        let _request_state = self
+            .0
+            .request_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.is_cancelled() || self.0.fan_out_started.load(Ordering::SeqCst) {
             return;
         }
         self.0.forced_after_ms.store(
@@ -777,29 +843,44 @@ impl JobCancellation {
     /// stands and no second fan-out starts, which is what keeps a cancel storm
     /// from turning into a signal storm.
     pub fn request(&self, reason: CancelReason) -> bool {
-        let transitioned = self
-            .0
-            .level
-            .compare_exchange(
-                CancelLevel::None.as_u8(),
-                CancelLevel::Requested.as_u8(),
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_ok();
-        if transitioned {
-            *self
+        let (transitioned, should_spawn) = {
+            let _request_state = self
                 .0
-                .reason
+                .request_state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
-        }
-        if self
-            .0
-            .fan_out_started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transitioned = self
+                .0
+                .level
+                .compare_exchange(
+                    CancelLevel::None.as_u8(),
+                    CancelLevel::Requested.as_u8(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok();
+            if transitioned {
+                *self
+                    .0
+                    .reason
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
+                let deadline = deadline_after(Instant::now(), self.forced_after());
+                *self
+                    .0
+                    .forced_deadline
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(deadline);
+            }
+            let should_spawn = self.level() != CancelLevel::Forced
+                && self
+                    .0
+                    .fan_out_started
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok();
+            (transitioned, should_spawn)
+        };
+        if should_spawn {
             self.spawn_fan_out();
         }
         transitioned
@@ -807,14 +888,24 @@ impl JobCancellation {
 
     /// Escalate to `Forced` without waiting for the grace period.
     pub fn force(&self) {
+        self.force_at(Instant::now());
+    }
+
+    fn force_at(&self, deadline: Instant) {
+        let _request_state = self
+            .0
+            .request_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.0
             .level
             .store(CancelLevel::Forced.as_u8(), Ordering::SeqCst);
+        drop(_request_state);
         // Escalation means "kill what the request deliberately spared". Setting
         // the level alone would leave the job and service containers alive
         // until something else happened to sweep, which is the leak this level
         // exists to close.
-        self.fan_out_once();
+        self.fan_out_once_at(Some(deadline));
     }
 
     /// Register a target with the fan-out. The registration removes it on drop.
@@ -849,6 +940,7 @@ impl JobCancellation {
         // termination mark here keeps the set bounded by the live registry
         // rather than by the number of targets the job ever created.
         registry.terminated.remove(&id);
+        registry.in_flight.remove(&id);
     }
 
     /// Targets currently registered, for tests and forensics.
@@ -876,26 +968,58 @@ impl JobCancellation {
 
     fn spawn_fan_out(&self) {
         let token = self.clone();
-        let forced_after = self.forced_after();
-        let spawned = std::thread::Builder::new()
+        let forced_deadline = self
+            .forced_deadline()
+            .unwrap_or_else(|| deadline_after(Instant::now(), self.forced_after()));
+        let initial_token = token.clone();
+        let initial_spawned = std::thread::Builder::new()
             .name("velnor-cancel-ladder".into())
             .spawn(move || {
-                token.fan_out_once();
-                // Everything that survived the ladder gets one forced pass at
-                // the server-supplied deadline, mirroring the listener's
-                // cancel-then-hard-kill pair
-                // (`src/Runner.Listener/JobDispatcher.cs:1280-1285`).
-                std::thread::sleep(forced_after);
-                if token.is_cancelled() {
-                    token.force();
-                    token.fan_out_once();
+                initial_token.fan_out_once_at(Some(forced_deadline));
+                // If the deadline watcher had to skip a target still being
+                // processed by this pass, retry it after the in-flight work
+                // releases its claim.
+                if initial_token.is_forced() {
+                    initial_token.fan_out_once_at(Some(forced_deadline));
                 }
             });
-        if let Err(error) = spawned {
+        let timer_token = token;
+        let timer_spawned = std::thread::Builder::new()
+            .name("velnor-cancel-deadline".into())
+            .spawn(move || {
+                wait_until_deadline(forced_deadline, &|| Instant::now(), &|duration| {
+                    std::thread::sleep(duration)
+                });
+                if timer_token.is_cancelled() {
+                    // Everything that survived the ladder gets one forced pass
+                    // at the absolute deadline, mirroring the listener's
+                    // cancel-then-hard-kill pair
+                    // (`src/Runner.Listener/JobDispatcher.cs:1280-1285`).
+                    timer_token.force_at(forced_deadline);
+                }
+            });
+        if let Err(error) = initial_spawned {
             // A host that cannot spawn a thread still has to terminate the job:
-            // run the fan-out inline rather than leaving it running.
+            // run the initial fan-out inline rather than leaving it running.
             eprintln!("cancellation ladder thread could not be spawned ({error}); running inline");
-            self.fan_out_once();
+            self.fan_out_once_at(Some(forced_deadline));
+            if self.is_forced() {
+                self.fan_out_once_at(Some(forced_deadline));
+            }
+        }
+        if let Err(error) = timer_spawned {
+            // Preserve the absolute deadline even if the timer thread cannot
+            // be created. This rare fallback may block the request caller, but
+            // it cannot silently extend or omit forced escalation.
+            eprintln!(
+                "cancellation deadline thread could not be spawned ({error}); waiting inline"
+            );
+            wait_until_deadline(forced_deadline, &|| Instant::now(), &|duration| {
+                std::thread::sleep(duration)
+            });
+            if self.is_cancelled() {
+                self.force_at(forced_deadline);
+            }
         }
     }
 
@@ -904,10 +1028,14 @@ impl JobCancellation {
     /// Public so the daemon-shutdown path can drive a synchronous fan-out and
     /// observe the outcome before it exits.
     pub fn fan_out_once(&self) {
+        self.fan_out_once_at(self.forced_deadline());
+    }
+
+    fn fan_out_once_at(&self, forced_deadline: Option<Instant>) {
         // Claim the unterminated targets under one lock, marking them before
         // the ladder runs, so a concurrent registration cannot select the same
         // target for a second fan-out.
-        let targets: Vec<TerminationTarget> = {
+        let targets: Vec<(u64, TerminationTarget)> = {
             let mut registry = self
                 .0
                 .registry
@@ -930,22 +1058,25 @@ impl JobCancellation {
                 .iter()
                 .filter(|(id, target)| {
                     !registry.terminated.contains(id)
+                        && !registry.in_flight.contains(id)
                         && target.terminate_at().as_u8() <= level.as_u8()
                 })
                 .map(|(id, target)| (*id, target.clone()))
                 .collect();
-            // Graceful targets run before bounded ones, regardless of the order
-            // they were registered in. Registration order is an accident of
-            // startup sequencing: the microVM jailer is registered when the VM
-            // is created and the guest's own `Cancel` hook only once the
-            // session exists, so ordering by registration killed the VM before
-            // asking it to stop — inverting the design. `sort_by_key` is
-            // stable, so targets of equal rank keep their registration order.
-            pending.sort_by_key(|(_, target)| target.termination_rank());
+            // Registration order is an accident of startup sequencing. Sort
+            // all classes explicitly so reverse registration produces the
+            // same cancellation order: Hook -> ProcessGroup -> DockerAction /
+            // BuildKit -> Job / Service.
+            pending.sort_by(|(left_id, left), (right_id, right)| {
+                left.termination_order()
+                    .cmp(&right.termination_order())
+                    .then_with(|| left.key().cmp(&right.key()))
+                    .then_with(|| left_id.cmp(right_id))
+            });
             for (id, _) in &pending {
-                registry.terminated.insert(*id);
+                registry.in_flight.insert(*id);
             }
-            pending.into_iter().map(|(_, target)| target).collect()
+            pending
         };
         if targets.is_empty() {
             return;
@@ -953,20 +1084,47 @@ impl JobCancellation {
         let ladder = TerminationLadder::default();
         // Every target shares one bound, so a wedged Docker daemon cannot make
         // the fan-out itself unbounded.
-        let deadline = Instant::now()
-            + ladder
-                .sigint_grace
-                .saturating_add(ladder.sigterm_grace)
-                .saturating_mul(u32::try_from(targets.len().max(1)).unwrap_or(u32::MAX))
-                .saturating_add(Duration::from_secs(30));
-        for target in &targets {
+        let deadline = forced_deadline.unwrap_or_else(|| {
+            deadline_after(
+                Instant::now(),
+                ladder
+                    .sigint_grace
+                    .saturating_add(ladder.sigterm_grace)
+                    .saturating_mul(u32::try_from(targets.len().max(1)).unwrap_or(u32::MAX))
+                    .saturating_add(Duration::from_secs(30)),
+            )
+        });
+        for (id, target) in &targets {
             let outcome = if self.0.live {
                 terminate_with(target, deadline, ladder, &|duration| {
                     std::thread::sleep(duration);
                 })
             } else {
-                recorded_outcome(target)
+                recorded_outcome(
+                    target,
+                    if deadline <= Instant::now() {
+                        CancelLevel::Forced
+                    } else {
+                        CancelLevel::Requested
+                    },
+                )
             };
+            {
+                let mut registry = self
+                    .0
+                    .registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                registry.in_flight.remove(id);
+                if outcome.gone
+                    && registry
+                        .targets
+                        .iter()
+                        .any(|(registered_id, _)| registered_id == id)
+                {
+                    registry.terminated.insert(*id);
+                }
+            }
             if let Some(error) = outcome.error.as_deref() {
                 eprintln!(
                     "Cancellation could not terminate {}: {error}",
@@ -987,7 +1145,7 @@ impl JobCancellation {
     }
 }
 
-fn recorded_outcome(target: &TerminationTarget) -> TerminationOutcome {
+fn recorded_outcome(target: &TerminationTarget, level: CancelLevel) -> TerminationOutcome {
     let mut outcome = TerminationOutcome {
         target: target.key(),
         escalated_to: Some(TerminationSignal::Interrupt),
@@ -995,7 +1153,7 @@ fn recorded_outcome(target: &TerminationTarget) -> TerminationOutcome {
         error: None,
     };
     if let TerminationTarget::Hook { run, .. } = target
-        && let Err(detail) = run(CancelLevel::Requested)
+        && let Err(detail) = run(level)
     {
         outcome.error = Some(detail);
         outcome.gone = false;
@@ -1147,8 +1305,8 @@ mod tests {
                 // Hooks first: a hook asks a target to stop itself, so it must
                 // precede the terminations that take the decision away.
                 "hook:vsock-cancel".to_string(),
-                "container:velnor-buildkit-1".to_string(),
                 "pgid:4242".to_string(),
+                "container:velnor-buildkit-1".to_string(),
             ],
             "a cancellation request must not destroy the job or service containers"
         );
@@ -1171,6 +1329,97 @@ mod tests {
             "the step's own work dies on request; the containers post steps need die on escalation, and every class is reached exactly once"
         );
         assert!(hook_ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn fan_out_order_is_independent_of_registration_order() {
+        let token = JobCancellation::recording(None);
+        let _service = token.register(TerminationTarget::Container {
+            name: "aaa-service".into(),
+            role: ContainerRole::Service,
+        });
+        let _job = token.register(TerminationTarget::Container {
+            name: "zzz-job".into(),
+            role: ContainerRole::Job,
+        });
+        let _buildkit = token.register(TerminationTarget::Container {
+            name: "aaa-buildkit".into(),
+            role: ContainerRole::BuildKit,
+        });
+        let _docker_action = token.register(TerminationTarget::Container {
+            name: "zzz-action".into(),
+            role: ContainerRole::DockerAction,
+        });
+        let _group = token.register(TerminationTarget::ProcessGroup {
+            pgid: 42,
+            label: "step".into(),
+        });
+        let _hook = token.register(TerminationTarget::Hook {
+            label: "zzz-hook".into(),
+            run: Arc::new(|_| Ok(())),
+        });
+
+        token.fan_out_once();
+
+        assert_eq!(
+            token
+                .outcomes()
+                .into_iter()
+                .map(|outcome| outcome.target)
+                .collect::<Vec<_>>(),
+            vec![
+                "hook:zzz-hook",
+                "pgid:42",
+                "container:zzz-action",
+                "container:aaa-buildkit",
+                "container:zzz-job",
+                "container:aaa-service",
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_target_remains_retryable_until_termination_succeeds() {
+        let token = JobCancellation::recording(None);
+        let attempts = Arc::new(AtomicU8::new(0));
+        let attempts_for_hook = Arc::clone(&attempts);
+        let _hook = token.register(TerminationTarget::Hook {
+            label: "retryable".into(),
+            run: Arc::new(move |_| {
+                if attempts_for_hook.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err("transient hook failure".into())
+                } else {
+                    Ok(())
+                }
+            }),
+        });
+
+        token.fan_out_once();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(token.target_keys(), vec!["hook:retryable"]);
+        assert!(!token.outcomes()[0].gone);
+
+        token.fan_out_once();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(token.outcomes()[1].gone);
+
+        token.fan_out_once();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(token.outcomes().len(), 2);
+    }
+
+    #[test]
+    fn deadline_watcher_does_not_sleep_after_a_slow_initial_fan_out() {
+        let request_started = Instant::now();
+        let forced_deadline = deadline_after(request_started, Duration::from_secs(5));
+        let initial_fan_out_finished = deadline_after(forced_deadline, Duration::from_secs(1));
+        let slept = std::cell::Cell::new(false);
+
+        wait_until_deadline(forced_deadline, &|| initial_fan_out_finished, &|_| {
+            slept.set(true)
+        });
+
+        assert!(!slept.get());
     }
 
     #[test]
