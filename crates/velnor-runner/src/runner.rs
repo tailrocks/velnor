@@ -8789,7 +8789,7 @@ fn execute_script_job_inner(
     let eager_checkout_plans = eager_checkout_plans
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let git_mirror_store = crate::container::git_mirror_store_host(&temp, trust_scope);
     // Capability validation has already accepted the complete job. Start the
     // Docker environment while checkout performs host-side network and disk
@@ -9367,14 +9367,17 @@ fn resolve_checkout_plan_context(
     mut plan: CheckoutPlan,
     base_env: &[(String, String)],
     context_data: &[(String, Value)],
-) -> CheckoutPlan {
+) -> Result<CheckoutPlan> {
     if let Some(version) = plan.version.as_mut()
         && !contains_step_output_expression(version)
     {
-        *version =
-            crate::executor::render_expressions_with_context(version, base_env, context_data);
+        *version = crate::executor::render_expressions_with_context_checked(
+            version,
+            base_env,
+            context_data,
+        )?;
     }
-    plan
+    Ok(plan)
 }
 
 fn contains_step_output_expression(value: &str) -> bool {
@@ -18911,7 +18914,7 @@ runs:
             }),
         )];
 
-        let resolved = resolve_checkout_plan_context(plan, &[], &context_data);
+        let resolved = resolve_checkout_plan_context(plan, &[], &context_data).unwrap();
 
         assert_eq!(resolved.version.as_deref(), Some("def456"));
         assert!(!resolved.requires_runtime_context());
@@ -18936,7 +18939,7 @@ runs:
             timeout_minutes: None,
         };
 
-        let resolved = resolve_checkout_plan_context(plan, &[], &[]);
+        let resolved = resolve_checkout_plan_context(plan, &[], &[]).unwrap();
 
         assert_eq!(
             resolved.version.as_deref(),
@@ -18965,7 +18968,7 @@ runs:
         };
         let base_env = vec![("GITHUB_SHA".to_string(), "abc123".to_string())];
 
-        let resolved = resolve_checkout_plan_context(plan, &base_env, &[]);
+        let resolved = resolve_checkout_plan_context(plan, &base_env, &[]).unwrap();
 
         assert_eq!(resolved.version.as_deref(), Some("abc123"));
         assert!(!resolved.requires_runtime_context());

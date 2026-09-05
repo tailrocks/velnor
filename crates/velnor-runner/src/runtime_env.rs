@@ -234,11 +234,11 @@ pub(crate) fn cache_authority_env(
             let raw = inputs
                 .get(name)
                 .with_context(|| format!("cache-contract missing input {name}"))?;
-            Ok(crate::executor::render_expressions_with_context(
+            Ok(crate::executor::render_expressions_with_context_checked(
                 raw,
                 &base_env,
                 &context_data,
-            ))
+            )?)
         };
         let declaration = value("expected-declaration-sha256")?;
         if declaration.len() != 64
