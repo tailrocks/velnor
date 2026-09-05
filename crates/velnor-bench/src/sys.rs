@@ -68,6 +68,18 @@ struct CommandOutput {
     usage: Rusage,
 }
 
+/// Maximum time a read-only host identity probe may wait for an external
+/// service. Workload commands deliberately keep their caller-owned deadline.
+pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn docker_control_timeout(program: &str, args: &[String]) -> Option<Duration> {
+    if program != "docker" {
+        return None;
+    }
+    let (operation, deadline) = velnor_runner::docker::deadline_for(args, Duration::ZERO);
+    operation.is_control_plane().then_some(deadline)
+}
+
 /// Counting process runner. Records every spawn so a scenario's process count
 /// and Docker invocation count are measured, never estimated.
 #[derive(Debug, Default)]
@@ -101,7 +113,26 @@ impl Runner {
         dir: Option<&std::path::Path>,
         env: &[(String, String)],
     ) -> io::Result<&Invocation> {
-        self.exec_inner(program, args, dir, env, &[])
+        self.exec_inner(program, args, dir, env, &[], None)
+    }
+
+    /// Run a command with an explicit deadline.
+    pub(crate) fn run_with_timeout<S: AsRef<str>>(
+        &mut self,
+        program: &str,
+        args: &[S],
+        timeout: Duration,
+    ) -> io::Result<&Invocation> {
+        self.exec_inner(program, args, None, &[], &[], Some(timeout))
+    }
+
+    /// Run a read-only identity probe with the fixed probe deadline.
+    pub(crate) fn probe<S: AsRef<str>>(
+        &mut self,
+        program: &str,
+        args: &[S],
+    ) -> io::Result<&Invocation> {
+        self.run_with_timeout(program, args, PROBE_TIMEOUT)
     }
 
     /// Run a command while removing selected inherited environment variables.
@@ -121,7 +152,7 @@ impl Runner {
         env: &[(String, String)],
         unset: &[&str],
     ) -> io::Result<&Invocation> {
-        self.exec_inner(program, args, dir, env, unset)
+        self.exec_inner(program, args, dir, env, unset, None)
     }
 
     fn exec_inner<S: AsRef<str>>(
@@ -131,8 +162,10 @@ impl Runner {
         dir: Option<&std::path::Path>,
         env: &[(String, String)],
         unset: &[&str],
+        timeout: Option<Duration>,
     ) -> io::Result<&Invocation> {
         let owned: Vec<String> = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
+        let timeout = timeout.or_else(|| docker_control_timeout(program, &owned));
         let mut command = Command::new(program);
         command.args(&owned).stdin(Stdio::null());
         if let Some(dir) = dir {
@@ -144,8 +177,16 @@ impl Runner {
         for key in unset {
             command.env_remove(key);
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if timeout.is_some() {
+            use std::os::unix::process::CommandExt;
+
+            // A probe may invoke a shell or helper process. Give the whole
+            // tree one identity so expiry cannot leave descendants behind.
+            command.process_group(0);
+        }
         let started = Instant::now();
-        let output = command_output(&mut command)?;
+        let output = command_output(&mut command, timeout)?;
         let wall = started.elapsed();
         self.usage = self.usage.accumulate(output.usage);
         self.invocations.push(Invocation {
@@ -163,6 +204,18 @@ impl Runner {
     /// single reason string suitable for a [`crate::fact::Fact`].
     pub fn capture<S: AsRef<str>>(&mut self, program: &str, args: &[S]) -> Result<String, String> {
         match self.run(program, args) {
+            Ok(invocation) => invocation.text(),
+            Err(error) => Err(format!("`{program}` could not be executed: {error}")),
+        }
+    }
+
+    /// Run a read-only identity probe and return trimmed stdout.
+    pub(crate) fn capture_probe<S: AsRef<str>>(
+        &mut self,
+        program: &str,
+        args: &[S],
+    ) -> Result<String, String> {
+        match self.probe(program, args) {
             Ok(invocation) => invocation.text(),
             Err(error) => Err(format!("`{program}` could not be executed: {error}")),
         }
@@ -209,7 +262,7 @@ impl Runner {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
+fn command_output(command: &mut Command, timeout: Option<Duration>) -> io::Result<CommandOutput> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -234,7 +287,7 @@ fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
         stderr.read_to_end(&mut output).map(|_| output)
     });
 
-    let (status, usage) = match wait4_child(&mut child) {
+    let (status, usage, timed_out) = match wait4_child(&mut child, timeout) {
         Ok(result) => result,
         Err(error) => {
             let _ = child.kill();
@@ -245,7 +298,16 @@ fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
         }
     };
     let stdout = join_output(stdout_reader)?;
-    let stderr = join_output(stderr_reader)?;
+    let mut stderr = join_output(stderr_reader)?;
+    if timed_out {
+        if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+            stderr.push(b'\n');
+        }
+        let timeout = timeout.expect("timed-out child had a deadline");
+        stderr.extend_from_slice(
+            format!("command timed out after {} ms", timeout.as_millis()).as_bytes(),
+        );
+    }
 
     Ok(CommandOutput {
         status,
@@ -256,17 +318,23 @@ fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn wait4_child(child: &mut std::process::Child) -> io::Result<(ExitStatus, Rusage)> {
+fn wait4_child(
+    child: &mut std::process::Child,
+    timeout: Option<Duration>,
+) -> io::Result<(ExitStatus, Rusage, bool)> {
     let pid = libc::pid_t::try_from(child.id())
         .map_err(|_| io::Error::other("child process id does not fit the platform pid type"))?;
     let mut status = 0;
     // SAFETY: `libc::rusage` contains only integer/time fields, so an
     // all-zero bit pattern is valid C struct storage.
     let mut usage = unsafe { std::mem::zeroed::<libc::rusage>() };
+    let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
+    let mut options = if timeout.is_some() { libc::WNOHANG } else { 0 };
+    let mut timed_out = false;
     loop {
         // SAFETY: `pid` is the live child returned by `Command::spawn`; the
         // status and usage pointers are valid writable storage for wait4.
-        let waited = unsafe { libc::wait4(pid, &mut status, 0, &mut usage) };
+        let waited = unsafe { libc::wait4(pid, &mut status, options, &mut usage) };
         if waited == -1 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -274,10 +342,35 @@ fn wait4_child(child: &mut std::process::Child) -> io::Result<(ExitStatus, Rusag
             }
             return Err(error);
         }
+        if waited == 0 && !timed_out {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                kill_process_group(child, pid);
+                timed_out = true;
+                options = 0;
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
         if waited != pid {
             return Err(io::Error::other("wait4 returned an unexpected child"));
         }
-        return Ok((ExitStatus::from_raw(status), Rusage::from_raw(usage)));
+        return Ok((
+            ExitStatus::from_raw(status),
+            Rusage::from_raw(usage),
+            timed_out,
+        ));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn kill_process_group(child: &mut std::process::Child, pid: libc::pid_t) {
+    // `exec_inner` puts bounded probes in a fresh process group. Killing the
+    // group closes inherited pipes too, so joining the output readers cannot
+    // wait forever on a descendant that outlived its shell parent.
+    let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if result == -1 {
+        let _ = child.kill();
     }
 }
 
@@ -289,7 +382,7 @@ fn join_output(reader: std::thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Resu
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn command_output(command: &mut Command) -> io::Result<CommandOutput> {
+fn command_output(command: &mut Command, _timeout: Option<Duration>) -> io::Result<CommandOutput> {
     let output = command.output()?;
     Ok(CommandOutput {
         status: output.status,
@@ -470,6 +563,35 @@ mod tests {
             .expect_err("failing program");
         assert!(reason.contains("exited 3"), "{reason}");
         assert!(reason.contains("boom"), "{reason}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn bounded_probe_kills_its_process_group() {
+        let marker = std::env::temp_dir().join(format!(
+            "velnor-bench-timeout-marker-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let mut runner = Runner::new();
+        let invocation = runner
+            .run_with_timeout(
+                "/bin/sh",
+                &["-c", &format!("sleep 30; touch '{}'", marker.display())],
+                Duration::from_millis(50),
+            )
+            .expect("spawn probe");
+
+        assert!(!invocation.ok());
+        assert!(
+            invocation.stderr.contains("timed out"),
+            "{}",
+            invocation.stderr
+        );
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!marker.exists(), "timed-out descendant survived");
+        assert_eq!(runner.process_count(), 1);
+        let _ = std::fs::remove_file(marker);
     }
 
     #[test]

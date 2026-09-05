@@ -261,13 +261,13 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
         "sh".to_string(),
         "-c".to_string(),
         format!(
-            "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v sudo >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && command -v velnor-workflow >/dev/null && test -x {VELNOR_WORKFLOW_BINARY} && sha256sum --check --strict --status {VELNOR_WORKFLOW_SHA256_FILE} && {VELNOR_WORKFLOW_BINARY} --help >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
+            "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v sudo >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && command -v mbx >/dev/null && mbx --version >/dev/null && command -v velnor-workflow >/dev/null && test -x {VELNOR_WORKFLOW_BINARY} && sha256sum --check --strict --status {VELNOR_WORKFLOW_SHA256_FILE} && {VELNOR_WORKFLOW_BINARY} --help >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
         ),
     ];
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
-            "Docker image '{}' is missing target job tools, Node, velnor-workflow, its SHA-256 metadata, or preinstalled estate Rust targets. stderr: {}",
+            "Docker image '{}' is missing target job tools, Node, MBX, velnor-workflow, its SHA-256 metadata, or preinstalled estate Rust targets. stderr: {}",
             docker_image,
             result.stderr
         );
@@ -678,6 +678,7 @@ mod tests {
         let command = runner.calls[0].1.last().unwrap();
         assert!(command.contains("command -v sudo >/dev/null"));
         assert!(command.contains("command -v node >/dev/null && node --version"));
+        assert!(command.contains("command -v mbx >/dev/null && mbx --version >/dev/null"));
         for target in [
             "aarch64-apple-darwin",
             "aarch64-unknown-linux-gnu",

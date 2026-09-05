@@ -62,8 +62,15 @@ test -f "$docs"
 grep -q "^  push:" "$workflow"
 grep -q "      - 'v\\[0-9\\]\\*'" "$workflow"
 grep -q -- "--features release-build" "$workflow"
+grep -q 'VELNOR_RELEASE_BUILD: "1"' "$workflow"
+grep -q "cargo zigbuild -p velnor-tools" "$workflow"
+grep -q "cargo zigbuild -p velnor-workflow" "$workflow"
+if grep -q -- "-p velnor-tools.*--features release-build" "$workflow"; then
+  echo "release:check: velnor-tools must not receive velnor-runner's release-build feature" >&2
+  exit 1
+fi
 grep -q "tailrocks/velnor-actions/.github/workflows/package-signer.yml@" "$workflow"
-grep -q "tailrocks/velnor-apt" "$docs"
+grep -q "apt-get install" "$docs"
 """
 
 [tasks.actionlint]

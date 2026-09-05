@@ -197,6 +197,11 @@ const BUDGET_ENV: [&str; 4] = [
     "MBX_SCHEDULER_MEMORY",
 ];
 
+const DEFAULT_CONTAINER_EXEC_PATH: &str =
+    "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const MBX_CONTAINER_EXEC_PATH: &str =
+    "/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 impl JobContainerSpec {
     /// The tightest valid `--cpus` limit declared by the operator
     /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
@@ -704,10 +709,7 @@ impl JobContainerSpec {
         command.env("DOCKER_HOST", JOB_DOCKER_HOST);
         command.env("RUSTUP_HOME", "/root/.rustup");
         command.env("CARGO_HOME", "/github/home/.cargo");
-        command.env(
-            "PATH",
-            "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        );
+        command.env("PATH", self.default_exec_path());
         command.env(
             "VELNOR_DOCKER_HOST_TEMP",
             self.docker_host_path(&self.temp_host).display().to_string(),
@@ -718,6 +720,18 @@ impl JobContainerSpec {
                 .display()
                 .to_string(),
         );
+    }
+
+    /// Runtime PATH for commands executed inside the job container. The image
+    /// puts the MBX cargo shim first, but every `docker exec` receives an
+    /// explicit PATH to defeat host-runtime injection; omitting it silently
+    /// turns the default acceleration path back into ordinary Cargo.
+    pub(crate) fn default_exec_path(&self) -> &'static str {
+        if self.mbx_store_host.is_some() {
+            MBX_CONTAINER_EXEC_PATH
+        } else {
+            DEFAULT_CONTAINER_EXEC_PATH
+        }
     }
 
     /// `docker run` for a Node action sidecar.
@@ -1078,9 +1092,9 @@ impl JobContainerSpec {
         docker_work_dir.join(relative)
     }
 
-    fn local_work_dir(&self) -> Option<&Path> {
+    fn local_work_dir(&self) -> Option<PathBuf> {
         let job_dir = self.temp_host.parent()?;
-        job_dir.parent()
+        Some(daemon_shared_root(job_dir.parent()?.to_path_buf()))
     }
 
     fn sidecar_container_name(&self, kind: &str) -> String {
@@ -1816,6 +1830,17 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/mbx")));
     }
 
+    #[test]
+    fn exec_path_selects_mbx_only_for_the_default_accelerator() {
+        let job = spec();
+        assert_eq!(job.default_exec_path(), MBX_CONTAINER_EXEC_PATH);
+
+        let mut sccache = job;
+        sccache.mbx_store_host = None;
+        sccache.sccache_store_host = Some(PathBuf::from("/var/cache/sccache"));
+        assert_eq!(sccache.default_exec_path(), DEFAULT_CONTAINER_EXEC_PATH);
+    }
+
     fn container_test_temp(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "velnor-container-{name}-{}",
@@ -2210,6 +2235,25 @@ mod tests {
     }
 
     #[test]
+    fn maps_slot_shared_paths_to_docker_host_work_dir() {
+        let root = container_test_temp("slot-host-work-dir");
+        let mut spec = spec();
+        spec.workspace_host = root.join("runner/work/slot-1/job-1/workspace");
+        spec.temp_host = root.join("runner/work/slot-1/job-1/temp");
+        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+
+        assert_eq!(
+            spec.docker_host_path(&spec.workspace_host),
+            PathBuf::from("/daemon/work/slot-1/job-1/workspace")
+        );
+        assert_eq!(
+            spec.docker_host_path(spec.mbx_store_host.as_ref().unwrap()),
+            PathBuf::from("/daemon/work/_velnor_mbx/trusted")
+        );
+    }
+
+    #[test]
     fn builds_bash_exec_args() {
         let spec = spec();
         let prepared = spec
@@ -2237,7 +2281,7 @@ mod tests {
                 "DOCKER_HOST=unix:///var/run/docker.sock",
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
-                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PATH=/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "GITHUB_OUTPUT=/__t/out",
@@ -2281,7 +2325,7 @@ mod tests {
                 "DOCKER_HOST=unix:///var/run/docker.sock",
                 "RUSTUP_HOME=/root/.rustup",
                 "CARGO_HOME=/github/home/.cargo",
-                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PATH=/opt/mbx/bin:/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 temp_env.as_str(),
                 workspace_env.as_str(),
                 "INPUT_NAME=value",

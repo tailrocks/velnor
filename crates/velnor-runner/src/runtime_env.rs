@@ -180,7 +180,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
             .iter()
             .any(|(name, value)| name == "ACTIONS_RUNTIME_TOKEN" && !value.is_empty());
         if let Some(url) = configured_cache_url(configured_url.as_deref(), has_job_token) {
-            set_env(&mut env, "ACTIONS_CACHE_URL", url);
+            set_env(&mut env, "ACTIONS_CACHE_URL", &url);
             env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
         }
     }
@@ -436,8 +436,9 @@ fn is_protected_default_env(name: &str) -> bool {
         || (upper.starts_with("MBX_") && upper != "MBX_DISABLE")
 }
 
-fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<&str> {
+fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<String> {
     url.filter(|url| has_job_token && !url.is_empty())
+        .and_then(|url| crate::gha_cache::normalize_public_base(url).ok())
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -757,8 +758,13 @@ mod tests {
         assert_eq!(configured_cache_url(None, true), None);
         assert_eq!(
             configured_cache_url(Some("http://cache"), true),
-            Some("http://cache")
+            Some("http://cache".to_owned())
         );
+        assert_eq!(
+            configured_cache_url(Some("http://cache///"), true),
+            Some("http://cache".to_owned())
+        );
+        assert_eq!(configured_cache_url(Some("ftp://cache"), true), None);
     }
 
     #[test]

@@ -3671,8 +3671,7 @@ where
         // (JobContainerSpec::append_base_exec_env) — the old HOME=/root +
         // CARGO_HOME=/root/.cargo exports here redirected cargo downloads into
         // the unmounted container /root, making `~` caches unsaveable.
-        let container_default_path =
-            "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        let container_default_path = container.default_exec_path();
         let path_entries: Vec<&str> = state
             .path
             .iter()

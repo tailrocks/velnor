@@ -1597,12 +1597,24 @@ async fn reclaim_orphaned_jobs(
                         }
                     }
                 } else {
-                    defer_remote_recovery_on_timeout(
-                        remaining_remote_budget(remote_deadline),
-                        crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
-                        "complete recorded in-flight job during orphan recovery",
-                    )
-                    .await?
+                    let recovery = if let Some(conclusion) = job.terminal_conclusion.as_deref() {
+                        defer_remote_recovery_on_timeout(
+                            remaining_remote_budget(remote_deadline),
+                            crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
+                                &slot_dir, &stored, conclusion,
+                            ),
+                            "complete recorded terminal conclusion during orphan recovery",
+                        )
+                        .await?
+                    } else {
+                        defer_remote_recovery_on_timeout(
+                            remaining_remote_budget(remote_deadline),
+                            crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+                            "complete recorded in-flight job during orphan recovery",
+                        )
+                        .await?
+                    };
+                    recovery
                 };
                 let Some(cleanup) = cleanup else {
                     continue;
@@ -2613,12 +2625,6 @@ mod tests {
     #[cfg(feature = "test-support")]
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Serializes tests that mutate `GITHUB_TOKEN` (process-global env):
-    /// `load_exec_config` resolves the PAT from the environment at call time,
-    /// so a parallel test's cleanup `remove_var` must not land mid-test.
-    static GITHUB_TOKEN_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-
     #[test]
     fn outbox_entry_parser_reserves_dot_prefixed_names_for_temporaries() {
         assert!(parse_outbox_entry_name(".job.7").is_err());
@@ -3443,9 +3449,8 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn missing_remote_registration_clears_local_claim() {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners/7"))
@@ -3582,9 +3587,8 @@ mod tests {
     async fn reconcile_with_runner_config_fixture(
         prepare_runner_config: impl FnOnce(&Path),
     ) -> anyhow::Result<SlotRecord> {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -3777,7 +3781,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_pat_fails_registration_reconciliation_closed() {
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let _env_guard = crate::test_support::github_test_env().await;
         let previous_token = std::env::var_os("GITHUB_TOKEN");
         let dir = metrics_test_dir("missing-pat");
         write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/velnor"), 1).unwrap();
@@ -3893,8 +3897,8 @@ mod tests {
         status: u16,
         headers: &[(&'static str, String)],
     ) -> GithubPacing {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
         let server = MockServer::start().await;
         let response = headers
             .iter()
@@ -3984,7 +3988,6 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn reconciliation_quota_errors_hold_fleet_until_absolute_deadline() {
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let reset = epoch_now() + 3600;
         let pacing = reconciliation_lookup_error_pacing(
             403,
@@ -4004,7 +4007,6 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn reconciliation_permission_error_does_not_hold_fleet() {
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
         let pacing = reconciliation_lookup_error_pacing(
             403,
             &[
@@ -4024,9 +4026,8 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn org_url_probe_bootstraps_policy_from_generated_allowlist() {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -4333,9 +4334,8 @@ mod tests {
     #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn rate_limited_probe_parks_instead_of_retrying_per_tick() {
-        let transport_guard = crate::test_support::github_http_transport_env().await;
-        transport_guard.set_native();
-        let _token_guard = GITHUB_TOKEN_ENV_LOCK.lock().await;
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
         let server = MockServer::start().await;
         let reset_epoch = epoch_now() + 3600;
         Mock::given(method("GET"))

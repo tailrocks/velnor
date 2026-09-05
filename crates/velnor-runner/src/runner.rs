@@ -38,7 +38,7 @@ use crate::{
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
         checkout_plan, checkout_plans, checkout_step_id, cleanup_checkout_credentials,
-        configure_safe_directory, CheckoutPlan,
+        configure_safe_directory, reap_stale_checkout_credentials, CheckoutPlan,
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
@@ -989,6 +989,56 @@ pub(crate) async fn complete_recorded_in_flight_job(
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
     )
     .await
+}
+
+/// Reconstruct the smallest valid completion when a worker crashed after the
+/// terminal conclusion was committed but before the payload/outbox existed.
+/// The durable conclusion is authoritative; recovery must not replace a
+/// successful job with the generic synthetic failure used for an unknown
+/// worker outcome.
+pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    terminal_conclusion: &str,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let conclusion = parse_recorded_terminal_conclusion(terminal_conclusion)?;
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
+    let ctx = RunServiceJobContext {
+        client,
+        run_service_url: record.run_service_url,
+        billing_owner_id: record.billing_owner_id,
+        journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
+        journal_dir,
+    };
+    let identity = AcquiredJobIdentity {
+        plan_id: record.plan_id,
+        job_id: record.job_id.clone(),
+    };
+    let completion =
+        recovered_terminal_completion(&identity, ctx.billing_owner_id.clone(), conclusion);
+    establish_durable_completion_ownership(&ctx, &identity)
+        .await
+        .context("establish durable ownership before recovered terminal completion")?;
+    send_guarded_run_service_complete(
+        &ctx.client,
+        &ctx.run_service_url,
+        completion,
+        &ctx.journal_dir,
+    )
+    .await
+    .context("send recovered terminal completion")?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+fn parse_recorded_terminal_conclusion(value: &str) -> Result<TaskResult> {
+    serde_json::from_value(Value::String(value.to_owned()))
+        .with_context(|| format!("unsupported durable terminal conclusion {value:?}"))
 }
 
 pub(crate) async fn complete_recorded_in_flight_job_after_journal_acceptance(
@@ -2515,6 +2565,23 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
+    // One-shot modes keep fail-fast semantics. The packaged long-running
+    // daemon must keep its startup gate inside the same retry contract as the
+    // rest of daemon startup: a transient journal/filesystem failure must not
+    // turn into a systemd restart storm, while no slot may register until the
+    // gate succeeds.
+    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+    if supervised && let Ok(config_base) = daemon_config_dir(&args) {
+        start_drain_listener(config_base);
+    }
+
+    // Reclaim credentials abandoned by a prior daemon before any slot can
+    // accept a job. This runs once per daemon process, outside pass retries.
+    reap_checkout_credentials_at_startup(supervised).await?;
+    if draining() {
+        return Ok(());
+    }
+
     // Operator-facing fail-fast: a token that is structurally impossible
     // (missing, or a literal unexpanded ${...} placeholder — systemd
     // EnvironmentFile does not expand variables) can never register a runner.
@@ -2529,16 +2596,6 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     {
         eprintln!("GITHUB_TOKEN problem: {problem}");
         crate::sd_notify::status(&format!("token problem: {problem}"));
-    }
-
-    // One-shot modes (dry runs, --once, no-URL local mode) keep their
-    // fail-fast semantics: they are used by tests and tooling that must see
-    // errors. The packaged long-running daemon (url + not once + not dry-run)
-    // must never give up — every failure is retried with backoff forever.
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
-
-    if supervised && let Ok(config_base) = daemon_config_dir(&args) {
-        start_drain_listener(config_base);
     }
 
     // P1: host the GitHub cache contract when the operator enables it. The
@@ -2604,6 +2661,40 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Reclaim abandoned checkout credentials before daemon registration.
+///
+/// One-shot invocations return the error immediately so callers receive a
+/// truthful failure. A supervised daemon retries the same startup gate with
+/// the normal bounded backoff and drain handling; it never accepts work while
+/// the credential journal cannot be inspected.
+async fn reap_checkout_credentials_at_startup(supervised: bool) -> Result<()> {
+    let mut attempt = 0_u32;
+    loop {
+        match reap_stale_checkout_credentials()
+            .context("reap stale checkout credentials at daemon startup")
+        {
+            Ok(_) => return Ok(()),
+            Err(error) if !supervised => return Err(error),
+            Err(error) => {
+                attempt = attempt.saturating_add(1);
+                let delay = supervised_retry_delay_for_error(attempt, &error);
+                let detail = sanitized_retry_error(&error);
+                eprintln!(
+                    "daemon startup credential reap failed: {detail}; retrying in {}s",
+                    delay.as_secs()
+                );
+                crate::sd_notify::status(&format!(
+                    "startup credential cleanup failing; retrying in {}s",
+                    delay.as_secs()
+                ));
+                if sleep_slot_retry_or_drain(delay).await {
+                    return Ok(());
                 }
             }
         }
@@ -11870,6 +11961,40 @@ fn terminal_acquired_job_completion(
     }
 }
 
+/// Build a minimal payload for the crash window where only the terminal
+/// conclusion survived. This is not a pre-execution rejection: preserving a
+/// recorded success must bypass the pre-execution success guard, while the
+/// synthetic step keeps the Run Service payload structurally complete.
+fn recovered_terminal_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    conclusion: TaskResult,
+) -> RunServiceCompleteJob {
+    let now = unix_now_iso8601();
+    RunServiceCompleteJob {
+        plan_id: identity.plan_id.clone(),
+        job_id: identity.job_id.clone(),
+        conclusion,
+        outputs: BTreeMap::new(),
+        step_results: vec![RunServiceStepResult {
+            external_id: Some("velnor-recovered-terminal".to_owned()),
+            number: Some(1),
+            name: "Velnor recovered durable terminal result".to_owned(),
+            status: TimelineRecordState::Completed,
+            conclusion,
+            started_at: Some(now.clone()),
+            completed_at: Some(now),
+            completed_log_lines: 0,
+            annotations: Vec::new(),
+        }],
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        environment_url: None,
+        billing_owner_id,
+        infrastructure_failure_category: None,
+    }
+}
+
 fn rejection_log_lines(category: &str, reason: &str) -> Vec<String> {
     let mut lines = vec![
         "##[error]Velnor rejected this job before workflow execution.".to_string(),
@@ -17532,6 +17657,24 @@ jobs:
             empty_error.to_string().contains("empty step_results"),
             "{empty_error:#}"
         );
+    }
+
+    #[test]
+    fn recovered_terminal_completion_preserves_durable_conclusion() {
+        let completion = recovered_terminal_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            None,
+            parse_recorded_terminal_conclusion("succeeded").unwrap(),
+        );
+
+        assert_eq!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(completion.step_results[0].conclusion, TaskResult::Succeeded);
+        assert!(completion.annotations.is_empty());
+        assert!(parse_recorded_terminal_conclusion("success").is_err());
     }
 
     #[test]

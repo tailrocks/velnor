@@ -37,6 +37,54 @@
         {
           "file": "docker/job-ubuntu.Dockerfile",
           "pattern": "grep -F 'sccache (?<version>[0-9][0-9.]*)'"
+        },
+        {
+          "file": "crates/velnor-runner/src/executor.rs",
+          "pattern": "sccache v?(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-policy.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-unit-collector.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-bench.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-client.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-control.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-model.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-render.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-runner.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-tools.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnor-workflow.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
+        },
+        {
+          "file": ".github/workflows/ci-rust-velnorctl.yml",
+          "pattern": "version: v(?<version>[0-9][0-9.]*)"
         }
       ]
     },
@@ -51,6 +99,24 @@
         {
           "file": "docker/job-ubuntu.Dockerfile",
           "pattern": "mbx --version \\| grep -F '(?<version>[0-9][0-9.]*)'"
+        }
+      ]
+    },
+    {
+      "name": "mold",
+      "description": "The job image's locked mold version is repeated in the lockfile and runner adapter. A linker mismatch fails only when a Rust job reaches its native setup step.",
+      "authority": {
+        "file": "docker/job-mise.toml",
+        "pattern": "mold = \"(?<version>[0-9][0-9.]*)\""
+      },
+      "mirrors": [
+        {
+          "file": "docker/job-mise.lock",
+          "pattern": "\\[\\[tools\\.mold\\]\\]\\s+version = \"(?<version>[0-9][0-9.]*)\""
+        },
+        {
+          "file": "crates/velnor-runner/src/executor.rs",
+          "pattern": "MOLD_LOCKED_VERSION: &str = \"(?<version>[0-9][0-9.]*)\""
         }
       ]
     },
