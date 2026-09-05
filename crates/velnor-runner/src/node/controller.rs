@@ -2005,20 +2005,128 @@ fn abandon_if_budget_spent(
 /// and never stamp `CompletionSendStarted` without an actual send.
 fn preserve_outbox(
     args: &ControllerArgs,
-    _journal: &mut Journal,
+    journal: &mut Journal,
     job_id: &JobId,
     generation: Generation,
     payload_sha256: &str,
 ) -> anyhow::Result<()> {
-    let bytes = cleanup::read_outbox(&args.state_dir, &job_id.0, generation.0)?;
+    if outbox_payload_is_missing(&args.state_dir, &job_id.0, generation.0)? {
+        return record_payload_loss(
+            args,
+            journal,
+            job_id,
+            generation,
+            payload_sha256,
+            "completion outbox payload is missing",
+        );
+    }
+    let bytes = match cleanup::read_outbox(&args.state_dir, &job_id.0, generation.0) {
+        Ok(bytes) => bytes,
+        Err(_error) if outbox_payload_is_missing(&args.state_dir, &job_id.0, generation.0)? => {
+            return record_payload_loss(
+                args,
+                journal,
+                job_id,
+                generation,
+                payload_sha256,
+                "completion outbox payload disappeared before it could be read",
+            );
+        }
+        Err(error) => return Err(error),
+    };
     let actual = velnor_control::journal::payload_checksum(&bytes);
     if actual != payload_sha256 {
+        return record_payload_loss(
+            args,
+            journal,
+            job_id,
+            generation,
+            payload_sha256,
+            "completion outbox checksum mismatch",
+        );
+    }
+    Ok(())
+}
+
+/// Check whether only the exact payload path is absent. Symlinks, non-directories,
+/// and permission errors stay on the hard-error path in `preserve_outbox`.
+fn outbox_payload_is_missing(
+    state_dir: &Path,
+    job_id: &str,
+    generation: u64,
+) -> anyhow::Result<bool> {
+    cleanup::assert_safe_id(job_id)?;
+    let parent = state_dir.join("outbox");
+    match std::fs::symlink_metadata(&parent) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Ok(false);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    }
+    let path = cleanup::outbox_path(state_dir, job_id, generation);
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Commit local payload loss before removing the exact outbox path. The
+/// reducer validates owner, generation, and checksum and emits only local
+/// cleanup/capacity effects; no remote acknowledgement is possible here.
+fn record_payload_loss(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+    payload_sha256: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let outcome =
+        journal.record_completion_payload_loss(job_id, generation, payload_sha256, reason)?;
+    if outcome.rejected {
         anyhow::bail!(
-            "outbox checksum mismatch for {} generation {}",
+            "completion payload loss rejected for job {} generation {}",
             job_id.0,
             generation.0
         );
     }
+
+    let mut deleted = false;
+    for command in outcome.commands {
+        match command {
+            SideEffect::DeleteOutbox {
+                job_id: command_job_id,
+                generation: command_generation,
+            } if command_job_id == *job_id && command_generation == generation => {
+                cleanup::remove_outbox(args.state_dir.as_path(), &job_id.0, generation.0)
+                    .context("remove lost completion outbox")?;
+                deleted = true;
+            }
+            SideEffect::AdvertiseCapacity { permits } => {
+                std::fs::write(
+                    args.state_dir.join("advertised-capacity"),
+                    permits.to_string(),
+                )?;
+            }
+            other => {
+                anyhow::bail!("payload-loss reducer emitted unexpected side effect: {other:?}");
+            }
+        }
+    }
+    if !deleted {
+        anyhow::bail!(
+            "payload-loss reducer omitted outbox deletion for job {} generation {}",
+            job_id.0,
+            generation.0
+        );
+    }
+    eprintln!(
+        "Error: completion payload for job {} generation {} was lost locally; recorded terminal local failure",
+        job_id.0, generation.0
+    );
     Ok(())
 }
 
@@ -2520,6 +2628,160 @@ mod tests {
             ("job.0.tmp-user".to_owned(), 7, true)
         );
         assert!(parse_outbox_entry_name("..malformed").is_err());
+    }
+
+    fn prime_pending_completion(journal: &mut Journal) -> (JobId, Generation, String) {
+        let slot_id = SlotId("velnor-1".to_owned());
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Assigned {
+                slot_id: slot_id.clone(),
+                job_id: job_id.clone(),
+                generation,
+            },
+            Event::JobOwned {
+                job_id: job_id.clone(),
+                slot_id,
+                attempt: 1,
+                generation,
+                worker: "worker-1".to_owned(),
+                accepted_unix: 1,
+            },
+            Event::JobStarted {
+                job_id: job_id.clone(),
+                generation,
+            },
+            Event::JobTerminalResult {
+                job_id: job_id.clone(),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let payload_sha256 = velnor_control::journal::payload_checksum(b"payload");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job_id.clone(),
+                    generation,
+                    payload_sha256: payload_sha256.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        (job_id, generation, payload_sha256)
+    }
+
+    fn controller_test_args(state_dir: PathBuf) -> ControllerArgs {
+        ControllerArgs {
+            state_dir,
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+        }
+    }
+
+    #[test]
+    fn missing_completion_payload_is_recorded_and_releases_exact_slot() {
+        let dir = metrics_test_dir("missing-completion-payload");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, generation, checksum) = prime_pending_completion(&mut journal);
+        let args = controller_test_args(dir.clone());
+
+        preserve_outbox(&args, &mut journal, &job_id, generation, &checksum).unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert!(state.jobs.is_empty());
+        assert!(state.outbox.is_empty());
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert!(!journal
+            .has_remote_terminal_ack(&job_id, generation)
+            .unwrap());
+        assert_eq!(
+            journal.unresolvable_completions().unwrap()[0].reason,
+            "completion outbox payload is missing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("advertised-capacity")).unwrap(),
+            "1"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn checksum_mismatch_is_recorded_and_corrupt_payload_is_deleted() {
+        let dir = metrics_test_dir("checksum-completion-payload");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, generation, checksum) = prime_pending_completion(&mut journal);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"corrupt").unwrap();
+        let args = controller_test_args(dir.clone());
+
+        preserve_outbox(&args, &mut journal, &job_id, generation, &checksum).unwrap();
+
+        assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        assert_eq!(
+            journal.unresolvable_completions().unwrap()[0].reason,
+            "completion outbox checksum mismatch"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_completion_payload_stays_a_hard_error() {
+        let dir = metrics_test_dir("symlink-completion-payload");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, generation, checksum) = prime_pending_completion(&mut journal);
+        let target = dir.join("target");
+        std::fs::write(&target, b"payload").unwrap();
+        std::fs::create_dir_all(dir.join("outbox")).unwrap();
+        std::os::unix::fs::symlink(&target, cleanup::outbox_path(&dir, &job_id.0, generation.0))
+            .unwrap();
+        let args = controller_test_args(dir.clone());
+
+        assert!(preserve_outbox(&args, &mut journal, &job_id, generation, &checksum).is_err());
+        assert!(journal.pending_outbox().unwrap()[0].is_pending());
+        assert!(journal.unresolvable_completions().unwrap().is_empty());
+        assert!(cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn dummy_exec(url: &str) -> DaemonArgs {

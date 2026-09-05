@@ -30,7 +30,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 6;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 7;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
@@ -638,6 +638,16 @@ pub enum Event {
     CompletionUnresolvable {
         job_id: JobId,
         generation: Generation,
+        /// Operator-facing explanation, recorded immutably in the log.
+        reason: String,
+    },
+    /// The local completion payload is missing or no longer matches the
+    /// checksum committed by `CompletionIntended`. This is terminal local
+    /// evidence: the remote service is never told that the job completed.
+    CompletionPayloadLost {
+        job_id: JobId,
+        generation: Generation,
+        payload_sha256: String,
         /// Operator-facing explanation, recorded immutably in the log.
         reason: String,
     },
@@ -1272,6 +1282,45 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 rejected = true;
             }
         }
+        Event::CompletionPayloadLost {
+            job_id,
+            generation,
+            payload_sha256,
+            reason: _,
+        } => {
+            let valid = state
+                .outbox
+                .iter()
+                .find(|row| row.job_id == job_id)
+                .is_some_and(|row| {
+                    row.generation == generation
+                        && row.payload_sha256 == payload_sha256
+                        && row.is_pending()
+                        && outbox_owner_is_proven(&state, row)
+                        && state.jobs.iter().any(|job| {
+                            job.job_id == job_id
+                                && job.slot_id == row.slot_id
+                                && job.generation == generation
+                                && !job.provisional
+                                && job.phase == ActorPhase::Completing
+                        })
+                });
+            if valid {
+                // Keep `remote_acked` false and never release a send claim:
+                // local payload loss is not remote delivery and must not
+                // authorize a fabricated or second terminal send.
+                if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
+                    row.abandoned = true;
+                }
+                commands.push(SideEffect::DeleteOutbox {
+                    job_id: job_id.clone(),
+                    generation,
+                });
+                restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
+            } else {
+                rejected = true;
+            }
+        }
         Event::JobWorkerLost { job_id, generation } => {
             let job = state.jobs.iter().find(|job| job.job_id == job_id);
             match job {
@@ -1431,6 +1480,28 @@ impl Journal {
         let state = load_materialized_state(&transaction)?;
         transaction.commit()?;
         Ok(state)
+    }
+
+    /// Record terminal local loss of a completion payload.
+    ///
+    /// The reducer validates the exact job owner, generation, and checksum
+    /// before releasing the slot. It never records remote acknowledgement.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn record_completion_payload_loss(
+        &mut self,
+        job_id: &JobId,
+        generation: Generation,
+        payload_sha256: &str,
+        reason: &str,
+    ) -> StoreResult<ReduceOutcome> {
+        self.apply(Event::CompletionPayloadLost {
+            job_id: job_id.clone(),
+            generation,
+            payload_sha256: payload_sha256.to_owned(),
+            reason: reason.to_owned(),
+        })
     }
 
     /// Persist `event` then return the commands. Crash after this returns
@@ -1612,7 +1683,7 @@ impl Journal {
         let mut statement = self.conn.prepare(
             "SELECT payload, checksum
              FROM events
-             WHERE kind = 'completion_unresolvable'
+             WHERE kind IN ('completion_unresolvable', 'completion_payload_lost')
              ORDER BY id DESC
              LIMIT ?1",
         )?;
@@ -1633,17 +1704,23 @@ impl Journal {
                 StoreError::new(velnor_model::ExitClass::Conflict, "journal.event.invalid")
                     .with_remediation("an abandoned completion event could not be decoded")
             })?;
-            if let Event::CompletionUnresolvable {
-                job_id,
-                generation,
-                reason,
-            } = event
-            {
-                found.push(UnresolvableCompletion {
+            match event {
+                Event::CompletionUnresolvable {
                     job_id,
                     generation,
                     reason,
-                });
+                }
+                | Event::CompletionPayloadLost {
+                    job_id,
+                    generation,
+                    reason,
+                    ..
+                } => found.push(UnresolvableCompletion {
+                    job_id,
+                    generation,
+                    reason,
+                }),
+                _ => {}
             }
         }
         Ok(found)
@@ -1703,6 +1780,7 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v3_to_v4(&transaction)?;
     migrate_v4_to_v5(&transaction)?;
     migrate_v5_to_v6(&transaction)?;
+    migrate_v6_to_v7(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -2514,6 +2592,17 @@ fn migrate_v5_to_v6(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// v7 adds the terminal local-payload-loss event vocabulary. No materialized
+/// table changed, but older writers must refuse journals that may contain it.
+fn migrate_v6_to_v7(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 7 {
+        return Ok(());
+    }
+    tx.pragma_update(None, "user_version", 7u32)?;
+    Ok(())
+}
+
 /// Repair the one historical migration poison that can pass the version gate.
 ///
 /// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
@@ -2653,6 +2742,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::CompletionIntended { generation, .. }
         | Event::CompletionAttemptFailed { generation, .. }
         | Event::CompletionUnresolvable { generation, .. }
+        | Event::CompletionPayloadLost { generation, .. }
         | Event::CompletionSendStarted { generation, .. }
         | Event::RemoteAcked { generation, .. }
         | Event::JobWorkerLost { generation, .. }
@@ -2691,6 +2781,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::CompletionIntended { .. } => "completion_intended",
         Event::CompletionAttemptFailed { .. } => "completion_attempt_failed",
         Event::CompletionUnresolvable { .. } => "completion_unresolvable",
+        Event::CompletionPayloadLost { .. } => "completion_payload_lost",
         Event::CompletionSendStarted { .. } => "completion_send_started",
         Event::RemoteAcked { .. } => "remote_acked",
         Event::RemoteObservedTerminal { .. } => "remote_observed_terminal",
@@ -3196,6 +3287,98 @@ mod tests {
     }
 
     #[test]
+    fn payload_loss_requires_exact_owner_generation_and_checksum() {
+        let (dir, mut journal) = open_tmp("payload-loss");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        let checksum = payload_checksum(b"ok");
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: checksum.clone(),
+            })
+            .unwrap();
+
+        for event in [
+            Event::CompletionPayloadLost {
+                job_id: job("job-1"),
+                generation: g,
+                payload_sha256: "wrong".into(),
+                reason: "corrupt payload".into(),
+            },
+            Event::CompletionPayloadLost {
+                job_id: job("job-1"),
+                generation: g.next(),
+                payload_sha256: checksum.clone(),
+                reason: "stale generation".into(),
+            },
+            Event::CompletionPayloadLost {
+                job_id: job("job-2"),
+                generation: g,
+                payload_sha256: checksum.clone(),
+                reason: "wrong owner".into(),
+            },
+        ] {
+            assert!(journal.apply(event).unwrap().rejected);
+        }
+        assert!(outbox_row(&journal, "job-1").unwrap().is_pending());
+
+        let outcome = journal
+            .record_completion_payload_loss(
+                &job("job-1"),
+                g,
+                &checksum,
+                "completion payload is missing",
+            )
+            .unwrap();
+        assert!(!outcome.rejected);
+        assert!(outcome.commands.contains(&SideEffect::DeleteOutbox {
+            job_id: job("job-1"),
+            generation: g,
+        }));
+        assert!(outcome
+            .commands
+            .contains(&SideEffect::AdvertiseCapacity { permits: 1 }));
+
+        let state = journal.materialized_state().unwrap();
+        assert!(state.jobs.is_empty());
+        assert!(state.outbox.is_empty());
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert!(!journal.has_remote_terminal_ack(&job("job-1"), g).unwrap());
+        let losses = journal.unresolvable_completions().unwrap();
+        assert_eq!(losses.len(), 1);
+        assert_eq!(losses[0].reason, "completion payload is missing");
+
+        drop(journal);
+        let reopened = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(reopened.pending_outbox().unwrap().is_empty());
+        assert!(reopened.materialized_state().unwrap().jobs.is_empty());
+        assert_eq!(
+            reopened.unresolvable_completions().unwrap()[0].reason,
+            "completion payload is missing"
+        );
+    }
+
+    #[test]
+    fn v6_journal_is_upgraded_for_payload_loss_event_vocabulary() {
+        let (dir, journal) = open_tmp("v6-to-v7");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 6u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+    }
+
+    #[test]
     fn a_permanent_remote_refusal_spends_the_whole_budget_at_once() {
         let (_dir, mut journal) = open_tmp("unresolvable-permanent");
         let g = prime_running_job(&mut journal, "scope-1", "job-1");
@@ -3351,14 +3534,16 @@ mod tests {
         let path = dir.join("journal.db");
         drop(journal);
         let conn = Connection::open(&path).unwrap();
-        conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION - 1)
-            .unwrap();
+        // This specifically guards the v5-to-v6 physical-shape transition;
+        // v6-to-v7 changes only the event vocabulary and is intentionally
+        // compatible with the current materialized tables.
+        conn.pragma_update(None, "user_version", 5u32).unwrap();
         conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
             .unwrap();
         drop(conn);
 
-        // The tables carry the current vocabulary but the stamp does not.
-        // Some writer mutated the shape without stamping; guessing which
+        // The tables carry the v6 vocabulary but the stamp does not. Some
+        // writer mutated the shape without stamping; guessing which
         // vocabulary wrote the events is exactly what must never happen.
         let before = std::fs::read(&path).unwrap();
         let error = Journal::open(&path).unwrap_err();
@@ -5415,7 +5600,7 @@ mod tests {
     /// replays events, so this asserts on materialization.
     #[test]
     fn an_upgrade_from_every_older_version_can_still_materialize() {
-        for stamped in [2u32, 3, 4, 5] {
+        for stamped in [2u32, 3, 4, 5, 6] {
             let (dir, journal) = open_tmp(&format!("upgrade-from-v{stamped}"));
             let path = dir.join("journal.db");
             drop(journal);
@@ -5460,7 +5645,7 @@ mod tests {
         }
     }
 
-    /// The genuine v5-to-v6 upgrade: an *older shape* under an older stamp, not
+    /// The genuine v5-to-v6 shape upgrade: an *older shape* under an older stamp, not
     /// merely a rewound stamp on a current file.
     ///
     /// This is the case the v5 bump got wrong. The columns really are absent,
@@ -5469,7 +5654,7 @@ mod tests {
     /// first `materialized_state()`. Assert the shape is repaired, the stamp
     /// lands on exactly the current version, and the state materializes.
     #[test]
-    fn a_v5_shaped_journal_upgrades_to_v6_and_materializes() {
+    fn a_v5_shaped_journal_upgrades_to_current_and_materializes() {
         let (dir, journal) = open_tmp("upgrade-v5-shape");
         let path = dir.join("journal.db");
         drop(journal);
@@ -5502,7 +5687,10 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
-        assert_eq!(JOURNAL_SCHEMA_VERSION, 6, "this test pins the v6 upgrade");
+        assert_eq!(
+            JOURNAL_SCHEMA_VERSION, 7,
+            "this test pins the current upgrade"
+        );
         for column in [
             "plan_id",
             "run_service_url",
