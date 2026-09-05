@@ -3917,3 +3917,20 @@ target phase). Stopped-agent state remains archived at
 
 Checks passed. Targeted test execution was blocked by host Cargo saturation;
 full completion is not claimed.
+
+## 74. Per-slot Docker memory cap and worktree preservation — 2026-09-05
+
+`c21e24f` makes the derived slot memory a Docker `--memory` hard cap. Workflow
+and operator memory flags are parsed to bytes, the tightest explicit value may
+narrow the derived share, and malformed values fail before Docker starts. The
+cap is emitted only when host memory is observable; no invented capacity is
+used. Focused container tests pass, host-budget tests pass, and runner target
+checks pass.
+
+The superseded unstaged checkout-hydration diff was preserved without touching
+its worktree at `refs/archive/worktree/checkout-hydration-errors-20260905`.
+The non-ancestor MBX scenario branch was likewise preserved at
+`refs/archive/branch/codex-scenario-mbx-requirements-20260905`; it remains
+unmerged because its host-side MBX probe cannot prove the in-container default
+job path. Authoritative typed slot-count propagation remains the next resource
+correctness gate.
