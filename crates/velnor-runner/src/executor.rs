@@ -15344,6 +15344,7 @@ esac
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
+            slot_count: std::num::NonZeroU32::MIN,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),

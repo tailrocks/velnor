@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::container::host_budget::{observe_slots, HostBudget, SlotBudget};
+use crate::container::host_budget::{HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
 
 /// One derived resource budget for the machine, and the share of it that
@@ -156,6 +156,9 @@ pub struct JobContainerSpec {
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
+    /// Validated daemon slot count carried into this job. Resource budgeting
+    /// must not infer topology from this job's filesystem layout.
+    pub slot_count: NonZeroU32,
     pub env: Vec<(String, String)>,
     /// Daemon-enforced Docker resource limits. CPU and memory limits are
     /// normalized with workflow createOptions into runner-owned values before
@@ -195,20 +198,6 @@ const BUDGET_ENV: [&str; 4] = [
 ];
 
 impl JobContainerSpec {
-    /// This job's `…/work/slot-N` directory, when the daemon runs more than one
-    /// slot. The production temp path is `…/slot-N/<job>/temp`.
-    fn slot_dir(&self) -> Option<PathBuf> {
-        let slot = self.temp_host.parent()?.parent()?;
-        let named = slot
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_prefix("slot-"))
-            .is_some_and(|suffix| {
-                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            });
-        named.then(|| slot.to_path_buf())
-    }
-
     /// The tightest valid `--cpus` limit declared by the operator
     /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
     fn declared_container_cpus(&self) -> Option<f64> {
@@ -248,13 +237,8 @@ impl JobContainerSpec {
     /// every job on the host, not a per-slot allowance. Nothing used to divide
     /// it, so four slots each ran a Cargo build sized to the whole machine.
     fn slot_budget(&self) -> SlotBudget {
-        let slots = observe_slots(
-            self.slot_dir().as_deref(),
-            std::env::var("VELNOR_SLOTS").ok().as_deref(),
-        );
-        let slots = slots.value().copied().unwrap_or(NonZeroU32::MIN);
         HostBudget::observe_host()
-            .per_slot(slots)
+            .per_slot(self.slot_count)
             .capped_by_container_cpus(self.declared_container_cpus())
     }
 
@@ -1564,6 +1548,7 @@ mod tests {
             actions_host: job.join("actions"),
             tools_host: job.join("tools"),
             mount_docker_socket: true,
+            slot_count: NonZeroU32::MIN,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             resource_options: vec!["--memory".into(), "8g".into()],
             options: vec!["--cpus".into(), "2".into()],
@@ -1580,6 +1565,15 @@ mod tests {
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
+    }
+
+    #[test]
+    fn slot_budget_uses_authoritative_count_for_nonstandard_job_paths() {
+        let mut job = spec();
+        job.temp_host = PathBuf::from("/not-a-slot-layout/jobs/job/temp");
+        job.slot_count = NonZeroU32::new(2).unwrap();
+
+        assert_eq!(job.slot_budget().slots, job.slot_count);
     }
 
     #[test]

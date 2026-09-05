@@ -333,7 +333,9 @@ fn format_cpu_milli(milli: u64) -> String {
     format!("{whole}.{fraction}")
 }
 
-/// Number of runner slots this daemon provisioned, derived rather than assumed.
+/// Test-only legacy discovery. Production receives the validated slot count
+/// through the typed run/job context; it must not infer topology from paths or
+/// ambient environment.
 ///
 /// `slot_dir` is this job's `…/work/slot-N` directory when the daemon runs more
 /// than one slot; every slot is a separate OS process, so the only shared
@@ -341,6 +343,7 @@ fn format_cpu_milli(milli: u64) -> String {
 /// the daemon work root. `env_hint` is `VELNOR_SLOTS`, which the packaged units
 /// pass to `--slots`. The larger of the two wins, because a slot whose
 /// directory has not been created yet still competes for the machine.
+#[cfg(test)]
 pub(crate) fn observe_slots(
     slot_dir: Option<&Path>,
     env_hint: Option<&str>,
@@ -362,6 +365,7 @@ pub(crate) fn observe_slots(
     }
 }
 
+#[cfg(test)]
 fn count_sibling_slots(slot_dir: &Path) -> Option<NonZeroU32> {
     if !is_slot_dir_name(slot_dir) {
         return None;
@@ -377,6 +381,7 @@ fn count_sibling_slots(slot_dir: &Path) -> Option<NonZeroU32> {
     NonZeroU32::new(count)
 }
 
+#[cfg(test)]
 fn is_slot_dir_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())

@@ -11,7 +11,7 @@
 //! proves the packaged files never reference a verb dropped from either
 //! binary. Plan 079 records the long-term home of each verb.
 
-use std::path::PathBuf;
+use std::{num::NonZeroU32, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -237,6 +237,8 @@ pub struct DaemonArgs {
 /// parsed service verb — kept for the library API and characterization tests.
 #[derive(Debug, Clone)]
 pub struct RunArgs {
+    /// Validated number of slots provisioned by the owning daemon.
+    pub slot_count: NonZeroU32,
     pub config_dir: Option<PathBuf>,
     pub pat: Option<String>,
     pub max_idle_slot_age_seconds: Option<u64>,
@@ -517,6 +519,7 @@ fwd_release!(
 impl From<RunArgs> for crate::args::RunArgs {
     fn from(a: RunArgs) -> Self {
         Self {
+            slot_count: a.slot_count,
             config_dir: a.config_dir,
             pat: a.pat,
             max_idle_slot_age_seconds: a.max_idle_slot_age_seconds,
