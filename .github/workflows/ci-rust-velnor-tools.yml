@@ -22,9 +22,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Velnor workflow runtime
+      - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        run: cargo install --locked --git https://github.com/tailrocks/velnor.git --rev 8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0 velnor-workflow --bin velnor-workflow
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+        with:
+          rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Set trusted workflow policy revision
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12da6232672f039e42c21fe9dff00085856ef92d" >> "$GITHUB_ENV"
       - name: Set up Mise Rust toolchain

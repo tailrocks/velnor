@@ -26,9 +26,11 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install Velnor workflow runtime
+      - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        run: cargo install --locked --git https://github.com/tailrocks/velnor.git --rev 8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0 velnor-workflow --bin velnor-workflow
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+        with:
+          rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Select affected units
         id: plan
         env:
@@ -56,40 +58,16 @@ jobs:
     uses: ./.github/workflows/ci-docker-docker.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-unit-docker-crates-velnor-workflow-tests-fixtures-polyglot:
-    name: "Docker · Docker (crates/velnor-workflow/tests/fixtures/polyglot)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-docker-crates-velnor-workflow-tests-fixtures-polyglot.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
   group-unit-docs:
     name: "Documentation · Documentation"
     needs: [plan, policy]
     uses: ./.github/workflows/ci-docs-docs.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-unit-gradle-crates-velnor-workflow-tests-fixtures-polyglot:
-    name: "Gradle · Gradle (crates/velnor-workflow/tests/fixtures/polyglot)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-gradle-crates-velnor-workflow-tests-fixtures-polyglot.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-  group-unit-node-fixture:
-    name: "Node.js · Node.js package (fixture)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-node-fixture.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
   group-unit-opentofu:
     name: "OpenTofu · OpenTofu"
     needs: [plan, policy]
     uses: ./.github/workflows/ci-opentofu-opentofu.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-  group-unit-rust-fixture:
-    name: "Rust · fixture"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-fixture.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-policy:

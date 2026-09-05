@@ -28,14 +28,14 @@ const OWNERSHIP_STATE: &str = ".github/ci/.github-actions-generator-state";
 const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\n";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
-const VELNOR_WORKFLOW_REPOSITORY: &str = "https://github.com/tailrocks/velnor.git";
+const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -664,6 +664,11 @@ fn scan_repository_with_default_branch(
             "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.".to_owned(),
         ],
     };
+    if files.iter().any(|file| is_ignored_test_manifest(file)) {
+        analysis.limitations.push(
+            "Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.".to_owned(),
+        );
+    }
 
     let cargo_manifests = files_named(&files, "Cargo.toml");
     if !cargo_manifests.is_empty() {
@@ -909,9 +914,11 @@ fn scan_repository_with_default_branch(
 
     let mut dockerfiles_by_root: BTreeMap<String, Vec<&String>> = BTreeMap::new();
     for dockerfile in files.iter().filter(|file| {
-        file.rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with("Dockerfile"))
+        !is_test_support_path(file)
+            && file
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("Dockerfile"))
     }) {
         let docker_root = parent_path(dockerfile);
         dockerfiles_by_root
@@ -2877,9 +2884,32 @@ fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
 fn files_named(files: &[String], name: &str) -> Vec<String> {
     files
         .iter()
-        .filter(|file| file.rsplit('/').next() == Some(name))
+        .filter(|file| file.rsplit('/').next() == Some(name) && !is_test_support_path(file))
         .cloned()
         .collect()
+}
+
+/// Cargo target directories hold tests and fixtures, not shippable
+/// packages: a manifest nested beneath one describes test support, never a
+/// unit CI should verify on its own. Scanned relative to the repository
+/// root, so manifests at a scanned root itself are unaffected.
+fn is_test_support_path(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| matches!(segment, "tests" | "benches"))
+}
+
+fn is_ignored_test_manifest(path: &str) -> bool {
+    if !is_test_support_path(path) {
+        return false;
+    }
+    match path.rsplit('/').next() {
+        Some("Cargo.toml" | "package.json" | "Package.swift") => true,
+        Some(name) if name.starts_with("Dockerfile") => true,
+        Some("settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts") => {
+            true
+        }
+        Some(_) | None => false,
+    }
 }
 
 fn has_extension(file: &str, extension: &str) -> bool {
@@ -2901,12 +2931,16 @@ fn gradle_roots(files: &BTreeSet<String>) -> Vec<String> {
     let manifests = files
         .iter()
         .filter(|file| {
-            matches!(
-                file.rsplit('/').next(),
-                Some(
-                    "settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts"
+            !is_test_support_path(file)
+                && matches!(
+                    file.rsplit('/').next(),
+                    Some(
+                        "settings.gradle"
+                            | "settings.gradle.kts"
+                            | "build.gradle"
+                            | "build.gradle.kts"
+                    )
                 )
-            )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -3184,7 +3218,8 @@ impl WorkflowIr {
             }
         }
         // Auxiliary schedules must not create or satisfy the branch-protection
-        // check. Only the PR and main workflows own the stable required check.
+        // check. Only the PR and main workflows own the stable `ci-required`
+        // check that repository rulesets gate on.
         if kind != WorkflowKind::Nightly {
             self.render_required(
                 &mut output,
@@ -3300,10 +3335,10 @@ impl WorkflowIr {
             .map(|job| format!("needs['{job}'].result == 'success'"))
             .collect::<Vec<_>>()
             .join(" && ");
-        let check_name = if include_policy { "main" } else { "required" };
+        let check_name = "ci-required";
         let _ = writeln!(
             output,
-            "  required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
             needs.join(", "),
             yaml_scalar(&self.github_runner)
         );
@@ -3435,10 +3470,11 @@ impl WorkflowIr {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {} --rev {} velnor-workflow --bin velnor-workflow\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
-            VELNOR_WORKFLOW_REPOSITORY,
+            VELNOR_WORKFLOW_SETUP_ACTION,
+            VELNOR_WORKFLOW_SOURCE_REV,
             VELNOR_WORKFLOW_SOURCE_REV,
         );
     }
@@ -3795,11 +3831,11 @@ impl WorkflowIr {
         &self,
         output: &mut String,
         runners: RunnerMode,
-        stable: bool,
+        _stable: bool,
         trusted: bool,
         include_policy: bool,
     ) {
-        let check_name = if stable { "required" } else { "main" };
+        let check_name = "ci-required";
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
@@ -3841,7 +3877,7 @@ impl WorkflowIr {
         };
         let _ = writeln!(
             output,
-            "  required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
             needs.join(", "),
             yaml_scalar(&self.github_runner),
         );
@@ -4480,7 +4516,7 @@ fn yaml_scalar(value: &str) -> String {
 fn workflow_runtime_setup(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Install Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        run: cargo install --locked --git {VELNOR_WORKFLOW_REPOSITORY} --rev {VELNOR_WORKFLOW_SOURCE_REV} velnor-workflow --bin velnor-workflow\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
+            "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}\n        with:\n          rev: {VELNOR_WORKFLOW_SOURCE_REV}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
         )
     } else {
         String::new()
@@ -6561,19 +6597,17 @@ mod tests {
     }
 
     #[test]
-    fn hosted_runtime_install_selects_the_multi_binary_workspace_package() {
+    fn hosted_runtime_setup_uses_the_versioned_setup_action() {
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
-            "scan fixture for hosted install command",
+            "scan fixture for hosted runtime setup",
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
-        assert!(workflow.contains(
-            "cargo install --locked --git https://github.com/tailrocks/velnor.git --rev "
-        ));
-        assert!(workflow.contains("velnor-workflow --bin velnor-workflow"));
-        assert!(!workflow.contains(&format!(
-            "--rev {VELNOR_WORKFLOW_SOURCE_REV} --bin velnor-workflow"
-        )));
+        let setup_reference =
+            format!("uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}");
+        assert!(workflow.contains(&setup_reference));
+        assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
+        assert!(!workflow.contains("cargo install --locked --git"));
     }
 
     #[test]
@@ -6982,6 +7016,68 @@ path-only = { path = "../path-only" }
         );
     }
 
+    #[test]
+    fn scanner_ignores_manifests_nested_under_test_directories() {
+        let root = temporary_repository("test-fixture-exclusion");
+        let app = root.join("crates/app");
+        let fixture = app.join("tests/fixtures/polyglot");
+        must(fs::create_dir_all(app.join("src")), "create app source");
+        must(fs::create_dir_all(&fixture), "create fixture directory");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"crates/app\"]\n",
+            ),
+            "write workspace manifest",
+        );
+        must(
+            fs::write(
+                app.join("Cargo.toml"),
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            ),
+            "write app manifest",
+        );
+        must(
+            fs::write(app.join("src/main.rs"), "fn main() {}\n"),
+            "write app source",
+        );
+        must(
+            fs::write(
+                fixture.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write fixture manifest",
+        );
+        must(
+            fs::write(
+                fixture.join("package.json"),
+                "{\"name\":\"fixture\",\"scripts\":{\"test\":\"exit 1\"}}",
+            ),
+            "write fixture package manifest",
+        );
+        must(
+            fs::write(fixture.join("Dockerfile"), "FROM scratch\n"),
+            "write fixture Dockerfile",
+        );
+        must(
+            fs::write(fixture.join("build.gradle.kts"), "tasks {}\n"),
+            "write fixture Gradle manifest",
+        );
+
+        let config = must(scan_repository(&root, RunnerMode::Both), "scan repository");
+        assert_eq!(config.units.len(), 1);
+        assert_eq!(config.units[0].id, "rust-app");
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("treated as test fixtures")),
+            "fixture exclusion is recorded"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the workspace fixture keeps all evidence assertions together"
@@ -7249,7 +7345,7 @@ path-only = { path = "../path-only" }
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("name: CI\nrun-name: CI / main"));
-        assert!(workflow.contains("  required:\n    name: main"));
+        assert!(workflow.contains("  ci-required:\n    name: ci-required"));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
@@ -7577,6 +7673,7 @@ path-only = { path = "../path-only" }
         assert!(pr.contains("name: CI\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
         assert!(pr.contains("merge_group:"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
         assert!(!pr.contains("branches: [main]"));
         assert!(main.contains("name: CI\nrun-name: CI / main"));
         assert!(main.contains("branches: [main]"));
@@ -7586,7 +7683,7 @@ path-only = { path = "../path-only" }
         assert!(nightly.contains("schedule:"));
         assert!(nightly.contains("workflow_dispatch:"));
         assert!(!nightly.contains("pull_request:"));
-        assert!(!nightly.contains("  required:\n    name: required"));
+        assert!(!nightly.contains("name: ci-required"));
         assert_eq!(
             must(
                 runtime::scope_for_event_values("push", None),
@@ -8699,7 +8796,9 @@ path-only = { path = "../path-only" }
         assert!(main.contains("workflow_dispatch:"));
         assert!(main.contains("refs/heads/main"));
         assert!(main.contains("runs-on: [self-hosted, velnor-target-mvp]"));
-        assert!(!nightly.contains("name: required"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
+        assert!(main.contains("  ci-required:\n    name: ci-required"));
+        assert!(!nightly.contains("name: ci-required"));
         assert!(nightly.contains("schedule:"));
         assert_eq!(
             runtime::scope_for_event_values("push", None)

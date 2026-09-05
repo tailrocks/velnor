@@ -54,7 +54,7 @@ and printed its maximum as a "p95".
 
 One NDJSON record per scenario run, `velnor.bench.result.v2`:
 
-```
+```text
 schema, run_id, recorded_at_unix_ms, scenario, family, driver, runnability,
 environment { velnor.bench.environment.v1 — every field mandatory },
 observations[ { total_ms, stages_ms{}, checkout_phases_ms{}, resources{}, git{} } ],
@@ -168,7 +168,7 @@ Two behavioural differences, both deliberate:
 
 ## Usage
 
-```
+```shell
 velnor-bench --velnor-repo . --fixture-repo ../velnor-actions-fixture probe
 velnor-bench --velnor-repo . list
 velnor-bench --velnor-repo . --network-egress \

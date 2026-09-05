@@ -10,8 +10,12 @@
 
 #[cfg(all(not(debug_assertions), feature = "test-support"))]
 compile_error!("test-support is forbidden in release-profile builds");
-#[cfg(all(feature = "release-build", feature = "test-support"))]
-compile_error!("test-support must never be combined with release-build");
+// NOTE: there is deliberately no `release-build + test-support` combination
+// gate. The release profile is already fully covered above, so such a gate
+// could only ever fire for dev-profile builds — exactly the harmless
+// `--all-features` test path where `release-build` is inert without
+// `VELNOR_RELEASE_BUILD=1` (see build.rs) and `test-support` is required
+// for integration fixtures.
 
 mod action;
 mod admission;

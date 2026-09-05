@@ -172,11 +172,11 @@ channel. The class fix is the missing manager, not just the bump.
 
 ## 9. Observed bottlenecks and benchmark baseline
 
-_Pending benchmark architecture._
+*Pending benchmark architecture.*
 
 ## 10. Task graph
 
-_Pending synthesis._
+*Pending synthesis.*
 
 ## 11. Status log
 
@@ -1197,7 +1197,7 @@ tooling; the `recursion_limit` warning (raise the limit — the real fix falls o
 decomposition); the benchmark script's defects (it is deleted, not repaired); and
 `audit_ci.rs` grepping shell text (CI-only, and fixed as a side effect of the verifier work).
 
-## 13. Completed work packages (continued)
+## 13. Completed work packages (continued, fixture branch)
 
 | ID | Change | Commits (fixture branch) |
 | --- | --- | --- |
@@ -1279,7 +1279,7 @@ Both defects invalidate measurement rather than execution, which is why they
 are recorded here by the benchmark work (T-010) rather than patched in place:
 `runner.rs` is under concurrent ownership.
 
-## 13. Completed work packages (continued)
+## 13. Completed work packages (continued, T-010)
 
 | ID | Scope | Outcome |
 | --- | --- | --- |
@@ -2984,7 +2984,7 @@ and ephemeral-identity behavior. This is the `fb8ae38` documentation package.
 and source-bound readiness audit pass against the 6c0c1af archive. Baseline-only and single-lane
 diagnostics remain fail-closed; no live parity result is substituted.
 
-### Final gates
+### Final gates (T-005)
 
 | Gate | Result |
 | --- | --- |
@@ -3053,15 +3053,15 @@ full workspace gate after this commit.
 
 Fresh independent audits found these unresolved requirements, not accepted as complete:
 
-* P0: recovery classifies a provisional acquisition as accepted and can leave the slot
+- P0: recovery classifies a provisional acquisition as accepted and can leave the slot
   occupied without a bounded `renewjob` ownership probe or terminal outcome. This crosses
   the reserved runner/controller boundary and requires coordination with the other lead.
-* P1: mixed native/JavaScript post steps are stored and executed in separate lists rather
+- P1: mixed native/JavaScript post steps are stored and executed in separate lists rather
   than one upstream LIFO stack; the implementation boundary is reserved `executor.rs`.
-* P1: the remaining live GitHub dual-lane provenance, deployed image identity, default-mbx
+- P1: the remaining live GitHub dual-lane provenance, deployed image identity, default-mbx
   Rust run, fault suite, soak suite, and official-runner comparison are absent. Existing
   local fixture gates prove schemas and mutation resistance, not live parity.
-* P1: control/mutation and acquisition recovery have additional fail-open/indeterminate
+- P1: control/mutation and acquisition recovery have additional fail-open/indeterminate
   paths; no benchmark or source gate is treated as evidence that those paths are fixed.
 
 The branch is intentionally not declared complete. Next packages must preserve the shared
