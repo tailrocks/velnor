@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
 
 /// Bump whenever target mounting or compiler-visible path semantics change.
 /// Old generations remain inactive, owned cache data and are reclaimed by GC.
@@ -31,6 +31,7 @@ pub fn github_job_container_spec(
     paths: GitHubJobContainerPaths,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
@@ -62,6 +63,7 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
+        slot_count,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         resource_options,
         options: job_container_options(job, trust_scope),
@@ -1054,6 +1056,7 @@ mod tests {
             actions_host: root.join("actions"),
             tools_host: root.join("tools"),
             mount_docker_socket: true,
+            slot_count: NonZeroU32::MIN,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),

@@ -6,7 +6,7 @@
 //! only; `velnorctl` converts its CLI-facing enums explicitly at the
 //! boundary. Plan 079 deletes this crate after the runtime modules move.
 
-use std::path::PathBuf;
+use std::{num::NonZeroU32, path::PathBuf};
 
 /// Default host location of the atomically activated release identity. Both the
 /// package scripts and the daemon `.service` units read from here, so the units
@@ -186,6 +186,10 @@ pub struct ConfigureArgs {
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
+    /// Validated number of slots provisioned by the owning daemon. Resource
+    /// budgeting must use this carried value, never infer topology from paths
+    /// or ambient environment.
+    pub slot_count: NonZeroU32,
     pub config_dir: Option<PathBuf>,
     pub pat: Option<String>,
     pub max_idle_slot_age_seconds: Option<u64>,

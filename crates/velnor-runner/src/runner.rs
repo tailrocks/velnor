@@ -10,6 +10,7 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
@@ -4352,10 +4353,13 @@ fn daemon_preflight_args(
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
-    if slots == 0 {
-        bail!("--slots must be greater than zero");
-    }
+    validated_slot_count(slots)?;
     Ok(slots)
+}
+
+fn validated_slot_count(slots: usize) -> Result<NonZeroU32> {
+    let slots = u32::try_from(slots).context("--slots exceeds the supported u32 range")?;
+    NonZeroU32::new(slots).ok_or_else(|| anyhow::anyhow!("--slots must be greater than zero"))
 }
 
 fn maybe_startup_host_docker_reclaim(
@@ -4675,12 +4679,14 @@ fn daemon_slot_run_args(
     slot_count: usize,
 ) -> Result<RunArgs> {
     validate_daemon_slot_index(slot_index, slot_count)?;
+    let validated_slot_count = validated_slot_count(args.slots)?;
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
     let require_docker_socket = crate::execution::load_execution_file(&slot_dir, None)
         .map(|file| file.backend().uses_host_docker_socket())
         .unwrap_or(false);
 
     Ok(RunArgs {
+        slot_count: validated_slot_count,
         config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
@@ -6499,6 +6505,7 @@ async fn handle_job_request(
         let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
+        let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
         let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
@@ -6527,6 +6534,7 @@ async fn handle_job_request(
                 docker_host_work_dir,
                 &docker_image,
                 resource_options,
+                slot_count,
                 &node_action_image,
                 &admission_graph,
                 &trust_scope,
@@ -8162,6 +8170,7 @@ fn execute_script_job(
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
@@ -8185,6 +8194,7 @@ fn execute_script_job(
         docker_host_work_dir,
         docker_image,
         resource_options,
+        slot_count,
         node_action_image,
         admission_graph,
         trust_scope,
@@ -8272,6 +8282,7 @@ fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     docker_image: &str,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     trust_scope: &str,
     run_service_url: &str,
@@ -8291,6 +8302,7 @@ fn execute_microvm_script_job(
         },
         docker_image,
         Vec::new(),
+        slot_count,
         node_action_image,
         "microvm".into(),
         trust_scope,
@@ -8677,6 +8689,7 @@ fn execute_script_job_inner(
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
@@ -8697,6 +8710,7 @@ fn execute_script_job_inner(
             job,
             script_steps,
             docker_image,
+            slot_count,
             node_action_image,
             trust_scope,
             run_service_url,
@@ -8755,6 +8769,7 @@ fn execute_script_job_inner(
         },
         docker_image,
         resource_options,
+        slot_count,
         node_action_image,
         daemon_id,
         trust_scope,
