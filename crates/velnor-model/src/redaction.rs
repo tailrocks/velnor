@@ -22,8 +22,10 @@
 //!   whole value (`ExecutionContext.AddMask` splits before registering);
 //! * each value is registered in its encoded forms as well — upstream's
 //!   `ValueEncoders`: JSON string escape, URI data escape, XML escape,
-//!   backslash escape, surrounding-quote trim, and base64 — because a secret
-//!   that reaches a log through a JSON body or a URL query is the same secret.
+//!   backslash escape, surrounding-quote trim, base64, shifted base64,
+//!   command-line and expression escaping, and PowerShell ampersand forms —
+//!   because a secret that reaches a log through a JSON body or a URL query is
+//!   the same secret.
 
 use std::collections::BTreeSet;
 
@@ -186,15 +188,22 @@ fn add_encodings(value: &str, patterns: &mut BTreeSet<String>) {
     if value.chars().count() < MIN_MASK_LENGTH {
         return;
     }
-    for candidate in [
+    let encoded = [
         value.to_owned(),
-        trim_double_quotes(value),
+        base64_encode(value),
+        base64_encode_shift(value, 1),
+        base64_encode_shift(value, 2),
+        command_line_argument_escape(value),
+        expression_string_escape(value),
         json_string_escape(value),
         uri_data_escape(value),
         xml_escape(value),
         backslash_escape(value),
-        base64_encode(value),
-    ] {
+        trim_double_quotes(value),
+        power_shell_pre_ampersand_escape(value),
+        power_shell_post_ampersand_escape(value),
+    ];
+    for candidate in encoded {
         if candidate.chars().count() >= MIN_MASK_LENGTH && !candidate.trim().is_empty() {
             patterns.insert(candidate);
         }
@@ -202,7 +211,28 @@ fn add_encodings(value: &str, patterns: &mut BTreeSet<String>) {
 }
 
 fn trim_double_quotes(value: &str) -> String {
-    value.trim_matches('"').to_owned()
+    if value.chars().count() > 8 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn base64_encode_shift(value: &str, shift: usize) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() > shift {
+        base64_encode_bytes(&bytes[shift..])
+    } else {
+        base64_encode_bytes(bytes)
+    }
+}
+
+fn command_line_argument_escape(value: &str) -> String {
+    value.replace('"', "\\\"")
+}
+
+fn expression_string_escape(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn json_string_escape(value: &str) -> String {
@@ -251,8 +281,11 @@ fn backslash_escape(value: &str) -> String {
 }
 
 fn base64_encode(value: &str) -> String {
+    base64_encode_bytes(value.as_bytes())
+}
+
+fn base64_encode_bytes(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = value.as_bytes();
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let buffer = [
@@ -276,6 +309,42 @@ fn base64_encode(value: &str) -> String {
         });
     }
     encoded
+}
+
+fn power_shell_pre_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => &value[..index + 2],
+        None => &value[..value.rfind('&').expect("value contains '&'") + 1],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn power_shell_post_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => {
+            let after = &value[index + 2..];
+            match after.chars().next() {
+                Some(colored) => &after[colored.len_utf8()..],
+                None => "",
+            }
+        }
+        None => &value[value.rfind('&').expect("value contains '&'") + 1..],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +383,47 @@ mod tests {
         assert!(masker.mask(&format!("json {}", json_string_escape(r#"a b"c\d"#))) == "json ***");
         assert!(masker.mask(&format!("uri {}", uri_data_escape(r#"a b"c\d"#))) == "uri ***");
         assert!(masker.mask(&format!("b64 {}", base64_encode(r#"a b"c\d"#))) == "b64 ***");
+    }
+
+    #[test]
+    fn masks_all_runner_value_encoder_forms() {
+        let value = r#"a'b"c\d"#;
+        let masker = SecretMasker::new([value]);
+        let encoded = [
+            base64_encode(value),
+            base64_encode_shift(value, 1),
+            base64_encode_shift(value, 2),
+            command_line_argument_escape(value),
+            expression_string_escape(value),
+            json_string_escape(value),
+            uri_data_escape(value),
+            xml_escape(value),
+            backslash_escape(value),
+        ];
+        for form in encoded {
+            assert_eq!(masker.mask(&form), REDACTION, "form {form:?}");
+        }
+
+        let quoted = r#""abcdefgh""#;
+        let quoted_masker = SecretMasker::new([quoted]);
+        assert_eq!(quoted_masker.mask("abcdefgh"), REDACTION);
+
+        let powershell = "abcdef&+Zghijkl";
+        let powershell_masker = SecretMasker::new([powershell]);
+        assert_eq!(powershell_masker.mask("abcdef&+"), REDACTION);
+        assert_eq!(powershell_masker.mask("ghijkl"), REDACTION);
+    }
+
+    #[test]
+    fn encoder_guards_match_runner_contract() {
+        assert!(trim_double_quotes(r#""short""#).is_empty());
+        assert!(power_shell_pre_ampersand_escape("abc&+").is_empty());
+        assert!(power_shell_post_ampersand_escape("abc&+Zdef").is_empty());
+
+        let masker = SecretMasker::new([r#""short""#, "abc&+Zdef"]);
+        assert_eq!(masker.mask("short"), "short");
+        assert_eq!(masker.mask("abc&+"), "abc&+");
+        assert_eq!(masker.mask("def"), "def");
     }
 
     #[test]
