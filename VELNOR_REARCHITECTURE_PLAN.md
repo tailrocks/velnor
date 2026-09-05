@@ -4002,11 +4002,28 @@ treated as a successful publisher.
 daemon startup path, before runner registration and broker polling. Checkout
 steps still retain their per-step fail-closed reaper call, but an idle daemon
 no longer waits for the next checkout before removing credentials left by a
-crashed process. Reaper failures stop daemon startup instead of allowing a
-runner to accept work while stale credential state is uninspectable.
+crashed process. `df284aa` keeps one-shot modes fail-fast while supervised
+daemons retry the same gate with drain-aware backoff; no runner accepts work
+while stale credential state is uninspectable.
 
 The change is limited to the existing daemon boundary; direct one-shot runs
 and child job passes do not acquire a second startup sweep. Formatting,
 `git diff --check`, the all-target runner compile gate, and the focused
 abandoned-credential test pass. No unstable daemon-startup integration test
 was added because the current startup path has no network-free seam.
+
+## 80. Crash recovery preserves a durable terminal conclusion — 2026-09-05
+
+`f1e36c0` closes the crash window after `JobTerminalResult` but before the
+completion payload/outbox is written. Orphan recovery now sends a minimal
+structurally valid completion using the journal's exact `TaskResult`; it does
+not route a durable `succeeded` result through the generic synthetic-failure
+path. Unknown durable conclusion strings fail closed, and ownership,
+generation, journal intent, send-claim, checksum, and remote-ack barriers stay
+unchanged. The original synthetic failure remains the path when no terminal
+conclusion exists.
+
+The controller recovery suite (`35` tests), terminal-conclusion regression,
+all-target runner compile, formatting, and diff checks pass. No live Run
+Service integration result is claimed; the network-free regression verifies
+the payload conclusion and structural step contract.
