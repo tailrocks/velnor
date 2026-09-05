@@ -3964,3 +3964,19 @@ library suite passed serially (`1577` passed, one ignored). Parallel full-suite
 runs intermittently hit unrelated filesystem lock-test contention; each
 affected test passes exactly in isolation, so no speculative lock patch was
 made.
+
+## 77. Artifact buckets share one lease and I/O lock boundary — 2026-09-05
+
+`b63cc1e` closes the artifact-store lifetime race. Artifact GC removes a whole
+`<run-id>-<attempt>` bucket, so upload, offline download, and GC now all use a
+flock keyed by that same bucket. Upload holds the exclusive lock through local
+staging, digesting, and Results Service streaming; offline download holds the
+shared lock before listing or opening any artifact. A regression test proves GC
+waits for an active artifact reader.
+
+Active jobs now publish an `artifacts/<run-key>/<job-id>` scope lease alongside
+the target, actions-cache, Cargo, and mise leases. The lease keeps the bucket
+live in the gaps between upload actions; the bucket lock remains the final
+integrity boundary for concurrent destructive I/O. Focused artifact GC,
+upload, and download tests pass (`1`, `8`, and `4` respectively), with format,
+diff, and runner compile checks passing.
