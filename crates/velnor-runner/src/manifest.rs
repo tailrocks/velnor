@@ -2176,14 +2176,13 @@ mod tests {
             "sign-arm64-deb",
         ];
         let expected = "${{ needs.release_gate.outputs.tag_ref }}";
-        let expected_signer =
-            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c";
+        let expected_signer = "./.github/workflows/ci-release-package-signer.yml";
 
         for job in signer_jobs {
             assert_eq!(
                 workflow["jobs"][job]["uses"].as_str(),
                 Some(expected_signer),
-                "{job} must use the pinned package-signer workflow"
+                "{job} must use the local policy-approved package signer"
             );
             let source_ref = workflow["jobs"][job]["with"]["source-ref"]
                 .as_str()

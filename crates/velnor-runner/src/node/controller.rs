@@ -1597,7 +1597,7 @@ async fn reclaim_orphaned_jobs(
                         }
                     }
                 } else {
-                    let recovery = if let Some(conclusion) = job.terminal_conclusion.as_deref() {
+                    if let Some(conclusion) = job.terminal_conclusion.as_deref() {
                         defer_remote_recovery_on_timeout(
                             remaining_remote_budget(remote_deadline),
                             crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
@@ -1613,8 +1613,7 @@ async fn reclaim_orphaned_jobs(
                             "complete recorded in-flight job during orphan recovery",
                         )
                         .await?
-                    };
-                    recovery
+                    }
                 };
                 let Some(cleanup) = cleanup else {
                     continue;

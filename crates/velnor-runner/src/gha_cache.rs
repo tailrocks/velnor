@@ -657,6 +657,13 @@ enum BlobPublication {
     NoReplace,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct UploadLimits {
+    declared_size: Option<u64>,
+    expected_size: Option<u64>,
+    max_bytes: u64,
+}
+
 fn validate_existing_v1_entry(
     service: &CacheService,
     id: &str,
@@ -709,9 +716,11 @@ where
             req.into_body(),
             &ctx.service,
             id,
-            declared_size,
-            None,
-            MAX_BODY,
+            UploadLimits {
+                declared_size,
+                expected_size: None,
+                max_bytes: MAX_BODY,
+            },
             Some(namespace),
             BlobPublication::Replace,
         )
@@ -736,9 +745,11 @@ where
         req.into_body(),
         &ctx.service,
         id,
-        declared_size,
-        Some(reservation.expected_size),
-        MAX_BODY,
+        UploadLimits {
+            declared_size,
+            expected_size: Some(reservation.expected_size),
+            max_bytes: MAX_BODY,
+        },
         Some(namespace),
         BlobPublication::NoReplace,
     )
@@ -774,9 +785,7 @@ async fn store_upload<B>(
     mut body: B,
     service: &CacheService,
     id: &str,
-    declared_size: Option<u64>,
-    expected_size: Option<u64>,
-    max_bytes: u64,
+    limits: UploadLimits,
     namespace: Option<&str>,
     publication: BlobPublication,
 ) -> Result<u64>
@@ -784,6 +793,11 @@ where
     B: Body<Data = Bytes> + Unpin,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
+    let UploadLimits {
+        declared_size,
+        expected_size,
+        max_bytes,
+    } = limits;
     validate_cache_id(id)?;
     if declared_size.is_some_and(|size| size > max_bytes) {
         anyhow::bail!("declared cache upload size exceeds {max_bytes} bytes");
@@ -1898,9 +1912,11 @@ mod tests {
             Full::new(Bytes::from_static(b"12345")),
             &service,
             &id,
-            None,
-            None,
-            4,
+            UploadLimits {
+                declared_size: None,
+                expected_size: None,
+                max_bytes: 4,
+            },
             None,
             BlobPublication::Replace,
         )
@@ -1932,9 +1948,11 @@ mod tests {
             StreamBody::new(stream::iter(frames)),
             &service,
             &id,
-            None,
-            None,
-            MAX_BODY,
+            UploadLimits {
+                declared_size: None,
+                expected_size: None,
+                max_bytes: MAX_BODY,
+            },
             None,
             BlobPublication::Replace,
         )
@@ -1960,9 +1978,11 @@ mod tests {
             Full::new(Bytes::from_static(b"12345")),
             &service,
             &id,
-            Some(4),
-            None,
-            MAX_BODY,
+            UploadLimits {
+                declared_size: Some(4),
+                expected_size: None,
+                max_bytes: MAX_BODY,
+            },
             None,
             BlobPublication::Replace,
         )
