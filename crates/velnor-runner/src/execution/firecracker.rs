@@ -271,15 +271,7 @@ impl FirecrackerBackend {
         }
         if identity_ok {
             // Load taints a Firecracker process; a failed load needs a fresh VMM.
-            if let Some(previous) = self.jailer.clone() {
-                world.runner.kill(&previous).map_err(|error| {
-                    ExecutionError::Isolation(format!(
-                        "kill jailer pid {} after snapshot failure: {error:#}",
-                        previous.pid
-                    ))
-                })?;
-                self.jailer = None;
-            }
+            self.stop_jailer(world, events)?;
             self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
             self.register_jailer_with_cancellation();
         }
@@ -407,11 +399,11 @@ impl FirecrackerBackend {
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         events.push(ExecutionEvent::FirecrackerApi("cancel".into()));
+        self.stop_jailer(world, events)?;
         events.push(ExecutionEvent::JobCompleted {
             conclusion: JobConclusion::Cancelled,
             exit_code: 1,
         });
-        self.stop_jailer(world, events)?;
         Ok(())
     }
 
@@ -504,16 +496,32 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        if let Some(jailer) = self.jailer.clone() {
-            world.runner.kill(&jailer).map_err(|error| {
-                ExecutionError::Isolation(format!("kill jailer pid {}: {error:#}", jailer.pid))
-            })?;
-            self.jailer = None;
-            events.push(ExecutionEvent::FirecrackerApi(format!(
-                "kill jailer pid {}",
-                jailer.pid
+        let Some(jailer) = self.jailer.take() else {
+            return Ok(());
+        };
+        let jailer_pid = jailer.pid;
+
+        if let Err(error) = world.runner.kill(&jailer) {
+            // Keep the process token and both cancellation registrations live:
+            // a failed kill is not proof that the VM is gone. The next teardown
+            // pass must retry the same owned token; this backend never creates
+            // a replacement numeric identity after ownership is uncertain.
+            self.jailer = Some(jailer);
+            return Err(ExecutionError::Isolation(format!(
+                "kill jailer pid {}: {error:#}",
+                jailer_pid
             )));
         }
+
+        // CommandRunner::kill owns the wait/reap contract for SpawnedProcess.
+        // Only after it returns success is it safe to deregister targets that
+        // describe the VM and its guest connection.
+        self.guest_cancel_registration.take();
+        self.cancellation_registration.take();
+        events.push(ExecutionEvent::FirecrackerApi(format!(
+            "kill jailer pid {}",
+            jailer_pid
+        )));
         Ok(())
     }
 }
@@ -1151,5 +1159,172 @@ pub fn restore_or_cold_boot(
             "guest.snapshot",
             format!("{detail}; using verified cold boot"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::execution::{ExecutionWorld, HostFs};
+    use crate::executor::{CommandResult, CommandRunner, SpawnedProcess};
+
+    #[derive(Debug, Default)]
+    struct TestRunner {
+        fail_kill: bool,
+        kill_calls: Vec<u32>,
+    }
+
+    impl CommandRunner for TestRunner {
+        fn run(&mut self, _program: &str, _args: &[String]) -> anyhow::Result<CommandResult> {
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn kill(&mut self, process: &SpawnedProcess) -> anyhow::Result<()> {
+            self.kill_calls.push(process.pid);
+            if self.fail_kill {
+                anyhow::bail!("injected kill failure")
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestFs;
+
+    impl HostFs for TestFs {
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn read(&self, _path: &Path) -> Result<Vec<u8>, String> {
+            Err("unused test filesystem read".into())
+        }
+
+        fn write(&mut self, _path: &Path, _bytes: &[u8]) -> Result<(), String> {
+            Err("unused test filesystem write".into())
+        }
+
+        fn remove_dir_all(&mut self, _path: &Path) -> Result<(), String> {
+            Err("unused test filesystem remove".into())
+        }
+
+        fn create_dir_all(&mut self, _path: &Path) -> Result<(), String> {
+            Err("unused test filesystem create".into())
+        }
+    }
+
+    fn test_world<'a>(
+        runner: &'a mut TestRunner,
+        api: &'a mut RecordingFirecracker,
+        fs: &'a mut TestFs,
+    ) -> ExecutionWorld<'a> {
+        let root = Path::new("/");
+        ExecutionWorld {
+            kvm: root,
+            artifact_root: root,
+            isolation_root: root,
+            host_docker_socket: root,
+            runner,
+            firecracker: api,
+            host_fs: fs,
+            vsock: None,
+            docker_engine: None,
+            allow_inline_guest_plan: true,
+        }
+    }
+
+    #[test]
+    fn direct_cancel_reports_terminal_after_jailer_kill() {
+        let mut backend = FirecrackerBackend {
+            jailer: Some(SpawnedProcess { pid: 7 }),
+            ..FirecrackerBackend::default()
+        };
+        let mut runner = TestRunner::default();
+        let mut api = RecordingFirecracker::default();
+        let mut fs = TestFs;
+        let mut events = Vec::new();
+
+        {
+            let mut world = test_world(&mut runner, &mut api, &mut fs);
+            backend.cancel(&mut world, &mut events).unwrap();
+        }
+
+        assert_eq!(runner.kill_calls, vec![7]);
+        assert!(backend.jailer.is_none());
+        assert_eq!(
+            events,
+            vec![
+                ExecutionEvent::FirecrackerApi("cancel".into()),
+                ExecutionEvent::FirecrackerApi("kill jailer pid 7".into()),
+                ExecutionEvent::JobCompleted {
+                    conclusion: JobConclusion::Cancelled,
+                    exit_code: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_direct_cancel_keeps_owned_jailer_and_registrations() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let jailer_registration =
+            token.register(crate::execution::cancel::TerminationTarget::ProcessGroup {
+                pgid: 7,
+                label: "microvm-jailer".into(),
+            });
+        let guest_registration =
+            token.register(crate::execution::cancel::TerminationTarget::Hook {
+                label: "microvm-guest-cancel".into(),
+                run: std::sync::Arc::new(|_| Ok(())),
+            });
+        let mut backend = FirecrackerBackend {
+            jailer: Some(SpawnedProcess { pid: 7 }),
+            guest_cancel_registration: Some(guest_registration),
+            cancellation_registration: Some(jailer_registration),
+            ..FirecrackerBackend::default()
+        };
+        let mut runner = TestRunner {
+            fail_kill: true,
+            ..TestRunner::default()
+        };
+        let mut api = RecordingFirecracker::default();
+        let mut fs = TestFs;
+        let mut events = Vec::new();
+
+        {
+            let mut world = test_world(&mut runner, &mut api, &mut fs);
+            let error = backend.cancel(&mut world, &mut events).unwrap_err();
+            assert!(error.to_string().contains("kill jailer pid 7"));
+        }
+
+        assert!(backend.jailer.is_some());
+        assert!(backend.guest_cancel_registration.is_some());
+        assert!(backend.cancellation_registration.is_some());
+        assert_eq!(token.target_keys().len(), 2);
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ExecutionEvent::JobCompleted { .. })));
+
+        runner.fail_kill = false;
+        {
+            let mut world = test_world(&mut runner, &mut api, &mut fs);
+            backend.cancel(&mut world, &mut events).unwrap();
+        }
+
+        assert!(backend.jailer.is_none());
+        assert!(backend.guest_cancel_registration.is_none());
+        assert!(backend.cancellation_registration.is_none());
+        assert!(token.target_keys().is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ExecutionEvent::JobCompleted { .. }))
+                .count(),
+            1
+        );
     }
 }
