@@ -575,7 +575,17 @@ impl JobContainerSpec {
         let image = self.image_reference()?;
         let store = mise_store_host(&self.temp_host);
         let mut args = DockerArgv::new(["run"]);
-        args.flags(["--rm", "--entrypoint", "sh"]);
+        args.flags([
+            "--rm".to_owned(),
+            "--entrypoint".to_owned(),
+            "sh".to_owned(),
+            "--name".to_owned(),
+            format!("velnor-mise-seed-{}", self.name),
+        ]);
+        // This is a transient job-owned container, not an anonymous helper.
+        // Labels let crash recovery distinguish it from co-located Docker
+        // workloads if the CLI dies before Docker processes `--rm`.
+        self.append_ownership_labels(&mut args);
         self.append_job_cgroup_parent(&mut args);
         args.flags([
             "-v".to_owned(),
@@ -2111,12 +2121,22 @@ mod tests {
 
     #[test]
     fn mise_seed_keeps_rustup_isolated_in_the_job_image() {
-        let args = spec().seed_mise_store_args().unwrap();
+        let job = spec();
+        let args = job.seed_mise_store_args().unwrap();
 
         assert!(!args.iter().any(|arg| arg.contains("/__velnor_seed/rustup")));
         assert!(!args
             .last()
             .is_some_and(|script| script.contains("/root/.rustup")));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--name", "velnor-mise-seed-velnor-job-1"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));

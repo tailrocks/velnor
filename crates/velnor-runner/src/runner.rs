@@ -113,6 +113,9 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bound the transient Docker job used to seed the host-persistent mise store.
+/// A wedged engine must never hold a runner slot indefinitely.
+const MISE_SEED_DOCKER_TIMEOUT: Duration = Duration::from_secs(90);
 /// Bound the whole read-only closure-admission stage: the wait for a local
 /// admission slot plus the Contents-API fetches themselves. An acquired job
 /// waits inside this budget; it is never failed because a sibling admission
@@ -4444,8 +4447,19 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     // startup receives the shared work root. Docker's label filter is exact,
     // so filtering for the shared root silently missed every multi-slot
     // container after a crash or package restart. Inspect the bounded
-    // `velnor-job` set and accept the shared root plus its direct slot roots.
-    let containers = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"])
+    // `velnor-job` and transient `velnor-mise-seed` sets are label-checked
+    // below. Accepting only these runner-owned names keeps co-located Docker
+    // workloads outside the reclaim candidate set.
+    let mut container_ids = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    container_ids.extend(ids_from(&[
+        "ps",
+        "-aq",
+        "--filter",
+        "name=velnor-mise-seed",
+    ]));
+    container_ids.sort();
+    container_ids.dedup();
+    let containers = container_ids
         .into_iter()
         .filter(|id| {
             docker(&[
@@ -4465,7 +4479,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         args.extend(containers.iter().cloned());
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
-            "Pruned {} stale velnor-job container(s) at startup.",
+            "Pruned {} stale Velnor container(s) at startup.",
             containers.len()
         );
     }
@@ -8755,7 +8769,6 @@ fn execute_script_job_inner(
     if repaired > 0 {
         eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
     }
-    seed_mise_store_from_image(docker_image, &mise_store);
     let container = github_job_container_spec(
         job,
         GitHubJobContainerPaths {
@@ -8774,6 +8787,7 @@ fn execute_script_job_inner(
         daemon_id,
         trust_scope,
     )?;
+    seed_mise_store_from_image(&container);
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -11010,52 +11024,67 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
 /// without one the baked shims dangle ("gh is not a valid shim", observed on
 /// jackin-agent-brown). Seed the store from the image once per daemon work
 /// dir so jobs start with the baked toolset and only add tools on top.
-fn seed_mise_store_from_image(docker_image: &str, mise_store: &std::path::Path) {
+fn seed_mise_store_from_image(container: &crate::container::JobContainerSpec) {
+    let docker_image = &container.image;
+    let mise_store = crate::container::mise_store_host(&container.temp_host);
     let marker = mise_store.join(".image-seeded");
-    // Re-seed when the job image changes so a new image's toolset (or tool
-    // versions) reaches the store; docker cp merges over the existing tree.
-    if fs::read_to_string(&marker)
-        .map(|content| content == docker_image)
-        .unwrap_or(false)
+    let lock_path = mise_store.join(".image-seed.lock");
+    let lock = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
     {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!(
+                "Warning: mise store seed lock {} failed: {error}",
+                lock_path.display()
+            );
+            return;
+        }
+    };
+    if let Err(error) =
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        eprintln!(
+            "Warning: mise store seed skipped while another job owns {}: {error}",
+            lock_path.display()
+        );
         return;
     }
-    let installs = mise_store.join("installs");
+
     let result = (|| -> Result<()> {
-        let created = std::process::Command::new("docker")
-            .args(["create", docker_image, "true"])
-            .output()
-            .context("docker create for mise store seed")?;
-        if !created.status.success() {
-            bail!(
-                "docker create {docker_image}: {}",
-                String::from_utf8_lossy(&created.stderr).trim()
-            );
+        // Recheck under the lock: sibling slots may have completed the seed
+        // between the initial job setup and this job acquiring ownership.
+        if fs::read_to_string(&marker)
+            .map(|content| content == docker_image.as_str())
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        let container_id = String::from_utf8_lossy(&created.stdout).trim().to_string();
-        let copied = std::process::Command::new("docker")
-            .args([
-                "cp",
-                &format!("{container_id}:/opt/mise/installs/."),
-                &installs.to_string_lossy(),
-            ])
-            .output()
-            .context("docker cp mise installs")?;
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", &container_id])
-            .output();
-        if !copied.status.success() {
-            bail!(
-                "docker cp mise installs: {}",
-                String::from_utf8_lossy(&copied.stderr).trim()
-            );
-        }
+
+        let args = container
+            .seed_mise_store_args()
+            .context("build mise store seed command")?;
+        let deadline = crate::docker::deadline_for(&args, MISE_SEED_DOCKER_TIMEOUT)
+            .1
+            .min(MISE_SEED_DOCKER_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&args, deadline)
+            .context("run bounded Docker mise store seed")?;
         Ok(())
     })();
+    let _ = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
     match result {
         Ok(()) => {
-            println!("Seeded mise tool store from {docker_image}.");
-            let _ = fs::write(&marker, docker_image);
+            if !fs::read_to_string(&marker)
+                .map(|content| content == docker_image.as_str())
+                .unwrap_or(false)
+            {
+                println!("Seeded mise tool store from {docker_image}.");
+                let _ = fs::write(&marker, docker_image);
+            }
         }
         Err(error) => {
             // Best-effort: an image without /opt/mise/installs just leaves the
