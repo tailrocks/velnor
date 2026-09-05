@@ -4388,7 +4388,8 @@ fn maybe_startup_host_docker_reclaim_with(
     // their guest siblings) orphaned by the previous drain/restart. Runs
     // before any slot accepts a job, so nothing this boot created can be
     // matched; scoped to THIS daemon id so co-located daemons are
-    // untouched. Best-effort — never blocks startup (velnor#311).
+    // untouched. Best-effort — bounded so a stalled daemon cannot wedge
+    // startup (velnor#311).
     if let Err(error) = reclaim(daemon_id) {
         eprintln!(
             "Warning: startup orphan job-environment reclaim failed: {}",
@@ -4407,10 +4408,17 @@ fn maybe_startup_host_docker_reclaim_with(
 /// stopped stale containers can be cleaned.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
-        std::process::Command::new("docker")
-            .args(args)
-            .output()
+        let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
+            .1
+            .min(STARTUP_DOCKER_CLEANUP_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
             .ok()
+            .map(|stdout| std::process::Output {
+                status: success_exit_status(),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
     };
     let ids_from = |args: &[&str]| -> Vec<String> {
         docker(args)
@@ -4514,6 +4522,9 @@ const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// Bound every Docker CLI invocation of the sweep: a stalled dockerd must
 /// never park an idle slot's broker poll loop indefinitely.
 const EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Startup cleanup runs before slots accept jobs, but a wedged Docker daemon
+/// must still not make daemon registration unbounded.
+const STARTUP_DOCKER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Remove this daemon's `velnor-net-*` networks that no longer have any
 /// attached container. Reconciliation runs while the daemon serves jobs — not
