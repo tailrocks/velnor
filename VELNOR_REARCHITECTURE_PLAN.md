@@ -3980,3 +3980,18 @@ live in the gaps between upload actions; the bucket lock remains the final
 integrity boundary for concurrent destructive I/O. Focused artifact GC,
 upload, and download tests pass (`1`, `8`, and `4` respectively), with format,
 diff, and runner compile checks passing.
+
+## 78. Generated CI release-disable state remains compile-safe — 2026-09-05
+
+Commit `630acdd` intentionally removed the legacy release publisher while
+`.github/ci/project.toml` records `release.enabled = false`. Eight runner tests
+still used compile-time `include_str!` on that retired workflow, so the
+all-target runner build failed before executing any test. Commit `2c33563`
+replaces that stale source dependency with one optional runtime loader: release
+contract assertions remain active when a separately reviewed publisher exists;
+when absent, tests require and observe the explicit disabled generator policy.
+
+The full serial runner library gate passes (`1578` passed, `1` ignored), and
+all-target compile, format, and diff checks pass. The generated workflow
+ownership boundary is preserved; the disabled release state is not silently
+treated as a successful publisher.
