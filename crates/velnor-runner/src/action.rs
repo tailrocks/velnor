@@ -494,7 +494,7 @@ pub fn local_action_plans_with_context(
         plans.push(LocalActionPlan {
             step_id: step_id(step, plans.len()),
             action_dir: local_action_dir(workspace_host, path)?,
-            inputs: render_inputs(&string_inputs(step)?, context_data),
+            inputs: render_inputs(&string_inputs(step)?, context_data)?,
         });
     }
     Ok(plans)
@@ -790,14 +790,15 @@ impl ResolvedAction {
             .runs
             .entrypoint
             .as_ref()
-            .map(|value| render_action_scoped_value(value, &inputs, &action_container_path));
+            .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
+            .transpose()?;
         let args = self
             .metadata
             .runs
             .args
             .iter()
             .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(DockerActionInvocation {
             image,
@@ -953,8 +954,8 @@ fn composite_action_invocations_with_path(
                 let nested_inputs = step
                     .with
                     .iter()
-                    .map(|(name, value)| {
-                        (
+                    .map(|(name, value)| -> Result<(String, String)> {
+                        Ok((
                             name.clone(),
                             render_composite_scoped_value(
                                 value,
@@ -962,10 +963,10 @@ fn composite_action_invocations_with_path(
                                 action_path,
                                 workspace_container,
                                 &step_ids,
-                            ),
-                        )
+                            )?,
+                        ))
                     })
-                    .collect::<BTreeMap<_, _>>();
+                    .collect::<Result<BTreeMap<_, _>>>()?;
                 let nested_action_path = if nested_dir.starts_with(actions_host) {
                     container_path(actions_host, &nested_dir)?
                 } else {
@@ -989,8 +990,8 @@ fn composite_action_invocations_with_path(
             let inputs = step
                 .with
                 .iter()
-                .map(|(name, value)| {
-                    (
+                .map(|(name, value)| -> Result<(String, String)> {
+                    Ok((
                         name.clone(),
                         render_composite_scoped_value(
                             value,
@@ -998,15 +999,15 @@ fn composite_action_invocations_with_path(
                             action_path,
                             workspace_container,
                             &step_ids,
-                        ),
-                    )
+                        )?,
+                    ))
                 })
-                .collect();
+                .collect::<Result<BTreeMap<_, _>>>()?;
             let env = step
                 .env
                 .iter()
-                .map(|(name, value)| {
-                    (
+                .map(|(name, value)| -> Result<(String, String)> {
+                    Ok((
                         name.clone(),
                         render_composite_scoped_value(
                             value,
@@ -1014,19 +1015,23 @@ fn composite_action_invocations_with_path(
                             action_path,
                             workspace_container,
                             &step_ids,
-                        ),
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let condition = step
+                .condition
+                .as_ref()
+                .map(|condition| {
+                    render_composite_scoped_value(
+                        condition,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
                     )
                 })
-                .collect();
-            let condition = step.condition.as_ref().map(|condition| {
-                render_composite_scoped_value(
-                    condition,
-                    &action_inputs,
-                    action_path,
-                    workspace_container,
-                    &step_ids,
-                )
-            });
+                .transpose()?;
             let repository_dir =
                 repository_dir(actions_host, &reference.repository, &reference.git_ref);
             let action_dir = action_dir(
@@ -1052,7 +1057,7 @@ fn composite_action_invocations_with_path(
                         action_path,
                         workspace_container,
                         &step_ids,
-                    ),
+                    )?,
                     timeout_minutes: None,
                 },
             ));
@@ -1073,12 +1078,12 @@ fn composite_action_invocations_with_path(
             action_path,
             workspace_container,
             &step_ids,
-        );
+        )?;
         let mut env = step
             .env
             .iter()
-            .map(|(name, value)| {
-                (
+            .map(|(name, value)| -> Result<(String, String)> {
+                Ok((
                     name.clone(),
                     render_composite_scoped_value(
                         value,
@@ -1086,26 +1091,25 @@ fn composite_action_invocations_with_path(
                         action_path,
                         workspace_container,
                         &step_ids,
-                    ),
-                )
+                    )?,
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         env.push(("GITHUB_ACTION_PATH".to_string(), action_path.to_string()));
         let working_directory_container = step
             .working_directory
             .as_deref()
-            .map(|path| {
-                workspace_path(
+            .map(|path| -> Result<String> {
+                let path = render_composite_scoped_value(
+                    path,
+                    &action_inputs,
+                    action_path,
                     workspace_container,
-                    &render_composite_scoped_value(
-                        path,
-                        &action_inputs,
-                        action_path,
-                        workspace_container,
-                        &step_ids,
-                    ),
-                )
+                    &step_ids,
+                )?;
+                Ok(workspace_path(workspace_container, &path))
             })
+            .transpose()?
             .unwrap_or_else(|| workspace_container.to_string());
         let composite_display_name = step
             .name
@@ -1126,22 +1130,26 @@ fn composite_action_invocations_with_path(
             shell,
             working_directory_container,
             env,
-            condition: step.condition.as_ref().map(|condition| {
-                render_composite_scoped_value(
-                    condition,
-                    &action_inputs,
-                    action_path,
-                    workspace_container,
-                    &step_ids,
-                )
-            }),
+            condition: step
+                .condition
+                .as_ref()
+                .map(|condition| {
+                    render_composite_scoped_value(
+                        condition,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
+                    )
+                })
+                .transpose()?,
             continue_on_error: composite_continue_on_error(
                 step,
                 &action_inputs,
                 action_path,
                 workspace_container,
                 &step_ids,
-            ),
+            )?,
             timeout_minutes: None,
         }));
     }
@@ -1150,7 +1158,7 @@ fn composite_action_invocations_with_path(
         .iter()
         .filter_map(|(name, output)| {
             output.value.as_ref().map(|value| {
-                (
+                Ok((
                     name.clone(),
                     render_composite_scoped_value(
                         value,
@@ -1158,11 +1166,11 @@ fn composite_action_invocations_with_path(
                         action_path,
                         workspace_container,
                         &step_ids,
-                    ),
-                )
+                    )?,
+                ))
             })
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Result<BTreeMap<_, _>>>()?;
     if !outputs.is_empty() {
         invocations.push(CompositeActionInvocation::Outputs(CompositeActionOutputs {
             step_id: step_id_prefix.to_string(),
@@ -1497,16 +1505,17 @@ fn input_value_as_str(value: &serde_json::Value) -> Option<&str> {
 fn render_inputs(
     inputs: &BTreeMap<String, String>,
     context_data: &[(String, serde_json::Value)],
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     inputs
         .iter()
-        .map(|(name, value)| {
+        .map(|(name, value)| -> Result<(String, String)> {
             let rendered = if contains_step_output_expression(value) {
+                crate::executor::validate_deferred_expression_template(value)?;
                 value.clone()
             } else {
-                crate::executor::render_context_expressions_bounded(value, context_data)
+                crate::executor::render_context_expressions_bounded(value, context_data)?
             };
-            (name.clone(), rendered)
+            Ok((name.clone(), rendered))
         })
         .collect()
 }
@@ -1522,27 +1531,27 @@ fn render_composite_value(
     inputs: &BTreeMap<String, String>,
     action_path: &str,
     workspace_container: &str,
-) -> String {
+) -> Result<String> {
+    let spans = crate::executor::expression_template_spans(value)?;
+    if spans.is_empty() {
+        return Ok(value.to_string());
+    }
     let mut rendered = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(start) = rest.find("${{") {
-        rendered.push_str(&rest[..start]);
-        let after_start = &rest[start + 3..];
-        let Some(end) = after_start.find("}}") else {
-            rendered.push_str(&rest[start..]);
-            return rendered;
-        };
-        let expression = after_start[..end].trim();
+    let mut cursor = 0usize;
+    for span in spans {
+        rendered.push_str(&value[cursor..span.start()]);
+        let expression = span.expression(value).trim();
         rendered.push_str(&render_composite_expression(
             expression,
             inputs,
             action_path,
             workspace_container,
         ));
-        rest = &after_start[end + 2..];
+        cursor = span.end();
     }
-    rendered.push_str(rest);
-    rendered
+    rendered.push_str(&value[cursor..]);
+    crate::executor::validate_deferred_expression_template(&rendered)?;
+    Ok(rendered)
 }
 
 fn render_composite_expression(
@@ -1680,11 +1689,9 @@ fn render_composite_scoped_value(
     action_path: &str,
     workspace_container: &str,
     step_ids: &BTreeMap<String, String>,
-) -> String {
-    rewrite_step_output_refs(
-        &render_composite_value(value, inputs, action_path, workspace_container),
-        step_ids,
-    )
+) -> Result<String> {
+    let rendered = render_composite_value(value, inputs, action_path, workspace_container)?;
+    Ok(rewrite_step_output_refs(&rendered, step_ids))
 }
 
 fn composite_continue_on_error(
@@ -1693,27 +1700,28 @@ fn composite_continue_on_error(
     action_path: &str,
     workspace_container: &str,
     step_ids: &BTreeMap<String, String>,
-) -> bool {
+) -> Result<bool> {
     step.continue_on_error
         .as_ref()
-        .map(|value| {
+        .map(|value| -> Result<bool> {
             let rendered = render_composite_scoped_value(
                 value,
                 inputs,
                 action_path,
                 workspace_container,
                 step_ids,
-            );
-            value_truthy(&serde_json::Value::String(rendered))
+            )?;
+            Ok(value_truthy(&serde_json::Value::String(rendered)))
         })
-        .unwrap_or(false)
+        .transpose()
+        .map(|value| value.unwrap_or(false))
 }
 
 fn render_action_scoped_value(
     value: &str,
     inputs: &BTreeMap<String, String>,
     action_path: &str,
-) -> String {
+) -> Result<String> {
     render_composite_value(value, inputs, action_path, "/__w")
 }
 
@@ -1971,7 +1979,7 @@ runs:
         let inputs = effective_inputs(&metadata, &provided).unwrap();
         assert_eq!(inputs.get("lookup-only").map(String::as_str), Some("true"));
         assert_eq!(
-            render_composite_value("${{ inputs.LOOKUP-ONLY }}", &inputs, "/__a", "/__w"),
+            render_composite_value("${{ inputs.LOOKUP-ONLY }}", &inputs, "/__a", "/__w").unwrap(),
             "true"
         );
     }
@@ -2007,7 +2015,8 @@ runs:
                 &inputs,
                 "/__a",
                 "/__w"
-            ),
+            )
+            .unwrap(),
             "echo inputs.name; echo ${{ format('inputs.name', 'velnor') }}"
         );
     }
@@ -2018,21 +2027,23 @@ runs:
             .into_iter()
             .collect();
 
-        for expression in ["日本語です", "αααα", "ünïcödé"] {
+        for expression in ["'日本語です'", "'αααα'", "'ünïcödé'"] {
             assert_eq!(
                 render_composite_value(
                     &format!("${{{{ {expression} }}}}"),
                     &inputs,
                     "/__a",
                     "/__w"
-                ),
+                )
+                .unwrap(),
                 format!("${{{{ {expression} }}}}")
             );
         }
         assert_eq!(
-            render_composite_value("${{ 日本語 inputs.name }}", &inputs, "/__a", "/__w"),
-            "${{ 日本語 'velnor' }}"
+            render_composite_value("日本語 ${{ inputs.name }}", &inputs, "/__a", "/__w").unwrap(),
+            "日本語 velnor"
         );
+        assert!(render_composite_value("${{ 日本語です }}", &inputs, "/__a", "/__w").is_err());
     }
 
     #[test]

@@ -337,56 +337,262 @@ pub enum CommandStream {
     Stderr,
 }
 
+/// A template could not be safely interpolated. The error deliberately keeps
+/// no expression text: parse/evaluation diagnostics can contain secrets or
+/// attacker-controlled source, while callers only need a stable failure class
+/// and location for lifecycle reporting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpressionInterpolationError {
+    BudgetExceeded,
+    Unterminated { offset: usize },
+    MismatchedDelimiter { offset: usize },
+    Parse { offset: usize },
+    Evaluation { offset: usize },
+}
+
+impl std::fmt::Display for ExpressionInterpolationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BudgetExceeded => f.write_str("expression interpolation budget exceeded"),
+            Self::Unterminated { offset } => {
+                write!(f, "unterminated expression interpolation at byte {offset}")
+            }
+            Self::MismatchedDelimiter { offset } => {
+                write!(f, "mismatched expression delimiter at byte {offset}")
+            }
+            Self::Parse { offset } => {
+                write!(f, "expression interpolation parse failure at byte {offset}")
+            }
+            Self::Evaluation { offset } => {
+                write!(
+                    f,
+                    "expression interpolation evaluation failure at byte {offset}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExpressionInterpolationError {}
+
+/// A validated `${{ ... }}` span. Keeping offsets instead of copied source
+/// makes the scanner reusable without putting untrusted expression text in
+/// errors or logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExpressionSpan {
+    start: usize,
+    expression_start: usize,
+    expression_end: usize,
+    end: usize,
+}
+
+impl ExpressionSpan {
+    pub(crate) fn start(self) -> usize {
+        self.start
+    }
+
+    pub(crate) fn end(self) -> usize {
+        self.end
+    }
+
+    pub(crate) fn source<'a>(self, value: &'a str) -> &'a str {
+        &value[self.start..self.end]
+    }
+
+    pub(crate) fn expression<'a>(self, value: &'a str) -> &'a str {
+        &value[self.expression_start..self.expression_end]
+    }
+}
+
+/// Scan and validate all template delimiters before evaluating any span.
+/// Quotes and index/group delimiters are respected, so `}}` inside a literal
+/// or nested expression cannot terminate the wrong span.
+pub(crate) fn expression_template_spans(
+    value: &str,
+) -> Result<Vec<ExpressionSpan>, ExpressionInterpolationError> {
+    const MAX_TEMPLATE_BYTES: usize = 64 * 1024;
+    const MAX_EXPRESSION_DEPTH: usize = 64;
+    const MAX_OPERATORS: usize = 1024;
+
+    let Some(first_start) = value.find("${{") else {
+        return Ok(Vec::new());
+    };
+    if value.len() > MAX_TEMPLATE_BYTES {
+        return Err(ExpressionInterpolationError::BudgetExceeded);
+    }
+
+    let mut spans = Vec::new();
+    let mut search_from = first_start;
+    while let Some(relative_start) = value[search_from..].find("${{") {
+        let start = search_from + relative_start;
+        let expression_start = start + 3;
+        let mut cursor = expression_start;
+        let mut quote = None;
+        let mut delimiters = Vec::new();
+        let mut operators = 0usize;
+        let mut end = None;
+
+        while cursor < value.len() {
+            let byte = value.as_bytes()[cursor];
+            if let Some(quote_byte) = quote {
+                if byte == quote_byte {
+                    // Expression string literals use doubled quotes for an
+                    // escaped quote. Accepting this here keeps scanning in
+                    // lockstep with the evaluator instead of closing early.
+                    if value.as_bytes().get(cursor + 1) == Some(&quote_byte) {
+                        cursor += 2;
+                    } else {
+                        quote = None;
+                        cursor += 1;
+                    }
+                } else {
+                    let width = value[cursor..].chars().next().map_or(1, char::len_utf8);
+                    cursor += width;
+                }
+                continue;
+            }
+
+            match byte {
+                b'\'' | b'"' => {
+                    quote = Some(byte);
+                    cursor += 1;
+                }
+                b'(' | b'[' => {
+                    delimiters.push(byte);
+                    if delimiters.len() > MAX_EXPRESSION_DEPTH {
+                        return Err(ExpressionInterpolationError::BudgetExceeded);
+                    }
+                    cursor += 1;
+                }
+                b')' | b']' => {
+                    let expected = if byte == b')' { b'(' } else { b'[' };
+                    if delimiters.pop() != Some(expected) {
+                        return Err(ExpressionInterpolationError::MismatchedDelimiter {
+                            offset: cursor,
+                        });
+                    }
+                    cursor += 1;
+                }
+                b'&' | b'|' | b'=' | b'!' => {
+                    operators = operators.saturating_add(1);
+                    if operators > MAX_OPERATORS {
+                        return Err(ExpressionInterpolationError::BudgetExceeded);
+                    }
+                    cursor += 1;
+                }
+                b'}' if value.as_bytes().get(cursor + 1) == Some(&b'}')
+                    && delimiters.is_empty() =>
+                {
+                    end = Some(cursor);
+                    break;
+                }
+                _ => {
+                    let width = value[cursor..].chars().next().map_or(1, char::len_utf8);
+                    cursor += width;
+                }
+            }
+        }
+
+        let Some(expression_end) = end else {
+            return Err(ExpressionInterpolationError::Unterminated { offset: start });
+        };
+        let end = expression_end + 2;
+        spans.push(ExpressionSpan {
+            start,
+            expression_start,
+            expression_end,
+            end,
+        });
+        search_from = end;
+    }
+    Ok(spans)
+}
+
+/// Validate a template whose runtime-context values are intentionally kept for
+/// a later execution pass. This catches malformed/unknown expressions at the
+/// metadata boundary without evaluating context that does not exist yet.
+pub(crate) fn validate_deferred_expression_template(
+    value: &str,
+) -> Result<(), ExpressionInterpolationError> {
+    let spans = expression_template_spans(value)?;
+    let state = JobExecutionState::try_new_with_context(&[], &[])?;
+    let context = state.expression_context();
+    for span in spans {
+        expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+            ExpressionInterpolationError::Parse {
+                offset: span.start(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Validate a template and report whether any expression reads state that is
+/// unavailable until step execution. Admission uses this before rendering
+/// capability-affecting inputs, so a runtime expression cannot be collapsed to
+/// a permissive value before the capability check. The walk parses every span
+/// before returning, including spans after the first runtime reference.
+pub(crate) fn template_reads_runtime_context(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> Result<bool, ExpressionInterpolationError> {
+    let spans = expression_template_spans(value)?;
+    let state = JobExecutionState::try_new_with_context(&[], context_data)?;
+    let context = state.expression_context();
+    let mut reads_runtime = false;
+    for span in spans {
+        let node = expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+            ExpressionInterpolationError::Parse {
+                offset: span.start(),
+            }
+        })?;
+        if let Some(node) = node {
+            reads_runtime |= node_reads_runtime_context(&node);
+        }
+    }
+    Ok(reads_runtime)
+}
+
+pub(crate) fn render_context_expressions_checked(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> Result<String, ExpressionInterpolationError> {
+    JobExecutionState::try_new_with_context(&[], context_data)?
+        .resolve_job_context_expressions(value)
+}
+
+/// Compatibility boundary for callers that cannot yet surface typed errors.
+/// Errors become an empty value, never the original template source.
 pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
-    JobExecutionState::new_with_context(&[], context_data).resolve_job_context_expressions(value)
+    render_context_expressions_checked(value, context_data).unwrap_or_default()
 }
 
 pub(crate) fn render_context_expressions_bounded(
     value: &str,
     context_data: &[(String, Value)],
-) -> String {
-    if !expression_within_budget(value) {
-        return value.to_string();
-    }
-    render_context_expressions(value, context_data)
+) -> Result<String, ExpressionInterpolationError> {
+    // Scanning first makes budget exhaustion and malformed templates explicit;
+    // the resolver then parses/evaluates every non-deferred span.
+    let _ = expression_template_spans(value)?;
+    render_context_expressions_checked(value, context_data)
 }
 
-fn expression_within_budget(value: &str) -> bool {
-    const MAX_BYTES: usize = 64 * 1024;
-    const MAX_DEPTH: usize = 64;
-    const MAX_OPERATORS: usize = 1024;
-    if value.len() > MAX_BYTES {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut operators = 0usize;
-    for byte in value.bytes() {
-        match byte {
-            b'(' => {
-                depth = depth.saturating_add(1);
-                if depth > MAX_DEPTH {
-                    return false;
-                }
-            }
-            b')' => depth = depth.saturating_sub(1),
-            b'&' | b'|' | b'=' | b'!' => {
-                operators = operators.saturating_add(1);
-                if operators > MAX_OPERATORS {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    true
+pub(crate) fn render_expressions_with_context_checked(
+    value: &str,
+    base_env: &[(String, String)],
+    context_data: &[(String, Value)],
+) -> Result<String, ExpressionInterpolationError> {
+    JobExecutionState::try_new_with_context(base_env, context_data)?.resolve_expressions(value)
 }
 
+/// Compatibility boundary for legacy non-lifecycle callers. It is fail-closed
+/// and never returns unresolved attacker-controlled source text.
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],
     context_data: &[(String, Value)],
 ) -> String {
-    JobExecutionState::new_with_context(base_env, context_data).resolve_expressions(value)
+    render_expressions_with_context_checked(value, base_env, context_data).unwrap_or_default()
 }
 
 fn node_action_image(runtime: &str, fallback: &str) -> String {
@@ -1829,12 +2035,12 @@ where
         if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
             effective_base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
         }
-        let mut state = JobExecutionState::new_with_workspace(
+        let mut state = JobExecutionState::try_new_with_workspace(
             &effective_base_env,
             context_data,
             &container.workspace_host,
             temp_host,
-        );
+        )?;
         state.persistent_workspace_target = container.cargo_target_host.is_some();
         state.cargo_target_host = container
             .cargo_target_host
@@ -1843,8 +2049,12 @@ where
         state.workflow_env = self
             .workflow_env
             .iter()
-            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
-            .collect();
+            .map(|(name, value)| {
+                state
+                    .resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Result<_, _>>()?;
         // The job's status for `success()`, `failure()` and `cancelled()` is
         // this token. Installing it here is what makes those functions truthful
         // instead of constant.
@@ -1889,7 +2099,7 @@ where
                         frame.depth += 1;
                     } else {
                         let frame_state = state.with_step_action(step_id);
-                        let resolved_display = frame_state.resolve_expressions(display_name);
+                        let resolved_display = frame_state.resolve_expressions(display_name)?;
                         let backend_step_id = github_backend_step_id(step_id);
                         let skipped = match frame_state.evaluate_condition(condition.as_deref()) {
                             Ok(condition_met) => !condition_met,
@@ -1954,10 +2164,11 @@ where
             let step_context_id = step.id().to_string();
             let step_backend_id = github_backend_step_id(&step_context_id);
             let step_state = state.with_step_action(&step_context_id);
-            // GitHub evaluates `${{ }}` in step display names at runtime
-            // (ActionRunner.TryUpdateDisplayName); unresolvable expressions
-            // stay raw, matching the upstream prettified-token fallback.
-            let display_name = step_state.resolve_expressions(step.display_name());
+            // Display names are resolved at the same execution boundary as
+            // the step. A malformed/evaluation failure must stop before the
+            // shell or action is dispatched; never carry raw template source
+            // into lifecycle or action execution.
+            let display_name = step_state.resolve_expressions(step.display_name())?;
             let condition_met = match step_state.evaluate_condition(step.condition()) {
                 Ok(condition_met) => condition_met,
                 Err(error) => {
@@ -2204,7 +2415,7 @@ where
                     self.execute_checkout_step(container, plan, &step_state)
                 }
                 ExecutableStep::Script(step) => {
-                    let step = step_state.resolve_script_step(step);
+                    let step = step_state.resolve_script_step(step)?;
                     let test_runner = test_command_kind(&step.script);
                     let test_started = test_runner.map(|_| Instant::now());
                     let compiler = compile_command_kind(&step.script);
@@ -2340,7 +2551,7 @@ where
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
-                        outputs: step_state.evaluate_named_outputs(outputs),
+                        outputs: step_state.evaluate_named_outputs(outputs)?,
                         ..StepCommandState::default()
                     },
                     skipped: false,
@@ -2661,8 +2872,8 @@ where
             return Err(error);
         }
         Ok(JobExecutionSummary {
-            job_outputs: evaluate_job_outputs(job_outputs, &state),
-            environment_url: evaluate_environment_url(environment_url, &state),
+            job_outputs: evaluate_job_outputs(job_outputs, &state)?,
+            environment_url: evaluate_environment_url(environment_url, &state)?,
             step_results: results,
             executed_physical_actions,
             step_logs,
@@ -2723,7 +2934,7 @@ where
         )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
@@ -2850,7 +3061,7 @@ where
         )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
         set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
         env.extend(command_files.env.iter().cloned());
@@ -2858,12 +3069,13 @@ where
         let entrypoint = action
             .entrypoint
             .as_ref()
-            .map(|value| state.resolve_expressions(value));
+            .map(|value| state.resolve_expressions(value))
+            .transpose()?;
         let args = action
             .args
             .iter()
             .map(|value| state.resolve_expressions(value))
-            .collect::<Vec<_>>();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let secret_masks = action_state.secret_masks(&self.secret_masks);
         let exec_args = container.prepare_run_docker_action_args(
             "/github/workspace",
@@ -2939,9 +3151,7 @@ where
             NativeActionAdapter::Renovate => {
                 self.native_renovate(_container, action, state, timeout)
             }
-            NativeActionAdapter::GitHubRuntimeExport => {
-                Ok(native_github_runtime_export(action, state))
-            }
+            NativeActionAdapter::GitHubRuntimeExport => native_github_runtime_export(action, state),
             NativeActionAdapter::GitHubScript => native_github_script(action, state),
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
@@ -2950,7 +3160,7 @@ where
             NativeActionAdapter::DockerLogin => {
                 self.native_docker_login(_container, action, state, timeout)
             }
-            NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
+            NativeActionAdapter::DockerMetadata => native_docker_metadata(action, state),
             NativeActionAdapter::DockerBuildPush => {
                 self.native_docker_build_push(_container, action, state, timeout)
             }
@@ -3016,11 +3226,11 @@ where
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             NativeActionAdapter::DockerSetupBuildx => {
-                let action_state = state.with_env(state.resolve_env(&action.env));
+                let action_state = state.with_env(state.resolve_env(&action.env)?);
                 let requested_name =
-                    native_input_or(&action_state, action, "name", "velnor-builder");
+                    native_input_or(&action_state, action, "name", "velnor-builder")?;
                 let name = job_scoped_buildx_builder_name(&requested_name, state);
-                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")) {
+                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?) {
                     return Ok(StepExecutionResult {
                         exit_code: 0,
                         state: StepCommandState::default(),
@@ -3035,7 +3245,7 @@ where
                     action,
                     "keep-state",
                     "false",
-                ));
+                )?);
                 let keep_state_arg = if keep_state { " --keep-state" } else { "" };
                 let script = format!(
                     "docker buildx rm{keep_state_arg} {name} 2>/dev/null || true; echo \"Removing builder {name}\""
@@ -3044,8 +3254,8 @@ where
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             NativeActionAdapter::DockerLogin => {
-                let action_state = state.with_env(state.resolve_env(&action.env));
-                let registry = native_input_or(&action_state, action, "registry", "");
+                let action_state = state.with_env(state.resolve_env(&action.env)?);
+                let registry = native_input_or(&action_state, action, "registry", "")?;
                 let script = if registry.is_empty() {
                     "docker logout 2>/dev/null || true".to_string()
                 } else {
@@ -3085,19 +3295,19 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
-        let version = native_input(action, &action_state, "version");
-        let install_args = native_input(action, &action_state, "install_args");
-        let working_directory = native_input(action, &action_state, "working_directory");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let install = input_truthy(&native_input_or(&action_state, action, "install", "true")?);
+        let version = native_input(action, &action_state, "version")?;
+        let install_args = native_input(action, &action_state, "install_args")?;
+        let working_directory = native_input(action, &action_state, "working_directory")?;
         let cache_key_prefix =
-            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2");
+            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2")?;
         let cache_save = input_truthy(&native_input_or(
             &action_state,
             action,
             "cache_save",
             "true",
-        ));
+        )?);
         // 008-R5: resolve the exact mise binary version now (an omitted version
         // becomes the fleet pin — never a live "latest" lookup) so it is
         // auditable and keys the persistent binary store.
@@ -3225,23 +3435,23 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let inputs = HadolintInputs {
-            dockerfile: native_input_or(&action_state, action, "dockerfile", "Dockerfile"),
-            config: native_input(action, &action_state, "config"),
-            recursive: native_input_or(&action_state, action, "recursive", "false"),
-            output_file: native_input_or(&action_state, action, "output-file", "/dev/stdout"),
-            no_color: native_input_or(&action_state, action, "no-color", "false"),
-            no_fail: native_input_or(&action_state, action, "no-fail", "false"),
-            verbose: native_input_or(&action_state, action, "verbose", "false"),
-            format: native_input_or(&action_state, action, "format", "tty"),
-            failure_threshold: native_input_or(&action_state, action, "failure-threshold", "info"),
-            override_error: native_input(action, &action_state, "override-error"),
-            override_warning: native_input(action, &action_state, "override-warning"),
-            override_info: native_input(action, &action_state, "override-info"),
-            override_style: native_input(action, &action_state, "override-style"),
-            ignore: native_input(action, &action_state, "ignore"),
-            trusted_registries: native_input(action, &action_state, "trusted-registries"),
+            dockerfile: native_input_or(&action_state, action, "dockerfile", "Dockerfile")?,
+            config: native_input(action, &action_state, "config")?,
+            recursive: native_input_or(&action_state, action, "recursive", "false")?,
+            output_file: native_input_or(&action_state, action, "output-file", "/dev/stdout")?,
+            no_color: native_input_or(&action_state, action, "no-color", "false")?,
+            no_fail: native_input_or(&action_state, action, "no-fail", "false")?,
+            verbose: native_input_or(&action_state, action, "verbose", "false")?,
+            format: native_input_or(&action_state, action, "format", "tty")?,
+            failure_threshold: native_input_or(&action_state, action, "failure-threshold", "info")?,
+            override_error: native_input(action, &action_state, "override-error")?,
+            override_warning: native_input(action, &action_state, "override-warning")?,
+            override_info: native_input(action, &action_state, "override-info")?,
+            override_style: native_input(action, &action_state, "override-style")?,
+            ignore: native_input(action, &action_state, "ignore")?,
+            trusted_registries: native_input(action, &action_state, "trusted-registries")?,
         };
         let result =
             self.native_shell(container, &action_state, &hadolint_script(&inputs), timeout)?;
@@ -3294,9 +3504,9 @@ where
                 self.trust_scope
             );
         }
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_image =
-            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE);
+            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE)?;
         if requested_image.trim() != SETUP_QEMU_BINFMT_IMAGE {
             eprintln!(
                 "Velnor ignored docker/setup-qemu-action image override `{}`; using pinned {}",
@@ -3305,8 +3515,8 @@ where
             );
         }
         let image = SETUP_QEMU_BINFMT_IMAGE.to_string();
-        let platforms = native_input_or(&action_state, action, "platforms", "all");
-        let reset = native_input_or(&action_state, action, "reset", "false");
+        let platforms = native_input_or(&action_state, action, "platforms", "all")?;
+        let reset = native_input_or(&action_state, action, "reset", "false")?;
         if reset.trim() == "true" {
             let uninstall = vec![
                 "run".to_string(),
@@ -3356,9 +3566,9 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let release = native_input(action, &action_state, "cosign-release");
-        let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let release = native_input(action, &action_state, "cosign-release")?;
+        let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign")?;
         // install-dir is interpolated inside double quotes so $HOME expands
         // in-shell (the action's documented default) — reject anything that
         // could escape the quoting or substitute commands.
@@ -3519,9 +3729,9 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let version = native_input(action, &action_state, "renovate-version");
-        let image = native_input(action, &action_state, "renovate-image");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let version = native_input(action, &action_state, "renovate-version")?;
+        let image = native_input(action, &action_state, "renovate-image")?;
         let image = if !image.is_empty() {
             image
         } else if !version.is_empty() {
@@ -3529,9 +3739,9 @@ where
         } else {
             "ghcr.io/renovatebot/renovate:latest".to_string()
         };
-        let token = native_input(action, &action_state, "token");
+        let token = native_input(action, &action_state, "token")?;
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         if !token.is_empty() {
             set_env_value(&mut env, "RENOVATE_TOKEN", &token);
             set_env_value(&mut env, "INPUT_TOKEN", &token);
@@ -3562,12 +3772,12 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
         let name = job_scoped_buildx_builder_name(&requested_name, state);
-        let driver = native_input_or(&action_state, action, "driver", "docker-container");
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
-            native_input(action, &action_state, "buildkitd-config-inline");
+            native_input(action, &action_state, "buildkitd-config-inline")?;
         let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
             None
         } else {
@@ -3604,7 +3814,7 @@ where
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
             }
-            if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
+            if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
                 args.push("--bootstrap".to_string());
             }
             self.container_docker(container, &action_state, &args, None, timeout)?
@@ -3616,7 +3826,7 @@ where
                     ("name".to_string(), name.clone()),
                     (
                         "driver".to_string(),
-                        native_input_or(&action_state, action, "driver", "docker-container"),
+                        native_input_or(&action_state, action, "driver", "docker-container")?,
                     ),
                     (
                         "platforms".to_string(),
@@ -3637,15 +3847,15 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let registry = native_input_or(
             &action_state,
             action,
             "registry",
             "https://index.docker.io/v1/",
-        );
-        let username = native_input(action, &action_state, "username");
-        let password = native_input(action, &action_state, "password");
+        )?;
+        let username = native_input(action, &action_state, "username")?;
+        let password = native_input(action, &action_state, "password")?;
         if !password.is_empty()
             && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
         {
@@ -3674,32 +3884,32 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let context = native_input_or(&action_state, action, "context", ".");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let context = native_input_or(&action_state, action, "context", ".")?;
         let mut args = vec!["buildx".to_string(), "build".to_string()];
         // build-push-action resolves an explicit `file` from the workspace,
         // independently from `context`. Passing context/file twice here turned
         // `context: docker`, `file: docker/Dockerfile` into
         // `docker/docker/Dockerfile`.
-        let file_input = native_input(action, &action_state, "file");
+        let file_input = native_input(action, &action_state, "file")?;
         if !file_input.trim().is_empty() {
             push_arg(&mut args, "--file", &file_input);
         }
         push_arg(
             &mut args,
             "--platform",
-            &native_input(action, &action_state, "platforms"),
+            &native_input(action, &action_state, "platforms")?,
         );
-        for tag in input_values(&native_input(action, &action_state, "tags")) {
+        for tag in input_values(&native_input(action, &action_state, "tags")?) {
             push_arg(&mut args, "--tag", &tag);
         }
-        for label in input_values(&native_input(action, &action_state, "labels")) {
+        for label in input_values(&native_input(action, &action_state, "labels")?) {
             push_arg(&mut args, "--label", &label);
         }
-        for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
+        for build_arg in input_values(&native_input(action, &action_state, "build-args")?) {
             push_arg(&mut args, "--build-arg", &build_arg);
         }
-        let secret_input = native_input(action, &action_state, "secrets");
+        let secret_input = native_input(action, &action_state, "secrets")?;
         if !secret_input.trim().is_empty()
             && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
         {
@@ -3729,24 +3939,24 @@ where
             );
             secret_files.push(secret_file);
         }
-        for cache in input_values(&native_input(action, &action_state, "cache-from")) {
+        for cache in input_values(&native_input(action, &action_state, "cache-from")?) {
             push_arg(&mut args, "--cache-from", &cache);
         }
-        for cache in input_values(&native_input(action, &action_state, "cache-to")) {
+        for cache in input_values(&native_input(action, &action_state, "cache-to")?) {
             push_arg(&mut args, "--cache-to", &cache);
         }
         // The `outputs` input maps to buildx --output (e.g. the publish
         // workflows' push-by-digest exporter: type=image,push-by-digest=true,
         // name=...,push=true).
         let mut has_output = false;
-        for output in input_values(&native_input(action, &action_state, "outputs")) {
+        for output in input_values(&native_input(action, &action_state, "outputs")?) {
             push_arg(&mut args, "--output", &output);
             has_output = true;
         }
-        if input_truthy(&native_input(action, &action_state, "push")) && !has_output {
+        if input_truthy(&native_input(action, &action_state, "push")?) && !has_output {
             args.push("--push".to_string());
         }
-        if input_truthy(&native_input(action, &action_state, "load")) && !has_output {
+        if input_truthy(&native_input(action, &action_state, "load")?) && !has_output {
             args.push("--load".to_string());
         }
         // build-push-action exposes digest/imageid/metadata step outputs from
@@ -3802,24 +4012,24 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let mut args = vec!["buildx".to_string(), "bake".to_string()];
         // The command runs inside the job container with CWD /__w (the
         // workspace), so workflow-relative bake file paths resolve as-is.
-        for file in input_values(&native_input(action, &action_state, "files")) {
+        for file in input_values(&native_input(action, &action_state, "files")?) {
             push_arg(&mut args, "--file", &file);
         }
-        for set in input_values(&native_input(action, &action_state, "set")) {
+        for set in input_values(&native_input(action, &action_state, "set")?) {
             push_arg(&mut args, "--set", &set);
         }
-        if input_truthy(&native_input(action, &action_state, "push")) {
+        if input_truthy(&native_input(action, &action_state, "push")?) {
             args.push("--push".to_string());
         }
         args.extend(input_values(&native_input(
             action,
             &action_state,
             "targets",
-        )));
+        )?));
         let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
@@ -3829,14 +4039,13 @@ where
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let filters = parse_paths_filter_rules(
-            action
-                .inputs
-                .get("filters")
-                .map(|value| state.resolve_expressions(value))
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
+        let filters_input = action
+            .inputs
+            .get("filters")
+            .map(|value| state.resolve_expressions(value))
+            .transpose()?
+            .unwrap_or_default();
+        let filters = parse_paths_filter_rules(&filters_input)?;
         let changed_files = self.changed_files_for_paths_filter(state)?;
         let mut outputs = BTreeMap::new();
         let mut matched_names = Vec::new();
@@ -4544,10 +4753,10 @@ fn resolve_checkout_plan_expressions(
 ) -> Result<CheckoutPlan> {
     let mut plan = plan.clone();
     if let Some(version) = plan.version.as_mut() {
-        *version = state.resolve_expressions(version);
+        *version = state.resolve_expressions(version)?;
     }
     if let Some(token) = plan.token.as_mut() {
-        *token = state.resolve_expressions(token);
+        *token = state.resolve_expressions(token)?;
         if token.is_empty() || token.contains("${{") {
             anyhow::bail!("explicit checkout token expression did not resolve");
         }
@@ -5220,14 +5429,14 @@ fn native_cache_restore_main(
     state: &JobExecutionState,
     kind: CacheActionKind,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     validate_cache_paths(&action_state, &path)?;
-    let restore_keys = native_input(action, &action_state, "restore-keys");
+    let restore_keys = native_input(action, &action_state, "restore-keys")?;
     let fail_on_cache_miss =
-        input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
-    let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
+        input_truthy(&native_input(action, &action_state, "fail-on-cache-miss")?);
+    let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only")?);
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
@@ -5335,9 +5544,9 @@ fn native_cache_save_main(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     validate_cache_paths(&action_state, &path)?;
     let version = cache_scope_version_for(action, &action_state, &path);
     save_cache_result(&action_state, &key, &path, false, &version)
@@ -5347,11 +5556,11 @@ fn native_rust_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let shared_key = native_cache_key(action, &action_state, "shared-key");
-    let cache_directories = native_input(action, &action_state, "cache-directories");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let shared_key = native_cache_key(action, &action_state, "shared-key")?;
+    let cache_directories = native_input(action, &action_state, "cache-directories")?;
     validate_cache_paths(&action_state, &cache_directories)?;
-    let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false")?;
     let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
     let matched = find_cache_match(&action_state, &shared_key, "", &version, &cache_directories)?;
@@ -5406,9 +5615,9 @@ fn native_cache_save(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
@@ -5423,9 +5632,9 @@ fn native_rust_cache_save(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "shared-key");
-    let path = native_input(action, &action_state, "cache-directories");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "shared-key")?;
+    let path = native_input(action, &action_state, "cache-directories")?;
     let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
@@ -5452,8 +5661,8 @@ fn native_cache_key(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
     name: &str,
-) -> String {
-    native_input(action, state, name).trim().to_string()
+) -> Result<String, ExpressionInterpolationError> {
+    Ok(native_input(action, state, name)?.trim().to_string())
 }
 
 /// Deterministic cache-version segment that isolates entries by runtime
@@ -7155,20 +7364,23 @@ fn native_upload_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let name = native_input_or(&action_state, action, "name", "artifact");
-    let path_input = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let name = native_input_or(&action_state, action, "name", "artifact")?;
+    let path_input = native_input(action, &action_state, "path")?;
     let if_no_files_found =
-        native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
-    let include_hidden_files =
-        input_truthy(&native_input(action, &action_state, "include-hidden-files"));
-    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
+        native_input_or(&action_state, action, "if-no-files-found", "warn")?.to_ascii_lowercase();
+    let include_hidden_files = input_truthy(&native_input(
+        action,
+        &action_state,
+        "include-hidden-files",
+    )?);
+    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite")?);
     // The strict manifest admits only the estate-approved v4 value `0`.
     // upload-artifact defines it as no compression (ZIP Stored).
     let store_uncompressed =
-        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
+        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level")?);
     let retention_days = artifact_retention_days(
-        &native_input(action, &action_state, "retention-days"),
+        &native_input(action, &action_state, "retention-days")?,
         action_state
             .env
             .get("GITHUB_RETENTION_DAYS")
@@ -7355,11 +7567,11 @@ fn native_download_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let name = native_input(action, &action_state, "name");
-    let pattern = native_input(action, &action_state, "pattern");
-    let destination_input = native_input_or(&action_state, action, "path", ".");
-    let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple"));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let name = native_input(action, &action_state, "name")?;
+    let pattern = native_input(action, &action_state, "pattern")?;
+    let destination_input = native_input_or(&action_state, action, "path", ".")?;
+    let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple")?);
     let destination = resolve_host_path(state, &destination_input)
         .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
     let destination_scope = trusted_job_destination(state, &destination)?;
@@ -7479,8 +7691,8 @@ fn native_upload_pages_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let source_input = native_input_or(&action_state, action, "path", "_site/");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let source_input = native_input_or(&action_state, action, "path", "_site/")?;
     let source = resolve_host_path(state, &source_input)
         .context("actions/upload-pages-artifact requires a workspace path")?;
     let workspace = state
@@ -7518,7 +7730,7 @@ fn native_upload_pages_artifact(
     let mut page_action = action.clone();
     page_action.inputs.insert(
         "name".to_string(),
-        native_input_or(&action_state, action, "name", "github-pages"),
+        native_input_or(&action_state, action, "name", "github-pages")?,
     );
     page_action
         .inputs
@@ -8027,7 +8239,7 @@ fn native_attest_build_provenance(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let workspace = state
         .workspace_host
         .as_deref()
@@ -8154,13 +8366,13 @@ fn native_create_github_app_token(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
     let (repository_owner, repository_name) = repository
         .split_once('/')
         .context("GITHUB_REPOSITORY must be owner/name")?;
-    let owner = native_input_or(&action_state, action, "owner", repository_owner);
-    let repositories = native_input_or(&action_state, action, "repositories", repository_name);
+    let owner = native_input_or(&action_state, action, "owner", repository_owner)?;
+    let repositories = native_input_or(&action_state, action, "repositories", repository_name)?;
     if owner != repository_owner || repositories != repository_name {
         bail!("actions/create-github-app-token is restricted to current repository {repository}");
     }
@@ -8170,15 +8382,15 @@ fn native_create_github_app_token(
         action,
         "skip-token-revoke",
         "false",
-    )) {
+    )?) {
         bail!("actions/create-github-app-token does not permit skip-token-revoke");
     }
     // v3 recommends client-id and retains app-id as a legacy alias. Resolve
     // the same pair here so admission and native execution cannot disagree.
-    let client_id = native_input(action, &action_state, "client-id");
-    let legacy_app_id = native_input(action, &action_state, "app-id");
+    let client_id = native_input(action, &action_state, "client-id")?;
+    let legacy_app_id = native_input(action, &action_state, "app-id")?;
     let app_id = github_app_identifier(client_id, legacy_app_id);
-    let private_key = native_input(action, &action_state, "private-key");
+    let private_key = native_input(action, &action_state, "private-key")?;
     if app_id.trim().is_empty() || private_key.trim().is_empty() {
         bail!(
             "actions/create-github-app-token requires client-id (or legacy app-id) and private-key"
@@ -8351,7 +8563,7 @@ fn native_deploy_pages(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
     let build_version = required_immutable_env(state, "GITHUB_SHA")?.to_owned();
     let github_token = required_immutable_env(state, "GITHUB_TOKEN")?;
@@ -8362,7 +8574,7 @@ fn native_deploy_pages(
     let oidc_url = crate::protocol::validate_authenticated_url(oidc_url)?;
     let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
         .context("actions/deploy-pages runtime token is missing workflow backend IDs")?;
-    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
+    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages")?;
     let api_url = trusted_github_api_base(state)?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("velnor-runner")
@@ -8396,7 +8608,7 @@ fn native_deploy_pages(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .context("Pages OIDC response is missing value")?;
-    let preview = native_input_or(&action_state, action, "preview", "false") == "true";
+    let preview = native_input_or(&action_state, action, "preview", "false")? == "true";
     let mut payload = serde_json::json!({
         "artifact_id": artifact_id,
         "pages_build_version": build_version,
@@ -8437,14 +8649,14 @@ fn native_deploy_pages(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| pages_url_for_repository(repository));
-    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000);
+    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000)?;
     let timeout = if requested_timeout == 0 {
         600_000
     } else {
         requested_timeout.min(600_000)
     };
-    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000);
-    let max_errors = native_u64_input(action, &action_state, "error_count", 10).max(1);
+    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000)?;
+    let max_errors = native_u64_input(action, &action_state, "error_count", 10)?.max(1);
     let started = std::time::Instant::now();
     let status_url = format!("{api_url}/repos/{repository}/pages/deployments/{deployment_id}");
     let mut errors = 0_u64;
@@ -8558,8 +8770,10 @@ fn native_u64_input(
     state: &JobExecutionState,
     name: &str,
     default: u64,
-) -> u64 {
-    native_input(action, state, name).parse().unwrap_or(default)
+) -> Result<u64, ExpressionInterpolationError> {
+    Ok(native_input(action, state, name)?
+        .parse()
+        .unwrap_or(default))
 }
 
 fn cancel_pages_deployment(
@@ -8582,10 +8796,10 @@ fn cancel_pages_deployment(
 fn native_docker_metadata(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let images = input_values(&native_input(action, &action_state, "images"));
-    let tags_input = native_input(action, &action_state, "tags");
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let images = input_values(&native_input(action, &action_state, "images")?);
+    let tags_input = native_input(action, &action_state, "tags")?;
     let mut tags = Vec::new();
     for image in &images {
         for tag in docker_metadata_tags(&action_state, &tags_input) {
@@ -8595,7 +8809,7 @@ fn native_docker_metadata(
     let labels = docker_metadata_labels(&action_state).join("\n");
     let tags = tags.join("\n");
     let json = docker_metadata_json(&tags, &labels);
-    StepExecutionResult {
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs: [
@@ -8621,14 +8835,14 @@ fn native_docker_metadata(
             "{ANSI_CYAN}{ANSI_BOLD}Generated Docker metadata{ANSI_RESET}\n{tags}\n{labels}\n"
         ),
         stderr: String::new(),
-    }
+    })
 }
 
 fn native_github_runtime_export(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let mut exported = BTreeMap::new();
     let mut stdout = String::new();
     for (name, value) in action_state.step_env(&[]) {
@@ -8637,7 +8851,7 @@ fn native_github_runtime_export(
             exported.insert(name, value);
         }
     }
-    StepExecutionResult {
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             env: exported,
@@ -8647,7 +8861,7 @@ fn native_github_runtime_export(
         failure_ignored: false,
         stdout,
         stderr: String::new(),
-    }
+    })
 }
 
 fn native_github_script(
@@ -8657,8 +8871,8 @@ fn native_github_script(
     const CONTRACT_OUTPUT: &str = "core.setOutput('docs-xtask', process.env.CONTRACT)";
     const PREPARED_RUNTIME: &str =
         "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())";
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let script = native_input(action, &action_state, "script");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let script = native_input(action, &action_state, "script")?;
     if script == CONTRACT_OUTPUT {
         let contract = action_state
             .env
@@ -9460,14 +9674,18 @@ fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
         .to_string()
 }
 
-fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
+fn native_input(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    name: &str,
+) -> Result<String, ExpressionInterpolationError> {
     action
         .inputs
         .iter()
         .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
         .map(|(_, value)| value)
         .map(|value| state.resolve_expressions(value))
-        .unwrap_or_default()
+        .unwrap_or_else(|| Ok(String::new()))
 }
 
 fn native_input_or(
@@ -9475,12 +9693,12 @@ fn native_input_or(
     action: &NativeActionInvocation,
     name: &str,
     default: &str,
-) -> String {
-    let value = native_input(action, state, name);
+) -> Result<String, ExpressionInterpolationError> {
+    let value = native_input(action, state, name)?;
     if value.is_empty() {
-        default.to_string()
+        Ok(default.to_string())
     } else {
-        value
+        Ok(value)
     }
 }
 
@@ -11403,7 +11621,7 @@ impl JobExecutionState {
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
     ) -> Self {
-        Self::new_internal(base_env, context_data, None, None)
+        Self::try_new_with_context(base_env, context_data).unwrap_or_default()
     }
 
     fn new_with_workspace(
@@ -11412,7 +11630,28 @@ impl JobExecutionState {
         workspace_host: &Path,
         temp_host: &Path,
     ) -> Self {
-        Self::new_internal(
+        Self::try_new_with_workspace(base_env, context_data, workspace_host, temp_host)
+            .unwrap_or_default()
+    }
+
+    fn try_new(base_env: &[(String, String)]) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_with_context(base_env, &[])
+    }
+
+    pub(crate) fn try_new_with_context(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+    ) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_internal(base_env, context_data, None, None)
+    }
+
+    pub(crate) fn try_new_with_workspace(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: &Path,
+        temp_host: &Path,
+    ) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_internal(
             base_env,
             context_data,
             Some(workspace_host.to_path_buf()),
@@ -11426,6 +11665,16 @@ impl JobExecutionState {
         workspace_host: Option<PathBuf>,
         temp_host: Option<PathBuf>,
     ) -> Self {
+        Self::try_new_internal(base_env, context_data, workspace_host, temp_host)
+            .unwrap_or_default()
+    }
+
+    fn try_new_internal(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: Option<PathBuf>,
+        temp_host: Option<PathBuf>,
+    ) -> Result<Self, ExpressionInterpolationError> {
         let initial_env: BTreeMap<_, _> = base_env.iter().cloned().collect();
         let mut state = Self {
             env: initial_env.clone(),
@@ -11450,10 +11699,14 @@ impl JobExecutionState {
         state.env = state
             .env
             .iter()
-            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
-            .collect();
+            .map(|(name, value)| {
+                state
+                    .resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Result<_, _>>()?;
         state.immutable_env = state.env.clone();
-        state
+        Ok(state)
     }
 
     pub(crate) fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
@@ -11621,19 +11874,22 @@ impl JobExecutionState {
             .collect()
     }
 
-    pub(crate) fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
-        ScriptStep {
+    pub(crate) fn resolve_script_step(
+        &self,
+        step: &ScriptStep,
+    ) -> Result<ScriptStep, ExpressionInterpolationError> {
+        Ok(ScriptStep {
             id: step.id.clone(),
             display_name: step.display_name.clone(),
-            script: self.resolve_expressions(&step.script),
+            script: self.resolve_expressions(&step.script)?,
             shell: step.shell,
             working_directory_container: self
-                .resolve_expressions(&step.working_directory_container),
-            env: self.resolve_env(&step.env),
+                .resolve_expressions(&step.working_directory_container)?,
+            env: self.resolve_env(&step.env)?,
             condition: step.condition.clone(),
             continue_on_error: step.continue_on_error,
             timeout_minutes: step.timeout_minutes,
-        }
+        })
     }
 
     /// The `env:` block GitHub prints in a step's header group: workflow env
@@ -11657,26 +11913,50 @@ impl JobExecutionState {
         for (name, value) in step_env {
             upsert(name, value);
         }
-        self.resolve_env(&ordered)
+        ordered
+            .into_iter()
+            .map(|(name, value)| (name, self.resolve_for_log(&value)))
+            .collect()
     }
 
-    pub(crate) fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+    /// Logs are an observational sink, not an execution boundary. If a
+    /// display expression is malformed, emit a fixed diagnostic token rather
+    /// than the original source (which may contain a secret); execution uses
+    /// `resolve_expressions` and still returns the typed error.
+    fn resolve_for_log(&self, value: &str) -> String {
+        self.resolve_expressions(value)
+            .unwrap_or_else(|_| "<expression-interpolation-failed>".to_string())
+    }
+
+    pub(crate) fn resolve_env(
+        &self,
+        env: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, ExpressionInterpolationError> {
         env.iter()
-            .map(|(name, value)| (name.clone(), self.resolve_expressions(value)))
+            .map(|(name, value)| {
+                self.resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
             .collect()
     }
 
     fn evaluate_named_outputs(
         &self,
         outputs: &BTreeMap<String, String>,
-    ) -> BTreeMap<String, String> {
+    ) -> Result<BTreeMap<String, String>, ExpressionInterpolationError> {
         outputs
             .iter()
-            .filter_map(|(name, value)| {
-                let value = self.resolve_expressions(value);
-                (!value.is_empty()).then(|| (name.clone(), value))
+            .map(|(name, value)| {
+                self.resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
             })
-            .collect()
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map(|outputs| {
+                outputs
+                    .into_iter()
+                    .filter(|(_, value)| !value.is_empty())
+                    .collect()
+            })
     }
 
     /// Interpolate every `${{ ... }}` span in `value`.
@@ -11684,15 +11964,12 @@ impl JobExecutionState {
     /// Each span is parsed and evaluated by [`crate::expression`] and rendered
     /// with upstream's `ConvertToString` rules
     /// (`src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs:136-155`).
-    ///
-    /// Deferred root cause: upstream fails template evaluation, and therefore
-    /// the step, when a `${{ }}` span cannot be evaluated
-    /// (`PipelineTemplateEvaluator` calls `context.Errors.Check()` after every
-    /// evaluate). Velnor keeps the raw span here instead; making
-    /// interpolation fail-closed changes step-preparation lifecycle and is
-    /// owned by the lifecycle work package. Step *conditions* are fail-closed
-    /// below, which is the divergence this module owns.
-    pub(crate) fn resolve_expressions(&self, value: &str) -> String {
+    /// Malformed, unevaluable, and over-budget templates return a typed error;
+    /// the original source is never returned to an execution boundary.
+    pub(crate) fn resolve_expressions(
+        &self,
+        value: &str,
+    ) -> Result<String, ExpressionInterpolationError> {
         self.render_template(value, false)
     }
 
@@ -11706,42 +11983,49 @@ impl JobExecutionState {
     /// time — so the first pass must not collapse a not-yet-known value to
     /// null. Collapsing the second pass would be correct; collapsing the
     /// first one silently drops runtime env and step outputs.
-    pub(crate) fn resolve_job_context_expressions(&self, value: &str) -> String {
+    pub(crate) fn resolve_job_context_expressions(
+        &self,
+        value: &str,
+    ) -> Result<String, ExpressionInterpolationError> {
         self.render_template(value, true)
     }
 
-    fn render_template(&self, value: &str, defer_runtime_contexts: bool) -> String {
-        let mut rendered = String::with_capacity(value.len());
-        let mut rest = value;
-        while let Some(start) = rest.find("${{") {
-            rendered.push_str(&rest[..start]);
-            let after_start = &rest[start + 3..];
-            let Some(end) = after_start.find("}}") else {
-                rendered.push_str(&rest[start..]);
-                return rendered;
-            };
-            let expression = after_start[..end].trim();
-            let source = &rest[start..start + 3 + end + 2];
-            let context = self.expression_context();
-            match expression::parse(expression, &context) {
-                Ok(Some(node))
-                    if !(defer_runtime_contexts && node_reads_runtime_context(&node)) =>
-                {
-                    match expression::evaluate_node(&node, &context) {
-                        Ok(value) => rendered.push_str(&value.convert_to_string()),
-                        Err(_) => rendered.push_str(source),
-                    }
-                }
-                Ok(None) => {}
-                // Deferred to the step-time pass, or unparseable: keep the
-                // literal span. See `resolve_expressions` on why interpolation
-                // is not fail-closed the way conditions are.
-                _ => rendered.push_str(source),
-            }
-            rest = &after_start[end + 2..];
+    fn render_template(
+        &self,
+        value: &str,
+        defer_runtime_contexts: bool,
+    ) -> Result<String, ExpressionInterpolationError> {
+        let spans = expression_template_spans(value)?;
+        if spans.is_empty() {
+            return Ok(value.to_string());
         }
-        rendered.push_str(rest);
-        rendered
+        let mut rendered = String::with_capacity(value.len());
+        let mut cursor = 0usize;
+        for span in spans {
+            rendered.push_str(&value[cursor..span.start()]);
+            let expression = span.expression(value).trim();
+            let context = self.expression_context();
+            let node = expression::parse(expression, &context).map_err(|_| {
+                ExpressionInterpolationError::Parse {
+                    offset: span.start(),
+                }
+            })?;
+            if let Some(node) = node {
+                if defer_runtime_contexts && node_reads_runtime_context(&node) {
+                    rendered.push_str(span.source(value));
+                } else {
+                    let value = expression::evaluate_node(&node, &context).map_err(|_| {
+                        ExpressionInterpolationError::Evaluation {
+                            offset: span.start(),
+                        }
+                    })?;
+                    rendered.push_str(&value.convert_to_string());
+                }
+            }
+            cursor = span.end();
+        }
+        rendered.push_str(&value[cursor..]);
+        Ok(rendered)
     }
 
     /// Whether this job has been cancelled.
@@ -11935,9 +12219,9 @@ fn node_references_status_function(node: &expression::Node) -> bool {
         .any(|child| node_references_status_function(child))
 }
 
-/// Whether the tree reads state that only exists once the job is running:
-/// the `env`, `steps`, `job` and `runner` contexts, or any runner-provided
-/// function. Plan-time rendering defers those spans to the step-time pass.
+/// Whether the tree reads state that may only be authoritative once the job
+/// is running. Plan-time rendering defers those spans to the step-time pass;
+/// parsing still happens before deferral, so malformed source cannot pass.
 fn node_reads_runtime_context(node: &expression::Node) -> bool {
     match node {
         expression::Node::NamedValue(name) => matches!(
@@ -12275,7 +12559,11 @@ pub(crate) fn condition_is_statically_false(
     let Some(condition) = condition else {
         return false;
     };
-    let state = JobExecutionState::new_with_context(base_env, context_data);
+    let Ok(state) = JobExecutionState::try_new_with_context(base_env, context_data) else {
+        // A malformed immutable expression is not proof that a condition is
+        // false; leave the step for normal fail-closed lifecycle handling.
+        return false;
+    };
     let context = state.expression_context();
     let Ok(Some(node)) = expression::parse(strip_expression(condition), &context) else {
         // An expression that does not even parse is not provably false.
@@ -12340,24 +12628,32 @@ fn reads_only_immutable_github(node: &expression::Node) -> bool {
 fn evaluate_job_outputs(
     job_outputs: Option<&Value>,
     state: &JobExecutionState,
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>, ExpressionInterpolationError> {
     job_output_pairs(job_outputs)
         .into_iter()
-        .filter_map(|(name, value)| {
-            let value = state.resolve_expressions(&value);
-            (!value.is_empty()).then_some((name, value))
+        .map(|(name, value)| state.resolve_expressions(&value).map(|value| (name, value)))
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map(|outputs| {
+            outputs
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .collect()
         })
-        .collect()
 }
 
 fn evaluate_environment_url(
     environment_url: Option<&Value>,
     state: &JobExecutionState,
-) -> Option<String> {
+) -> Result<Option<String>, ExpressionInterpolationError> {
     environment_url
         .and_then(template_string_value)
-        .map(|value| state.resolve_expressions(value))
-        .filter(|value| !value.is_empty())
+        .map(|value| {
+            state
+                .resolve_expressions(value)
+                .map(|value| (!value.is_empty()).then_some(value))
+        })
+        .transpose()
+        .map(|value| value.flatten())
 }
 
 fn template_string_value(value: &Value) -> Option<&str> {
@@ -12511,7 +12807,7 @@ fn javascript_post_log_prelude(
 
 fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
     let mut lines = Vec::new();
-    let script = state.resolve_expressions(&step.script);
+    let script = state.resolve_for_log(&step.script);
     if !script.trim().is_empty() {
         // GitHub prints the script body in bold cyan inside the header group
         // (no repeated `Run …` line — the group title already carries it).
@@ -12541,7 +12837,7 @@ fn checkout_log_prelude(plan: &CheckoutPlan, state: &JobExecutionState) -> Vec<S
         checkout_repository_for_log(&plan.clone_url),
     ));
     if let Some(version) = &plan.version {
-        inputs.push(("ref".to_string(), state.resolve_expressions(version)));
+        inputs.push(("ref".to_string(), state.resolve_for_log(version)));
     }
     inputs.push(("token".to_string(), "***".to_string()));
     inputs.push(("ssh-strict".to_string(), "true".to_string()));
@@ -12581,7 +12877,7 @@ fn append_with_pairs(
     for (name, value) in inputs {
         lines.push(format!(
             "  {name}: {}",
-            redact_log_value(name, &state.resolve_expressions(value))
+            redact_log_value(name, &state.resolve_for_log(value))
         ));
     }
 }
@@ -12620,7 +12916,7 @@ fn append_with_lines(
     for (name, value) in inputs {
         lines.push(format!(
             "  {name}: {}",
-            redact_log_value(name, &state.resolve_expressions(value))
+            redact_log_value(name, &state.resolve_for_log(value))
         ));
     }
 }
@@ -13301,7 +13597,7 @@ mod tests {
             env: Vec::new(),
         };
         assert_eq!(
-            native_input(&action, &JobExecutionState::default(), "lookup-only"),
+            native_input(&action, &JobExecutionState::default(), "lookup-only").unwrap(),
             "true"
         );
     }
@@ -13310,7 +13606,10 @@ mod tests {
     fn over_budget_expression_is_not_evaluated() {
         let state = JobExecutionState::default();
         let expression = format!("${{{{ {} }}}}", "github.sha ".repeat(7000));
-        assert_eq!(state.resolve_expressions(&expression), expression);
+        assert_eq!(
+            state.resolve_expressions(&expression).unwrap_err(),
+            ExpressionInterpolationError::BudgetExceeded
+        );
     }
 
     #[cfg(unix)]
@@ -19058,7 +19357,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let publish_result = native_docker_metadata(&publish_action, &publish_state);
+        let publish_result = native_docker_metadata(&publish_action, &publish_state).unwrap();
         assert_eq!(
             publish_result.state.outputs["tags"],
             "chainargos/rust-bitcoin-processor:latest\nchainargos/rust-bitcoin-processor:abcdef1234567890"
@@ -19091,7 +19390,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let result = native_docker_metadata(&action, &state);
+        let result = native_docker_metadata(&action, &state).unwrap();
         assert_eq!(
             result.state.outputs["tags"],
             "ghcr.io/org/repo/fixture:main\nghcr.io/org/repo/fixture:sha-abcdef1"
@@ -19120,7 +19419,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let result = native_docker_metadata(&action, &state);
+        let result = native_docker_metadata(&action, &state).unwrap();
         // no branch ref → falls back to sha default
         assert!(result.state.outputs["tags"].starts_with("ghcr.io/org/repo/fixture:sha-"));
     }
@@ -19618,17 +19917,24 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.masks, vec!["secret"]);
         assert_eq!(
-            state.resolve_expressions("value=${{ steps.producer.outputs.answer }}"),
+            state
+                .resolve_expressions("value=${{ steps.producer.outputs.answer }}")
+                .unwrap(),
             "value=42"
         );
         assert_eq!(
-            state.resolve_expressions("value=${{ steps.producer.outputs['answer'] }}"),
+            state
+                .resolve_expressions("value=${{ steps.producer.outputs['answer'] }}")
+                .unwrap(),
             "value=42"
         );
         // A context value that is not set is null, and null renders as the
         // empty string (EvaluationResult.cs:140-141). The deleted evaluator
         // rendered the source text instead, which is divergence D-4.
-        assert_eq!(state.resolve_expressions("keep=${{ github.ref }}"), "keep=");
+        assert_eq!(
+            state.resolve_expressions("keep=${{ github.ref }}").unwrap(),
+            "keep="
+        );
     }
 
     #[test]
@@ -19746,8 +20052,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
         );
 
-        let env =
-            state.resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())]);
+        let env = state
+            .resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())])
+            .unwrap();
 
         assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
     }
@@ -19783,33 +20090,37 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         ]);
 
         assert_eq!(
-            state.resolve_expressions("${{ github.ref }} ${{ github.sha }}"),
+            state
+                .resolve_expressions("${{ github.ref }} ${{ github.sha }}")
+                .unwrap(),
             "refs/heads/main abc123"
         );
         assert_eq!(
-            state.resolve_env(&[
-                ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
-                ("ACTION".into(), "${{ github.action }}".into()),
-                ("ACTION_PATH".into(), "${{ github.action_path }}".into()),
-                ("ACTION_REF".into(), "${{ github.action_ref }}".into()),
-                (
-                    "ACTION_REPOSITORY".into(),
-                    "${{ github.action_repository }}".into(),
-                ),
-                ("EVENT_PATH".into(), "${{ github.event_path }}".into()),
-                ("OWNER".into(), "${{ github.repository_owner }}".into()),
-                ("SERVER_URL".into(), "${{ github.server_url }}".into()),
-                ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
-                ("WORKSPACE".into(), "${{ github.workspace }}".into()),
-                ("OS".into(), "${{ runner.os }}".into()),
-                ("RUNNER_NAME".into(), "${{ runner.name }}".into()),
-                (
-                    "RUNNER_ENVIRONMENT".into(),
-                    "${{ runner.environment }}".into()
-                ),
-                ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
-                ("ACTION_STATUS".into(), "${{ github.action_status }}".into()),
-            ]),
+            state
+                .resolve_env(&[
+                    ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                    ("ACTION".into(), "${{ github.action }}".into()),
+                    ("ACTION_PATH".into(), "${{ github.action_path }}".into()),
+                    ("ACTION_REF".into(), "${{ github.action_ref }}".into()),
+                    (
+                        "ACTION_REPOSITORY".into(),
+                        "${{ github.action_repository }}".into(),
+                    ),
+                    ("EVENT_PATH".into(), "${{ github.event_path }}".into()),
+                    ("OWNER".into(), "${{ github.repository_owner }}".into()),
+                    ("SERVER_URL".into(), "${{ github.server_url }}".into()),
+                    ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
+                    ("WORKSPACE".into(), "${{ github.workspace }}".into()),
+                    ("OS".into(), "${{ runner.os }}".into()),
+                    ("RUNNER_NAME".into(), "${{ runner.name }}".into()),
+                    (
+                        "RUNNER_ENVIRONMENT".into(),
+                        "${{ runner.environment }}".into()
+                    ),
+                    ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
+                    ("ACTION_STATUS".into(), "${{ github.action_status }}".into()),
+                ])
+                .unwrap(),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
                 ("ACTION".into(), "setup".into()),
@@ -19890,82 +20201,108 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         );
 
         assert_eq!(
-            state.resolve_expressions("target=${{ matrix.target }}"),
+            state
+                .resolve_expressions("target=${{ matrix.target }}")
+                .unwrap(),
             "target=x86_64-apple-darwin"
         );
         // toJSON is pretty-printed upstream: two-space indent, a newline
         // before every element and ": " between key and value
         // (src/Sdk/DTExpressions2/Expressions2/Sdk/Functions/ToJson.cs:158-282).
         assert_eq!(
-            state.resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}"),
+            state
+                .resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}")
+                .unwrap(),
             "needs={\n  \"bake-targets\": \"bitcoin-processor-app\",\n  \"bitcoin-processor\": \"false\"\n}"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "tool=${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
-            ),
+            state
+                .resolve_expressions(
+                    "tool=${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
+                )
+                .unwrap(),
             "tool=rust zig cargo:cargo-zigbuild"
         );
         assert_eq!(
-            state.resolve_expressions("literal=${{ 'a || b && c == d' }}"),
+            state
+                .resolve_expressions("literal=${{ 'a || b && c == d' }}")
+                .unwrap(),
             "literal=a || b && c == d"
         );
         assert_eq!(
             state.resolve_expressions(
                 "push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.packages) }}"
-            ),
+            ).unwrap(),
             "push=bitcoin-processor-app"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
-            ),
+            state
+                .resolve_expressions(
+                    "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
+                )
+                .unwrap(),
             "selected=true"
         );
         assert_eq!(
-            state.resolve_expressions("comma=${{ contains('alpha,beta', 'BETA') }}"),
+            state
+                .resolve_expressions("comma=${{ contains('alpha,beta', 'BETA') }}")
+                .unwrap(),
             "comma=true"
         );
         assert_eq!(
             state.resolve_expressions(
                 "fallback=${{ steps.dispatch.outputs.docs || needs.changes.outputs.bake-targets }}"
-            ),
+            ).unwrap(),
             "fallback=bitcoin-processor-app"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
-            ),
+            state
+                .resolve_expressions(
+                    "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
+                )
+                .unwrap(),
             "enabled=true"
         );
         assert_eq!(
-            state.resolve_expressions("event=${{ github.event_name == 'WORKFLOW_DISPATCH' }}"),
+            state
+                .resolve_expressions("event=${{ github.event_name == 'WORKFLOW_DISPATCH' }}")
+                .unwrap(),
             "event=true"
         );
         assert_eq!(
-            state.resolve_expressions("pr=${{ github.event.pull_request.number }}"),
+            state
+                .resolve_expressions("pr=${{ github.event.pull_request.number }}")
+                .unwrap(),
             "pr=42"
         );
         assert_eq!(
-            state.resolve_expressions("head=${{ github.event.workflow_run.head_sha }}"),
+            state
+                .resolve_expressions("head=${{ github.event.workflow_run.head_sha }}")
+                .unwrap(),
             "head=def456"
         );
         assert_eq!(
             state.resolve_expressions(
                 "same=${{ github.event.workflow_run.head_repository.full_name == github.repository }}"
-            ),
+            ).unwrap(),
             "same=true"
         );
         assert_eq!(
-            state.resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}"),
+            state
+                .resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}")
+                .unwrap(),
             "token=docker_secret"
         );
         assert_eq!(
-            state.resolve_expressions("missing=${{ github.event.issue.number }}"),
+            state
+                .resolve_expressions("missing=${{ github.event.issue.number }}")
+                .unwrap(),
             "missing="
         );
         assert_eq!(
-            state.resolve_expressions("missing-input=${{ inputs.publish }}"),
+            state
+                .resolve_expressions("missing-input=${{ inputs.publish }}")
+                .unwrap(),
             "missing-input="
         );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")).unwrap());
@@ -20046,7 +20383,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ))
             .unwrap());
         assert_eq!(
-            state.resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}"),
+            state
+                .resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}")
+                .unwrap(),
             "sha=def456"
         );
     }
@@ -20104,7 +20443,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 collect_yaml_strings(&yaml, &mut strings);
                 for value in strings {
                     if value.contains("${{") {
-                        let rendered = state.resolve_expressions(value);
+                        let rendered = state.resolve_expressions(value).unwrap();
                         assert!(
                             !rendered.contains("${{"),
                             "{} left unresolved expression in {value:?}: {rendered:?}",
@@ -20167,7 +20506,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 collect_yaml_strings(&yaml, &mut strings);
                 for value in strings {
                     if value.contains("${{") {
-                        let rendered = state.resolve_expressions(value);
+                        let rendered = state.resolve_expressions(value).unwrap();
                         assert!(
                             !rendered.contains("${{"),
                             "{} left unresolved expression in {value:?}: {rendered:?}",
@@ -20312,7 +20651,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
         );
 
-        let resolved = state.resolve_env(&[("GENERATED".into(), "${{ env.OUTER }}".into())]);
+        let resolved = state
+            .resolve_env(&[("GENERATED".into(), "${{ env.OUTER }}".into())])
+            .unwrap();
 
         assert_eq!(
             resolved,
@@ -21616,9 +21957,9 @@ fi"#
         let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
 
         let expression = "hash=${{ hashFiles('Cargo.toml') }}";
-        let first = state.resolve_expressions(expression);
+        let first = state.resolve_expressions(expression).unwrap();
         fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
-        let second = state.resolve_expressions(expression);
+        let second = state.resolve_expressions(expression).unwrap();
 
         assert_eq!(first, "hash=");
         assert_ne!(second, "hash=");
@@ -22364,9 +22705,14 @@ fi"#
         assert!(state
             .evaluate_condition(Some("runner.os != 'windows'"))
             .unwrap());
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "success"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "success"
         );
         assert!(state
@@ -22400,9 +22746,14 @@ fi"#
         assert!(state
             .evaluate_condition(Some("always() && failure()"))
             .unwrap());
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "failure"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "failure"
         );
         assert!(state
@@ -22434,7 +22785,9 @@ fi"#
         assert!(ignored_state.evaluate_condition(Some("success()")).unwrap());
         assert!(!ignored_state.evaluate_condition(Some("failure()")).unwrap());
         assert_eq!(
-            ignored_state.resolve_expressions("${{ job.status }}"),
+            ignored_state
+                .resolve_expressions("${{ job.status }}")
+                .unwrap(),
             "success"
         );
     }
@@ -22451,7 +22804,10 @@ fi"#
 
         assert!(state.evaluate_condition(Some("success()")).unwrap());
         assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
+        assert_eq!(
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "success"
+        );
 
         token.request(crate::execution::cancel::CancelReason::ServerRequested);
 
@@ -22459,9 +22815,14 @@ fi"#
         assert!(!state.evaluate_condition(Some("failure()")).unwrap());
         assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
         assert!(state.evaluate_condition(Some("always()")).unwrap());
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "cancelled");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "cancelled"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "cancelled"
         );
         // Surprising, and upstream-correct: an explicit condition that names no
@@ -22590,7 +22951,10 @@ fi"#
             .evaluate_condition(Some("env.SET == 'value'"))
             .unwrap());
         // The source text must never leak into the rendered value.
-        assert_eq!(state.resolve_expressions("[${{ env.UNSET }}]"), "[]");
+        assert_eq!(
+            state.resolve_expressions("[${{ env.UNSET }}]").unwrap(),
+            "[]"
+        );
     }
 
     /// D-5: the relational operators did not exist, so this condition ran on
@@ -22641,7 +23005,9 @@ fi"#
             .evaluate_condition(Some("contains(fromJson('[\"main\"]'), 'main')"))
             .unwrap());
         assert_eq!(
-            state.resolve_expressions("${{ join(fromJson('[\"a\",\"b\"]'), '+') }}"),
+            state
+                .resolve_expressions("${{ join(fromJson('[\"a\",\"b\"]'), '+') }}")
+                .unwrap(),
             "a+b"
         );
     }
@@ -22717,9 +23083,14 @@ fi"#
         );
         state.push_composite("composite");
 
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "failure"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "success"
         );
 
@@ -22736,12 +23107,16 @@ fi"#
         );
 
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "failure"
         );
         state.pop_composite("composite");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "failure"
         );
     }

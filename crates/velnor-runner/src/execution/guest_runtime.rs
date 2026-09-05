@@ -598,7 +598,8 @@ impl<'a> GuestDockerTeardown<'a> {
             .iter()
             .map(|env| (env.name.clone(), env.value.clone()))
             .collect();
-        let mut state = JobExecutionState::new_with_context(&base_env, &plan.context_data);
+        let mut state = JobExecutionState::try_new_with_context(&base_env, &plan.context_data)
+            .map_err(|error| error.to_string())?;
         let mut code = 0_i32;
         for step in &plan.steps {
             self.events.push(ExecutionEvent::StepStarted {
@@ -659,17 +660,25 @@ impl<'a> GuestDockerTeardown<'a> {
                 continue;
             }
             let mut resolved_step = step.clone();
-            resolved_step.script = step_state.resolve_expressions(&step.script);
-            resolved_step.working_directory =
-                step_state.resolve_expressions(&step.working_directory);
+            resolved_step.script = step_state
+                .resolve_expressions(&step.script)
+                .map_err(|error| error.to_string())?;
+            resolved_step.working_directory = step_state
+                .resolve_expressions(&step.working_directory)
+                .map_err(|error| error.to_string())?;
             resolved_step.inputs = step
                 .inputs
                 .iter()
-                .map(|input| velnor_model::GuestEnvVar {
-                    name: input.name.clone(),
-                    value: step_state.resolve_expressions(&input.value),
+                .map(|input| {
+                    step_state
+                        .resolve_expressions(&input.value)
+                        .map(|value| velnor_model::GuestEnvVar {
+                            name: input.name.clone(),
+                            value,
+                        })
+                        .map_err(|error| error.to_string())
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             resolved_step.env = step_state
                 .resolve_env(
                     &step
@@ -678,6 +687,7 @@ impl<'a> GuestDockerTeardown<'a> {
                         .map(|env| (env.name.clone(), env.value.clone()))
                         .collect::<Vec<_>>(),
                 )
+                .map_err(|error| error.to_string())?
                 .into_iter()
                 .map(|(name, value)| velnor_model::GuestEnvVar { name, value })
                 .collect();

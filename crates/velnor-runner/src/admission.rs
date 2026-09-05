@@ -595,6 +595,10 @@ pub fn admit_job(
             },
         );
         let ancestry = root.child(format!("step '{step_label}' ({repository}@{action_ref})"));
+        let raw_inputs = crate::action::string_inputs(step).map_err(|error| {
+            AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
+        })?;
+        reject_runtime_capability_inputs(&ancestry, repository, &raw_inputs, context_data)?;
         let inputs = resolve_step_inputs(step, context_data).map_err(|error| {
             AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
         })?;
@@ -735,6 +739,7 @@ fn admit_remote(
     step_label: &str,
 ) -> Result<(), AdmissionError> {
     let inputs = canonicalize_admission_inputs(inputs, ancestry)?;
+    reject_runtime_capability_inputs(ancestry, repository, &inputs, walk.context_data)?;
     reject_unresolved_capability_inputs(ancestry, repository, &inputs)?;
     manifest::validate_resolved_action(step_label, repository, action_ref, subpath, &inputs)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
@@ -998,12 +1003,15 @@ fn recurse_composite(
         let Some(uses) = step.uses.as_deref() else {
             continue;
         };
-        let child_inputs = render_inputs(&step.with, &inputs_context);
         let label = step
             .name
             .clone()
             .or_else(|| step.id.clone())
             .unwrap_or_else(|| format!("nested-step-{child_index}"));
+        let child_ancestry = ancestry.child(format!("nested '{label}'"));
+        let child_inputs = render_inputs(&step.with, &inputs_context).map_err(|error| {
+            AdmissionError::new(&child_ancestry, "inputs", error.to_string(), Vec::new())
+        })?;
 
         if uses.starts_with("docker://") {
             return Err(AdmissionError::new(
@@ -1088,6 +1096,41 @@ fn reject_unresolved_capability_inputs(
     Ok(())
 }
 
+/// Reject a capability-affecting input that reads state available only while
+/// executing steps. This runs before any remote metadata fetch. Available plan
+/// contexts (`github`, `needs`, `matrix`, `strategy`, `secrets`, and `vars`)
+/// are deliberately not classified as runtime state by the executor walker.
+fn reject_runtime_capability_inputs(
+    ancestry: &Ancestry,
+    repository: &str,
+    inputs: &BTreeMap<String, String>,
+    context_data: &[(String, Value)],
+) -> Result<(), AdmissionError> {
+    for (name, value) in inputs {
+        if !value.contains("${{") || !manifest::action_input_is_constrained(repository, name) {
+            continue;
+        }
+        let reads_runtime = crate::executor::template_reads_runtime_context(value, context_data)
+            .map_err(|error| {
+                AdmissionError::new(
+                    ancestry,
+                    format!("with.{name}"),
+                    error.to_string(),
+                    vec!["a statically resolvable literal".to_string()],
+                )
+            })?;
+        if reads_runtime {
+            return Err(AdmissionError::new(
+                ancestry,
+                format!("with.{name}"),
+                "capability-affecting input reads runtime state and cannot be resolved before admission",
+                vec!["a statically resolvable literal".to_string()],
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn is_composite(metadata: &ActionMetadata) -> bool {
     metadata.runs.using.eq_ignore_ascii_case("composite")
 }
@@ -1096,10 +1139,12 @@ fn resolve_step_inputs(
     step: &crate::job_message::ActionStep,
     context_data: &[(String, Value)],
 ) -> Result<BTreeMap<String, String>> {
-    Ok(crate::action::string_inputs(step)?
+    crate::action::string_inputs(step)?
         .into_iter()
-        .map(|(name, value)| (name, render_admission_expression(&value, context_data)))
-        .collect())
+        .map(|(name, value)| {
+            render_admission_expression(&value, context_data).map(|value| (name, value))
+        })
+        .collect()
 }
 
 fn resolve_composite_inputs(
@@ -1135,92 +1180,23 @@ fn inputs_context(
 fn render_inputs(
     with: &BTreeMap<String, String>,
     inputs_context: &[(String, Value)],
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     with.iter()
         .map(|(name, value)| {
-            (
-                name.clone(),
-                render_admission_expression(value, inputs_context),
-            )
+            render_admission_expression(value, inputs_context).map(|value| (name.clone(), value))
         })
         .collect()
 }
 
-fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> String {
-    if contains_runtime_context_expression(value) {
-        value.to_string()
-    } else {
-        crate::executor::render_context_expressions_bounded(value, context_data)
-    }
-}
-
-fn contains_runtime_context_expression(value: &str) -> bool {
-    const RUNTIME_ROOTS: &[&str] = &[
-        "steps.",
-        "steps[",
-        "needs.",
-        "needs[",
-        "env.",
-        "env[",
-        "job.",
-        "job[",
-        "matrix.",
-        "matrix[",
-        "strategy.",
-        "strategy[",
-        "secrets.",
-        "secrets[",
-        "vars.",
-        "vars[",
-        "runner.",
-        "runner[",
-        "github.",
-        "github.action",
-        "github[",
-        "github.action_status",
-        "github.event.",
-    ];
-    let mut offset = 0;
-    while let Some(start) = value[offset..].find("${{") {
-        let start = offset + start + 3;
-        let Some(end) = value[start..].find("}}") else {
-            return false;
-        };
-        let expression = &value[start..start + end];
-        let lower_expression = expression.to_ascii_lowercase();
-        if [
-            "hashfiles(",
-            "format(",
-            "success(",
-            "failure(",
-            "cancelled(",
-            "always(",
-        ]
-        .iter()
-        .any(|function| lower_expression.contains(function))
-        {
-            return true;
-        }
-        if RUNTIME_ROOTS.iter().any(|root| {
-            let mut search = 0;
-            while let Some(found) = lower_expression[search..].find(root) {
-                let found = search + found;
-                let boundary = found == 0
-                    || !lower_expression.as_bytes()[found - 1].is_ascii_alphanumeric()
-                        && lower_expression.as_bytes()[found - 1] != b'_'
-                        && lower_expression.as_bytes()[found - 1] != b'-';
-                if boundary {
-                    return true;
-                }
-                search = found + root.len();
-            }
-            false
-        }) {
-            return true;
-        }
-        offset = start + end + 2;
-    }
-    false
+/// Resolve what admission can know now, while preserving valid runtime
+/// contexts for the execution pass. The checked executor boundary rejects
+/// malformed, unevaluable, and over-budget templates; it never returns the
+/// unresolved source on error.
+fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> Result<String> {
+    Ok(crate::executor::render_context_expressions_bounded(
+        value,
+        context_data,
+    )?)
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
@@ -1841,7 +1817,6 @@ mod tests {
             "${{ github.action || 'docker-container' }}",
             "${{ github['event']['pull_request']['draft'] }}",
             "${{ hashFiles('**/Cargo.lock') }}",
-            "${{ format('{0}', 'false') }}",
             "${{ success() && 'true' || 'false' }}",
             "${{ failure() || cancelled() || always() }}",
         ] {

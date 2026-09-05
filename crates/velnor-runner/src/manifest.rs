@@ -1332,15 +1332,30 @@ fn violations_with_context_limited(
             }
         }
         let inputs = match string_inputs(step) {
-            Ok(inputs) => inputs
+            Ok(inputs) => match inputs
                 .into_iter()
                 .map(|(name, value)| {
-                    (
-                        name,
-                        crate::executor::render_context_expressions_bounded(&value, context_data),
-                    )
+                    crate::executor::render_context_expressions_bounded(&value, context_data)
+                        .map(|value| (name, value))
                 })
-                .collect(),
+                .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    violations.push(violation(
+                        &step_name,
+                        repository,
+                        action_ref,
+                        "inputs",
+                        &error.to_string(),
+                        Vec::new(),
+                    ));
+                    if limit.is_some_and(|limit| violations.len() >= limit) {
+                        return violations;
+                    }
+                    continue;
+                }
+            },
             Err(error) => {
                 violations.push(violation(
                     &step_name,
