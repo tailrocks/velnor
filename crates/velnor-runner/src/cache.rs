@@ -534,7 +534,13 @@ fn scoped_sizes(store: &StoreRoot) -> Result<BTreeMap<String, u64>> {
     if !store.path.exists() {
         return Ok(sizes);
     }
-    collect_scoped_sizes(&store.path, &store.path, store.scope_depth, &mut sizes)?;
+    collect_scoped_sizes(
+        &store.path,
+        &store.path,
+        store.scope_depth,
+        &store.scope_prefix,
+        &mut sizes,
+    )?;
     Ok(sizes)
 }
 
@@ -542,6 +548,7 @@ fn collect_scoped_sizes(
     root: &Path,
     path: &Path,
     scope_depth: usize,
+    scope_prefix: &[String],
     sizes: &mut BTreeMap<String, u64>,
 ) -> Result<u64> {
     let metadata = match fs::symlink_metadata(path) {
@@ -550,7 +557,7 @@ fn collect_scoped_sizes(
         Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
     };
     if metadata.is_file() {
-        let scope = scope_for(root, path, scope_depth);
+        let scope = scope_for(root, path, scope_depth, scope_prefix);
         *sizes.entry(scope).or_default() += metadata.len();
         return Ok(metadata.len());
     }
@@ -560,7 +567,7 @@ fn collect_scoped_sizes(
 
     let mut total = 0;
     for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
-        total += collect_scoped_sizes(root, &entry?.path(), scope_depth, sizes)?;
+        total += collect_scoped_sizes(root, &entry?.path(), scope_depth, scope_prefix, sizes)?;
     }
     Ok(total)
 }
@@ -1048,8 +1055,14 @@ fn size_and_modified(path: &Path) -> Result<(u64, SystemTime)> {
     Ok((bytes, newest))
 }
 
-fn scope_for(root: &Path, path: &Path, scope_depth: usize) -> String {
-    scope_parts(root, path, scope_depth).join("/")
+fn scope_for(root: &Path, path: &Path, scope_depth: usize, scope_prefix: &[String]) -> String {
+    scope_prefix
+        .iter()
+        .cloned()
+        .chain(scope_parts(root, path, scope_depth))
+        .filter(|part| part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn scope_parts(root: &Path, path: &Path, scope_depth: usize) -> Vec<String> {
@@ -1519,6 +1532,46 @@ mod tests {
             in_use_scopes: BTreeSet::new(),
             protected_paths: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn cache_du_scopes_include_store_prefixes() {
+        let root = std::env::temp_dir().join(format!("velnor-du-scope-{}", uuid::Uuid::new_v4()));
+        let registry = root.join("registry");
+        fs::create_dir_all(registry.join("cache/index")).unwrap();
+        fs::write(registry.join("cache/index/crate"), vec![0; 7]).unwrap();
+        let registry_store = StoreRoot {
+            kind: CacheStore::Cargo,
+            path: registry,
+            scope_prefix: vec!["registry".into()],
+            scope_depth: 0,
+            candidate_depth: 0,
+            gc_managed: true,
+            emergency_managed: true,
+        };
+
+        let bin = root.join("bin");
+        fs::create_dir_all(bin.join("repository")).unwrap();
+        fs::write(bin.join("repository/tool"), vec![0; 11]).unwrap();
+        let bin_store = StoreRoot {
+            kind: CacheStore::Cargo,
+            path: bin,
+            scope_prefix: vec!["bin".into()],
+            scope_depth: 1,
+            candidate_depth: 1,
+            gc_managed: true,
+            emergency_managed: true,
+        };
+
+        assert_eq!(
+            scoped_sizes(&registry_store).unwrap(),
+            BTreeMap::from([("registry".to_string(), 7)])
+        );
+        assert_eq!(
+            scoped_sizes(&bin_store).unwrap(),
+            BTreeMap::from([("bin/repository".to_string(), 11)])
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
