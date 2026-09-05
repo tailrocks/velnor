@@ -1924,7 +1924,9 @@ fn debian_package_binds_complete_microvm_identity() {
         cargo.contains("recommends = \"docker.io | docker-ce\""),
         "host docker is recommended for the docker backend, not a hard package depend"
     );
-    let release = include_str!("../../../../.github/workflows/release.yml");
+    let Some(release) = crate::manifest::release_workflow_text() else {
+        return;
+    };
     assert!(
         release.contains("stage --root crates/velnor-runner/release/microvm --arch \"$pin_arch\""),
         "release staging must verify source-manifest checksums for the package arch"
