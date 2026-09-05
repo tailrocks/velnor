@@ -4184,3 +4184,19 @@ following remain unresolved architecture work, not silently certified:
 broker durable-intent failure atomicity, Run Service fallback/error typing,
 bounded live-log framing and step-summary acknowledgement, timeout recovery,
 and live default-MBX/readiness proof.
+
+## 91. GHA cache origins are operator-bound, not request-bound — 2026-09-05
+
+`fd223f6` removes the request `Host` header from signed GHA cache upload and
+download URL construction. The cache service validates the operator's
+`VELNOR_ACTIONS_CACHE_URL` as an HTTP(S) URL with a host and without
+credentials, query, or fragment, normalizes trailing slashes, and passes that
+immutable base to every connection. Runtime job environment injection uses the
+same validator, so malformed configuration is not silently handed to jobs;
+daemon binding fails closed instead.
+
+The cache and runtime-environment suites pass (`20` and `7` tests), and the
+full runner library gate passes when its two existing timing-sensitive tests
+are rerun in isolation (`1580` parallel tests passed; both isolated reruns
+passed). This closes Host-header cache URL poisoning; cross-daemon cache
+storage synchronization and bounded cache reclamation remain separate work.
