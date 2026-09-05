@@ -1210,6 +1210,20 @@ impl Drop for ActiveGuard {
 mod tests {
     use super::*;
 
+    /// Wait for the shared outcomes log to reach `expected` entries.
+    ///
+    /// `request` starts the detached ladder thread, so a synchronous
+    /// `fan_out_once` can observe an empty log while that thread still holds
+    /// the targets. Both passes append to the same log in deterministic
+    /// order; waiting keeps the ordering assertions exact without racing
+    /// the scheduler. Times out rather than hanging a wedged ladder.
+    fn wait_for_outcomes(token: &JobCancellation, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while token.outcomes().len() < expected && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn forced_kill_delay_floors_at_sixty_seconds_minus_the_lead() {
         // `JobDispatcher.cs:1280-1285`.
@@ -1565,6 +1579,7 @@ mod tests {
         });
         token.request(CancelReason::ServerRequested);
         token.fan_out_once();
+        wait_for_outcomes(&token, 2);
         assert_eq!(
             token
                 .outcomes()
@@ -1604,6 +1619,7 @@ mod tests {
             guest_cancelled.load(Ordering::SeqCst),
             "the guest is told to stop"
         );
+        wait_for_outcomes(&token, 2);
         assert_eq!(
             token
                 .outcomes()
