@@ -514,8 +514,11 @@ jobs:
           # velnor-sudo-exception: GitHub-hosted release build installs required OS packages.
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
-            mmdebstrap debootstrap arch-test qemu-user-binfmt binfmt-support \
+            mmdebstrap debootstrap arch-test qemu-user-static binfmt-support \
             gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+          sudo update-binfmts --enable qemu-aarch64
+          test -x /usr/bin/qemu-aarch64-static
+          arch-test arm64
 
       - name: Download pinned kernel tarball
         run: |
