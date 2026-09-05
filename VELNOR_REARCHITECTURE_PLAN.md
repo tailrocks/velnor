@@ -4041,3 +4041,15 @@ semantics were changed behind the admission boundary.
 The focused manifest suite passes (`49` tests), with formatting and diff checks
 clean. BuildKit retention remains an explicit future package rather than a
 silent no-op.
+
+## 82. Default Docker preflight proves the MBX runtime — 2026-09-05
+
+`8f11ecc` extends the configured Docker job-image preflight with an image-local
+`mbx` lookup and `mbx --version` probe. Runtime container setup always mounts
+and configures the MBX store, so an image that lacks the executable must be
+rejected before admission rather than failing later during a job.
+
+The existing preflight regression now asserts the MBX probe alongside the
+other required job tools. This proves the configured default image contract;
+workflow-specific image overrides remain subject to their own image contract.
+The focused preflight test, formatting, and diff checks pass.
