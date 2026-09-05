@@ -375,11 +375,11 @@ mod tests {
         assert!(stream.publish(candidate).is_err());
 
         let mut candidate = event("ready");
-        candidate.detail = Some("token=[REDACTED]LEAK".to_owned());
+        candidate.detail = Some("token=***LEAK".to_owned());
         assert!(stream.publish(candidate).is_err());
 
         let mut candidate = event("ready");
-        candidate.detail = Some("token=[REDACTED]".to_owned());
+        candidate.detail = Some("token=***".to_owned());
         assert!(stream.publish(candidate).is_ok());
 
         let candidate = event("ready\n");

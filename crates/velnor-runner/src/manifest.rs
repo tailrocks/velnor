@@ -5,23 +5,63 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::action::{
-    string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
+    native_action_adapter, string_inputs, unsupported_action_error, ActionAdapter, ActionRuntime,
+    NativeActionAdapter, NATIVE_ACTION_REF,
 };
 use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
-use velnor_cache_service::{
-    resolve_backend, CacheAdmissionError, CompilerCacheBackend, CompilerCachePolicy,
-    WrapperDeclaration,
-};
 
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-// Approved composites introduced v8; the native GitHub App token adapter is v9;
-// Kache v0.14.2 admission is v10.
-pub const MANIFEST_VERSION: u32 = 10;
+// Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
+// Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11;
+// explicit planner dispatch classes are v12.
+pub const MANIFEST_VERSION: u32 = 12;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
+
+/// Load the optional repository release workflow for contract tests.
+///
+/// The CI generator deliberately removes the legacy publisher while
+/// `.github/ci/project.toml` keeps release `enabled = false`. Keep the release
+/// assertions live when a separately reviewed publisher is present, but make
+/// its absence an explicit, testable policy state rather than a compile-time
+/// source-path failure.
+#[cfg(test)]
+pub(crate) fn release_workflow_text() -> Option<String> {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workflow_path = repository_root.join(".github/workflows/release.yml");
+    match std::fs::read_to_string(&workflow_path) {
+        Ok(workflow) => Some(workflow),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let config_path = repository_root.join(".github/ci/project.toml");
+            let config_text = std::fs::read_to_string(&config_path).unwrap_or_else(|read_error| {
+                panic!(
+                    "release workflow is absent and generator policy cannot be read from {}: {read_error}",
+                    config_path.display()
+                )
+            });
+            let config: toml::Value = toml::from_str(&config_text).unwrap_or_else(|parse_error| {
+                panic!("release workflow is absent and generator policy is invalid: {parse_error}")
+            });
+            let enabled = config
+                .get("release")
+                .and_then(|release| release.get("enabled"))
+                .and_then(toml::Value::as_bool);
+            assert_eq!(
+                enabled,
+                Some(false),
+                "release workflow is absent without an explicit disabled policy"
+            );
+            None
+        }
+        Err(error) => panic!(
+            "read optional release workflow {}: {error}",
+            workflow_path.display()
+        ),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -33,7 +73,7 @@ pub struct CapabilityManifest {
 #[derive(Debug, Clone, Copy)]
 pub struct ActionCapability {
     pub repository: &'static str,
-    pub adapter: NativeActionAdapter,
+    pub adapter: ActionAdapter,
     pub allowed_refs: &'static [AllowedRef],
     /// Non-root action subpaths this repository exposes (for example
     /// `actions/cache` exposes `restore` and `save`). The root action is always
@@ -275,19 +315,23 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("disable_annotations", &["false"]),
     InputRule::Forbidden("token"),
 ];
-const KACHE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["v0.14.2"]),
-    InputRule::Literal("github-cache", &["false"]),
-    InputRule::Literal("cache-executables", &["false"]),
-    InputRule::Literal("pr-comment", &["false"]),
-    InputRule::Literal("max-size", &["20GiB"]),
-    InputRule::Forbidden("token"),
-    InputRule::Forbidden("sync"),
-    InputRule::Forbidden("warm"),
-    InputRule::Forbidden("manifest-key"),
-    InputRule::Forbidden("namespace"),
-    InputRule::Forbidden("min-compile-ms"),
-    InputRule::Forbidden("cache-key-prefix"),
+const MR_BOXINGTON_INPUTS: &[InputRule] = &[
+    InputRule::Literal("backend", &["github", "server"]),
+    InputRule::Any("version"),
+    InputRule::Any("github-token"),
+    InputRule::Any("cache-key"),
+    InputRule::Any("restore-keys"),
+    InputRule::Any("cache-generation"),
+    InputRule::Literal("save-on-workflow-dispatch", &["true", "false"]),
+    InputRule::Any("toolchain"),
+    InputRule::Any("max-size"),
+    InputRule::Literal("cache-links", &["auto", "true", "false"]),
+    InputRule::Any("server-url"),
+    InputRule::Any("namespace"),
+    InputRule::Any("token"),
+    InputRule::Any("token-file"),
+    InputRule::Any("oidc-audience"),
+    InputRule::Literal("server-mode", &["read-write", "read-only", "write-only"]),
 ];
 const RUST_CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("shared-key"),
@@ -332,7 +376,7 @@ macro_rules! capability {
     ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr, subpaths: $subpaths:expr) => {
         ActionCapability {
             repository: $repo,
-            adapter: NativeActionAdapter::$adapter,
+            adapter: ActionAdapter::Native(NativeActionAdapter::$adapter),
             allowed_refs: $refs,
             allowed_subpaths: $subpaths,
             inputs: $inputs,
@@ -344,7 +388,7 @@ macro_rules! capability {
 pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
         repository: "tailrocks/velnor-actions",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
                 "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
@@ -385,7 +429,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "jackin-project/jackin-role-action",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: ActionAdapter::Composite,
         allowed_refs: &[
             allowed(
                 "041f17a6d32f8fd2a8ef03c2a63be58346993136",
@@ -411,7 +455,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     },
     ActionCapability {
         repository: "fsfe/reuse-action",
-        adapter: NativeActionAdapter::ApprovedComposite,
+        adapter: ActionAdapter::Docker,
         allowed_refs: &[allowed(
             "676e2d560c9a403aa252096d99fcab3e1132b0f5",
             "pinned REUSE compliance Docker action",
@@ -419,6 +463,17 @@ pub static ACTIONS: &[ActionCapability] = &[
         allowed_subpaths: &[],
         inputs: &[],
         notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
+    },
+    ActionCapability {
+        repository: "jdx/mr-boxington-action",
+        adapter: ActionAdapter::JavaScript,
+        allowed_refs: &[allowed(
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            "v1.2.0",
+        )],
+        allowed_subpaths: &[],
+        inputs: MR_BOXINGTON_INPUTS,
+        notes: "pinned Node24 main/post action; generic fetched-action execution with a closed identity and input surface",
     },
     capability!(
         "actions/checkout",
@@ -550,12 +605,6 @@ pub static ACTIONS: &[ActionCapability] = &[
         Sccache,
         SCCACHE_REFS,
         SCCACHE_INPUTS
-    ),
-    capability!(
-        "kunobi-ninja/kache-action",
-        Kache,
-        &[allowed("49398d37113c616fdb61be434cb497e3c2c8f3e6", "v1")],
-        KACHE_INPUTS
     ),
     capability!("rui314/setup-mold", SetupMold, MOLD_REFS, &[]),
     capability!(
@@ -812,7 +861,7 @@ fn assert_manifest_integrity_of(
             if allowed_ref.value == NATIVE_ACTION_REF {
                 // `__native` authorizes broker-managed checkout only; it must
                 // never stand in for a metadata-fetched action ref.
-                if capability.adapter != NativeActionAdapter::Checkout {
+                if capability.adapter != ActionAdapter::Native(NativeActionAdapter::Checkout) {
                     anyhow::bail!(
                         "manifest integrity: '__native' ref is only valid for broker-managed checkout, found on '{}'",
                         capability.repository
@@ -855,6 +904,27 @@ fn assert_manifest_integrity_of(
                 );
             }
             seen_subpaths.push(subpath);
+        }
+
+        match capability.adapter {
+            ActionAdapter::Native(adapter) => {
+                if native_action_adapter(capability.repository) != Some(adapter) {
+                    anyhow::bail!(
+                        "manifest integrity: native adapter {:?} for '{}' does not match the native adapter table",
+                        adapter,
+                        capability.repository
+                    );
+                }
+            }
+            ActionAdapter::Composite | ActionAdapter::Docker | ActionAdapter::JavaScript => {
+                if let Some(adapter) = native_action_adapter(capability.repository) {
+                    anyhow::bail!(
+                        "manifest integrity: generic action '{}' is also mapped to native adapter {:?}",
+                        capability.repository,
+                        adapter
+                    );
+                }
+            }
         }
     }
 
@@ -907,6 +977,66 @@ pub fn find(repository: &str) -> Option<&'static ActionCapability> {
     ACTIONS
         .iter()
         .find(|capability| capability.repository.eq_ignore_ascii_case(repository))
+}
+
+/// Validate the fetched runtime against the manifest's dispatch class. Native
+/// actions never reach this function: their static adapter table is checked by
+/// manifest integrity and admission skips metadata fetches for them.
+pub fn validate_action_runtime(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    runtime: &ActionRuntime,
+) -> Result<()> {
+    let capability = find(repository).ok_or_else(|| {
+        violation(
+            step,
+            repository,
+            action_ref,
+            "uses",
+            repository,
+            ACTIONS
+                .iter()
+                .map(|item| item.repository.to_string())
+                .collect(),
+        )
+    })?;
+    let expected = match capability.adapter {
+        ActionAdapter::Composite => "composite",
+        ActionAdapter::Docker => "docker",
+        ActionAdapter::JavaScript => "javascript",
+        ActionAdapter::Native(adapter) => {
+            return Err(violation(
+                step,
+                repository,
+                action_ref,
+                "runtime",
+                runtime_kind(runtime),
+                vec![format!("native:{adapter:?}")],
+            )
+            .into());
+        }
+    };
+    if runtime_kind(runtime) != expected {
+        return Err(violation(
+            step,
+            repository,
+            action_ref,
+            "runtime",
+            runtime_kind(runtime),
+            vec![expected.to_string()],
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn runtime_kind(runtime: &ActionRuntime) -> &'static str {
+    match runtime {
+        ActionRuntime::JavaScript { .. } => "javascript",
+        ActionRuntime::Composite => "composite",
+        ActionRuntime::Docker { .. } => "docker",
+    }
 }
 
 pub fn validate_resolved_action(
@@ -1244,15 +1374,30 @@ fn violations_with_context_limited(
             }
         }
         let inputs = match string_inputs(step) {
-            Ok(inputs) => inputs
+            Ok(inputs) => match inputs
                 .into_iter()
                 .map(|(name, value)| {
-                    (
-                        name,
-                        crate::executor::render_context_expressions_bounded(&value, context_data),
-                    )
+                    crate::executor::render_context_expressions_bounded(&value, context_data)
+                        .map(|value| (name, value))
                 })
-                .collect(),
+                .collect::<std::result::Result<BTreeMap<_, _>, _>>()
+            {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    violations.push(violation(
+                        &step_name,
+                        repository,
+                        action_ref,
+                        "inputs",
+                        &error.to_string(),
+                        Vec::new(),
+                    ));
+                    if limit.is_some_and(|limit| violations.len() >= limit) {
+                        return violations;
+                    }
+                    continue;
+                }
+            },
             Err(error) => {
                 violations.push(violation(
                     &step_name,
@@ -1354,60 +1499,25 @@ fn validate_attestation_permissions(
     }
 }
 
-pub fn compiler_cache_declaration(job: &AgentJobRequestMessage) -> WrapperDeclaration {
-    let mut declaration = WrapperDeclaration::default();
-    for step in job.steps.iter().filter(|step| step.enabled) {
-        let repository = step
-            .reference
+pub fn declares_sccache(job: &AgentJobRequestMessage) -> bool {
+    job.steps.iter().filter(|step| step.enabled).any(|step| {
+        step.reference
             .as_ref()
-            .and_then(|reference| reference.name.as_deref());
-        declaration.sccache |= repository
-            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
-        declaration.kache |=
-            repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
-    }
-    declaration
+            .and_then(|reference| reference.name.as_deref())
+            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
+    })
 }
 
-/// Resolve the daemon-owned compiler-cache policy for the production runner.
-/// Auto is intentionally passed to the service resolver: no wrapper declaration
-/// selects Kache, while an explicit sccache declaration remains supported.
-pub fn compiler_cache_backend(
-    job: &AgentJobRequestMessage,
-) -> Result<CompilerCacheBackend, CacheAdmissionError> {
-    resolve_backend(CompilerCachePolicy::Auto, &compiler_cache_declaration(job))
-}
-
-/// Reject compiler-cache ownership that cannot cross the MicroVM guest boundary.
-///
-/// The broker can represent environment variables in several shapes. All
-/// supported job, job-container, variable, and step locations are collected by
-/// the same recursive walker before this decision is made. Docker does not call
-/// this validator and retains its existing compiler-cache behavior.
-pub(crate) fn validate_microvm_compiler_cache(
-    job: &AgentJobRequestMessage,
-) -> Result<(), CacheAdmissionError> {
-    let declaration = compiler_cache_declaration(job);
-    if declaration.sccache && declaration.kache {
-        return Err(CacheAdmissionError::ConflictingWrappers);
-    }
-
+pub(crate) fn validate_microvm_compiler_cache(job: &AgentJobRequestMessage) -> anyhow::Result<()> {
     if let Some(name) = compiler_cache_environment_names(job)
         .into_iter()
         .find(|name| is_compiler_cache_environment(name))
     {
-        return Err(CacheAdmissionError::MicroVmEnvironmentUnsupported { name });
+        anyhow::bail!("MicroVM does not support explicit compiler-cache environment `{name}`");
     }
-
-    if declaration.sccache || declaration.kache {
-        let declared = if declaration.sccache {
-            CompilerCacheBackend::Sccache
-        } else {
-            CompilerCacheBackend::Kache
-        };
-        return Err(CacheAdmissionError::MicroVmTransportUnavailable { declared });
+    if declares_sccache(job) {
+        anyhow::bail!("MicroVM does not support explicit mozilla-actions/sccache-action");
     }
-
     Ok(())
 }
 
@@ -1430,44 +1540,13 @@ fn compiler_cache_environment_names(job: &AgentJobRequestMessage) -> Vec<String>
 
 fn is_compiler_cache_environment(name: &str) -> bool {
     let upper = name.to_ascii_uppercase().replace('-', "_");
-    upper == "RUSTC_WRAPPER" || upper.starts_with("SCCACHE_") || upper.starts_with("KACHE_")
+    upper == "RUSTC_WRAPPER" || upper.starts_with("SCCACHE_")
 }
 
 fn validate_compiler_cache_topology(
     job: &AgentJobRequestMessage,
     violations: &mut Vec<CapabilityViolation>,
 ) {
-    let wrappers = job
-        .steps
-        .iter()
-        .filter(|step| step.enabled)
-        .filter_map(|step| {
-            step.reference
-                .as_ref()
-                .and_then(|reference| reference.name.as_deref())
-        })
-        .filter(|repository| {
-            repository.eq_ignore_ascii_case("mozilla-actions/sccache-action")
-                || repository.eq_ignore_ascii_case("kunobi-ninja/kache-action")
-        })
-        .collect::<Vec<_>>();
-    if wrappers
-        .iter()
-        .any(|repository| repository.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
-        && wrappers
-            .iter()
-            .any(|repository| repository.eq_ignore_ascii_case("kunobi-ninja/kache-action"))
-    {
-        violations.push(violation(
-            "job preflight",
-            "compiler-cache",
-            "mixed",
-            "compiler-cache.backend",
-            "sccache+kache",
-            vec!["sccache".into(), "kache".into()],
-        ));
-    }
-
     let mut environment = compiler_cache_environment_names(job);
     environment.sort_unstable();
     environment.dedup();
@@ -1482,11 +1561,7 @@ fn validate_compiler_cache_topology(
             || upper.starts_with("SCCACHE_MEMCACHED")
             || upper.starts_with("SCCACHE_GCS")
             || upper.starts_with("SCCACHE_AZURE")
-            || upper.starts_with("SCCACHE_WEBDAV")
-            || upper == "KACHE_CACHE_DIR"
-            || upper.starts_with("KACHE_S3_")
-            || upper.starts_with("KACHE_REMOTE")
-            || upper.starts_with("KACHE_PLANNER");
+            || upper.starts_with("SCCACHE_WEBDAV");
         if forbidden {
             violations.push(violation(
                 "job preflight",
@@ -1720,7 +1795,7 @@ pub fn to_json() -> Result<String> {
         .iter()
         .map(|item| ExportAction {
             repository: item.repository,
-            adapter: format!("{:?}", item.adapter),
+            adapter: item.adapter.manifest_name(),
             allowed_refs: item
                 .allowed_refs
                 .iter()
@@ -1877,7 +1952,7 @@ mod tests {
     ) -> ActionCapability {
         ActionCapability {
             repository,
-            adapter: NativeActionAdapter::Cache,
+            adapter: ActionAdapter::Composite,
             allowed_refs,
             allowed_subpaths,
             inputs: &[],
@@ -1886,19 +1961,81 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_ten_and_structurally_immutable() {
-        // Kache v0.14.2 changes the accepted capability surface and requires a
-        // new manifest version so stale workflow inputs fail closed.
-        assert_eq!(MANIFEST_VERSION, 10);
-        assert_eq!(MANIFEST.version, 10);
+    fn compiled_manifest_is_version_twelve_and_structurally_immutable() {
+        // Generic remote action runtime kinds change the exported capability
+        // surface and require a new version so stale consumers fail closed.
+        assert_eq!(MANIFEST_VERSION, 12);
+        assert_eq!(MANIFEST.version, 12);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
     #[test]
+    fn admitted_remote_actions_declare_their_actual_runtime_kind() {
+        let expected = [
+            ("tailrocks/velnor-actions", ActionAdapter::Composite),
+            (
+                "jackin-project/jackin-role-action",
+                ActionAdapter::Composite,
+            ),
+            ("fsfe/reuse-action", ActionAdapter::Docker),
+            ("jdx/mr-boxington-action", ActionAdapter::JavaScript),
+        ];
+        for (repository, adapter) in expected {
+            assert_eq!(find(repository).map(|item| item.adapter), Some(adapter));
+        }
+    }
+
+    #[test]
+    fn generic_runtime_must_match_declared_dispatch_class() {
+        let docker = ActionRuntime::Docker {
+            image: "docker://alpine:3.20".to_string(),
+        };
+        assert!(validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &docker,
+        )
+        .is_ok());
+
+        let mismatch = validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &ActionRuntime::Composite,
+        )
+        .unwrap_err();
+        let mismatch = mismatch.downcast_ref::<CapabilityViolation>().unwrap();
+        assert_eq!(mismatch.field, "runtime");
+        assert_eq!(mismatch.received, "composite");
+        assert_eq!(mismatch.accepted, vec!["docker"]);
+
+        let javascript = validate_action_runtime(
+            "reuse",
+            "fsfe/reuse-action",
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            &ActionRuntime::JavaScript {
+                node: "node24".to_string(),
+                main: "dist/index.js".to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            javascript
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "runtime"
+        );
+    }
+
+    #[test]
     fn release_workflow_action_refs_are_compiled_into_the_manifest() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let mut uses = Vec::new();
         collect_uses(&workflow, &mut uses);
 
@@ -1977,9 +2114,11 @@ mod tests {
 
     #[test]
     fn release_signers_use_validated_tag_ref_not_raw_commit() {
-        let workflow_text = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(workflow_text).expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         assert!(workflow_text.contains("EXPECTED_TAG_REF"));
         assert!(workflow_text.contains("git ls-remote --exit-code origin"));
         assert!(workflow_text.contains("$2 == expected \"^{}\""));
@@ -2075,7 +2214,9 @@ mod tests {
 
     #[test]
     fn release_workflow_reads_platforms_from_imagetools_inspect_schema() {
-        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow) = release_workflow_text() else {
+            return;
+        };
         for architecture in ["amd64", "arm64"] {
             let selector = format!(
                 ".manifest.manifests[] | select(.platform.architecture==\"{architecture}\") | .digest"
@@ -2089,9 +2230,11 @@ mod tests {
 
     #[test]
     fn deb_staging_binds_package_runner_to_build_and_binary_sidecar() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["build"]["steps"]
             .as_sequence()
             .expect("build job steps");
@@ -2193,9 +2336,11 @@ mod tests {
 
     #[test]
     fn release_creation_binds_packaged_runner_to_recorded_binary() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["release"]["steps"]
             .as_sequence()
             .expect("release job steps");
@@ -2234,7 +2379,9 @@ mod tests {
 
     #[test]
     fn release_record_derives_manifest_version_from_compiled_artifact() {
-        let workflow = include_str!("../../../.github/workflows/release.yml");
+        let Some(workflow) = release_workflow_text() else {
+            return;
+        };
         assert!(
             workflow.contains("manifest_version=\"$(jq -er '.version"),
             "release assembly must read the compiled manifest version"
@@ -2251,9 +2398,11 @@ mod tests {
 
     #[test]
     fn release_record_downloads_compiled_tool_before_independent_verification() {
+        let Some(workflow_text) = release_workflow_text() else {
+            return;
+        };
         let workflow: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
-                .expect("release workflow must parse");
+            serde_yaml::from_str(&workflow_text).expect("release workflow must parse");
         let steps = workflow["jobs"]["release"]["steps"]
             .as_sequence()
             .expect("release job steps");
@@ -2286,7 +2435,7 @@ mod tests {
                 if allowed_ref.value == NATIVE_ACTION_REF {
                     assert_eq!(
                         capability.adapter,
-                        NativeActionAdapter::Checkout,
+                        ActionAdapter::Native(NativeActionAdapter::Checkout),
                         "__native only for checkout"
                     );
                     continue;
@@ -2355,7 +2504,7 @@ mod tests {
     fn integrity_rejects_native_ref_outside_checkout() {
         let actions = [ActionCapability {
             repository: "acme/notcheckout",
-            adapter: NativeActionAdapter::Cache,
+            adapter: ActionAdapter::Native(NativeActionAdapter::Cache),
             allowed_refs: &[AllowedRef {
                 value: NATIVE_ACTION_REF,
                 release: "",
@@ -2482,6 +2631,85 @@ mod tests {
     }
 
     #[test]
+    fn mr_boxington_rejects_unsupported_local_backend() {
+        const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+
+        for backend in ["github", "server"] {
+            validate_resolved_action(
+                "cache",
+                "jdx/mr-boxington-action",
+                SHA,
+                None,
+                &BTreeMap::from([("backend".to_string(), backend.to_string())]),
+            )
+            .unwrap();
+        }
+
+        let local_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            local_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
+
+        let unknown_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            SHA,
+            None,
+            &BTreeMap::from([("backend".to_string(), "unknown".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "with.backend"
+        );
+
+        let ref_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            "1111111111111111111111111111111111111111",
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            ref_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "ref"
+        );
+        assert!(crate::action::native_action_adapter("jdx/mr-boxington-action").is_none());
+    }
+
+    #[test]
+    fn mr_boxington_declares_javascript_runtime() {
+        validate_action_runtime(
+            "cache",
+            "jdx/mr-boxington-action",
+            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            &ActionRuntime::JavaScript {
+                node: "node24".to_string(),
+                main: "dist/index.js".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn reusable_workflow_validation_enforces_identity_ref_and_inputs() {
         let publish_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136";
         // Approved identity + immutable ref + no inputs is admitted.
@@ -2589,7 +2817,6 @@ mod tests {
     #[test]
     fn manifest_covers_every_native_adapter() {
         let expected = [
-            NativeActionAdapter::ApprovedComposite,
             NativeActionAdapter::Checkout,
             NativeActionAdapter::Cache,
             NativeActionAdapter::UploadArtifact,
@@ -2598,10 +2825,10 @@ mod tests {
             NativeActionAdapter::ConfigurePages,
             NativeActionAdapter::DeployPages,
             NativeActionAdapter::AttestBuildProvenance,
+            NativeActionAdapter::CreateGitHubAppToken,
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
-            NativeActionAdapter::Kache,
             NativeActionAdapter::SetupMold,
             NativeActionAdapter::SetupJust,
             NativeActionAdapter::RustCache,
@@ -2619,10 +2846,18 @@ mod tests {
         ];
         for adapter in expected {
             assert!(
-                ACTIONS.iter().any(|item| item.adapter == adapter),
+                ACTIONS
+                    .iter()
+                    .any(|item| item.adapter == ActionAdapter::Native(adapter)),
                 "missing {adapter:?}"
             );
         }
+        assert!(ACTIONS
+            .iter()
+            .any(|item| item.adapter == ActionAdapter::Composite));
+        assert!(ACTIONS
+            .iter()
+            .any(|item| item.adapter == ActionAdapter::Docker));
     }
 
     #[test]
@@ -2640,6 +2875,17 @@ mod tests {
         // `development` sentinel from build.rs.
         assert_eq!(value["source_sha"], env!("VELNOR_SOURCE_SHA"));
         assert_eq!(value["crate_version"], env!("CARGO_PKG_VERSION"));
+        let actions = value["actions"].as_array().unwrap();
+        let reuse = actions
+            .iter()
+            .find(|item| item["repository"] == "fsfe/reuse-action")
+            .unwrap();
+        assert_eq!(reuse["adapter"], "Docker");
+        let cache = actions
+            .iter()
+            .find(|item| item["repository"] == "actions/cache")
+            .unwrap();
+        assert_eq!(cache["adapter"], "Native(Cache)");
     }
 
     #[test]
@@ -3060,37 +3306,6 @@ mod tests {
     }
 
     #[test]
-    fn dual_cache_wrappers_rejected() {
-        let mut target = job(
-            "mozilla-actions/sccache-action",
-            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
-            serde_json::json!({}),
-        );
-        let kache_step = job(
-            "kunobi-ninja/kache-action",
-            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
-            serde_json::json!({
-                "version": "v0.14.2",
-                "github-cache": "false",
-                "cache-executables": "false",
-                "pr-comment": "false",
-                "max-size": "20GiB"
-            }),
-        )
-        .steps
-        .remove(0);
-        target.steps.push(kache_step);
-        let errors = violations(&target);
-        assert!(errors
-            .iter()
-            .any(|error| error.field == "compiler-cache.backend"));
-        assert_eq!(
-            compiler_cache_backend(&target),
-            Err(CacheAdmissionError::ConflictingWrappers)
-        );
-    }
-
-    #[test]
     fn remote_cache_env_rejected_but_legacy_gha_flag_tolerated() {
         let mut target = job(
             "mozilla-actions/sccache-action",
@@ -3108,33 +3323,5 @@ mod tests {
         assert!(!errors
             .iter()
             .any(|error| error.field == "env.SCCACHE_GHA_ENABLED"));
-    }
-
-    #[test]
-    fn backend_selection_matches_single_wrapper_or_default_kache() {
-        let sccache = job(
-            "mozilla-actions/sccache-action",
-            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
-            serde_json::json!({}),
-        );
-        let kache = job(
-            "kunobi-ninja/kache-action",
-            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
-            serde_json::json!({}),
-        );
-        let mut default_job = sccache.clone();
-        default_job.steps.clear();
-        assert_eq!(
-            compiler_cache_backend(&sccache),
-            Ok(CompilerCacheBackend::Sccache)
-        );
-        assert_eq!(
-            compiler_cache_backend(&kache),
-            Ok(CompilerCacheBackend::Kache)
-        );
-        assert_eq!(
-            compiler_cache_backend(&default_job),
-            Ok(CompilerCacheBackend::Kache)
-        );
     }
 }

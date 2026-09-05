@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fs,
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -8,7 +8,6 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
 
 use crate::{
     args::{CacheArgs, CacheCommand, CacheGcArgs},
@@ -16,6 +15,15 @@ use crate::{
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Minimum time a store must have been untouched before the *emergency*
+/// reclaimer may delete it.
+pub(crate) const EMERGENCY_MIN_IDLE: Duration = Duration::from_secs(15 * 60);
+
+/// Builder-name prefix for every BuildKit builder Velnor owns. The concrete
+/// builder always carries a `-<scope>` suffix, which is why inspecting the bare
+/// prefix never matched and the disk-pressure BuildKit reclaim was dead code.
+pub(crate) const OWNED_BUILDER_PREFIX: &str = "velnor-builder";
 const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
 const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
 const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
@@ -119,6 +127,26 @@ fn run_du(work_root: &Path, budgets: &BTreeMap<CacheStore, u64>) -> Result<()> {
         );
     }
 
+    // Docker is not a Velnor store, but it spends the same filesystem. Leaving
+    // it out of the report is what let the reservation ledger believe it held
+    // headroom Docker had already taken.
+    match crate::host_capacity::docker_usage_bytes() {
+        Some(bytes) => println!(
+            "store\t{}\t{bytes}\t{bytes}\t0\tunmanaged\tdocker",
+            CacheStore::Docker
+        ),
+        None => println!("store\t{}\t0\t0\t0\tunmeasured\tdocker", CacheStore::Docker),
+    }
+    match crate::host_capacity::HostCapacity::probe(work_root) {
+        Ok(capacity) => println!(
+            "host\ttotal_bytes\t{}\tavailable_bytes\t{}\tused_percent\t{}",
+            capacity.total_bytes,
+            capacity.available_bytes,
+            capacity.used_percent()
+        ),
+        Err(error) => eprintln!("host capacity probe failed: {error:#}"),
+    }
+
     println!("scope\tstore\tbytes\tscope");
     for store in &stores {
         for (scope, bytes) in scoped_sizes(store)? {
@@ -147,8 +175,10 @@ fn run_gc(
     if !args.dry_run && !args.yes {
         bail!("destructive cache gc requires --yes");
     }
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
+    let storage_layout = crate::storage::StorageLayout::resolve();
+    let run_root = storage_layout
+        .as_ref()
+        .map(|layout| layout.run_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
     let _destructive_locks = if args.dry_run {
         None
@@ -168,7 +198,7 @@ fn run_gc(
         Err(error) => return Err(error).context("read active cache-scope leases"),
     };
 
-    let listing = cache_listing(work_root, false)?;
+    let listing = cache_listing_with_layout(work_root, false, storage_layout.as_ref())?;
     let max_age = args
         .max_age_days
         .checked_mul(DAY.as_secs())
@@ -181,7 +211,10 @@ fn run_gc(
         max_total_bytes: args.max_size_bytes,
         class_budgets,
         in_use_scopes,
-        protected_paths: pointer_protected_target_generations(work_root),
+        protected_paths: pointer_protected_target_generations_with_layout(
+            work_root,
+            storage_layout.as_ref(),
+        ),
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
@@ -204,8 +237,9 @@ fn run_gc(
         return Ok(());
     }
 
-    let log_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.log_root)
+    let log_root = storage_layout
+        .as_ref()
+        .map(|layout| layout.log_root.clone())
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
         let result = remove_candidate(&candidate);
@@ -340,14 +374,26 @@ struct StoreRoot {
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
-    let cargo = crate::container::cargo_store_host(work_root);
+    let layout = crate::storage::StorageLayout::resolve();
+    store_roots_with_layout(work_root, layout.as_ref())
+}
+
+fn store_roots_with_layout(
+    work_root: &Path,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> Vec<StoreRoot> {
+    // Every path below comes from the catalog. GC must never spell a store root
+    // itself: that is exactly how the artifact store came to be written at
+    // `<work>/slot-N/_velnor_artifacts` while GC swept `<work>/_velnor_artifacts`.
+    let catalog = crate::store_catalog::StoreCatalog::for_work_root_with_layout(work_root, layout);
+    let cargo = catalog.cargo();
     let cargo_bin = cargo.join("bin");
     let cargo_bin_legacy = is_legacy_store(&cargo);
-    let mise = crate::container::mise_store_host(work_root);
+    let mise = catalog.mise();
     let mise_legacy = is_legacy_store(&mise);
-    let targets = crate::container::cargo_target_store_host(work_root);
+    let targets = catalog.targets();
     let targets_legacy = is_legacy_store(&targets);
-    let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
+    let actions_cache = catalog.actions_cache();
     let actions_cache_legacy = is_legacy_store(&actions_cache);
     let mut stores = vec![
         StoreRoot {
@@ -437,7 +483,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         },
         StoreRoot {
             kind: CacheStore::Artifacts,
-            path: work_root.join("_velnor_artifacts"),
+            path: catalog.artifacts(),
             scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
@@ -445,20 +491,10 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             emergency_managed: true,
         },
     ];
-    for trust_class in [
-        GuestCompilerCacheTrustClass::Untrusted,
-        GuestCompilerCacheTrustClass::Trusted,
-        GuestCompilerCacheTrustClass::Release,
-    ] {
+    for (trust_class, trust_scope) in crate::store_catalog::TRUST_SCOPES {
         for (kind, path) in [
-            (
-                CacheStore::Sccache,
-                crate::container::sccache_host(work_root, trust_class),
-            ),
-            (
-                CacheStore::Kache,
-                crate::container::kache_host(work_root, trust_class),
-            ),
+            (CacheStore::Mbx, catalog.mbx(trust_scope)),
+            (CacheStore::Sccache, catalog.sccache(trust_class)),
         ] {
             stores.push(StoreRoot {
                 kind,
@@ -470,6 +506,20 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
                 emergency_managed: true,
             });
         }
+    }
+    // The hosted actions-cache service is durable storage like any other class.
+    // It was previously invisible to `cache du` and to every collector, so each
+    // tenant accumulated its own budget outside the ledger.
+    if let Some(layout) = layout {
+        stores.push(StoreRoot {
+            kind: CacheStore::GhaCache,
+            path: crate::store_catalog::gha_cache_root(layout).join("tenants"),
+            scope_prefix: Vec::new(),
+            scope_depth: 1,
+            candidate_depth: 1,
+            gc_managed: true,
+            emergency_managed: true,
+        });
     }
     stores
 }
@@ -484,7 +534,13 @@ fn scoped_sizes(store: &StoreRoot) -> Result<BTreeMap<String, u64>> {
     if !store.path.exists() {
         return Ok(sizes);
     }
-    collect_scoped_sizes(&store.path, &store.path, store.scope_depth, &mut sizes)?;
+    collect_scoped_sizes(
+        &store.path,
+        &store.path,
+        store.scope_depth,
+        &store.scope_prefix,
+        &mut sizes,
+    )?;
     Ok(sizes)
 }
 
@@ -492,6 +548,7 @@ fn collect_scoped_sizes(
     root: &Path,
     path: &Path,
     scope_depth: usize,
+    scope_prefix: &[String],
     sizes: &mut BTreeMap<String, u64>,
 ) -> Result<u64> {
     let metadata = match fs::symlink_metadata(path) {
@@ -500,7 +557,7 @@ fn collect_scoped_sizes(
         Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
     };
     if metadata.is_file() {
-        let scope = scope_for(root, path, scope_depth);
+        let scope = scope_for(root, path, scope_depth, scope_prefix);
         *sizes.entry(scope).or_default() += metadata.len();
         return Ok(metadata.len());
     }
@@ -510,20 +567,27 @@ fn collect_scoped_sizes(
 
     let mut total = 0;
     for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
-        total += collect_scoped_sizes(root, &entry?.path(), scope_depth, sizes)?;
+        total += collect_scoped_sizes(root, &entry?.path(), scope_depth, scope_prefix, sizes)?;
     }
     Ok(total)
 }
 
-fn cache_listing(work_root: &Path, emergency: bool) -> Result<Vec<CacheEntry>> {
+fn cache_listing_with_layout(
+    work_root: &Path,
+    emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> Result<Vec<CacheEntry>> {
     let mut entries = Vec::new();
-    for store in store_roots(work_root).into_iter().filter(|store| {
-        if emergency {
-            store.emergency_managed
-        } else {
-            store.gc_managed
-        }
-    }) {
+    for store in store_roots_with_layout(work_root, layout)
+        .into_iter()
+        .filter(|store| {
+            if emergency {
+                store.emergency_managed
+            } else {
+                store.gc_managed
+            }
+        })
+    {
         collect_candidates(&store, &store.path, 0, &mut entries)?;
     }
     Ok(entries)
@@ -541,13 +605,14 @@ pub fn reclaim(
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
 ) -> Result<ReclaimReport> {
-    reclaim_work_root(
+    reclaim_work_root_with_layout(
         &layout.cache_root,
         &layout.run_root,
         &layout.log_root,
         target_bytes,
         in_use_scopes,
         false,
+        Some(layout),
     )
 }
 
@@ -560,6 +625,41 @@ pub fn reclaim(
 pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
     let roots = crate::leftover_disk::discover_daemon_work_roots();
     let layout = crate::storage::StorageLayout::resolve();
+    reclaim_for_disk_pressure_with_context(target_bytes, &roots, layout.as_ref())
+}
+
+/// Reclaim one work root using the current process storage layout.
+///
+/// The explicit-layout variant below is the implementation seam used by
+/// callers that already hold a configuration snapshot. This wrapper preserves
+/// the existing crate-local test and operator entry point for callers that
+/// provide only filesystem roots.
+#[allow(dead_code, reason = "crate-local tests exercise the wrapper")]
+pub(crate) fn reclaim_work_root(
+    work_root: &Path,
+    run_root: &Path,
+    log_root: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+    emergency: bool,
+) -> Result<ReclaimReport> {
+    let layout = crate::storage::StorageLayout::resolve();
+    reclaim_work_root_with_layout(
+        work_root,
+        run_root,
+        log_root,
+        target_bytes,
+        in_use_scopes,
+        emergency,
+        layout.as_ref(),
+    )
+}
+
+fn reclaim_for_disk_pressure_with_context(
+    target_bytes: u64,
+    roots: &[PathBuf],
+    layout: Option<&crate::storage::StorageLayout>,
+) -> ReclaimReport {
     let mut report = ReclaimReport::default();
 
     for work_root in roots {
@@ -576,13 +676,14 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
         if remaining == 0 {
             break;
         }
-        match reclaim_work_root(
-            &work_root,
+        match reclaim_work_root_with_layout(
+            work_root,
             &run_root,
             &log_root,
             remaining,
             &BTreeSet::new(),
             true,
+            layout,
         ) {
             Ok(root_report) => {
                 report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
@@ -598,13 +699,14 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
     report
 }
 
-pub(crate) fn reclaim_work_root(
+fn reclaim_work_root_with_layout(
     work_root: &Path,
     run_root: &Path,
     log_root: &Path,
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
     emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
@@ -622,7 +724,7 @@ pub(crate) fn reclaim_work_root(
         run_root,
         Duration::from_secs(24 * 3600),
     )?);
-    let mut entries = cache_listing(work_root, emergency)?;
+    let mut entries = cache_listing_with_layout(work_root, emergency, layout)?;
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -630,9 +732,26 @@ pub(crate) fn reclaim_work_root(
         max_total_bytes: None,
         class_budgets: BTreeMap::new(),
         in_use_scopes: active_scopes,
-        protected_paths: pointer_protected_target_generations(work_root),
+        protected_paths: pointer_protected_target_generations_with_layout(work_root, layout),
     };
     entries.retain(|entry| !in_use(entry, &policy) && !protected(entry, &policy));
+    if emergency {
+        // Leases are the primary liveness evidence, but the emergency path also
+        // reaches classes whose lease has not been published for the job that
+        // owns them. A store a live job is writing is never idle, so refuse to
+        // delete anything touched inside the idle floor. This is the fail-safe
+        // that stops emergency reclaim from deleting an unleased store out from
+        // under a running job; the lease classes in `store_catalog` are the
+        // primary fix.
+        let now = policy.now;
+        entries.retain(|entry| {
+            // Never touch a class Velnor does not own by scope.
+            entry.store.lease_class().is_some()
+                && now
+                    .duration_since(entry.modified)
+                    .is_ok_and(|idle| idle >= EMERGENCY_MIN_IDLE)
+        });
+    }
     entries.sort_by(|left, right| {
         reclaim_priority(left.store)
             .cmp(&reclaim_priority(right.store))
@@ -665,9 +784,13 @@ pub(crate) fn reclaim_work_root(
             }
         }
     }
-    if report.freed_bytes < target_bytes {
-        let _ = prune_owned_builder(0)?;
-    }
+    // Deliberate safety decision: emergency reclaim does not prune BuildKit.
+    // `prune_owned_builder` can enumerate Velnor's builders, but this reclaimer
+    // has no BuildKit lease or job-claim covering the builder's content. A
+    // builder can therefore be live while its cache path is idle, and
+    // `buildx prune --max-used-space 0B` is destructive in exactly that window.
+    // Keep the explicit operator function available; only a future caller that
+    // holds the matching BuildKit lease may invoke it.
     Ok(report)
 }
 
@@ -679,7 +802,7 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
     };
     let _entry_lock = (matches!(
         candidate.store,
-        CacheStore::ActionsCache | CacheStore::Targets
+        CacheStore::ActionsCache | CacheStore::Artifacts | CacheStore::Targets
     ))
     .then(|| CacheEntryLock::exclusive(lock_path))
     .transpose()?;
@@ -711,51 +834,93 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
 }
 
+/// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
+///
+/// The builder name is always `velnor-builder-<scope>`; inspecting the literal
+/// prefix `velnor-builder` therefore never succeeded, which made the whole
+/// disk-pressure BuildKit reclaim a silent no-op. Ownership is the prefix, so
+/// enumerate and match the prefix instead of guessing one name.
+pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in buildx_ls_stdout.lines() {
+        let Some(first) = line.split_whitespace().next() else {
+            continue;
+        };
+        // `docker buildx ls` marks the selected builder with a trailing `*` and
+        // indents each builder's nodes; nodes are not builders.
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let name = first.trim_end_matches('*');
+        if name.starts_with(OWNED_BUILDER_PREFIX) && !names.iter().any(|seen| seen == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+/// Explicitly prune every Velnor-owned BuildKit builder down to
+/// `max_used_space_bytes`. Emergency reclaim intentionally does not call this:
+/// the builder content has no lease/claim boundary yet.
+#[allow(
+    dead_code,
+    reason = "operator action requires an explicit BuildKit lease"
+)]
 pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
-    let inspect = std::process::Command::new("docker")
-        .args(["buildx", "inspect", "velnor-builder"])
-        .output();
-    let Ok(inspect) = inspect else {
+    let Ok(listed) = std::process::Command::new("docker")
+        .args(["buildx", "ls"])
+        .output()
+    else {
         return Ok(false);
     };
-    if !inspect.status.success() {
+    if !listed.status.success() {
         return Ok(false);
     }
+    let builders = owned_builder_names(&String::from_utf8_lossy(&listed.stdout));
     let limit = format!("{max_used_space_bytes}B");
-    let output = std::process::Command::new("docker")
-        .args([
-            "buildx",
-            "prune",
-            "--builder",
-            "velnor-builder",
-            "--force",
-            "--max-used-space",
-            &limit,
-        ])
-        .output()
-        .context("prune Velnor-owned buildx builder")?;
-    if !output.status.success() {
+    let mut pruned = false;
+    for builder in builders {
+        let output = std::process::Command::new("docker")
+            .args([
+                "buildx",
+                "prune",
+                "--builder",
+                &builder,
+                "--force",
+                "--max-used-space",
+                &limit,
+            ])
+            .output()
+            .context("prune Velnor-owned buildx builder")?;
+        if output.status.success() {
+            pruned = true;
+            continue;
+        }
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("No such container") || stderr.contains("no builder") {
-            return Ok(false);
+            continue;
         }
         bail!(
-            "Velnor-owned buildx builder prune failed: {}: {}",
+            "Velnor-owned buildx builder prune failed for {builder}: {}: {}",
             output.status,
             stderr.trim()
         );
     }
-    Ok(true)
+    Ok(pruned)
 }
 
 fn reclaim_priority(store: CacheStore) -> u8 {
     match store {
         CacheStore::Artifacts => 0,
-        CacheStore::ActionsCache => 1,
-        CacheStore::Targets => 2,
-        CacheStore::Cargo => 3,
-        CacheStore::Mise => 4,
-        CacheStore::Sccache | CacheStore::Kache => 5,
+        CacheStore::GhaCache => 1,
+        CacheStore::ActionsCache => 2,
+        CacheStore::Targets => 3,
+        CacheStore::Cargo => 4,
+        CacheStore::Mise => 5,
+        CacheStore::Mbx | CacheStore::Sccache => 6,
+        // Never reclaimed by scope: Velnor does not own Docker's store beyond
+        // its own builder. It is accounted, not evicted.
+        CacheStore::Docker => u8::MAX,
     }
 }
 
@@ -890,8 +1055,14 @@ fn size_and_modified(path: &Path) -> Result<(u64, SystemTime)> {
     Ok((bytes, newest))
 }
 
-fn scope_for(root: &Path, path: &Path, scope_depth: usize) -> String {
-    scope_parts(root, path, scope_depth).join("/")
+fn scope_for(root: &Path, path: &Path, scope_depth: usize, scope_prefix: &[String]) -> String {
+    scope_prefix
+        .iter()
+        .cloned()
+        .chain(scope_parts(root, path, scope_depth))
+        .filter(|part| part != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn scope_parts(root: &Path, path: &Path, scope_depth: usize) -> Vec<String> {
@@ -907,30 +1078,10 @@ fn scope_parts(root: &Path, path: &Path, scope_depth: usize) -> Vec<String> {
     parts
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CacheStore {
-    Cargo,
-    Mise,
-    Targets,
-    ActionsCache,
-    Artifacts,
-    Sccache,
-    Kache,
-}
-
-impl fmt::Display for CacheStore {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Cargo => "cargo",
-            Self::Mise => "mise",
-            Self::Targets => "targets",
-            Self::ActionsCache => "actions-cache",
-            Self::Artifacts => "artifacts",
-            Self::Sccache => "sccache",
-            Self::Kache => "kache",
-        })
-    }
-}
+/// GC's store classes are the catalog's store classes. Two enums would let the
+/// collector recognize a class the catalog does not publish (or the reverse),
+/// which is the same drift that hid the artifact store.
+pub(crate) use crate::store_catalog::StoreClass as CacheStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheEntry {
@@ -1274,9 +1425,12 @@ fn target_generation_is_current(path: &Path) -> Result<bool> {
     Ok(current_pointer_generation_checked(parent)?.as_deref() == Some(name.as_ref()))
 }
 
-fn pointer_protected_target_generations(work_root: &Path) -> BTreeSet<PathBuf> {
+fn pointer_protected_target_generations_with_layout(
+    work_root: &Path,
+    layout: Option<&crate::storage::StorageLayout>,
+) -> BTreeSet<PathBuf> {
     let mut protected = BTreeSet::new();
-    for store in store_roots(work_root)
+    for store in store_roots_with_layout(work_root, layout)
         .into_iter()
         .filter(|store| store.kind == CacheStore::Targets)
     {
@@ -1313,8 +1467,44 @@ fn collect_pointer_protected(path: &Path, depth: usize, protected: &mut BTreeSet
 }
 
 #[cfg(test)]
+pub(crate) mod test_clock {
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Backdate every node under `path` so an emergency-reclaim fixture models
+    /// a cold store rather than one a live job just touched.
+    pub(crate) fn backdate(path: &Path, age: Duration) {
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
+            && metadata.is_dir()
+        {
+            for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+                backdate(&entry.path(), age);
+            }
+        }
+        let when = std::time::SystemTime::now() - age;
+        let stamp = rustix::fs::Timespec {
+            tv_sec: when
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            tv_nsec: 0,
+        };
+        let _ = rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &rustix::fs::Timestamps {
+                last_access: stamp,
+                last_modification: stamp,
+            },
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use test_clock::backdate;
 
     fn entry(
         path: &str,
@@ -1342,6 +1532,46 @@ mod tests {
             in_use_scopes: BTreeSet::new(),
             protected_paths: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn cache_du_scopes_include_store_prefixes() {
+        let root = std::env::temp_dir().join(format!("velnor-du-scope-{}", uuid::Uuid::new_v4()));
+        let registry = root.join("registry");
+        fs::create_dir_all(registry.join("cache/index")).unwrap();
+        fs::write(registry.join("cache/index/crate"), vec![0; 7]).unwrap();
+        let registry_store = StoreRoot {
+            kind: CacheStore::Cargo,
+            path: registry,
+            scope_prefix: vec!["registry".into()],
+            scope_depth: 0,
+            candidate_depth: 0,
+            gc_managed: true,
+            emergency_managed: true,
+        };
+
+        let bin = root.join("bin");
+        fs::create_dir_all(bin.join("repository")).unwrap();
+        fs::write(bin.join("repository/tool"), vec![0; 11]).unwrap();
+        let bin_store = StoreRoot {
+            kind: CacheStore::Cargo,
+            path: bin,
+            scope_prefix: vec!["bin".into()],
+            scope_depth: 1,
+            candidate_depth: 1,
+            gc_managed: true,
+            emergency_managed: true,
+        };
+
+        assert_eq!(
+            scoped_sizes(&registry_store).unwrap(),
+            BTreeMap::from([("registry".to_string(), 7)])
+        );
+        assert_eq!(
+            scoped_sizes(&bin_store).unwrap(),
+            BTreeMap::from([("bin/repository".to_string(), 11)])
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1576,6 +1806,38 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn artifacts_gc_waits_for_active_restore_lock() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-artifact-lock-{}", uuid::Uuid::new_v4()));
+        let run_bucket = root.join("_velnor_artifacts/run-1");
+        fs::create_dir_all(&run_bucket).unwrap();
+        fs::write(run_bucket.join("artifact"), b"artifact").unwrap();
+        let restore_lock = CacheEntryLock::shared(&run_bucket).unwrap();
+        let candidate = EvictionCandidate {
+            path: run_bucket.clone(),
+            store: CacheStore::Artifacts,
+            scope: vec!["run-1".into()],
+            bytes: 8,
+            reason: "test".into(),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let remover =
+            std::thread::spawn(move || sender.send(remove_candidate(&candidate)).unwrap());
+
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(run_bucket.join("artifact").is_file());
+        drop(restore_lock);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        remover.join().unwrap();
+        assert!(!run_bucket.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn target_gc_rechecks_current_under_publisher_lock() {
         let temp_root =
             fs::canonicalize(std::env::temp_dir()).expect("canonicalize temporary test root");
@@ -1646,13 +1908,14 @@ mod tests {
             fs::create_dir_all(path).unwrap();
             fs::write(path.join("data"), vec![0; 16]).unwrap();
         }
-        let report = reclaim_work_root(
+        let report = reclaim_work_root_with_layout(
             &work,
             &root.join("run"),
             &root.join("log"),
             16,
             &BTreeSet::from(["actions-cache/trusted/active".into()]),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(report.deleted.len(), 1);
@@ -1669,37 +1932,22 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let work = root.join("lib/velnor-test/work");
-        let cache = root.join("cache/velnor/v1/trusted/caches/idle/key");
-        let compiler_cache = work.join("_velnor_sccache/trusted/idle/key");
+        let cache = root.join("cache/velnor/v1/untrusted/caches/idle/key");
+        let compiler_cache = work.join("_velnor_sccache/untrusted/idle/key");
         fs::create_dir_all(&work).unwrap();
         fs::create_dir_all(&cache).unwrap();
         fs::create_dir_all(&compiler_cache).unwrap();
         fs::write(cache.join("payload"), vec![0; 16]).unwrap();
         fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
+        // Emergency reclaim refuses to delete a store a live job may be
+        // writing. Model genuinely cold stores.
+        backdate(&cache, EMERGENCY_MIN_IDLE * 2);
+        backdate(compiler_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
 
-        let previous = std::env::var_os("VELNOR_STORAGE_ROOT");
-        let previous_trust = std::env::var_os("VELNOR_TRUST_SCOPE");
-        // SAFETY: this synchronous test owns the process environment values
-        // while exercising the discovery path and restores them below. The
-        // canonical actions-cache path is trust-scoped, so pin the exact
-        // `trusted` scope the fixture directories use instead of relying on
-        // the process-global default.
-        unsafe {
-            std::env::set_var("VELNOR_STORAGE_ROOT", &root);
-            std::env::set_var("VELNOR_TRUST_SCOPE", "trusted");
-        }
-        let report = reclaim_for_disk_pressure(32);
-        // SAFETY: restore the values owned by this synchronous test.
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("VELNOR_STORAGE_ROOT", value),
-                None => std::env::remove_var("VELNOR_STORAGE_ROOT"),
-            }
-            match previous_trust {
-                Some(value) => std::env::set_var("VELNOR_TRUST_SCOPE", value),
-                None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
-            }
-        }
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let work_roots = crate::leftover_disk::discover_daemon_work_roots_in(&root.join("lib"));
+        assert_eq!(work_roots, vec![work.clone()]);
+        let report = reclaim_for_disk_pressure_with_context(32, &work_roots, Some(&layout));
 
         assert_eq!(report.freed_bytes, 32);
         assert_eq!(
@@ -1708,6 +1956,96 @@ mod tests {
         );
         assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Emergency reclaim must not delete the store of a job that is merely
+    /// between steps, uploading artifacts, or publishing a target generation —
+    /// none of which show up as a running container, and two of which have no
+    /// lease class published today.
+    #[test]
+    fn emergency_reclaim_keeps_stores_a_live_job_is_touching() {
+        let root = std::env::temp_dir().join(format!("velnor-live-store-{}", uuid::Uuid::new_v4()));
+        let work = root.join("lib/velnor-test/work");
+        // Mid artifact upload and mid sccache write: touched right now.
+        let artifacts = work.join("_velnor_artifacts/run-1");
+        let sccache = work.join("_velnor_sccache/untrusted/hot/key");
+        // A genuinely cold store, so the pass is not vacuously empty.
+        let cold = work.join("_velnor_sccache/untrusted/cold");
+        for dir in [&artifacts, &sccache, &cold.join("key")] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join("payload"), vec![0; 16]).unwrap();
+        }
+        backdate(&cold, EMERGENCY_MIN_IDLE * 2);
+
+        let run_root = root.join("run");
+        let report = reclaim_work_root(
+            &work,
+            &run_root,
+            &root.join("log"),
+            u64::MAX,
+            &BTreeSet::new(),
+            true,
+        )
+        .unwrap();
+
+        assert!(
+            artifacts.exists(),
+            "an artifact store being written must survive emergency reclaim"
+        );
+        assert!(
+            sccache.exists(),
+            "a compiler store being written must survive emergency reclaim"
+        );
+        assert!(
+            report.deleted.iter().any(|path| path == &cold),
+            "the cold store must still be reclaimed: {report:?}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The disk-pressure BuildKit reclaim inspected the literal name
+    /// `velnor-builder`, but every real builder carries a `-<scope>` suffix, so
+    /// the inspect never matched and the prune never ran.
+    #[test]
+    fn owned_builders_are_matched_by_prefix_not_by_a_bare_name() {
+        let listing = "\
+NAME/NODE                     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
+default *                     docker
+  default                     default           running   v0.12.0    linux/arm64
+velnor-builder-trusted        docker-container
+  velnor-builder-trusted0     unix:///var/run/docker.sock running v0.12.0 linux/arm64
+velnor-builder-untrusted      docker-container
+  velnor-builder-untrusted0   unix:///var/run/docker.sock running v0.12.0 linux/arm64
+someone-elses-builder         docker-container
+";
+        assert_eq!(
+            owned_builder_names(listing),
+            vec![
+                "velnor-builder-trusted".to_string(),
+                "velnor-builder-untrusted".to_string()
+            ],
+            "the bare name never exists; ownership is the prefix"
+        );
+        assert!(owned_builder_names(listing)
+            .iter()
+            .all(|name| name.starts_with(OWNED_BUILDER_PREFIX)));
+        assert!(owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
+    }
+
+    /// Every store the emergency reclaimer may delete must declare a lease
+    /// class, or it can be deleted out from under the job that owns it.
+    #[test]
+    fn every_emergency_managed_store_has_a_lease_class() {
+        let work = PathBuf::from("/var/lib/velnor/work");
+        for store in store_roots(&work) {
+            if store.emergency_managed || store.gc_managed {
+                assert!(
+                    store.kind.lease_class().is_some(),
+                    "{} is reclaimable but declares no lease class",
+                    store.kind
+                );
+            }
+        }
     }
 
     #[test]

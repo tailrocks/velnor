@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 use crate::{
-    command_files::{parse_command_file, FileCommand},
+    command_files::{parse_command_file_contents, FileCommand},
     container::Shell,
+    expression::{self, Node},
+    fs_copy::NoFollowDestinationDir,
     job_message::{ActionReferenceType, ActionStep},
 };
 use anyhow::{bail, Context, Result};
@@ -10,14 +12,9 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
-
-/// Internal metadata passed to the structured compiler-cache boundary. The
-/// shell still applies these entries to PATH at execution time; this value
-/// lets the cache key bind to the same GITHUB_PATH state without including
-/// per-step command-file paths.
-pub(crate) const COMPILER_ACTION_PATH_ENV: &str = "VELNOR_COMPILER_ACTION_PATH";
 
 #[derive(Debug, Clone)]
 pub struct ScriptStep {
@@ -102,43 +99,38 @@ fn github_script_step_with_context(
         .and_then(|value| value.as_object())
         .ok_or_else(|| anyhow::anyhow!("script step {} missing inputs object", index + 1))?;
     // GitHub sends script body as a plain literal OR as a format() expression when ${{ }} is used.
-    let script: String = string_input_field(inputs, &["script", "Script"])
-        .map(String::from)
-        .or_else(|| evaluate_script_format_expr(inputs, &["script", "Script"], context_data))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "script step {} missing script input; input keys: {}",
-                index + 1,
-                input_summary(inputs)
-            )
-        })?;
+    let script: String = match string_input_field(inputs, &["script", "Script"]) {
+        Some(script) => Some(script.to_string()),
+        None => match expr_input_field(inputs, &["script", "Script"]) {
+            Some(expr) => Some(render_setup_expression(expr, context_data)?),
+            None => None,
+        },
+    }
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "script step {} missing script input; input keys: {}",
+            index + 1,
+            input_summary(inputs)
+        )
+    })?;
     let shell = string_input_field(inputs, &["shell", "Shell"])
         .or(defaults.shell.as_deref())
         .map(github_shell)
         .transpose()?
         .unwrap_or(Shell::BashDefault);
-    let working_directory = string_input_field(
-        inputs,
-        &[
-            "workingDirectory",
-            "working-directory",
-            "WorkingDirectory",
-            "Working-Directory",
-        ],
-    )
-    .map(String::from)
-    .or_else(|| {
-        evaluate_script_format_expr(
-            inputs,
-            &[
-                "workingDirectory",
-                "working-directory",
-                "WorkingDirectory",
-                "Working-Directory",
-            ],
-            context_data,
-        )
-    })
+    const WORKING_DIRECTORY_NAMES: &[&str] = &[
+        "workingDirectory",
+        "working-directory",
+        "WorkingDirectory",
+        "Working-Directory",
+    ];
+    let working_directory = match string_input_field(inputs, WORKING_DIRECTORY_NAMES) {
+        Some(directory) => Some(directory.to_string()),
+        None => match expr_input_field(inputs, WORKING_DIRECTORY_NAMES) {
+            Some(expr) => Some(render_setup_expression(expr, context_data)?),
+            None => None,
+        },
+    }
     .or_else(|| defaults.working_directory.clone())
     .map(|path| workspace_path(workspace_container, &path))
     .unwrap_or_else(|| workspace_container.to_string());
@@ -362,171 +354,162 @@ fn input_name_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
         .find_map(|name| object.get(*name).and_then(input_value_as_str))
 }
 
-/// Evaluate a GitHub Actions `format()` expression from the inputs map.
-/// Used when the script body is an expression like `format('just clippy "{0}"', matrix.package)`.
-fn evaluate_script_format_expr(
-    inputs: &serde_json::Map<String, Value>,
+/// The `{"expr": "..."}` form the broker sends for an input whose workflow
+/// source contained `${{ }}`, looked up by input name in the inputs map.
+fn expr_input_field<'a>(
+    inputs: &'a serde_json::Map<String, Value>,
     names: &[&str],
-    context_data: &[(String, Value)],
-) -> Option<String> {
-    let map = inputs.get("map").or_else(|| inputs.get("Map"))?;
-    let items = map.as_array()?;
+) -> Option<&'a str> {
+    let items = inputs
+        .get("map")
+        .or_else(|| inputs.get("Map"))?
+        .as_array()?;
     let entry = items.iter().find(|item| {
         item.as_object()
-            .and_then(|obj| input_name_field(obj))
-            .is_some_and(|key| names.iter().any(|n| n.eq_ignore_ascii_case(key)))
+            .and_then(input_name_field)
+            .is_some_and(|key| names.iter().any(|name| name.eq_ignore_ascii_case(key)))
     })?;
     let value = entry
         .as_object()
-        .and_then(|obj| obj.get("value").or_else(|| obj.get("Value")))?;
-    let obj = value.as_object()?;
-    let expr = obj
+        .and_then(|object| object.get("value").or_else(|| object.get("Value")))?
+        .as_object()?;
+    value
         .get("expr")
-        .or_else(|| obj.get("Expr"))
-        .and_then(|v| v.as_str())?;
-    // Eagerly evaluate the format() call so that {{ / }} escape sequences in the
-    // template are resolved (e.g. ${{output}} → ${output} for bash variables).
-    // Args that cannot be resolved from context_data (e.g. steps.X.outputs.Y)
-    // are replaced with a `${{ arg }}` lazy expression so that resolve_expressions
-    // picks them up at step-run time without the nested-}} problem.
-    evaluate_format_expr_with_lazy_args(expr, context_data)
-        .or_else(|| Some(format!("${{{{ {expr} }}}}")))
+        .or_else(|| value.get("Expr"))
+        .and_then(Value::as_str)
 }
 
-fn evaluate_format_expr_with_lazy_args(
+/// Render a broker-sent step input expression at job setup.
+///
+/// Upstream evaluates a step's inputs in `ActionRunner.RunAsync`
+/// (@397b032, src/Runner.Worker/ActionRunner.cs:174-185) via
+/// `PipelineTemplateEvaluator.EvaluateStepInputs`
+/// (src/Sdk/DTPipelines/Pipelines/ObjectTemplating/PipelineTemplateEvaluator.cs:166-191),
+/// whose `context.Errors.Check()` throws a `TemplateValidationException` that
+/// `StepsRunner` turns into a failed step
+/// (src/Runner.Worker/StepsRunner.cs:335-344). Input rendering is therefore
+/// **fail-closed** upstream, unlike `${{ }}` interpolation inside an already
+/// rendered value. An `Err` here propagates out of `github_script_steps_*` and
+/// fails the job (`runner.rs` `step_mapping`).
+///
+/// The one thing upstream never faces is a context that does not exist yet:
+/// it renders at step-run time. Velnor renders once at setup, so a subtree
+/// reading `env`/`steps`/`job`/`jobs`/`runner` or a runner function is handed
+/// on verbatim as `${{ … }}` for the step-time pass, exactly as
+/// `resolve_job_context_expressions` defers such spans in `executor.rs`.
+fn render_setup_expression(expr: &str, context_data: &[(String, Value)]) -> Result<String> {
+    let context = SetupExpressionContext { context_data };
+    let node = expression::parse(expr, &context)
+        .with_context(|| format!("evaluating step input expression `{expr}`"))?;
+    let Some(node) = node else {
+        // `ExpressionParser.cs:60-64` — an empty expression is null, and
+        // `convert_to_string` of null is the empty string.
+        return Ok(String::new());
+    };
+
+    // A `format()` call is the shape GitHub compiles a `run:` body into. Its
+    // template carries the script's literal `{`/`}` as `{{`/`}}` escapes, so
+    // deferring the whole call verbatim would both re-emit those escapes and
+    // truncate the `${{ … }}` span at the first `}}`. Render the template now
+    // and defer only the arguments that cannot be evaluated yet.
+    if let Node::Function { name, args } = &node
+        && name.eq_ignore_ascii_case("format")
+        && !args.is_empty()
+        && let Some(rendered) = render_format_call(expr, args, &context)?
+    {
+        return Ok(rendered);
+    }
+
+    if expression::reads_runtime_context(&node) {
+        return Ok(format!("${{{{ {} }}}}", expr.trim()));
+    }
+    expression::evaluate_node(&node, &context)
+        .map(|value| value.convert_to_string())
+        .with_context(|| format!("evaluating step input expression `{expr}`"))
+}
+
+/// Render a `format(template, args…)` call, deferring individual arguments.
+///
+/// Returns `Ok(None)` when the argument spans cannot be recovered verbatim or
+/// the template itself is not knowable yet; the caller then falls back to
+/// deferring or evaluating the whole tree.
+fn render_format_call(
     expr: &str,
-    context_data: &[(String, Value)],
-) -> Option<String> {
-    let inner = expr.trim().strip_prefix("format(")?.strip_suffix(')')?;
-    let parts = split_format_args(inner);
-    if parts.is_empty() {
-        return None;
+    args: &[Node],
+    context: &SetupExpressionContext<'_>,
+) -> Result<Option<String>> {
+    if expression::reads_runtime_context(&args[0]) {
+        return Ok(None);
     }
-    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-    let placeholder_open = "\x00LBRACE\x00";
-    let placeholder_close = "\x00RBRACE\x00";
-    let mut result = template
-        .replace("''", "'")
-        .replace("{{", placeholder_open)
-        .replace("}}", placeholder_close);
-    for (i, arg) in parts[1..].iter().enumerate() {
-        let value = if let Some(v) = resolve_context_path(arg.trim(), context_data) {
-            v
+    let Some((_, spans)) = expression::function_call_argument_spans(expr) else {
+        return Ok(None);
+    };
+    if spans.len() != args.len() {
+        return Ok(None);
+    }
+    let template = expression::evaluate_node(&args[0], context)
+        .with_context(|| format!("evaluating step input expression `{expr}`"))?
+        .convert_to_string();
+
+    let rendered = expression::eval::format_template(&template, args.len() - 1, |index| {
+        let argument = &args[index + 1];
+        if expression::reads_runtime_context(argument) {
+            // Verbatim hand-off to the step-time pass.
+            Ok(expression::Value::string(format!(
+                "${{{{ {} }}}}",
+                spans[index + 1]
+            )))
         } else {
-            // Unresolvable at setup time → lazy ${{ arg }} for runtime resolution
-            format!("${{{{ {} }}}}", arg.trim())
-        };
-        result = result.replace(&format!("{{{i}}}"), &value);
-    }
-    result = result
-        .replace(placeholder_open, "{")
-        .replace(placeholder_close, "}");
-    Some(result)
-}
-
-/// Evaluate a GitHub Actions `format(template, args...)` expression.
-/// Returns the formatted string with `{N}` placeholders replaced by resolved context values.
-pub fn evaluate_github_format(expr: &str, context_data: &[(String, Value)]) -> Option<String> {
-    let expr = expr.trim();
-    let inner = expr
-        .strip_prefix("format(")
-        .and_then(|s| s.strip_suffix(')'))?;
-
-    // Split on commas not inside quotes (simple greedy parser for well-formed expressions)
-    let parts = split_format_args(inner);
-    if parts.is_empty() {
-        return None;
-    }
-
-    // First arg is the template (single-quoted string)
-    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-
-    // Remaining args are context expressions like `matrix.package`
-    // Use a placeholder during {N} substitution to avoid touching {{ and }} escape sequences.
-    let placeholder_open = "\x00LBRACE\x00";
-    let placeholder_close = "\x00RBRACE\x00";
-    let mut result = template
-        .replace("''", "'") // escaped single quotes in single-quoted string
-        .replace("{{", placeholder_open)
-        .replace("}}", placeholder_close);
-    for (i, arg) in parts[1..].iter().enumerate() {
-        let resolved = resolve_context_path(arg.trim(), context_data).unwrap_or_default();
-        result = result.replace(&format!("{{{i}}}"), &resolved);
-    }
-    // Restore escaped braces: {{ → { and }} → }
-    result = result
-        .replace(placeholder_open, "{")
-        .replace(placeholder_close, "}");
-    Some(result)
-}
-
-/// Public alias so executor.rs can call the format-arg parser directly.
-pub fn split_format_args_pub(s: &str) -> Vec<String> {
-    split_format_args(s)
-}
-
-fn split_format_args(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_single_quote = false;
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' if !in_single_quote => {
-                in_single_quote = true;
-                current.push(ch);
-            }
-            '\'' if in_single_quote => {
-                if chars.peek() == Some(&'\'') {
-                    // escaped quote ''
-                    current.push(ch);
-                    current.push(chars.next().unwrap());
-                } else {
-                    in_single_quote = false;
-                    current.push(ch);
-                }
-            }
-            ',' if !in_single_quote => {
-                parts.push(current.trim().to_string());
-                current = String::new();
-            }
-            _ => current.push(ch),
+            expression::evaluate_node(argument, context)
         }
-    }
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-    parts
+    })
+    .with_context(|| format!("evaluating step input expression `{expr}`"))?;
+    Ok(Some(rendered))
 }
 
-/// Resolve a dot-path context expression like `matrix.package` from context_data.
-fn resolve_context_path(path: &str, context_data: &[(String, Value)]) -> Option<String> {
-    let mut parts = path.splitn(2, '.');
-    let top = parts.next()?;
-    let rest = parts.next();
-    let top_value = context_data
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(top))
-        .map(|(_, v)| v)?;
-    match rest {
-        None => Some(value_to_string(top_value)),
-        Some(rest) => {
-            let mut cur = top_value;
-            for key in rest.split('.') {
-                cur = cur.get(key)?;
-            }
-            Some(value_to_string(cur))
-        }
+/// The setup-time expression environment: the job message's context data, and
+/// nothing that only exists once steps run.
+struct SetupExpressionContext<'a> {
+    context_data: &'a [(String, Value)],
+}
+
+impl expression::ParseEnvironment for SetupExpressionContext<'_> {
+    fn is_named_value(&self, name: &str) -> bool {
+        expression::ROOT_CONTEXTS
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(name))
+    }
+
+    fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
+        expression::RUNNER_FUNCTIONS
+            .iter()
+            .find(|(known, _, _)| known.eq_ignore_ascii_case(name))
+            .map(|(_, min, max)| (*min, *max))
     }
 }
 
-fn value_to_string(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => String::new(),
-        other => other.to_string(),
+impl expression::EvaluationContext for SetupExpressionContext<'_> {
+    /// A context the job message did not carry is null, which
+    /// `convert_to_string` renders as `""` — upstream's coercion
+    /// (`Sdk/Value.cs`), not the old resolver's "leave the text alone".
+    fn named_value(&self, name: &str) -> expression::Value {
+        self.context_data
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| expression::eval::from_serde_json(value))
+            .unwrap_or(expression::Value::Null)
+    }
+
+    /// Never reached: `reads_runtime_context` defers any tree containing a
+    /// runner function before evaluation starts.
+    fn call_function(
+        &self,
+        name: &str,
+        _args: &[expression::Value],
+    ) -> std::result::Result<expression::Value, expression::ExpressionError> {
+        Err(expression::ExpressionError::evaluation(format!(
+            "{name}() cannot be evaluated before the job runs"
+        )))
     }
 }
 
@@ -787,28 +770,18 @@ impl ScriptStepPlan {
         let script_name = format!("{}.sh", step.id);
         let script_host_path = temp_host.join(&script_name);
         let script = script_with_path_prelude(&step.script, path_prepend);
-        fs::write(&script_host_path, script)
-            .with_context(|| format!("write {}", script_host_path.display()))?;
+        let temp_dir = open_step_file_dir(temp_host)?;
+        write_step_file(&temp_dir, &script_name, &script)?;
 
         let command_files = CommandFileSet::new(&step.id, temp_host);
-        command_files.create_empty_files()?;
+        command_files.create_empty_files(&temp_dir)?;
 
         Ok(Self {
             script_host_path,
             script_container_path: format!("/__t/{script_name}"),
             shell: step.shell,
             working_directory_container: step.working_directory_container.clone(),
-            env: {
-                let mut env = command_files.env();
-                if !path_prepend.is_empty() {
-                    env.push((
-                        COMPILER_ACTION_PATH_ENV.to_owned(),
-                        serde_json::to_string(path_prepend)
-                            .context("serialize effective GITHUB_PATH entries")?,
-                    ));
-                }
-                env
-            },
+            env: command_files.env(),
             command_files,
         })
     }
@@ -820,6 +793,7 @@ impl ScriptStepPlan {
 
 #[derive(Debug, Clone)]
 struct CommandFileSet {
+    temp_host: PathBuf,
     output: PathMapping,
     env: PathMapping,
     path: PathMapping,
@@ -830,6 +804,7 @@ struct CommandFileSet {
 impl CommandFileSet {
     fn new(step_id: &str, temp_host: &Path) -> Self {
         Self {
+            temp_host: temp_host.to_path_buf(),
             output: PathMapping::new(temp_host, step_id, "output"),
             env: PathMapping::new(temp_host, step_id, "env"),
             path: PathMapping::new(temp_host, step_id, "path"),
@@ -838,15 +813,15 @@ impl CommandFileSet {
         }
     }
 
-    fn create_empty_files(&self) -> Result<()> {
-        for path in [
-            &self.output.host,
-            &self.env.host,
-            &self.path.host,
-            &self.state.host,
-            &self.summary.host,
+    fn create_empty_files(&self, temp_dir: &NoFollowDestinationDir) -> Result<()> {
+        for mapping in [
+            &self.output,
+            &self.env,
+            &self.path,
+            &self.state,
+            &self.summary,
         ] {
-            fs::write(path, "").with_context(|| format!("create {}", path.display()))?;
+            write_step_file(temp_dir, &mapping.name, "")?;
         }
         Ok(())
     }
@@ -862,28 +837,209 @@ impl CommandFileSet {
     }
 
     fn collect_state(&self) -> Result<StepCommandState> {
-        Ok(StepCommandState {
-            outputs: commands_to_map(parse_command_file(&self.output.host)?),
-            env: env_commands_to_map(parse_command_file(&self.env.host)?),
-            path: fs::read_to_string(&self.path.host)?
+        let temp_dir = open_step_file_dir(&self.temp_host)?;
+        let mut state = StepCommandState {
+            outputs: commands_to_map(parse_command_file_contents(&read_step_file(
+                &temp_dir,
+                &self.output.name,
+            )?)?),
+            env: BTreeMap::new(),
+            path: read_step_file(&temp_dir, &self.path.name)?
                 .lines()
                 .filter(|line| !line.is_empty())
                 .map(ToOwned::to_owned)
                 .collect(),
-            state: commands_to_map(parse_command_file(&self.state.host)?),
-            summary: fs::read_to_string(&self.summary.host)?,
+            state: commands_to_map(parse_command_file_contents(&read_step_file(
+                &temp_dir,
+                &self.state.name,
+            )?)?),
+            summary: String::new(),
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
-        })
+        };
+        self.collect_env(&temp_dir, &mut state)?;
+        self.collect_summary(&temp_dir, &mut state)?;
+        Ok(state)
     }
+
+    /// Read `GITHUB_ENV`.
+    ///
+    /// Mirrors `SetEnvFileCommand.ProcessCommand` in actions/runner
+    /// `src/Runner.Worker/FileCommandManager.cs` (@397b032): every name is
+    /// applied except the ones on `_setEnvBlockList`, which holds `NODE_OPTIONS`
+    /// alone, and a blocked name is reported as a step error rather than
+    /// dropped. Velnor used to drop every `GITHUB_*` and `RUNNER_*` name too,
+    /// and silently: a step that exported `GITHUB_TOKEN` for later steps — which
+    /// GitHub allows — saw the value vanish with nothing in the log to say why.
+    fn collect_env(
+        &self,
+        temp_dir: &NoFollowDestinationDir,
+        state: &mut StepCommandState,
+    ) -> Result<()> {
+        for command in parse_command_file_contents(&read_step_file(temp_dir, &self.env.name)?)? {
+            if let Some(blocked) = blocked_env_file_name(&command.name) {
+                state.error_count += 1;
+                state.annotations.push(StepAnnotation {
+                    level: StepAnnotationLevel::Failure,
+                    message: format!(
+                        "Can't store {blocked} output parameter using '$GITHUB_ENV' command."
+                    ),
+                    title: None,
+                    path: None,
+                    start_line: None,
+                    end_line: None,
+                    start_column: None,
+                    end_column: None,
+                });
+                continue;
+            }
+            state.env.insert(command.name, command.value);
+        }
+        Ok(())
+    }
+
+    /// Read `GITHUB_STEP_SUMMARY`, refusing anything over the upload limit.
+    ///
+    /// Mirrors `CreateStepSummaryCommand.ProcessCommand` in actions/runner
+    /// `src/Runner.Worker/FileCommandManager.cs`: a missing or empty file
+    /// attaches nothing, and a file larger than `AttachmentSizeLimit` is not
+    /// uploaded at all — the step is failed with `UnsupportedSummarySize`
+    /// instead, so an oversized summary can never reach the durable blob.
+    fn collect_summary(
+        &self,
+        temp_dir: &NoFollowDestinationDir,
+        state: &mut StepCommandState,
+    ) -> Result<()> {
+        let Some(mut file) = open_step_file(temp_dir, &self.summary.name)? else {
+            return Ok(());
+        };
+        // The size comes from the open descriptor, not from a second lookup by
+        // path, so the file that is measured is the file that is read.
+        let size = file
+            .metadata()
+            .with_context(|| format!("stat step file {}", self.summary.name))?
+            .len();
+        if size == 0 {
+            return Ok(());
+        }
+        if size > STEP_SUMMARY_SIZE_LIMIT {
+            state.error_count += 1;
+            state.annotations.push(StepAnnotation {
+                level: StepAnnotationLevel::Failure,
+                message: unsupported_summary_size_message(size),
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            });
+            return Ok(());
+        }
+        let mut summary = String::new();
+        Read::read_to_string(&mut file, &mut summary)
+            .with_context(|| format!("read step file {}", self.summary.name))?;
+        state.summary = summary;
+        Ok(())
+    }
+}
+
+/// Bind `RUNNER_TEMP` to a directory descriptor, so every later step-file
+/// operation is relative to that descriptor rather than to a path a step can
+/// re-point.
+///
+/// `RUNNER_TEMP` itself is a runner-configured root and is treated as trusted:
+/// its own path is canonicalized once, which is what lets it sit under a
+/// symlinked prefix such as macOS `/var`. Everything *below* it is
+/// step-writable and is therefore only ever reached descriptor-relative and
+/// `O_NOFOLLOW`.
+fn open_step_file_dir(temp_host: &Path) -> Result<NoFollowDestinationDir> {
+    NoFollowDestinationDir::open_trusted_rooted_destination(temp_host, Path::new("")).with_context(
+        || {
+            format!(
+                "open step file directory {} without following symlinks",
+                temp_host.display()
+            )
+        },
+    )
+}
+
+/// Create or replace one step file inside `RUNNER_TEMP`.
+///
+/// `RUNNER_TEMP` is mode 1777 and every step-file name is derived from the
+/// step id, so the path a step will be handed is already predictable to the
+/// step running before it. Planting a symlink there and letting the runner's
+/// own `fs::write` follow it is an arbitrary host-file write, read and
+/// truncate as the runner user, with no race to win.
+///
+/// `write_file_from_reader` refuses a destination that is not a regular file,
+/// stages the content in an `O_CREAT | O_EXCL | O_NOFOLLOW` temporary it
+/// created itself, and renames that over the name. A planted symlink is
+/// therefore either reported or replaced, never written through.
+fn write_step_file(temp_dir: &NoFollowDestinationDir, name: &str, contents: &str) -> Result<()> {
+    temp_dir
+        .write_file_from_reader(
+            &mut contents.as_bytes(),
+            Path::new(name),
+            contents.len() as u64,
+            STEP_FILE_MODE,
+        )
+        .with_context(|| format!("write step file {name}"))?;
+    Ok(())
+}
+
+/// Open one step file for reading, or `None` when the step removed it.
+///
+/// The open is descriptor-relative and `O_NOFOLLOW`, and a name that is not a
+/// regular file is an error rather than a redirect: a step cannot make the
+/// runner read a host file by leaving a symlink behind.
+fn open_step_file(temp_dir: &NoFollowDestinationDir, name: &str) -> Result<Option<fs::File>> {
+    temp_dir
+        .open_relative_file_if_exists(Path::new(name))
+        .with_context(|| format!("open step file {name}"))
+}
+
+fn read_step_file(temp_dir: &NoFollowDestinationDir, name: &str) -> Result<String> {
+    let Some(mut file) = open_step_file(temp_dir, name)? else {
+        return Ok(String::new());
+    };
+    let mut contents = String::new();
+    Read::read_to_string(&mut file, &mut contents)
+        .with_context(|| format!("read step file {name}"))?;
+    Ok(contents)
+}
+
+/// Step files keep the owner-writable, world-readable mode the runner's umask
+/// already produced for them.
+const STEP_FILE_MODE: u16 = 0o644;
+
+/// `CreateStepSummaryCommand.AttachmentSizeLimit` in actions/runner
+/// `src/Runner.Worker/FileCommandManager.cs`: 1 MiB.
+pub const STEP_SUMMARY_SIZE_LIMIT: u64 = 1024 * 1024;
+
+/// `Constants.Runner.UnsupportedSummarySize` in actions/runner
+/// `src/Runner.Common/Constants.cs`, formatted with the same two operands:
+/// the limit and the observed size, both in whole kibibytes.
+fn unsupported_summary_size_message(size: u64) -> String {
+    format!(
+        "$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of {}k, got {}k. \
+         For more information see: \
+         https://docs.github.com/actions/using-workflows/workflow-commands-for-github-actions#adding-a-markdown-summary",
+        STEP_SUMMARY_SIZE_LIMIT / 1024,
+        size / 1024
+    )
 }
 
 #[derive(Debug, Clone)]
 struct PathMapping {
+    /// File name inside `RUNNER_TEMP`. Every access goes through the directory
+    /// descriptor by this name; `host` is only for display and for callers
+    /// that need the mount-side path.
+    name: String,
     host: PathBuf,
     container: String,
 }
@@ -894,6 +1050,7 @@ impl PathMapping {
         Self {
             host: temp_host.join(&file_name),
             container: format!("/__t/{file_name}"),
+            name: file_name,
         }
     }
 }
@@ -939,12 +1096,6 @@ pub enum StepAnnotationLevel {
 }
 
 impl StepCommandState {
-    pub(crate) fn set_env(&mut self, name: String, value: String) {
-        if !is_blocked_env_mutation(&name) {
-            self.env.insert(name, value);
-        }
-    }
-
     pub fn merge(&mut self, other: StepCommandState) {
         self.outputs.extend(other.outputs);
         self.env.extend(other.env);
@@ -973,16 +1124,15 @@ fn commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn env_commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
-    commands
-        .into_iter()
-        .filter(|command| !is_blocked_env_mutation(&command.name))
-        .map(|command| (command.name, command.value))
-        .collect()
-}
+/// `SetEnvFileCommand._setEnvBlockList` (@397b032,
+/// src/Runner.Worker/FileCommandManager.cs).
+const SET_ENV_FILE_BLOCK_LIST: &[&str] = &["NODE_OPTIONS"];
 
-fn is_blocked_env_mutation(name: &str) -> bool {
-    name.starts_with("GITHUB_") || name.starts_with("RUNNER_") || name == "NODE_OPTIONS"
+fn blocked_env_file_name(name: &str) -> Option<&'static str> {
+    SET_ENV_FILE_BLOCK_LIST
+        .iter()
+        .find(|blocked| blocked.eq_ignore_ascii_case(name))
+        .copied()
 }
 
 fn fix_script(script: &str) -> String {
@@ -1035,6 +1185,69 @@ mod tests {
     fn temp_step_dir() -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("velnor-step-test-{}-{}", std::process::id(), id))
+    }
+
+    fn sample_step() -> ScriptStep {
+        ScriptStep {
+            id: "step1".into(),
+            display_name: String::new(),
+            script: "echo test".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    /// `RUNNER_TEMP` is mode 1777 and step-file names are derived from the step
+    /// id, so one step can plant a symlink at the path the next step's files
+    /// will use. Neither the write nor the read may follow it.
+    #[cfg(unix)]
+    #[test]
+    fn step_files_never_follow_a_planted_symlink() {
+        let temp = temp_step_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let victim = temp.join("victim");
+        fs::write(&victim, "host secret").unwrap();
+
+        for name in ["step1.sh", "step1_output", "step1_summary"] {
+            let planted = temp.join(name);
+            let _ = fs::remove_file(&planted);
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+            let error = ScriptStepPlan::prepare(&sample_step(), &temp)
+                .expect_err("preparing a step over a planted symlink must not write through it");
+            assert!(
+                format!("{error:#}").contains("symlink"),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "host secret");
+            assert!(fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            fs::remove_file(&planted).unwrap();
+        }
+
+        // A step that replaces its own command file with a symlink after the
+        // runner created it must not make the runner read the target back.
+        let plan = ScriptStepPlan::prepare(&sample_step(), &temp).unwrap();
+        let summary = temp.join("step1_summary");
+        fs::remove_file(&summary).unwrap();
+        std::os::unix::fs::symlink(&victim, &summary).unwrap();
+        let error = plan
+            .collect_state()
+            .expect_err("collecting state through a planted symlink must fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("not a regular file"),
+            "unexpected error: {rendered}"
+        );
+        assert!(!rendered.contains("host secret"));
+
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -1100,12 +1313,58 @@ mod tests {
         assert_eq!(state.outputs["multi"], "one\ntwo");
         assert_eq!(state.env["NAME"], "value");
         assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
-        assert!(!state.env.contains_key("GITHUB_REF"));
-        assert!(!state.env.contains_key("RUNNER_TEMP"));
+        // Upstream blocks NODE_OPTIONS alone, loudly; every other name applies.
+        assert_eq!(state.env["GITHUB_REF"], "evil");
+        assert_eq!(state.env["RUNNER_TEMP"], "/bad");
         assert!(!state.env.contains_key("NODE_OPTIONS"));
+        assert_eq!(state.error_count, 1);
+        assert_eq!(
+            state.annotations[0].message,
+            "Can't store NODE_OPTIONS output parameter using '$GITHUB_ENV' command."
+        );
+        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn oversized_step_summary_is_refused_and_fails_the_step() {
+        let temp = temp_step_dir();
+        let step = ScriptStep {
+            id: "step1".into(),
+            display_name: String::new(),
+            script: "echo test".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
+
+        // Exactly at the limit is still uploaded.
+        let at_limit = "a".repeat(STEP_SUMMARY_SIZE_LIMIT as usize);
+        fs::write(temp.join("step1_summary"), &at_limit).unwrap();
+        let state = plan.collect_state().unwrap();
+        assert_eq!(state.summary.len(), STEP_SUMMARY_SIZE_LIMIT as usize);
+        assert_eq!(state.error_count, 0);
+        assert!(state.annotations.is_empty());
+
+        // One byte over is dropped entirely and reported as a step error,
+        // matching CreateStepSummaryCommand.ProcessCommand.
+        fs::write(temp.join("step1_summary"), format!("{at_limit}a")).unwrap();
+        let state = plan.collect_state().unwrap();
+        assert_eq!(state.summary, "");
+        assert_eq!(state.error_count, 1);
+        assert_eq!(state.annotations.len(), 1);
+        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
+        assert!(state.annotations[0]
+            .message
+            .starts_with("$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of 1024k, got 1024k."));
+
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -1133,13 +1392,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
             "export PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
-        );
-        assert_eq!(
-            plan.env
-                .iter()
-                .find(|(name, _)| name == COMPILER_ACTION_PATH_ENV)
-                .map(|(_, value)| value.as_str()),
-            Some(r#"["/opt/bin","/path/with'quote"]"#)
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -1534,44 +1786,194 @@ mod tests {
 
     #[test]
     fn evaluates_format_expr_with_context() {
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             "format('just clippy \"{0}\"', matrix.package)",
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"package": "app-b"}),
             )],
-        );
-        assert_eq!(result.as_deref(), Some("just clippy \"app-b\""));
+        )
+        .unwrap();
+        assert_eq!(result, "just clippy \"app-b\"");
     }
 
     #[test]
     fn evaluates_format_expr_with_escaped_braces() {
         // {{ and }} in GitHub format() are escape sequences for literal { and }
         let expr = "format('{{\\n  echo stats ({0})\\n}} >> \"${{ENV}}\"\\n', matrix.config.lane)";
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             expr,
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"config": {"lane": "velnor"}}),
             )],
-        );
+        )
+        .unwrap();
         let expected = "{\\n  echo stats (velnor)\\n} >> \"${ENV}\"\\n";
-        assert_eq!(result.as_deref(), Some(expected));
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn evaluates_format_expr_multi_arg() {
-        let result = evaluate_github_format(
+        let result = render_setup_expression(
             "format('python3 write.py \"{0}\" \"{1}\"', matrix.package, matrix.config.lane)",
             &[(
                 "matrix".to_string(),
                 serde_json::json!({"package": "app-a", "config": {"lane": "velnor"}}),
             )],
+        )
+        .unwrap();
+        assert_eq!(result, "python3 write.py \"app-a\" \"velnor\"");
+    }
+
+    fn matrix_context(value: serde_json::Value) -> Vec<(String, Value)> {
+        vec![("matrix".to_string(), value)]
+    }
+
+    /// D3 — `Sdk/Value.cs` truthiness: every non-empty string is truthy,
+    /// `"0"` and `"false"` included. The deleted resolver had no truthiness at
+    /// all, so a `&&`/`||` in a step input silently rewrote to text.
+    #[test]
+    fn setup_expression_string_truthiness_matches_upstream() {
+        let context = matrix_context(serde_json::json!({"zero": "0", "no": "false", "empty": ""}));
+        assert_eq!(
+            render_setup_expression("matrix.zero && 'yes'", &context).unwrap(),
+            "yes"
         );
         assert_eq!(
-            result.as_deref(),
-            Some("python3 write.py \"app-a\" \"velnor\"")
+            render_setup_expression("matrix.no && 'yes'", &context).unwrap(),
+            "yes"
         );
+        assert_eq!(
+            render_setup_expression("matrix.empty && 'yes'", &context).unwrap(),
+            ""
+        );
+    }
+
+    /// D4 — a value the job message never carried is null, and null converts
+    /// to the empty string (`Sdk/Value.cs`). The deleted resolver returned
+    /// `None` for a missing path, which the caller turned into a literal
+    /// `${{ … }}` left in the script.
+    #[test]
+    fn setup_expression_missing_value_coerces_to_empty_string() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        assert_eq!(
+            render_setup_expression("format('[{0}]', matrix.absent)", &context).unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            render_setup_expression("format('[{0}]', matrix.absent.deeper)", &context).unwrap(),
+            "[]"
+        );
+    }
+
+    /// D5 — relational operators. The deleted resolver had none; `>` was just
+    /// text it could not resolve.
+    #[test]
+    fn setup_expression_supports_relational_operators() {
+        let context = matrix_context(serde_json::json!({"version": 14, "name": "beta"}));
+        assert_eq!(
+            render_setup_expression("matrix.version >= 12", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("matrix.version < 12", &context).unwrap(),
+            "false"
+        );
+        // Upstream compares a string to a number by coercing the string
+        // (`Sdk/Value.cs`), so a non-numeric string is NaN and every relation
+        // is false.
+        assert_eq!(
+            render_setup_expression("matrix.name > 1", &context).unwrap(),
+            "false"
+        );
+    }
+
+    /// D6 — the function set the deleted resolver did not have.
+    #[test]
+    fn setup_expression_supports_the_full_function_set() {
+        let context = matrix_context(serde_json::json!({
+            "package": "velnor-runner",
+            "list": ["a", "b"],
+            "json": "{\"lane\": \"fast\"}"
+        }));
+        assert_eq!(
+            render_setup_expression("startsWith(matrix.package, 'velnor')", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("endsWith(matrix.package, 'runner')", &context).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            render_setup_expression("join(matrix.list, '+')", &context).unwrap(),
+            "a+b"
+        );
+        assert_eq!(
+            render_setup_expression("fromJSON(matrix.json).lane", &context).unwrap(),
+            "fast"
+        );
+        assert_eq!(
+            render_setup_expression("contains(matrix.package, 'run')", &context).unwrap(),
+            "true"
+        );
+    }
+
+    /// A span that reads a context which does not exist until steps run is
+    /// deferred verbatim to the step-time pass — per argument, so the
+    /// template's `{{`/`}}` escapes are still resolved now and the deferred
+    /// span carries no nested `}}`.
+    #[test]
+    fn setup_expression_defers_runtime_context_arguments_verbatim() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        assert_eq!(
+            render_setup_expression(
+                "format('echo {0} ${{{0}}} {1}', matrix.package, steps.build.outputs.sha)",
+                &context
+            )
+            .unwrap(),
+            "echo app ${app} ${{ steps.build.outputs.sha }}"
+        );
+        // A whole tree that reads runtime state and is not a format() call is
+        // handed on unchanged.
+        assert_eq!(
+            render_setup_expression("env.MODE == 'release'", &context).unwrap(),
+            "${{ env.MODE == 'release' }}"
+        );
+    }
+
+    /// Fail-closed: upstream's `EvaluateStepInputs` runs
+    /// `context.Errors.Check()`, which throws and fails the step
+    /// (`PipelineTemplateEvaluator.cs:166-191`,
+    /// `StepsRunner.cs:335-344`). An unevaluatable span must not be passed
+    /// through as text the shell then runs.
+    #[test]
+    fn setup_expression_is_fail_closed() {
+        let context = matrix_context(serde_json::json!({"package": "app"}));
+        // Unrecognized named-value (`ExpressionParser.cs:144-147`).
+        assert!(render_setup_expression("nope.value", &context).is_err());
+        // Unrecognized function.
+        assert!(render_setup_expression("bogus('x')", &context).is_err());
+        // Unexpected end of expression.
+        assert!(render_setup_expression("format('{0}', ", &context).is_err());
+        // A format string referencing an argument that was not supplied
+        // (`Format.cs:41`).
+        assert!(render_setup_expression("format('{0} {1}', matrix.package)", &context).is_err());
+
+        // And it fails the step mapping, not just the expression.
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([{
+            "enabled": true,
+            "reference": { "type": "Script" },
+            "inputs": {
+                "map": [{
+                    "Key": {"lit": "script", "type": 0},
+                    "Value": {"expr": "format('{0} {1}', matrix.package)", "type": 3}
+                }],
+                "type": 2
+            }
+        }]))
+        .unwrap();
+        assert!(github_script_steps_with_context(&steps, "/__w", &[], &context).is_err());
     }
 
     #[test]

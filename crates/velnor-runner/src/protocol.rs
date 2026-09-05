@@ -337,7 +337,7 @@ fn is_loopback_host(host: &str) -> bool {
         || host == "::1"
 }
 
-fn unix_epoch_now() -> u64 {
+pub(crate) fn unix_epoch_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1775,6 +1775,23 @@ pub fn is_retriable_completion_status(status: u16) -> bool {
     !(400..500).contains(&status) || matches!(status, 408 | 409 | 429)
 }
 
+/// Whether a failed completion send is one that retrying can never fix.
+///
+/// The completion journal needs this to distinguish a node that is merely
+/// unlucky from a payload the run service will refuse forever. A permanent
+/// refusal spends the whole recovery budget at once, so the job's slot is
+/// released now instead of after hours of doomed retries.
+///
+/// Transport failures and status-less errors are never permanent: not knowing
+/// the remote's answer is the case where retrying is the only correct move.
+#[must_use]
+pub fn completion_failure_is_permanent(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .is_some_and(|api| !is_retriable_completion_status(api.status))
+}
+
 /// Protocol disposition for a completion POST.
 ///
 /// `RemoteObservedTerminal` is a successful observation: the remote service
@@ -1798,7 +1815,10 @@ enum CompletionResponseClass {
 fn classify_completion_response(status: u16, body: &str) -> CompletionResponseClass {
     match status {
         200..=299 => CompletionResponseClass::Accepted,
-        404 if is_run_service_job_not_found(body) => {
+        // The upstream client classifies a failed run-service response from
+        // the body's `statusCode`, not the outer HTTP status. Keep 2xx and
+        // status-less transport handling ahead of this branch.
+        status if status != 0 && is_run_service_job_not_found(body) => {
             CompletionResponseClass::RemoteObservedTerminal
         }
         status if is_retriable_completion_status(status) => {
@@ -1808,15 +1828,80 @@ fn classify_completion_response(status: u16, body: &str) -> CompletionResponseCl
     }
 }
 
+/// Error envelope returned by the run service. Mirrors actions/runner's
+/// `RunServiceError` (`src/Sdk/RSWebApi/Contracts/RunServiceError.cs`): the
+/// serde names below are the upstream `DataMember(Name = ...)` wire names, not
+/// the C# property identifiers. `Code` is the property; `statusCode` is the
+/// wire field, and only the wire name may appear here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct RunServiceError {
+    #[serde(default, rename = "source")]
+    pub(crate) source: Option<String>,
+    #[serde(default, rename = "statusCode")]
+    pub(crate) code: Option<u16>,
+    #[serde(default, rename = "errorMessage")]
+    pub(crate) message: Option<String>,
+}
+
+impl RunServiceError {
+    /// actions/runner's `RunServiceHttpClient.TryParseErrorBody`: a body only
+    /// counts as a run-service error when it parses and `source` is exactly
+    /// `actions-run-service`. Anything else is an unrelated API failure.
+    fn parse(body: &str) -> Option<Self> {
+        let error: Self = serde_json::from_str(body).ok()?;
+        (error.source.as_deref() == Some(RUN_SERVICE_ERROR_SOURCE)).then_some(error)
+    }
+}
+
+/// `RunServiceHttpClient.TryParseErrorBody` only accepts this source value.
+const RUN_SERVICE_ERROR_SOURCE: &str = "actions-run-service";
+
+/// The `statusCode` of a run-service error body, when the body really is one.
+///
+/// This is the only sanctioned way to read a run-service verdict. The outer
+/// HTTP status is not it: upstream classifies from the body, and an unrelated
+/// proxy or gateway can produce the same outer status with no run-service
+/// meaning at all.
+fn run_service_error_code(body: &str) -> Option<u16> {
+    RunServiceError::parse(body).and_then(|error| error.code)
+}
+
 /// Match the exact error shape used by actions/runner's RunService client for
 /// a missing completion job. A bare 404 or an unrelated API 404 is not proof
 /// that this job was already terminal.
 fn is_run_service_job_not_found(body: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return false;
-    };
-    value.get("source").and_then(Value::as_str) == Some("actions-run-service")
-        && value.get("code").and_then(Value::as_u64) == Some(404)
+    run_service_error_code(body) == Some(404)
+}
+
+/// Whether a non-retriable `acquirejob` reply proves this runner will never own
+/// the job behind the broker message.
+///
+/// Only `404` (the message is gone) and `422` (the run service refuses to hand
+/// it over) are definite, and only when the *typed body* says so. `409` is
+/// deliberately excluded: upstream's `RunServiceError` carries `source`,
+/// `statusCode` and `errorMessage` and no runner identity
+/// (`src/Sdk/RSWebApi/Contracts/RunServiceError.cs`), so a conflict cannot
+/// distinguish "this runner acquired the job and then crashed" from "another
+/// runner holds it". Treating a conflict as gone would drop a job this runner
+/// may own; leaving the provisional row lets `renewjob` decide later.
+#[must_use]
+pub fn acquire_reply_is_definitely_gone(body: &str) -> bool {
+    matches!(run_service_error_code(body), Some(404 | 422))
+}
+
+/// Whether a `renewjob` failure proves the run service has no such job for this
+/// runner.
+///
+/// Only a typed `404` counts. Every other failure — transport, 5xx, auth, or a
+/// body that is not a run-service error at all — leaves ownership unproven, and
+/// the caller must treat it as indeterminate rather than dropping a row it may
+/// still own.
+#[must_use]
+pub fn renew_failure_is_job_gone(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .is_some_and(|api| is_run_service_job_not_found(&api.body))
 }
 
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
@@ -7705,6 +7790,138 @@ mod tests {
         assert!(!is_retriable_completion_status(422));
     }
 
+    /// Build a run-service error body from the upstream contract, not from
+    /// Velnor's parser. Field names are transcribed from
+    /// `actions/runner@v2.337.0 src/Sdk/RSWebApi/Contracts/RunServiceError.cs`:
+    ///
+    /// ```text
+    /// [DataMember(Name = "source",       EmitDefaultValue = false)] public string Source
+    /// [DataMember(Name = "statusCode",   EmitDefaultValue = false)] public int    Code
+    /// [DataMember(Name = "errorMessage", EmitDefaultValue = false)] public string Message
+    /// ```
+    ///
+    /// Every fixture in this module must come through here so a fixture can
+    /// never be derived from Velnor's own field names.
+    fn upstream_run_service_error_body(
+        source: &str,
+        status_code: u16,
+        message: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "source": source,
+            "statusCode": status_code,
+            "errorMessage": message,
+        })
+    }
+
+    #[test]
+    fn run_service_error_uses_upstream_wire_names() {
+        let parsed: RunServiceError = serde_json::from_value(upstream_run_service_error_body(
+            "actions-run-service",
+            404,
+            "Job not found",
+        ))
+        .unwrap();
+        assert_eq!(parsed.source.as_deref(), Some("actions-run-service"));
+        assert_eq!(parsed.code, Some(404));
+        assert_eq!(parsed.message.as_deref(), Some("Job not found"));
+
+        // The C# *property* names are `Code` and `Message`; the wire names are
+        // `statusCode` and `errorMessage`. Reading the property spellings must
+        // stay impossible, or a 404 acknowledgement silently degrades into a
+        // permanent failure again.
+        let property_named: RunServiceError = serde_json::from_str(
+            r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#,
+        )
+        .unwrap();
+        assert_eq!(property_named.code, None);
+        assert_eq!(property_named.message, None);
+        assert!(!is_run_service_job_not_found(
+            r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#
+        ));
+    }
+
+    #[test]
+    fn permanent_completion_failures_are_told_apart_from_unlucky_ones() {
+        let permanent = github_api_error("complete run-service job", 422, "invalid payload");
+        assert!(completion_failure_is_permanent(&permanent));
+        let permanent = permanent.context("complete run-service job after credential refresh");
+        assert!(
+            completion_failure_is_permanent(&permanent),
+            "the classification must survive the context the callers add"
+        );
+
+        let retriable = github_api_error("complete run-service job", 503, "try later");
+        assert!(!completion_failure_is_permanent(&retriable));
+        assert!(!completion_failure_is_permanent(&github_api_error(
+            "complete run-service job",
+            409,
+            "conflict"
+        )));
+        // Not knowing the remote's answer is exactly when retrying is right.
+        assert!(!completion_failure_is_permanent(&anyhow::anyhow!(
+            "connection reset"
+        )));
+    }
+
+    #[test]
+    fn acquire_reply_is_gone_only_for_typed_404_and_422() {
+        for code in [404u16, 422] {
+            assert!(acquire_reply_is_definitely_gone(
+                &upstream_run_service_error_body("actions-run-service", code, "gone").to_string(),
+            ));
+        }
+        // A conflict says the job is held. Upstream's error envelope carries no
+        // runner identity, so it cannot say *by whom* — abandoning here would
+        // drop a job this runner may have acquired before it crashed.
+        assert!(!acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-run-service", 409, "already acquired")
+                .to_string(),
+        ));
+        // Raw HTTP status is never the oracle: an untyped or foreign-sourced
+        // body proves nothing, whatever the outer status was.
+        assert!(!acquire_reply_is_definitely_gone(
+            r#"{"message":"Not Found"}"#
+        ));
+        assert!(!acquire_reply_is_definitely_gone(
+            &upstream_run_service_error_body("actions-broker", 404, "gone").to_string(),
+        ));
+        assert!(!acquire_reply_is_definitely_gone(""));
+    }
+
+    #[test]
+    fn renew_failure_is_job_gone_only_for_typed_404() {
+        let gone = github_api_error(
+            "renew run-service job",
+            404,
+            upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                .to_string(),
+        );
+        assert!(renew_failure_is_job_gone(&gone));
+        // The typed body decides, not the envelope status.
+        let gone_behind_5xx = github_api_error(
+            "renew run-service job",
+            500,
+            upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                .to_string(),
+        );
+        assert!(renew_failure_is_job_gone(&gone_behind_5xx));
+        let server_error = github_api_error(
+            "renew run-service job",
+            500,
+            upstream_run_service_error_body("actions-run-service", 500, "server error").to_string(),
+        );
+        assert!(!renew_failure_is_job_gone(&server_error));
+        let untyped = github_api_error("renew run-service job", 404, r#"{"message":"Not Found"}"#);
+        assert!(!renew_failure_is_job_gone(&untyped));
+        let unauthorized = github_api_error("renew run-service job", 401, "");
+        assert!(!renew_failure_is_job_gone(&unauthorized));
+        // A transport failure never proves anything about ownership.
+        assert!(!renew_failure_is_job_gone(&anyhow::anyhow!(
+            "connection reset"
+        )));
+    }
+
     #[test]
     fn completion_response_classifies_terminal_observations_without_retry() {
         assert_eq!(
@@ -7714,9 +7931,44 @@ mod tests {
         assert_eq!(
             classify_completion_response(
                 404,
-                r#"{"source":"actions-run-service","code":404,"message":"Job not found"}"#,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
             ),
             CompletionResponseClass::RemoteObservedTerminal
+        );
+        assert_eq!(
+            classify_completion_response(
+                500,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::RemoteObservedTerminal
+        );
+        assert_eq!(
+            classify_completion_response(
+                404,
+                &upstream_run_service_error_body("actions-run-service", 500, "server error")
+                    .to_string(),
+            ),
+            CompletionResponseClass::PermanentFailure
+        );
+        assert_eq!(
+            classify_completion_response(
+                204,
+                &upstream_run_service_error_body("actions-run-service", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::Accepted
+        );
+        // An unrelated service emitting the same envelope is not proof that
+        // this job is terminal: upstream gates on `source` too.
+        assert_eq!(
+            classify_completion_response(
+                404,
+                &upstream_run_service_error_body("actions-broker", 404, "Job not found")
+                    .to_string(),
+            ),
+            CompletionResponseClass::PermanentFailure
         );
         assert_eq!(
             classify_completion_response(409, ""),
@@ -7759,13 +8011,9 @@ mod tests {
             server.reset().await;
             Mock::given(method("POST"))
                 .and(path("/run/jobs/123/completejob"))
-                .respond_with(
-                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
-                        "source": "actions-run-service",
-                        "code": status,
-                        "message": "Job not found",
-                    })),
-                )
+                .respond_with(ResponseTemplate::new(status).set_body_json(
+                    upstream_run_service_error_body("actions-run-service", status, "Job not found"),
+                ))
                 .expect(1)
                 .mount(&server)
                 .await;

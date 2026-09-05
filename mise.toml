@@ -1,8 +1,9 @@
 [tools]
 actionlint = "1.7.12"
+"aqua:oven-sh/bun" = "1.4.0"
 cargo-binstall = "1.22.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.143"
 "cargo:cargo-zigbuild" = "0.23.3"
 "cargo:cargo-deb" = "3.7.0"
 zig = "0.16.0"
@@ -68,8 +69,31 @@ grep -q "tailrocks/velnor-apt" "$docs"
 [tasks.actionlint]
 run = "actionlint"
 
+# A version pin is only a pin if something fails when it drifts. This gate
+# re-runs every Renovate custom manager against the working tree and compares
+# every repeated pin against its authoritative site, because both failures are
+# otherwise silent: Renovate opens no pull request for a manager that matches
+# nothing, and mise resolves tools from the lockfile, so a stale lock keeps
+# installing the old version however the declaration reads.
+[tasks.pin-integrity]
+description = "Prove every Renovate manager matches a real pin site and every repeated pin agrees"
+run = """
+set -eu
+if command -v node >/dev/null 2>&1; then
+  exec node scripts/pin_integrity.mjs
+fi
+if command -v bun >/dev/null 2>&1; then
+  exec bun scripts/pin_integrity.mjs
+fi
+echo "pin-integrity: needs node or bun on PATH; both the job image and the project toolchain provide one" >&2
+exit 1
+"""
+
 [tasks.deny]
-run = "cargo deny check advisories"
+# Run every section (advisories, bans, licenses, sources). Checking only
+# advisories once let a broken licence policy sit undetected in deny.toml,
+# because the section that would have failed was never executed.
+run = "cargo deny check"
 
 # Plan 039 tooling-law closure: policy generation remains fully offline. The
 # Generated per-org desired-policy JSONs use VELNOR_FLEET_POLICY_OUT_DIR. The
@@ -174,10 +198,10 @@ cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "audit-ci", "deny", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
+depends = ["fmt", "actionlint", "audit-ci", "deny", "pin-integrity", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
 
 [tasks.ci]
-depends = ["actionlint", "audit-ci", "deny"]
+depends = ["actionlint", "audit-ci", "deny", "pin-integrity"]
 # The generated CI workflow owns separate test, lint, and format gates. Keep
 # this task build-only so those gates are not executed twice on every run.
 run = "cargo check --workspace --all-targets --locked --features velnor-runner/test-support"

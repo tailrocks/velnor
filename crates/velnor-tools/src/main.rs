@@ -2,6 +2,7 @@ mod audit_ci;
 mod fleet_policy;
 mod fleet_policy_client;
 mod lane_compare;
+mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -57,6 +58,8 @@ enum CommandKind {
     Commit(CommitArgs),
     /// Dispatch a GitHub Actions workflow and print the new run id.
     WorkflowDispatch(WorkflowDispatchArgs),
+    /// Monitor one GitHub Actions run and write bounded evidence.
+    WorkflowMonitor(WorkflowMonitorArgs),
     /// Write Velnor live evidence for a GitHub Actions run.
     WriteLiveEvidence(WriteLiveEvidenceArgs),
     /// Run the full fixture smoke sequence against a Velnor JIT daemon.
@@ -394,6 +397,28 @@ struct WorkflowDispatchArgs {
 }
 
 #[derive(Debug, Args)]
+struct WorkflowMonitorArgs {
+    /// GitHub repository slug.
+    #[arg(long, env = "VELNOR_WORKFLOW_REPO")]
+    repo: String,
+    /// GitHub Actions run database id.
+    #[arg(long, env = "VELNOR_WORKFLOW_RUN_ID")]
+    run_id: u64,
+    /// Maximum monitoring duration, such as `30m` or `2h`.
+    #[arg(long, default_value = "15m", value_parser = parse_monitor_duration)]
+    timeout: Duration,
+    /// Delay between GitHub observations, such as `2s`.
+    #[arg(long, default_value = "2s", value_parser = parse_monitor_duration)]
+    poll: Duration,
+    /// Local Velnor instance to observe through the read-only control CLI.
+    #[arg(long, env = "VELNOR_INSTANCE")]
+    instance: Option<String>,
+    /// Directory for atomically-written evidence JSON.
+    #[arg(long, env = "VELNOR_WORKFLOW_EVIDENCE_DIR")]
+    evidence_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
 struct WriteLiveEvidenceArgs {
     /// Evidence phase label (e.g. after-velnor, completed, failed-before-completion).
     phase: String,
@@ -507,6 +532,7 @@ async fn main() -> Result<()> {
         CommandKind::TargetVerify(args) => target_verify(&root, args).await,
         CommandKind::Commit(args) => commit(&root, args),
         CommandKind::WorkflowDispatch(args) => workflow_dispatch(args),
+        CommandKind::WorkflowMonitor(args) => run_workflow_monitor(args),
         CommandKind::WriteLiveEvidence(args) => write_live_evidence_cmd(&root, args),
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
@@ -702,6 +728,15 @@ async fn fixture_audit(args: FixtureAuditArgs) -> Result<()> {
         }
     }
 
+    // The default Velnor Rust path is the load-bearing workload. Check the
+    // scenario matrix per job so sccache stays one scenario among several.
+    match read_fixture_file(&args, RUST_SCENARIO_WORKFLOW).await {
+        Ok(content) => failures.extend(check_rust_scenarios(&content)),
+        Err(error) => failures.push(format!(
+            "{RUST_SCENARIO_WORKFLOW}: missing or unreadable: {error:#}"
+        )),
+    }
+
     if !failures.is_empty() {
         eprintln!("fixture audit failed:");
         for failure in failures {
@@ -717,6 +752,10 @@ async fn fixture_audit(args: FixtureAuditArgs) -> Result<()> {
         .unwrap_or_else(|| format!("{}@{}", args.repo, args.git_ref));
     println!("fixture audit passed for {source}");
     println!("checked {} files", fixture_required_snippets().len());
+    println!(
+        "checked {} Rust scenario(s) including the mandatory default Velnor Rust path",
+        fixture_rust_scenarios().len()
+    );
     Ok(())
 }
 
@@ -800,6 +839,255 @@ fn github_headers(user_agent: &'static str) -> Result<HeaderMap> {
     Ok(headers)
 }
 
+/// Fixture workflow that must carry the whole Rust scenario matrix.
+const RUST_SCENARIO_WORKFLOW: &str = ".github/workflows/_rust-suite.yml";
+
+/// One Rust scenario the fixture must cover, checked per job rather than per
+/// file so that a scenario's forbidden declarations cannot be satisfied by a
+/// sibling scenario in the same workflow.
+struct RustScenario {
+    /// Scenario letter and name, used in verifier output.
+    id: &'static str,
+    /// `jobs.<job>` key in [`RUST_SCENARIO_WORKFLOW`].
+    job: &'static str,
+    /// Substrings the serialized job must contain.
+    required: &'static [(&'static str, &'static str)],
+    /// Environment names the job and its steps must not declare. A trailing
+    /// `*` matches a prefix. Declared names are checked structurally so a
+    /// scenario may still *read* a variable it must not *set*.
+    forbidden_env: &'static [&'static str],
+    /// Action repositories no step of the job may reference.
+    forbidden_uses: &'static [&'static str],
+    /// Reject an `actions/cache` step that persists the Cargo `target/` tree.
+    forbid_target_cache: bool,
+}
+
+/// The Rust scenarios the fixture must cover.
+///
+/// Velnor's default Rust acceleration (Mr Boxington) is selected exactly when a
+/// job does **not** declare `mozilla-actions/sccache-action`; see
+/// `velnor_runner::github_adapter::job_container_spec`, which sets
+/// `mbx_store_host` only for `!declares_sccache(job)`, and
+/// `velnor_runner::container::JobContainerSpec::append_rust_acceleration`,
+/// which swaps in `MBX_DISABLE=1` for the sccache branch. A fixture that
+/// declared sccache in every Rust job therefore only ever exercised the
+/// compatibility branch, and requiring sccache here made that permanent.
+///
+/// The mandatory scenario is the default path. sccache is one scenario among
+/// several, never the fixture's baseline.
+fn fixture_rust_scenarios() -> &'static [RustScenario] {
+    &[
+        RustScenario {
+            id: "A default Velnor Rust path",
+            job: "rust-default",
+            required: &[
+                ("nextest invocation", "cargo nextest run"),
+                ("scenario evidence", "rust-default"),
+            ],
+            forbidden_env: &["RUSTC_WRAPPER", "SCCACHE_*", "MBX_*"],
+            forbidden_uses: &[
+                "mozilla-actions/sccache-action",
+                "jdx/mr-boxington-action",
+                "kunobi-ninja/kache-action",
+            ],
+            forbid_target_cache: true,
+        },
+        RustScenario {
+            id: "B explicit sccache compatibility",
+            job: "rust-sccache",
+            required: &[
+                ("explicit sccache action", "mozilla-actions/sccache-action@"),
+                ("explicit compiler-cache wrapper", "RUSTC_WRAPPER"),
+                ("local sccache environment", "SCCACHE_GHA_ENABLED"),
+                ("scenario evidence", "rust-sccache"),
+            ],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
+        },
+        RustScenario {
+            id: "C explicit acceleration opt-out",
+            job: "rust-accel-optout",
+            required: &[
+                ("acceleration opt-out", "MBX_DISABLE"),
+                ("scenario evidence", "rust-accel-optout"),
+            ],
+            forbidden_env: &["RUSTC_WRAPPER", "SCCACHE_*"],
+            forbidden_uses: &["mozilla-actions/sccache-action"],
+            forbid_target_cache: true,
+        },
+        RustScenario {
+            id: "D cache interaction",
+            job: "rust-cache-interaction",
+            required: &[
+                ("user actions/cache", "actions/cache@"),
+                ("cache restore-keys", "restore-keys:"),
+                ("scenario evidence", "rust-cache-interaction"),
+            ],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
+        },
+        RustScenario {
+            id: "E parallel Rust",
+            job: "rust-parallel",
+            required: &[
+                ("parallel shard matrix", "shard:"),
+                ("scenario evidence", "rust-parallel"),
+            ],
+            forbidden_env: &[],
+            forbidden_uses: &[],
+            forbid_target_cache: false,
+        },
+    ]
+}
+
+/// Check the fixture's Rust scenario matrix.
+///
+/// Requires the default Velnor Rust path to be covered, and every other
+/// declared scenario to keep the declarations that make it that scenario.
+fn check_rust_scenarios(content: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let workflow: serde_yaml::Value = match serde_yaml::from_str(content) {
+        Ok(value) => value,
+        Err(error) => {
+            failures.push(format!(
+                "{RUST_SCENARIO_WORKFLOW}: cannot parse YAML: {error}"
+            ));
+            return failures;
+        }
+    };
+
+    for scenario in fixture_rust_scenarios() {
+        let Some(job) = workflow.get("jobs").and_then(|jobs| jobs.get(scenario.job)) else {
+            failures.push(format!(
+                "{RUST_SCENARIO_WORKFLOW}: missing Rust scenario {} (job '{}')",
+                scenario.id, scenario.job
+            ));
+            continue;
+        };
+        let body = match serde_yaml::to_string(job) {
+            Ok(body) => body,
+            Err(error) => {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: job '{}' cannot be serialized: {error}",
+                    scenario.job
+                ));
+                continue;
+            }
+        };
+        for (label, snippet) in scenario.required {
+            if !body.contains(snippet) {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' missing {label}: {snippet}",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+        for name in rust_scenario_declared_env(job) {
+            if let Some(rule) = scenario
+                .forbidden_env
+                .iter()
+                .find(|rule| environment_name_matches(rule, &name))
+            {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not declare environment {name} (rule {rule})",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+        for reference in rust_scenario_step_uses(job) {
+            if let Some(forbidden) = scenario
+                .forbidden_uses
+                .iter()
+                .find(|forbidden| reference.contains(*forbidden))
+            {
+                failures.push(format!(
+                    "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not use {forbidden}: {reference}",
+                    scenario.id, scenario.job
+                ));
+            }
+        }
+        if scenario.forbid_target_cache {
+            for path in rust_scenario_cached_paths(job) {
+                if path == "target" || path.starts_with("target/") {
+                    failures.push(format!(
+                        "{RUST_SCENARIO_WORKFLOW}: scenario {} job '{}' must not cache the Cargo target tree: {path}",
+                        scenario.id, scenario.job
+                    ));
+                }
+            }
+        }
+    }
+
+    failures
+}
+
+/// Match one `forbidden_env` rule: an exact name, or a `PREFIX_*` prefix.
+fn environment_name_matches(rule: &str, name: &str) -> bool {
+    match rule.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == rule,
+    }
+}
+
+/// Environment names a job declares, at job level and on each of its steps.
+fn rust_scenario_declared_env(job: &serde_yaml::Value) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut collect = |value: Option<&serde_yaml::Value>| {
+        if let Some(mapping) = value.and_then(serde_yaml::Value::as_mapping) {
+            names.extend(mapping.keys().cloned());
+        }
+    };
+    collect(job.get("env"));
+    for step in rust_scenario_steps(job) {
+        collect(step.get("env"));
+    }
+    names
+}
+
+fn rust_scenario_steps(job: &serde_yaml::Value) -> &[serde_yaml::Value] {
+    job.get("steps")
+        .and_then(serde_yaml::Value::as_sequence)
+        .map_or(&[][..], |steps| steps.as_slice())
+}
+
+fn rust_scenario_step_uses(job: &serde_yaml::Value) -> Vec<String> {
+    rust_scenario_steps(job)
+        .iter()
+        .filter_map(|step| step.get("uses").and_then(serde_yaml::Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Paths each `actions/cache` step of the job persists.
+fn rust_scenario_cached_paths(job: &serde_yaml::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for step in rust_scenario_steps(job) {
+        let uses = step
+            .get("uses")
+            .and_then(serde_yaml::Value::as_str)
+            .unwrap_or_default();
+        if !uses.starts_with("actions/cache") {
+            continue;
+        }
+        let Some(path) = step
+            .get("with")
+            .and_then(|with| with.get("path"))
+            .and_then(serde_yaml::Value::as_str)
+        else {
+            continue;
+        };
+        paths.extend(
+            path.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    paths
+}
+
 fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
     vec![
         (
@@ -818,12 +1106,9 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("path filtering", "dorny/paths-filter@"),
                 ("mise tool installer", "jdx/mise-action@"),
                 ("mold linker", "rui314/setup-mold@"),
-                ("sccache action", "mozilla-actions/sccache-action@"),
-                ("sccache local env", "SCCACHE_GHA_ENABLED:"),
                 ("cargo cache", "actions/cache@"),
                 ("cargo cache restore-keys", "restore-keys:"),
                 ("cache off job", "cache-off:"),
-                ("cache sccache job", "cache-sccache:"),
                 ("Postgres services job", "services-postgres:"),
                 ("services declaration", "services:"),
                 ("Postgres health check", "pg_isready"),
@@ -1265,11 +1550,14 @@ fn fixture_status(args: FixtureStatusArgs) -> Result<()> {
     };
     let run = github_run_view(&args.repo, run_id)?;
     println!("url\t{}", required_string(&run, "url")?);
-    println!(
-        "run\t{}\t{}",
-        required_string(&run, "status")?,
-        optional_string(&run, "conclusion").unwrap_or_default()
-    );
+    let status = required_string(&run, "status")?;
+    let conclusion = optional_string(&run, "conclusion").unwrap_or_default();
+    println!("run\t{}\t{}", status, conclusion);
+    if status != "completed" || conclusion != "success" {
+        bail!(
+            "fixture workflow run {run_id} is not successful: status={status} conclusion={conclusion}"
+        );
+    }
     let jobs = run
         .get("jobs")
         .and_then(|value| value.as_array())
@@ -1474,8 +1762,6 @@ fn fixture_smoke_daemon_args(
     let mut args = vec![
         "--url".to_string(),
         fixture_url.to_string(),
-        "--pat".to_string(),
-        "$GITHUB_TOKEN".to_string(),
         "--name".to_string(),
         runner_name.to_string(),
         "--labels".to_string(),
@@ -1597,8 +1883,6 @@ fn target_smoke_daemon_args(
     let mut args = vec![
         "--url".to_string(),
         target_url.to_string(),
-        "--pat".to_string(),
-        "$GITHUB_TOKEN".to_string(),
         "--name".to_string(),
         runner_name.to_string(),
         "--target-mvp-labels".to_string(),
@@ -1863,6 +2147,18 @@ struct TargetSurface {
     unsupported: Vec<String>,
 }
 
+const CHECKOUT_SUPPORTED_INPUTS: &[&str] = &[
+    "repository",
+    "ref",
+    "token",
+    "path",
+    "fetch-depth",
+    "clean",
+    "fetch-tags",
+    "persist-credentials",
+    "lfs",
+];
+
 fn target_audit(args: TargetAuditArgs) -> Result<()> {
     if !args.check_target_mvp && !args.self_test {
         bail!("pass --check-target-mvp or --self-test");
@@ -2106,17 +2402,7 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
         && let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping())
     {
         for input in with.keys() {
-            let supported = matches!(
-                input.as_str(),
-                "repository"
-                    | "ref"
-                    | "token"
-                    | "path"
-                    | "fetch-depth"
-                    | "submodules"
-                    | "persist-credentials"
-                    | "lfs"
-            );
+            let supported = CHECKOUT_SUPPORTED_INPUTS.contains(&input.as_str());
             if !supported {
                 surface.unsupported.push(format!(
                     "{workflow_path}: unsupported actions/checkout input {input}"
@@ -2258,10 +2544,8 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("actions/checkout", 46),
         ("actions/deploy-pages", 1),
         ("actions/download-artifact", 3),
-        ("actions/setup-python", 1),
         ("actions/upload-artifact", 6),
         ("actions/upload-pages-artifact", 1),
-        ("baptiste0928/cargo-install", 1),
         ("crazy-max/ghaction-github-runtime", 2),
         ("docker/bake-action", 1),
         ("docker/build-push-action", 1),
@@ -2269,7 +2553,6 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("docker/metadata-action", 1),
         ("docker/setup-buildx-action", 5),
         ("dorny/paths-filter", 5),
-        ("dtolnay/rust-toolchain", 1),
         ("extractions/setup-just", 4),
         ("jdx/mise-action", 13),
         ("mozilla-actions/sccache-action", 7),
@@ -3068,6 +3351,68 @@ where
     Ok(())
 }
 
+fn parse_monitor_duration(raw: &str) -> Result<Duration, String> {
+    let (number, unit) = raw.split_at(
+        raw.find(|character: char| !character.is_ascii_digit())
+            .unwrap_or(raw.len()),
+    );
+    let value = number
+        .parse::<u64>()
+        .map_err(|_| "duration must start with an unsigned integer".to_owned())?;
+    let multiplier = match unit {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return Err("duration unit must be ms, s, m, or h".to_owned()),
+    };
+    let milliseconds = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration is too large".to_owned())?;
+    if milliseconds == 0 {
+        return Err("duration must be greater than zero".to_owned());
+    }
+    Ok(Duration::from_millis(milliseconds))
+}
+
+fn run_workflow_monitor(args: WorkflowMonitorArgs) -> Result<()> {
+    let mut config = workflow_monitor::WorkflowMonitorConfig::new(args.repo, args.run_id)
+        .with_timeout(args.timeout)
+        .with_poll_interval(args.poll);
+    if let Some(instance) = args.instance {
+        config = config.with_instance(instance);
+    }
+    if let Some(evidence_dir) = args.evidence_dir {
+        config = config.with_evidence_dir(evidence_dir);
+    }
+    let result = workflow_monitor::monitor_workflow_run(&config)?;
+    println!(
+        "run={} status={} conclusion={} observations={} timed_out={}",
+        result.final_run.id,
+        result.final_run.status,
+        result.final_run.conclusion.as_deref().unwrap_or("pending"),
+        result.observations.len(),
+        result.timed_out
+    );
+    if let Some(path) = &result.evidence_path {
+        println!("evidence={}", path.display());
+    }
+    if result.timed_out {
+        bail!(
+            "workflow run {} did not reach a terminal GitHub state",
+            result.final_run.id
+        );
+    }
+    if !result.succeeded() {
+        bail!(
+            "workflow run {} completed with conclusion {}",
+            result.final_run.id,
+            result.final_run.conclusion.as_deref().unwrap_or("unknown")
+        );
+    }
+    Ok(())
+}
+
 fn workflow_dispatch(args: WorkflowDispatchArgs) -> Result<()> {
     validate_repo_slug("repo", &args.repo)?;
     validate_workflow_file("workflow", &args.workflow)?;
@@ -3640,30 +3985,62 @@ fn check_runner_exclusivity_gh(
 struct RunnerCleanupGuard {
     enabled: bool,
     root: PathBuf,
-    pat: String,
     slots: u64,
+}
+
+impl RunnerCleanupGuard {
+    fn cleanup(&mut self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        self.enabled = false;
+        eprintln!("==> Removing runner ({} slot(s))", self.slots);
+        let status = runner_cleanup_command(&self.root, self.slots)
+            .status()
+            .context("spawn velnorctl runner cleanup")?;
+        if !status.success() {
+            bail!("velnorctl remove exited with {status}");
+        }
+        Ok(())
+    }
+}
+
+fn runner_cleanup_command(root: &Path, slots: u64) -> Command {
+    let mut command = Command::new("cargo");
+    command
+        .args([
+            "run",
+            "--bin",
+            "velnorctl",
+            "--",
+            "remove",
+            "--slots",
+            &slots.to_string(),
+        ])
+        .current_dir(root);
+    command
 }
 
 impl Drop for RunnerCleanupGuard {
     fn drop(&mut self) {
-        if !self.enabled {
-            return;
+        if let Err(error) = self.cleanup() {
+            eprintln!("==> Runner cleanup failed: {error:#}");
         }
-        eprintln!("==> Removing runner ({} slot(s))", self.slots);
-        let _ = Command::new("cargo")
-            .args([
-                "run",
-                "--bin",
-                "velnor-runner",
-                "--",
-                "remove",
-                "--pat",
-                &self.pat,
-                "--slots",
-                &self.slots.to_string(),
-            ])
-            .current_dir(&self.root)
-            .status();
+    }
+}
+
+fn finish_smoke_result(smoke_result: Result<()>, cleanup: &mut RunnerCleanupGuard) -> Result<()> {
+    combine_smoke_results(smoke_result, cleanup.cleanup())
+}
+
+fn combine_smoke_results(smoke_result: Result<()>, cleanup_result: Result<()>) -> Result<()> {
+    match (smoke_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(smoke_error), Err(cleanup_error)) => {
+            Err(smoke_error.context(format!("runner cleanup also failed: {cleanup_error:#}")))
+        }
     }
 }
 
@@ -3678,7 +4055,7 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
     validate_workflow_dispatch_inputs(&plan.fixture_inputs)?;
     validate_live_evidence_controls(&args.log_lines.to_string(), &args.local_entries.to_string())?;
 
-    let pat = env::var("GITHUB_TOKEN")
+    env::var("GITHUB_TOKEN")
         .context("GITHUB_TOKEN is required to create fixture JIT runner configs.")?;
     ensure_command("gh")?;
 
@@ -3755,99 +4132,95 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
         &dump_job_messages,
     );
 
-    let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for arg in &mut daemon_args_with_pat {
-        if arg == "$GITHUB_TOKEN" {
-            *arg = pat.clone();
-        }
-    }
-
     println!(
         "==> Running Velnor fixture daemon with {} slot(s)",
         plan.job_count
     );
-    let _cleanup = RunnerCleanupGuard {
+    let mut cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
-        pat: pat.clone(),
         slots: plan.job_count,
     };
 
-    let result = Command::new("cargo")
-        .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args_with_pat)
-        .current_dir(root)
-        .status()
-        .context("spawn velnor-runner daemon");
-
-    if let Some(run_id) = run_id {
-        println!("==> Fixture run after Velnor");
-        print!("{}", show_run_status_gh(&plan.repo, run_id));
-        write_fixture_evidence(
-            root,
-            "after-velnor",
-            run_id,
-            &plan.repo,
-            &args,
-            &work_dir,
-            &dump_job_messages,
-        )?;
-    }
-
-    let status = result?;
-    if !status.success() {
-        if let Some(run_id) = run_id {
-            let _ = write_fixture_evidence(
-                root,
-                "failed-before-completion",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            );
-        }
-        bail!("velnor-runner daemon exited with {status}");
-    }
-
-    if let Some(run_id) = run_id {
-        println!("==> Waiting briefly for compare-results");
-        let watch_status = Command::new("gh")
-            .args([
-                "run",
-                "watch",
-                &run_id.to_string(),
-                "--repo",
-                &plan.repo,
-                "--exit-status",
-            ])
+    let smoke_result = (|| -> Result<()> {
+        let result = Command::new("cargo")
+            .args(["run", "--bin", "velnor-runner", "--", "daemon"])
+            .args(&daemon_args)
+            .current_dir(root)
             .status()
-            .context("gh run watch")?;
-        if watch_status.success() {
-            write_fixture_evidence(
-                root,
-                "completed",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-        } else {
-            write_fixture_evidence(
-                root,
-                "completed-with-failure",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-            bail!("fixture run completed with failure (exit {})", watch_status);
-        }
-    }
+            .context("spawn velnor-runner daemon");
 
-    Ok(())
+        if let Some(run_id) = run_id {
+            println!("==> Fixture run after Velnor");
+            print!("{}", show_run_status_gh(&plan.repo, run_id));
+            write_fixture_evidence(
+                root,
+                "after-velnor",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+        }
+
+        let status = result?;
+        if !status.success() {
+            if let Some(run_id) = run_id {
+                let _ = write_fixture_evidence(
+                    root,
+                    "failed-before-completion",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                );
+            }
+            bail!("velnor-runner daemon exited with {status}");
+        }
+
+        if let Some(run_id) = run_id {
+            println!("==> Waiting briefly for compare-results");
+            let watch_status = Command::new("gh")
+                .args([
+                    "run",
+                    "watch",
+                    &run_id.to_string(),
+                    "--repo",
+                    &plan.repo,
+                    "--exit-status",
+                ])
+                .status()
+                .context("gh run watch")?;
+            if watch_status.success() {
+                write_fixture_evidence(
+                    root,
+                    "completed",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+            } else {
+                write_fixture_evidence(
+                    root,
+                    "completed-with-failure",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+                bail!("fixture run completed with failure (exit {})", watch_status);
+            }
+        }
+
+        Ok(())
+    })();
+
+    finish_smoke_result(smoke_result, &mut cleanup)
 }
 
 fn wait_for_new_run_id(
@@ -3917,7 +4290,7 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
     validate_real_target_manual_confirmation_bool(&plan.repo, plan.real_target_manual_confirm)?;
     validate_live_evidence_controls(&args.log_lines.to_string(), &args.local_entries.to_string())?;
 
-    let pat = env::var("GITHUB_TOKEN")
+    env::var("GITHUB_TOKEN")
         .context("GITHUB_TOKEN is required to create target JIT runner configs.")?;
 
     if !plan.workflow.is_empty() || plan.run_id.is_some() {
@@ -4000,102 +4373,98 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
         &dump_job_messages,
     );
 
-    let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for arg in &mut daemon_args_with_pat {
-        if arg == "$GITHUB_TOKEN" {
-            *arg = pat.clone();
-        }
-    }
-
     println!(
         "==> Running Velnor {} target daemon with {} slot(s)",
         plan.target_label, plan.job_count
     );
-    let _cleanup = RunnerCleanupGuard {
+    let mut cleanup = RunnerCleanupGuard {
         enabled: plan.cleanup_runner,
         root: root.to_path_buf(),
-        pat: pat.clone(),
         slots: plan.job_count,
     };
 
-    let result = Command::new("cargo")
-        .args(["run", "--bin", "velnor-runner", "--", "daemon"])
-        .args(&daemon_args_with_pat)
-        .current_dir(root)
-        .status()
-        .context("spawn velnor-runner daemon");
-
-    if let Some(run_id) = run_id {
-        println!("==> Target run after Velnor");
-        print!("{}", show_run_status_gh(&plan.repo, run_id));
-        write_target_evidence(
-            root,
-            "after-velnor",
-            run_id,
-            &plan.repo,
-            &args,
-            &work_dir,
-            &dump_job_messages,
-        )?;
-    }
-
-    let status = result?;
-    if !status.success() {
-        if let Some(run_id) = run_id {
-            let _ = write_target_evidence(
-                root,
-                "failed-before-completion",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            );
-        }
-        bail!("velnor-runner daemon exited with {status}");
-    }
-
-    if let Some(run_id) = run_id
-        && plan.watch_run
-    {
-        println!("==> Waiting for target run completion");
-        let watch_status = Command::new("gh")
-            .args([
-                "run",
-                "watch",
-                &run_id.to_string(),
-                "--repo",
-                &plan.repo,
-                "--exit-status",
-            ])
+    let smoke_result = (|| -> Result<()> {
+        let result = Command::new("cargo")
+            .args(["run", "--bin", "velnor-runner", "--", "daemon"])
+            .args(&daemon_args)
+            .current_dir(root)
             .status()
-            .context("gh run watch")?;
-        if watch_status.success() {
-            write_target_evidence(
-                root,
-                "completed",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-        } else {
-            write_target_evidence(
-                root,
-                "completed-with-failure",
-                run_id,
-                &plan.repo,
-                &args,
-                &work_dir,
-                &dump_job_messages,
-            )?;
-            bail!("target run completed with failure (exit {})", watch_status);
-        }
-    }
+            .context("spawn velnor-runner daemon");
 
-    println!("{} target smoke job completed.", plan.target_label);
-    Ok(())
+        if let Some(run_id) = run_id {
+            println!("==> Target run after Velnor");
+            print!("{}", show_run_status_gh(&plan.repo, run_id));
+            write_target_evidence(
+                root,
+                "after-velnor",
+                run_id,
+                &plan.repo,
+                &args,
+                &work_dir,
+                &dump_job_messages,
+            )?;
+        }
+
+        let status = result?;
+        if !status.success() {
+            if let Some(run_id) = run_id {
+                let _ = write_target_evidence(
+                    root,
+                    "failed-before-completion",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                );
+            }
+            bail!("velnor-runner daemon exited with {status}");
+        }
+
+        if let Some(run_id) = run_id
+            && plan.watch_run
+        {
+            println!("==> Waiting for target run completion");
+            let watch_status = Command::new("gh")
+                .args([
+                    "run",
+                    "watch",
+                    &run_id.to_string(),
+                    "--repo",
+                    &plan.repo,
+                    "--exit-status",
+                ])
+                .status()
+                .context("gh run watch")?;
+            if watch_status.success() {
+                write_target_evidence(
+                    root,
+                    "completed",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+            } else {
+                write_target_evidence(
+                    root,
+                    "completed-with-failure",
+                    run_id,
+                    &plan.repo,
+                    &args,
+                    &work_dir,
+                    &dump_job_messages,
+                )?;
+                bail!("target run completed with failure (exit {})", watch_status);
+            }
+        }
+
+        println!("{} target smoke job completed.", plan.target_label);
+        Ok(())
+    })();
+
+    finish_smoke_result(smoke_result, &mut cleanup)
 }
 
 fn write_target_evidence(
@@ -4390,8 +4759,172 @@ mno\trefs/tags/not-a-runner-release
     }
 
     #[test]
+    fn rust_scenarios_require_the_default_path_and_never_mandate_sccache() {
+        let default_scenario = fixture_rust_scenarios()
+            .iter()
+            .find(|scenario| scenario.job == "rust-default")
+            .expect("the default Velnor Rust path is mandatory");
+        assert!(
+            default_scenario
+                .forbidden_uses
+                .contains(&"mozilla-actions/sccache-action"),
+            "the default path must not declare the sccache action"
+        );
+        assert!(
+            default_scenario.forbidden_env.contains(&"RUSTC_WRAPPER"),
+            "the default path must not set a compiler-cache wrapper"
+        );
+        assert!(
+            default_scenario.forbid_target_cache,
+            "the default path must not cache the Cargo target tree"
+        );
+
+        // sccache is one scenario among several, never a fixture-wide
+        // requirement: no snippet outside scenario B may demand it.
+        for (path, snippets) in fixture_required_snippets() {
+            for (_, snippet) in snippets {
+                assert!(
+                    !snippet.contains("sccache"),
+                    "{path}: whole-file sccache requirement re-creates the lock-in: {snippet}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn check_rust_scenarios_rejects_an_accelerated_default_job() {
+        let workflow = r#"
+jobs:
+  rust-default:
+    env:
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: mozilla-actions/sccache-action@0000000000000000000000000000000000000000
+      - uses: actions/cache@1111111111111111111111111111111111111111
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+      - run: cargo nextest run --locked -p app-a
+"#;
+
+        let failures = check_rust_scenarios(workflow);
+
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not use mozilla-actions/sccache-action")),
+            "{failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not declare environment RUSTC_WRAPPER")),
+            "{failures:?}"
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("must not cache the Cargo target tree")),
+            "{failures:?}"
+        );
+        for scenario in fixture_rust_scenarios().iter().skip(1) {
+            assert!(
+                failures
+                    .iter()
+                    .any(|failure| failure.contains(scenario.job)),
+                "missing scenario {} was not reported: {failures:?}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
     fn target_audit_normalizes_uses_and_compacts_values() {
         target_audit_self_test().unwrap();
+    }
+
+    #[test]
+    fn target_capability_surface_stays_backed_by_runner_manifest() {
+        const MANIFEST_SOURCE: &str = include_str!("../../velnor-runner/src/manifest.rs");
+        let manifest_actions = MANIFEST_SOURCE
+            .split_once("pub static ACTIONS: &[ActionCapability] = &[")
+            .and_then(|(_, source)| source.split_once("\n];\n\n/// Exact"))
+            .map(|(source, _)| source)
+            .expect("runner manifest action table must have its expected shape");
+        let manifest_actions_lower = manifest_actions.to_ascii_lowercase();
+
+        for repository in expected_target_uses()
+            .keys()
+            .filter(|repository| !repository.starts_with("./"))
+        {
+            let needle = format!("\"{}\"", repository.to_ascii_lowercase());
+            assert!(
+                manifest_actions_lower.contains(&needle),
+                "target audit advertises {repository}, but runner manifest does not admit it"
+            );
+        }
+
+        let checkout_manifest = manifest_actions
+            .split_once("capability!(\n        \"actions/checkout\",")
+            .and_then(|(_, source)| source.split_once("capability!(\n        \"actions/cache\","))
+            .map(|(source, _)| source)
+            .expect("runner manifest must contain the checkout capability before cache");
+        let input_pattern = Regex::new(
+            r#"InputRule::(?:Any|Literal|RequiredLiteral|Forbidden|Predicate)\(\s*"([^"]+)""#,
+        )
+        .expect("manifest input rule pattern must compile");
+        let manifest_inputs = input_pattern
+            .captures_iter(checkout_manifest)
+            .map(|capture| capture[1].to_string())
+            .collect::<BTreeSet<_>>();
+        let advertised_inputs = CHECKOUT_SUPPORTED_INPUTS
+            .iter()
+            .map(|input| (*input).to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            advertised_inputs, manifest_inputs,
+            "target audit checkout inputs must match the runner manifest"
+        );
+
+        let supported_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  repository: owner/repository
+  ref: main
+  token: token
+  path: checkout
+  fetch-depth: 0
+  clean: "true"
+  fetch-tags: "true"
+  persist-credentials: "false"
+  lfs: "false"
+"#,
+        )
+        .expect("supported checkout inputs must parse");
+        let mut supported_surface = TargetSurface::default();
+        collect_step(&mut supported_surface, "fixture.yml", &supported_step);
+        assert!(
+            supported_surface.unsupported.is_empty(),
+            "manifest-backed checkout inputs must be accepted: {:?}",
+            supported_surface.unsupported
+        );
+
+        let submodules_step: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+uses: actions/checkout@v7
+with:
+  submodules: recursive
+"#,
+        )
+        .expect("checkout submodules input must parse");
+        let mut submodules_surface = TargetSurface::default();
+        collect_step(&mut submodules_surface, "fixture.yml", &submodules_step);
+        assert_eq!(
+            submodules_surface.unsupported,
+            vec!["fixture.yml: unsupported actions/checkout input submodules"]
+        );
     }
 
     #[test]
@@ -4482,6 +5015,49 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
     }
 
     #[test]
+    fn runner_cleanup_uses_operator_cli() {
+        let command = runner_cleanup_command(Path::new("/work"), 2);
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.windows(2).any(|pair| pair == ["--bin", "velnorctl"]));
+        assert!(args.windows(2).any(|pair| pair == ["--", "remove"]));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
+    }
+
+    #[test]
+    fn runner_cleanup_failure_fails_successful_smoke() {
+        let error = combine_smoke_results(
+            Ok(()),
+            Err(anyhow::anyhow!(
+                "velnorctl remove exited with exit status: 1"
+            )),
+        )
+        .expect_err("cleanup failure must fail smoke");
+
+        assert!(error.to_string().contains("velnorctl remove exited"));
+    }
+
+    #[test]
+    fn runner_cleanup_failure_is_attached_to_smoke_failure() {
+        let error = combine_smoke_results(
+            Err(anyhow::anyhow!("daemon failed")),
+            Err(anyhow::anyhow!(
+                "velnorctl remove exited with exit status: 1"
+            )),
+        )
+        .expect_err("smoke failure must remain an error");
+        let rendered = format!("{error:#}");
+
+        assert!(rendered.contains("daemon failed"));
+        assert!(rendered.contains("runner cleanup also failed"));
+    }
+
+    #[test]
     fn smoke_plan_fixture_daemon_args_match_shell_contract() {
         let args = fixture_smoke_daemon_args(
             "https://github.com/tailrocks/velnor-actions-fixture",
@@ -4504,6 +5080,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(!args.contains(&"--require-docker-socket".to_string()));
         assert!(!args.contains(&"--docker-host-work-dir".to_string()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]
@@ -4566,6 +5145,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .windows(2)
             .any(|pair| pair == ["--dump-job-message", "/dumps"]));
         assert!(args.contains(&"--require-docker-socket".to_string()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--pat" || arg.contains("GITHUB_TOKEN")));
     }
 
     #[test]

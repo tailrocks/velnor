@@ -18,6 +18,7 @@ const PAGE_PREFIX: &str = "v1:";
 #[derive(Clone)]
 pub struct QueryService {
     state: Arc<RwLock<QueryState>>,
+    supported: bool,
 }
 
 impl Default for QueryService {
@@ -36,13 +37,28 @@ impl QueryService {
     /// Create an empty projection.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_support(true)
+    }
+
+    /// Create the production placeholder until normalized Store readers are
+    /// wired. It fails closed rather than returning a false empty projection.
+    #[must_use]
+    pub(crate) fn unsupported() -> Self {
+        Self::with_support(false)
+    }
+
+    fn with_support(supported: bool) -> Self {
         Self {
             state: Arc::new(RwLock::new(QueryState::default())),
+            supported,
         }
     }
 
     /// Replace the projection and advance its cursor generation.
     pub fn replace(&self, mut resources: Vec<AnyResource>) -> Result<(), PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if resources.iter().any(|resource| {
             resource.meta().name.trim().is_empty() || resource.meta().name.len() > 512
         }) {
@@ -66,6 +82,9 @@ impl QueryService {
 
     /// Current projection generation used by watch/read consumers.
     pub fn generation(&self) -> Result<u64, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         self.state
             .read()
             .map(|state| state.generation)
@@ -77,6 +96,9 @@ impl QueryService {
 
 impl QueryPort for QueryService {
     fn query(&self, request: QueryRequest) -> Result<QueryPage, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if request.limit == 0 || request.limit > MAX_PAGE_SIZE {
             return Err(PortError::Invalid {
                 field: "limit".to_owned(),
@@ -155,6 +177,12 @@ impl QueryPort for QueryService {
     }
 }
 
+fn unsupported() -> PortError {
+    PortError::Unsupported {
+        operation: "query resources".to_owned(),
+    }
+}
+
 fn parse_page_token(raw: &str) -> Result<(u64, String, usize), PortError> {
     let Some(raw) = raw.strip_prefix(PAGE_PREFIX) else {
         return Err(PortError::Invalid {
@@ -185,6 +213,12 @@ fn parse_page_token(raw: &str) -> Result<(u64, String, usize), PortError> {
         field: "page_token".to_owned(),
         message: "malformed continuation token".to_owned(),
     })?;
+    if generation == 0 {
+        return Err(PortError::Invalid {
+            field: "page_token".to_owned(),
+            message: "malformed continuation token".to_owned(),
+        });
+    }
     let offset = offset.parse::<usize>().map_err(|_| PortError::Invalid {
         field: "page_token".to_owned(),
         message: "malformed continuation token".to_owned(),
@@ -344,6 +378,21 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(error, PortError::Conflict { .. }));
+    }
+
+    #[test]
+    fn page_token_generation_zero_is_rejected() {
+        let service = QueryService::new();
+        service
+            .replace(vec![resource("a"), resource("b")])
+            .expect("replace");
+        let error = service
+            .query(QueryRequest {
+                page_token: Some(format!("v1:0:{}:1", "0".repeat(64))),
+                ..QueryRequest::default()
+            })
+            .unwrap_err();
+        assert!(matches!(error, PortError::Invalid { field, .. } if field == "page_token"));
     }
 
     #[test]

@@ -26,7 +26,7 @@ use anyhow::Result;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::action::{native_action_adapter, ActionMetadata, NATIVE_ACTION_REF};
+use crate::action::{native_action_adapter, ActionAdapter, ActionMetadata, NATIVE_ACTION_REF};
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 use crate::manifest::{self, CapabilityViolation};
 use crate::protocol::GitHubScope;
@@ -130,9 +130,8 @@ pub enum AdmissionNodeKind {
     NativeAction,
     /// A remote composite action whose metadata was fetched and recursed.
     RemoteComposite,
-    /// A remote non-composite (JavaScript/Docker) action — rejected on the
-    /// production path unless it maps to a native adapter, but represented here
-    /// for completeness while recursing.
+    /// A remote non-composite (JavaScript/Docker) action. It is admitted as a
+    /// leaf; the planner selects its executable adapter from the manifest.
     RemoteAction,
     /// A local action or composite read from the workflow repository.
     LocalAction,
@@ -596,6 +595,10 @@ pub fn admit_job(
             },
         );
         let ancestry = root.child(format!("step '{step_label}' ({repository}@{action_ref})"));
+        let raw_inputs = crate::action::string_inputs(step).map_err(|error| {
+            AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
+        })?;
+        reject_runtime_capability_inputs(&ancestry, repository, &raw_inputs, context_data)?;
         let inputs = resolve_step_inputs(step, context_data).map_err(|error| {
             AdmissionError::new(&ancestry, "inputs", error.to_string(), Vec::new())
         })?;
@@ -736,9 +739,20 @@ fn admit_remote(
     step_label: &str,
 ) -> Result<(), AdmissionError> {
     let inputs = canonicalize_admission_inputs(inputs, ancestry)?;
+    reject_runtime_capability_inputs(ancestry, repository, &inputs, walk.context_data)?;
     reject_unresolved_capability_inputs(ancestry, repository, &inputs)?;
     manifest::validate_resolved_action(step_label, repository, action_ref, subpath, &inputs)
         .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    let adapter = manifest::find(repository)
+        .map(|capability| capability.adapter)
+        .ok_or_else(|| {
+            AdmissionError::new(
+                ancestry,
+                "uses",
+                "action capability disappeared during admission",
+                Vec::new(),
+            )
+        })?;
 
     let normalized = normalize_subpath(subpath);
     let identity = ActionIdentity {
@@ -748,7 +762,15 @@ fn admit_remote(
     };
 
     // A native adapter is authoritative: no metadata fetch, no recursion.
-    if native_action_adapter(repository).is_some() {
+    if let ActionAdapter::Native(expected) = adapter {
+        if native_action_adapter(repository) != Some(expected) {
+            return Err(AdmissionError::new(
+                ancestry,
+                "adapter",
+                "manifest native adapter does not match the native adapter table",
+                vec![format!("{expected:?}")],
+            ));
+        }
         let index = walk
             .graph
             .intern(identity, AdmissionNodeKind::NativeAction, ancestry)?;
@@ -763,7 +785,12 @@ fn admit_remote(
     walk.graph.link(parent, index, ancestry)?;
 
     let metadata = cached_metadata(walk, &action_key, repository, action_ref, subpath, ancestry)?;
-    if !is_composite(&metadata) {
+    let runtime = metadata
+        .runtime()
+        .map_err(|error| AdmissionError::new(ancestry, "runtime", error.to_string(), Vec::new()))?;
+    manifest::validate_action_runtime(step_label, repository, action_ref, &runtime)
+        .map_err(|error| AdmissionError::from_capability(ancestry, error))?;
+    if !matches!(adapter, ActionAdapter::Composite) {
         return Ok(());
     }
     walk.graph.nodes[index].kind = AdmissionNodeKind::RemoteComposite;
@@ -976,12 +1003,15 @@ fn recurse_composite(
         let Some(uses) = step.uses.as_deref() else {
             continue;
         };
-        let child_inputs = render_inputs(&step.with, &inputs_context);
         let label = step
             .name
             .clone()
             .or_else(|| step.id.clone())
             .unwrap_or_else(|| format!("nested-step-{child_index}"));
+        let child_ancestry = ancestry.child(format!("nested '{label}'"));
+        let child_inputs = render_inputs(&step.with, &inputs_context).map_err(|error| {
+            AdmissionError::new(&child_ancestry, "inputs", error.to_string(), Vec::new())
+        })?;
 
         if uses.starts_with("docker://") {
             return Err(AdmissionError::new(
@@ -1066,6 +1096,41 @@ fn reject_unresolved_capability_inputs(
     Ok(())
 }
 
+/// Reject a capability-affecting input that reads state available only while
+/// executing steps. This runs before any remote metadata fetch. Available plan
+/// contexts (`github`, `needs`, `matrix`, `strategy`, `secrets`, and `vars`)
+/// are deliberately not classified as runtime state by the executor walker.
+fn reject_runtime_capability_inputs(
+    ancestry: &Ancestry,
+    repository: &str,
+    inputs: &BTreeMap<String, String>,
+    context_data: &[(String, Value)],
+) -> Result<(), AdmissionError> {
+    for (name, value) in inputs {
+        if !value.contains("${{") || !manifest::action_input_is_constrained(repository, name) {
+            continue;
+        }
+        let reads_runtime = crate::executor::template_reads_runtime_context(value, context_data)
+            .map_err(|error| {
+                AdmissionError::new(
+                    ancestry,
+                    format!("with.{name}"),
+                    error.to_string(),
+                    vec!["a statically resolvable literal".to_string()],
+                )
+            })?;
+        if reads_runtime {
+            return Err(AdmissionError::new(
+                ancestry,
+                format!("with.{name}"),
+                "capability-affecting input reads runtime state and cannot be resolved before admission",
+                vec!["a statically resolvable literal".to_string()],
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn is_composite(metadata: &ActionMetadata) -> bool {
     metadata.runs.using.eq_ignore_ascii_case("composite")
 }
@@ -1074,10 +1139,12 @@ fn resolve_step_inputs(
     step: &crate::job_message::ActionStep,
     context_data: &[(String, Value)],
 ) -> Result<BTreeMap<String, String>> {
-    Ok(crate::action::string_inputs(step)?
+    crate::action::string_inputs(step)?
         .into_iter()
-        .map(|(name, value)| (name, render_admission_expression(&value, context_data)))
-        .collect())
+        .map(|(name, value)| {
+            render_admission_expression(&value, context_data).map(|value| (name, value))
+        })
+        .collect()
 }
 
 fn resolve_composite_inputs(
@@ -1113,92 +1180,23 @@ fn inputs_context(
 fn render_inputs(
     with: &BTreeMap<String, String>,
     inputs_context: &[(String, Value)],
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>> {
     with.iter()
         .map(|(name, value)| {
-            (
-                name.clone(),
-                render_admission_expression(value, inputs_context),
-            )
+            render_admission_expression(value, inputs_context).map(|value| (name.clone(), value))
         })
         .collect()
 }
 
-fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> String {
-    if contains_runtime_context_expression(value) {
-        value.to_string()
-    } else {
-        crate::executor::render_context_expressions_bounded(value, context_data)
-    }
-}
-
-fn contains_runtime_context_expression(value: &str) -> bool {
-    const RUNTIME_ROOTS: &[&str] = &[
-        "steps.",
-        "steps[",
-        "needs.",
-        "needs[",
-        "env.",
-        "env[",
-        "job.",
-        "job[",
-        "matrix.",
-        "matrix[",
-        "strategy.",
-        "strategy[",
-        "secrets.",
-        "secrets[",
-        "vars.",
-        "vars[",
-        "runner.",
-        "runner[",
-        "github.",
-        "github.action",
-        "github[",
-        "github.action_status",
-        "github.event.",
-    ];
-    let mut offset = 0;
-    while let Some(start) = value[offset..].find("${{") {
-        let start = offset + start + 3;
-        let Some(end) = value[start..].find("}}") else {
-            return false;
-        };
-        let expression = &value[start..start + end];
-        let lower_expression = expression.to_ascii_lowercase();
-        if [
-            "hashfiles(",
-            "format(",
-            "success(",
-            "failure(",
-            "cancelled(",
-            "always(",
-        ]
-        .iter()
-        .any(|function| lower_expression.contains(function))
-        {
-            return true;
-        }
-        if RUNTIME_ROOTS.iter().any(|root| {
-            let mut search = 0;
-            while let Some(found) = lower_expression[search..].find(root) {
-                let found = search + found;
-                let boundary = found == 0
-                    || !lower_expression.as_bytes()[found - 1].is_ascii_alphanumeric()
-                        && lower_expression.as_bytes()[found - 1] != b'_'
-                        && lower_expression.as_bytes()[found - 1] != b'-';
-                if boundary {
-                    return true;
-                }
-                search = found + root.len();
-            }
-            false
-        }) {
-            return true;
-        }
-        offset = start + end + 2;
-    }
-    false
+/// Resolve what admission can know now, while preserving valid runtime
+/// contexts for the execution pass. The checked executor boundary rejects
+/// malformed, unevaluable, and over-budget templates; it never returns the
+/// unresolved source on error.
+fn render_admission_expression(value: &str, context_data: &[(String, Value)]) -> Result<String> {
+    Ok(crate::executor::render_context_expressions_bounded(
+        value,
+        context_data,
+    )?)
 }
 
 fn is_local_reference(name: Option<&str>, path: Option<&str>) -> bool {
@@ -1641,6 +1639,7 @@ mod tests {
     }
 
     const CACHE_SHA: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
+    const REUSE_SHA: &str = "676e2d560c9a403aa252096d99fcab3e1132b0f5";
 
     #[test]
     fn case_distinct_local_subpaths_are_not_aliases() {
@@ -1818,7 +1817,6 @@ mod tests {
             "${{ github.action || 'docker-container' }}",
             "${{ github['event']['pull_request']['draft'] }}",
             "${{ hashFiles('**/Cargo.lock') }}",
-            "${{ format('{0}', 'false') }}",
             "${{ success() && 'true' || 'false' }}",
             "${{ failure() || cancelled() || always() }}",
         ] {
@@ -1900,6 +1898,50 @@ mod tests {
         // Native adapter: admitted without any metadata fetch.
         assert_eq!(source.reads(), 0);
         assert!(graph.contains_remote_action("actions/cache", CACHE_SHA, Some("restore")));
+    }
+
+    #[test]
+    fn remote_action_runtime_must_match_manifest_dispatch_class() {
+        let job = job(serde_json::json!([repo_step(
+            "fsfe/reuse-action",
+            REUSE_SHA,
+            None,
+            serde_json::json!({})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("fsfe/reuse-action@{REUSE_SHA}"),
+            "runs:\n  using: composite\n  steps: []\n",
+        )]);
+        let error = admit_job(&job, &workflow_context(), &source).unwrap_err();
+        assert_eq!(source.reads(), 1);
+        assert_eq!(error.field, "runtime");
+        assert_eq!(error.accepted, vec!["docker"]);
+    }
+
+    #[test]
+    fn remote_javascript_action_is_admitted_as_a_leaf() {
+        let action_ref = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+        let repository = "jdx/mr-boxington-action";
+        let job = job(serde_json::json!([repo_step(
+            repository,
+            action_ref,
+            None,
+            serde_json::json!({"backend": "github"})
+        )]));
+        let source = FakeMetadataSource::new(&[(
+            &format!("{repository}@{action_ref}"),
+            "runs:\n  using: node24\n  main: dist/index.js\n",
+        )]);
+
+        let graph = admit_job(&job, &workflow_context(), &source).unwrap();
+
+        assert_eq!(source.reads(), 1);
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.identity.repository == repository)
+            .expect("JavaScript action should be in the admission graph");
+        assert_eq!(node.kind, AdmissionNodeKind::RemoteAction);
     }
 
     #[test]

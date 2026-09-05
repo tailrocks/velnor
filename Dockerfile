@@ -30,7 +30,7 @@ RUN mkdir -p /opt/mise/bin \
     && : > /tmp/mise-empty.toml \
     && cd /opt/mise/config \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
-    && curl -fsSL https://mise.run | MISE_VERSION="v2026.8.14" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
+    && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
     && mise install --locked --yes rust sccache \
     && mise reshim \
@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/sccache \
     cd /opt/mise/config \
-    && mise exec -- cargo build --manifest-path /src/Cargo.toml --release --bin velnor-runner --bin velnorctl --bin velnor-tools \
+    && mise exec -- cargo build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow \
     && mise exec -- sccache --show-stats
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
@@ -70,6 +70,12 @@ RUN apt-get update \
 COPY --from=build /src/target/release/velnorctl /usr/local/bin/velnorctl
 COPY --from=build /src/target/release/velnor-runner /usr/local/bin/velnor-runner
 COPY --from=build /src/target/release/velnor-tools /usr/local/bin/velnor-tools
+COPY --from=build /src/target/release/velnor-workflow /usr/local/bin/velnor-workflow
+RUN install -d -m 0755 /usr/local/share/velnor \
+    && sha256sum /usr/local/bin/velnor-workflow \
+        > /usr/local/share/velnor/velnor-workflow.sha256 \
+    && chmod 0644 /usr/local/share/velnor/velnor-workflow.sha256 \
+    && sha256sum --check --strict --status /usr/local/share/velnor/velnor-workflow.sha256
 
 WORKDIR /work
 ENTRYPOINT ["velnorctl"]

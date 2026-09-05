@@ -10,8 +10,8 @@ use std::{
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
+    num::NonZeroU32,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicI64, Ordering},
         Arc, Mutex, OnceLock,
@@ -30,10 +30,10 @@ use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
         composite_repository_action_plans_from_resolved, download_repository_actions,
-        is_local_action_step, local_action_plans_with_context, native_action_adapter,
-        native_invocation_from_plan, repository_action_plans, resolve_local_action,
-        unsupported_action_error, ActionMetadata, ActionRuntime, CompositeActionInvocation,
-        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
+        is_local_action_step, local_action_plans_with_context, native_invocation_from_plan,
+        repository_action_plans, resolve_local_action, unsupported_action_error, ActionAdapter,
+        ActionMetadata, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
+        ResolvedAction,
     },
     args::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     checkout::{
@@ -55,7 +55,8 @@ use crate::{
     },
     platform,
     protocol::{
-        decode_jit_config, github_api_retry_delay, is_transient_acquire_error, AcquireJobOutcome,
+        acquire_reply_is_definitely_gone, decode_jit_config, github_api_retry_delay,
+        is_transient_acquire_error, renew_failure_is_job_gone, unix_epoch_now, AcquireJobOutcome,
         BrokerClient, DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope,
         ListedRunner, OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
         RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
@@ -65,7 +66,7 @@ use crate::{
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
-    slot_log::{self, SlotForensics, LIFECYCLE_LOG},
+    slot_log::{self, SlotForensics},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -112,72 +113,234 @@ const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
-/// Keep blocking Contents-API admission off Tokio workers and bound the total
-/// time an acquired job can wait in the read-only gate.
+/// Bound the transient Docker job used to seed the host-persistent mise store.
+/// A wedged engine must never hold a runner slot indefinitely.
+const MISE_SEED_DOCKER_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bound the whole read-only closure-admission stage: the wait for a local
+/// admission slot plus the Contents-API fetches themselves. An acquired job
+/// waits inside this budget; it is never failed because a sibling admission
+/// was in flight.
 const ACTION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(65);
-const ACTION_ADMISSION_BLOCKING_PERMITS: usize = 1;
-static ACTION_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-/// SQLite admission is a single-writer boundary. Keep the Tokio blocking
-/// queue bounded by acquiring the only admission permit before spawning work.
-const OPERATIONAL_ADMISSION_BLOCKING_PERMITS: usize = 1;
-static OPERATIONAL_ADMISSION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// Closure admission is read-only — it fetches `action.yml` and mutates
+/// nothing — so it needs no mutual exclusion. This limiter exists only to cap
+/// admission's share of the control-plane blocking pool, so slow upstream
+/// fetches can never starve retention, teardown joins or Docker sweeps.
+/// Callers wait for a slot; they are never rejected for want of one.
+const ACTION_ADMISSION_CONCURRENCY: usize = 4;
+static ACTION_ADMISSION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+/// SQLite admission is already serialised by `Store`'s connection mutex, WAL
+/// and `busy_timeout`, and the control-plane blocking pool is explicitly
+/// sized, so admission takes no local permit at all. The stage is bounded by
+/// a deadline instead: a store that cannot answer within it is a real
+/// infrastructure failure, unlike a store that is merely busy.
+const OPERATIONAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionPersistenceOutcome {
     Accepted,
     Rejected,
     InfrastructureFailure,
+    DeadlineExceeded,
 }
 
-fn operational_admission_permits() -> Arc<Semaphore> {
+/// The stage an acquired job is in while it is not executing.
+///
+/// Every non-executing stage reports where the job is and why it is waiting,
+/// as machine-readable telemetry fields rather than prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobStage {
+    OperationalAdmission,
+    ActionAdmission,
+    HostCapacityWait,
+}
+
+impl JobStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OperationalAdmission => "operational_admission",
+            Self::ActionAdmission => "action_admission",
+            Self::HostCapacityWait => "host_capacity",
+        }
+    }
+}
+
+/// Why a stage was not making progress. Distinguishes local contention from a
+/// slow dependency, which prose in an error message cannot do reliably.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitReason {
+    /// A sibling admission held the bounded local limiter.
+    LocalAdmissionLimiter,
+    /// The read-only Contents API was answering slowly.
+    GithubContentsApi,
+    /// The operational store's writer was busy or stalled.
+    OperationalStoreWriter,
+    /// The host had no admissible disk budget yet.
+    HostDiskCapacity,
+}
+
+impl WaitReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalAdmissionLimiter => "local_admission_limiter",
+            Self::GithubContentsApi => "github_contents_api",
+            Self::OperationalStoreWriter => "operational_store_writer",
+            Self::HostDiskCapacity => "host_disk_capacity",
+        }
+    }
+}
+
+fn action_admission_limiter() -> Arc<Semaphore> {
     Arc::clone(
-        OPERATIONAL_ADMISSION_PERMITS
-            .get_or_init(|| Arc::new(Semaphore::new(OPERATIONAL_ADMISSION_BLOCKING_PERMITS))),
+        ACTION_ADMISSION_LIMITER
+            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_CONCURRENCY))),
     )
 }
 
-fn action_admission_permits() -> Arc<Semaphore> {
-    Arc::clone(
-        ACTION_ADMISSION_PERMITS
-            .get_or_init(|| Arc::new(Semaphore::new(ACTION_ADMISSION_BLOCKING_PERMITS))),
-    )
+/// Wait — never fail — for one of the bounded read-only admission slots.
+///
+/// Returns the permit and how long the caller waited. `Err` carries the wait
+/// that exhausted the budget, which is a bounded, explainable deadline rather
+/// than the old "a neighbour is busy, fail this job" rejection.
+async fn acquire_action_admission_slot(
+    budget: Duration,
+) -> std::result::Result<(tokio::sync::OwnedSemaphorePermit, Duration), Duration> {
+    let started = Instant::now();
+    match tokio::time::timeout(budget, action_admission_limiter().acquire_owned()).await {
+        Ok(permit) => Ok((
+            permit.expect("the action admission limiter is never closed"),
+            started.elapsed(),
+        )),
+        Err(_elapsed) => Err(started.elapsed()),
+    }
+}
+
+/// Wall-clock start of a stage, in Unix milliseconds, so an operator can line
+/// a wait up against GitHub's own timeline.
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since_epoch| u64::try_from(since_epoch.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Structured fields for one non-executing stage. `cause` and `ms` satisfy the
+/// `passive_wait` contract; `stage`, `wait_reason` and `stage_started_unix_ms`
+/// make the wait attributable without parsing any log line.
+fn stage_wait_telemetry_fields(
+    stage: JobStage,
+    reason: WaitReason,
+    waited_ms: u64,
+    stage_started_unix_ms: u64,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("cause".to_owned(), Value::from(stage.as_str())),
+        (
+            "ms".to_owned(),
+            Value::from(waited_ms.min(MAX_TELEMETRY_DURATION_MS)),
+        ),
+        ("stage".to_owned(), Value::from(stage.as_str())),
+        ("wait_reason".to_owned(), Value::from(reason.as_str())),
+        (
+            "stage_started_unix_ms".to_owned(),
+            Value::from(stage_started_unix_ms),
+        ),
+    ])
+}
+
+fn emit_stage_wait_telemetry(
+    admission: Option<&crate::ops::JobAdmission>,
+    stage: JobStage,
+    reason: WaitReason,
+    waited_ms: u64,
+    stage_started_unix_ms: u64,
+) {
+    let (Some(sink), Some(admission)) = (crate::ops::global(), admission) else {
+        return;
+    };
+    let _ = sink.emit_telemetry_for_admission(
+        admission,
+        TelemetryEvent::PassiveWait,
+        stage_wait_telemetry_fields(stage, reason, waited_ms, stage_started_unix_ms),
+    );
+}
+
+/// Run one job body on a dedicated OS thread owned by this slot.
+///
+/// A job runs for minutes to hours. Tokio's blocking pool is sized for the
+/// control plane — millisecond SQLite writes, Docker sweeps, teardown joins,
+/// read-only admission fetches — and a job body parked there is
+/// indistinguishable from a hung control-plane worker. That shared pool is
+/// what made fail-closed admission permits look like the only defence against
+/// queueing behind long work; giving execution its own thread removes the
+/// condition instead of rationing the symptom.
+///
+/// One slot process executes one job at a time, so this is exactly one thread
+/// per slot. The thread outlives an aborted await the same way an in-flight
+/// `spawn_blocking` task does; `Runtime::shutdown_timeout` in `main` still
+/// bounds daemon shutdown, and a lost sender surfaces here as an error rather
+/// than a hang.
+async fn run_on_job_execution_thread<F, T>(job_id: &str, body: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (sender, receiver) = oneshot::channel();
+    std::thread::Builder::new()
+        .name(format!("velnor-job-{job_id}"))
+        .spawn(move || {
+            let _ = sender.send(body());
+        })
+        .context("spawn the dedicated job execution thread")?;
+    receiver
+        .await
+        .context("job execution thread ended without a result (panicked or was killed)")
 }
 
 async fn persist_admission_on_blocking_pool(
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
 ) -> AdmissionPersistenceOutcome {
-    persist_admission_on_blocking_pool_with(sink, admission, |sink, admission| {
-        sink.record_admission(&admission)
-    })
+    persist_admission_on_blocking_pool_with(
+        sink,
+        admission,
+        OPERATIONAL_ADMISSION_TIMEOUT,
+        |sink, admission| sink.record_admission(&admission),
+    )
     .await
 }
 
 async fn persist_admission_on_blocking_pool_with<F>(
     sink: Arc<crate::ops::OpsSink>,
     admission: crate::ops::JobAdmission,
+    deadline: Duration,
     persist: F,
 ) -> AdmissionPersistenceOutcome
 where
     F: FnOnce(Arc<crate::ops::OpsSink>, crate::ops::JobAdmission) -> bool + Send + 'static,
 {
-    let permits = operational_admission_permits();
-    // Admission is a pre-execution gate. Queueing an acquired job behind a
-    // stuck SQLite worker would hold the run-service lease without bounded
-    // progress, so fail closed when the single writer is busy.
-    let Ok(permit) = permits.try_acquire_owned() else {
-        return AdmissionPersistenceOutcome::InfrastructureFailure;
+    // `Store` is already a single-writer boundary (connection mutex + WAL +
+    // busy_timeout) and the blocking pool is explicitly sized, so a busy
+    // writer is something to wait for, not a reason to fail an acquired job.
+    // The stage is bounded by a deadline: only a store that cannot answer
+    // within it is an infrastructure failure.
+    let stage_started_unix_ms = unix_millis_now();
+    let started = Instant::now();
+    let telemetry_admission = admission.clone();
+    let worker = tokio::task::spawn_blocking(move || persist(sink, admission));
+    let outcome = match tokio::time::timeout(deadline, worker).await {
+        Ok(Ok(true)) => AdmissionPersistenceOutcome::Accepted,
+        Ok(Ok(false)) => AdmissionPersistenceOutcome::Rejected,
+        Ok(Err(_join_error)) => AdmissionPersistenceOutcome::InfrastructureFailure,
+        Err(_elapsed) => AdmissionPersistenceOutcome::DeadlineExceeded,
     };
-    match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        persist(sink, admission)
-    })
-    .await
-    {
-        Ok(true) => AdmissionPersistenceOutcome::Accepted,
-        Ok(false) => AdmissionPersistenceOutcome::Rejected,
-        Err(_join_error) => AdmissionPersistenceOutcome::InfrastructureFailure,
-    }
+    emit_stage_wait_telemetry(
+        Some(&telemetry_admission),
+        JobStage::OperationalAdmission,
+        WaitReason::OperationalStoreWriter,
+        duration_ms(started.elapsed()),
+        stage_started_unix_ms,
+    );
+    outcome
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,9 +355,17 @@ enum V2MessageAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunServiceJobJournalState {
     /// The run-service job was acquired, but local admission is not durable.
-    /// Only a terminal failure may use the direct completion path in this state.
+    /// The current acquisition response is the proof needed to promote the
+    /// exact provisional row before a terminal completion is sent.
     Acquired,
     Accepted,
+    /// Recovery found the durable acquisition intent, but the crashed worker's
+    /// acquire response is not proof available to this process. `renewjob`
+    /// must prove ownership before promotion.
+    Provisional,
+    /// The marker has no durable ownership proof. Completion must stop before
+    /// transport and leave the marker for a later reconciliation.
+    Unproven,
 }
 
 #[derive(Clone)]
@@ -290,27 +461,287 @@ fn in_flight_job_path(config_dir: &Path) -> PathBuf {
     config_dir.join("in-flight-job.json")
 }
 
-fn accept_run_service_job_in_journal(
+/// A provisional acquisition is keyed by the broker request until the acquire
+/// reply names the run-service job. That request id is the only identity that
+/// exists before the call.
+fn provisional_job_id(runner_request_id: &str) -> velnor_model::JobId {
+    velnor_model::JobId(runner_request_id.to_owned())
+}
+
+/// Open the fleet journal and locate this runner's slot.
+///
+/// `Ok(None)` means this runner has no journal-managed slot — a configless
+/// runner has no slots at all — and every acquisition step is then a no-op,
+/// exactly as journal acceptance has always been.
+fn open_slot_journal(
     journal_dir: &Path,
     config_dir: &Path,
-    github_job_id: &str,
-) -> Result<()> {
-    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+    what: &str,
+) -> Result<Option<(velnor_control::journal::Journal, velnor_model::SlotId)>> {
+    // A configless runner has no journal-managed slots. In particular, do not
+    // create an absolute/default config path just because a broker message
+    // arrived; that would turn a harmless no-slot path into a filesystem
+    // failure in read-only environments.
+    if !config_dir.is_dir() {
+        return Ok(None);
+    }
+    // Acquisition intent is written before the first run-service request. The
+    // first request can therefore be the process that creates the configured
+    // journal directory; leaving that to later slot setup reopens the exact
+    // crash window this journal is meant to close.
+    fs::create_dir_all(journal_dir)
+        .with_context(|| format!("create journal directory {}", journal_dir.display()))?;
+    let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let state = journal
         .materialized_state()
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     if state.slots.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let slot_id = crate::node::complete::infer_slot_id(&journal, config_dir)
-        .ok_or_else(|| anyhow::anyhow!("no slot accepted GitHub job {github_job_id}"))?;
-    crate::node::complete::accept_job(
+        .ok_or_else(|| anyhow::anyhow!("no slot is available to {what}"))?;
+    Ok(Some((journal, slot_id)))
+}
+
+/// Occupy the slot *before* `acquirejob` is called.
+///
+/// This is the write that closes the lost-acquisition window: a crash between
+/// the request and its reply used to leave no local record at all, so the job
+/// was lost until its lease expired. The row is not ownership — it cannot back
+/// a completion — it is evidence that this runner may already hold the job.
+fn intend_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    message_id: &str,
+    run_service_url: &str,
+) -> Result<()> {
+    let Some((mut journal, slot_id)) =
+        open_slot_journal(journal_dir, config_dir, "intend a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    crate::node::complete::intend_acquisition(
         &mut journal,
-        &velnor_model::JobId(github_job_id.to_owned()),
+        &provisional_job_id(runner_request_id),
         &slot_id,
+        message_id,
+        run_service_url,
+        unix_epoch_now(),
     )?;
     Ok(())
+}
+
+/// Retarget the provisional row onto the identity the acquire reply named.
+///
+/// Done as soon as the identity is known and before the job message is even
+/// parsed, because this is what makes the row probeable: until the plan id is
+/// durable, no `renewjob` call can be built for it.
+fn resolve_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let Some((mut journal, _)) =
+        open_slot_journal(journal_dir, config_dir, "resolve a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    let provisional = provisional_job_id(runner_request_id);
+    let generation = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == provisional)
+        .map(|job| job.generation)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no acquisition intent exists for broker request {runner_request_id}")
+        })?;
+    crate::node::complete::resolve_acquisition(
+        &mut journal,
+        &provisional,
+        &velnor_model::JobId(identity.job_id.clone()),
+        &identity.plan_id,
+        generation,
+    )
+}
+
+/// Drop a provisional row the run service says is gone, freeing the slot now
+/// instead of at the next restart.
+fn abandon_run_service_acquisition_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    reason: &str,
+) -> Result<()> {
+    let Some((mut journal, _)) =
+        open_slot_journal(journal_dir, config_dir, "abandon a run-service acquisition")?
+    else {
+        return Ok(());
+    };
+    let provisional = provisional_job_id(runner_request_id);
+    let Some(generation) = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == provisional && job.provisional)
+        .map(|job| job.generation)
+    else {
+        return Ok(());
+    };
+    crate::node::complete::abandon_acquisition(&mut journal, &provisional, generation, reason)
+}
+
+/// Ask the run service whether a provisional row is really ours.
+///
+/// `renewjob` is the oracle, and the only one available: it succeeds for the
+/// lease holder and nobody else, which is exactly the discrimination recovery
+/// needs. The 409 from `acquirejob` cannot serve here — upstream's
+/// `RunServiceError` carries `source`, `statusCode` and `errorMessage` and no
+/// runner identity, so a conflict cannot tell "we acquired this and crashed"
+/// from "another runner has it".
+///
+/// Only a typed 404 is a definite "not ours". Transport failure, 5xx, auth
+/// trouble and an unparseable 2xx all leave ownership unproven, and an
+/// indeterminate verdict deliberately changes nothing: promoting a job we may
+/// not own would let two runners publish a terminal result for it, and dropping
+/// one we do own would strand it until its lease expired.
+async fn probe_provisional_acquisition(
+    run_service: &RunServiceClient,
+    row: &velnor_control::journal::JobRecord,
+) -> crate::node::complete::AcquisitionVerdict {
+    use crate::node::complete::AcquisitionVerdict;
+
+    match run_service
+        .renew_job(&row.run_service_url, &row.plan_id, &row.job_id.0)
+        .await
+    {
+        Ok(_) => AcquisitionVerdict::Owned,
+        Err(error) if renew_failure_is_job_gone(&error) => AcquisitionVerdict::NotOurs,
+        Err(error) => {
+            eprintln!(
+                "Acquisition probe for job {} reached no verdict; leaving the row for the next attempt: {}",
+                row.job_id.0,
+                sanitized_retry_error(&error)
+            );
+            AcquisitionVerdict::Indeterminate
+        }
+    }
+}
+
+/// Settle every acquisition a crash left unproven, once, at slot startup.
+///
+/// Probing is bounded by the row's durable budget, because `renewjob` extends
+/// the lease as a side effect: a job this node owns but can never execute must
+/// not have its lease renewed on every restart forever.
+async fn resolve_provisional_acquisitions_at_startup(
+    journal_dir: &Path,
+    config_dir: &Path,
+    run_service: &RunServiceClient,
+    forensics: &mut SlotForensics,
+) {
+    let opened = match open_slot_journal(
+        journal_dir,
+        config_dir,
+        "resolve unproven run-service acquisitions",
+    ) {
+        Ok(Some(opened)) => opened,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!(
+                "Warning: could not open the journal to resolve unproven acquisitions: {}",
+                sanitized_retry_error(&error)
+            );
+            return;
+        }
+    };
+    let (mut journal, _) = opened;
+    let pending: Vec<velnor_control::journal::JobRecord> = match journal.materialized_state() {
+        Ok(state) => state
+            .jobs
+            .into_iter()
+            .filter(|job| job.provisional)
+            .collect(),
+        Err(error) => {
+            eprintln!("Warning: could not read unproven acquisitions: {error}");
+            return;
+        }
+    };
+    if pending.is_empty() {
+        return;
+    }
+    // The probe closure the journal drives must be synchronous, so ask the run
+    // service first and hand the recorded answers over. Only rows that are
+    // still probeable are asked: a row past its budget, or one the acquire
+    // reply never named, is settled by the journal without a renewal.
+    let now = unix_epoch_now();
+    let mut verdicts: std::collections::HashMap<String, crate::node::complete::AcquisitionVerdict> =
+        std::collections::HashMap::new();
+    for row in pending {
+        if row.plan_id.is_empty() || row.probe_budget_exhausted(now) {
+            continue;
+        }
+        verdicts.insert(
+            row.job_id.0.clone(),
+            probe_provisional_acquisition(run_service, &row).await,
+        );
+    }
+    let resolved =
+        crate::node::complete::resolve_provisional_acquisitions(&mut journal, now, |row| {
+            verdicts
+                .get(&row.job_id.0)
+                .copied()
+                .unwrap_or(crate::node::complete::AcquisitionVerdict::Indeterminate)
+        });
+    match resolved {
+        Ok(resolved) => {
+            for outcome in resolved {
+                let note = format!(
+                    "acquisition {} resolved: verdict={:?} abandoned={}",
+                    outcome.job_id.0, outcome.verdict, outcome.abandoned
+                );
+                println!("{note}");
+                forensics.lifecycle(&note);
+            }
+        }
+        Err(error) => eprintln!(
+            "Warning: resolving unproven acquisitions failed: {}",
+            sanitized_retry_error(&error)
+        ),
+    }
+}
+
+/// Promote the retargeted row to ownership. The run-service acquire path
+/// reaches ownership only through the intent, so it never calls `accept_job`.
+fn accept_run_service_job_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    github_job_id: &str,
+) -> Result<()> {
+    let Some((mut journal, slot_id)) = open_slot_journal(
+        journal_dir,
+        config_dir,
+        &format!("accept GitHub job {github_job_id}"),
+    )?
+    else {
+        return Ok(());
+    };
+    let job_id = velnor_model::JobId(github_job_id.to_owned());
+    let generation = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .iter()
+        .find(|job| job.job_id == job_id)
+        .map(|job| job.generation)
+        .ok_or_else(|| {
+            anyhow::anyhow!("no acquisition row exists for GitHub job {github_job_id}")
+        })?;
+    crate::node::complete::confirm_acquisition(&mut journal, &job_id, &slot_id, generation)
 }
 
 fn persist_in_flight_job(
@@ -461,15 +892,15 @@ fn clear_in_flight_job_if_matches(config_dir: &Path, job_id: &str) -> Result<boo
 
 fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJobJournalState {
     let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db")) else {
-        return RunServiceJobJournalState::Accepted;
+        return RunServiceJobJournalState::Unproven;
     };
     let Ok(state) = journal.materialized_state() else {
-        return RunServiceJobJournalState::Accepted;
+        return RunServiceJobJournalState::Unproven;
     };
-    if state.jobs.iter().any(|job| job.job_id.0 == job_id) {
-        RunServiceJobJournalState::Accepted
-    } else {
-        RunServiceJobJournalState::Acquired
+    match state.jobs.iter().find(|job| job.job_id.0 == job_id) {
+        Some(job) if job.provisional => RunServiceJobJournalState::Provisional,
+        Some(_) => RunServiceJobJournalState::Accepted,
+        None => RunServiceJobJournalState::Unproven,
     }
 }
 
@@ -757,29 +1188,51 @@ pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String
     Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
 }
 
+/// One completed job's durations, as written to the typed `job-timing.jsonl`
+/// sink and read back by the doctor SLOs.
+///
+/// Every duration that a code path may not have measured is `Option<u64>`, and
+/// `None` means "not measured" — never `0`. A zero placeholder is not a neutral
+/// default here: it is the fastest possible sample, so it drags a percentile
+/// down and turns an unmeasurable SLO into a permanently satisfied one.
+/// `pickup_ms` and `finalize_ms` stay unconditional because both are measured
+/// on every path that builds a record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct JobTimingRecord {
     v: u8,
     job_id: String,
+    /// Job completion time, the sort key for the SLO window. Typed, so the
+    /// reader never has to parse a timestamp out of a log line prefix.
+    #[serde(default)]
+    completed_at: String,
     #[serde(default)]
     queue_ms: Option<u64>,
     #[serde(default)]
     queue_to_first_step_ms: Option<u64>,
     pickup_ms: u64,
-    first_step_ms: u64,
-    checkout_ms: u64,
-    container_boot_ms: u64,
-    steps_ms: u64,
+    #[serde(default)]
+    first_step_ms: Option<u64>,
+    #[serde(default)]
+    checkout_ms: Option<u64>,
+    #[serde(default)]
+    container_boot_ms: Option<u64>,
+    #[serde(default)]
+    steps_ms: Option<u64>,
     finalize_ms: u64,
-    teardown_ms: u64,
+    /// Filled in by the post-completion teardown thread once teardown actually
+    /// finishes. `None` on the paths that have no teardown to run.
+    #[serde(default)]
+    teardown_ms: Option<u64>,
 }
 
+/// Durations an execution backend measured. A backend that does not measure a
+/// phase reports `None` rather than `0`; see [`JobTimingRecord`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ExecutionTimings {
-    first_step_ms: u64,
-    checkout_ms: u64,
-    container_boot_ms: u64,
-    steps_ms: u64,
+    first_step_ms: Option<u64>,
+    checkout_ms: Option<u64>,
+    container_boot_ms: Option<u64>,
+    steps_ms: Option<u64>,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -1765,11 +2218,21 @@ fn select_runner_storage_layout_from(
     }
 }
 
+fn resolve_run_trust_scope(args: &mut RunArgs) {
+    args.trust_scope = crate::trust_scope::resolve(&args.trust_scope).into_string();
+}
+
 async fn run_with_jit_prewarmer(
-    args: RunArgs,
+    mut args: RunArgs,
     prewarm_trigger: Option<oneshot::Sender<()>>,
     storage_mode: RunnerStorageMode,
 ) -> Result<()> {
+    // Node/job workers bypass the service CLI conversion, so establish the
+    // process-local trust boundary before any store or capability path runs.
+    // Keep the write-once winner in the owned args too: a later invocation in
+    // this process must not widen capabilities by carrying a different value.
+    resolve_run_trust_scope(&mut args);
+
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -2407,8 +2870,8 @@ async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
 const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Returns a problem description when any of the slot's writable roots is
-/// low on space. Best-effort (`df` failures are treated as healthy — a
-/// broken probe must not park the fleet).
+/// low on space. An unmeasurable root is also a problem: admission cannot
+/// prove that the next job has its required disk budget.
 fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<String> {
     let mut roots: Vec<&Path> = vec![config_base];
     if let Some(work_dir) = work_dir {
@@ -2433,9 +2896,16 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
         }
     }
     for root in roots {
-        if let Some(free) = free_space_bytes(root)
-            && free < DISK_MIN_FREE_BYTES
-        {
+        let free = match free_space_bytes(root) {
+            Some(free) => free,
+            None => {
+                return Some(format!(
+                    "cannot measure disk space at {}; refusing admission",
+                    root.display()
+                ));
+            }
+        };
+        if free < DISK_MIN_FREE_BYTES {
             let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
             let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
             if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
@@ -2451,7 +2921,15 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
                 .map(|file| file.backend())
                 .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
             let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
-            let free = free_space_bytes(root).unwrap_or(free);
+            let free = match free_space_bytes(root) {
+                Some(free) => free,
+                None => {
+                    return Some(format!(
+                        "cannot remeasure disk space at {}; refusing admission",
+                        root.display()
+                    ));
+                }
+            };
             if free < DISK_MIN_FREE_BYTES {
                 return Some(format!(
                     "low disk space at {} ({} MiB free, need {} MiB)",
@@ -2465,22 +2943,12 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     None
 }
 
-/// Free bytes on the filesystem holding `path`, via `df -Pk` (POSIX output,
-/// no extra crate). `None` when the probe itself fails.
+/// Free bytes on the filesystem holding `path`, via the bounded `statvfs`
+/// authority shared by disk admission. `None` means the probe failed.
 fn free_space_bytes(path: &Path) -> Option<u64> {
-    let probe = if path.exists() {
-        path
-    } else {
-        path.parent().filter(|parent| parent.exists())?
-    };
-    let output = Command::new("df").arg("-Pk").arg(probe).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().nth(1)?;
-    let available_kib: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
-    Some(available_kib * 1024)
+    crate::host_capacity::HostCapacity::probe(path)
+        .ok()
+        .map(|capacity| capacity.available_bytes)
 }
 
 /// Classify an operator-supplied GitHub token. `None` means the shape is
@@ -2549,6 +3017,12 @@ pub(crate) async fn run_daemon_slot(
 
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
+    // Disk pressure is a bounded state machine rather than an indefinite park.
+    // The slot reclaims, then refuses admission against a deadline, then drains
+    // — it never sleeps and retries forever with no terminal state.
+    let disk_root = args.work_dir.clone().unwrap_or_else(|| config_base.clone());
+    let mut disk_pressure =
+        crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
     loop {
         if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
@@ -2569,15 +3043,80 @@ pub(crate) async fn run_daemon_slot(
         }
         if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
             // Registering runners whose jobs are doomed (and whose curl
-            // transport needs temp files) only burns API budget — park.
-            let message = format!("daemon slot-{slot_index} parked: {note}");
-            eprintln!("{message}");
-            crate::sd_notify::status(&message);
-            daemon_forensic_log(&config_base, &message);
-            if sleep_slot_retry_or_drain(Duration::from_secs(60)).await {
-                continue;
+            // transport needs temp files) only burns API budget. Which of
+            // refuse, drain or deregister that means is the policy's decision,
+            // and every one of them is bounded.
+            let action = match crate::host_capacity::HostCapacity::probe(&disk_root) {
+                Ok(capacity) => disk_pressure.observe(
+                    capacity.available_bytes,
+                    unix_millis_now().saturating_div(1_000),
+                ),
+                Err(error) => {
+                    // An unmeasurable host is not a healthy one, and it is also
+                    // not evidence for escalating. Refuse for one interval and
+                    // re-measure.
+                    eprintln!(
+                        "daemon slot-{slot_index}: cannot measure free space, refusing admission for now: {error:#}"
+                    );
+                    crate::host_capacity::DiskAction::RefuseUntil {
+                        remaining: Duration::from_secs(60),
+                    }
+                }
+            };
+            match action {
+                crate::host_capacity::DiskAction::Admit => {}
+                crate::host_capacity::DiskAction::Reclaim => {
+                    let message = format!("daemon slot-{slot_index} reclaiming disk: {note}");
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    let report = crate::cache::reclaim_for_disk_pressure(
+                        crate::host_capacity::DEFAULT_MIN_FREE_BYTES,
+                    );
+                    daemon_forensic_log(
+                        &config_base,
+                        &format!(
+                            "daemon slot-{slot_index} reclaim freed {} bytes",
+                            report.freed_bytes
+                        ),
+                    );
+                    continue;
+                }
+                crate::host_capacity::DiskAction::RefuseUntil { remaining } => {
+                    // The operator is told how long the slot will keep refusing
+                    // before it sheds itself, which is the difference between a
+                    // bounded wait and a mystery.
+                    let message = format!(
+                        "daemon slot-{slot_index} refusing jobs for lack of disk, draining in {}s: {note}",
+                        remaining.as_secs()
+                    );
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    let nap = remaining.min(Duration::from_secs(60));
+                    sleep_slot_retry_or_drain(nap).await;
+                    continue;
+                }
+                crate::host_capacity::DiskAction::Drain
+                | crate::host_capacity::DiskAction::Deregister => {
+                    let message = format!(
+                        "daemon slot-{slot_index} draining: disk stayed below the floor past the deadline: {note}"
+                    );
+                    eprintln!("{message}");
+                    crate::sd_notify::status(&message);
+                    daemon_forensic_log(&config_base, &message);
+                    cleanup_failed_daemon_slot(
+                        &args,
+                        &config_base,
+                        slot_index,
+                        slots,
+                        cycle,
+                        &durable_slot,
+                    )
+                    .await;
+                    return Ok(());
+                }
             }
-            continue;
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         if !args.once {
@@ -3817,10 +4356,13 @@ fn daemon_preflight_args(
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
-    if slots == 0 {
-        bail!("--slots must be greater than zero");
-    }
+    validated_slot_count(slots)?;
     Ok(slots)
+}
+
+fn validated_slot_count(slots: usize) -> Result<NonZeroU32> {
+    let slots = u32::try_from(slots).context("--slots exceeds the supported u32 range")?;
+    NonZeroU32::new(slots).ok_or_else(|| anyhow::anyhow!("--slots must be greater than zero"))
 }
 
 fn maybe_startup_host_docker_reclaim(
@@ -3857,7 +4399,8 @@ fn maybe_startup_host_docker_reclaim_with(
     // their guest siblings) orphaned by the previous drain/restart. Runs
     // before any slot accepts a job, so nothing this boot created can be
     // matched; scoped to THIS daemon id so co-located daemons are
-    // untouched. Best-effort — never blocks startup (velnor#311).
+    // untouched. Best-effort — bounded so a stalled daemon cannot wedge
+    // startup (velnor#311).
     if let Err(error) = reclaim(daemon_id) {
         eprintln!(
             "Warning: startup orphan job-environment reclaim failed: {}",
@@ -3876,10 +4419,17 @@ fn maybe_startup_host_docker_reclaim_with(
 /// stopped stale containers can be cleaned.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
-        std::process::Command::new("docker")
-            .args(args)
-            .output()
+        let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
+            .1
+            .min(STARTUP_DOCKER_CLEANUP_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
             .ok()
+            .map(|stdout| std::process::Output {
+                status: success_exit_status(),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
     };
     let ids_from = |args: &[&str]| -> Vec<String> {
         docker(args)
@@ -3897,8 +4447,19 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     // startup receives the shared work root. Docker's label filter is exact,
     // so filtering for the shared root silently missed every multi-slot
     // container after a crash or package restart. Inspect the bounded
-    // `velnor-job` set and accept the shared root plus its direct slot roots.
-    let containers = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"])
+    // `velnor-job` and transient `velnor-mise-seed` sets are label-checked
+    // below. Accepting only these runner-owned names keeps co-located Docker
+    // workloads outside the reclaim candidate set.
+    let mut container_ids = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    container_ids.extend(ids_from(&[
+        "ps",
+        "-aq",
+        "--filter",
+        "name=velnor-mise-seed",
+    ]));
+    container_ids.sort();
+    container_ids.dedup();
+    let containers = container_ids
         .into_iter()
         .filter(|id| {
             docker(&[
@@ -3918,7 +4479,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         args.extend(containers.iter().cloned());
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
-            "Pruned {} stale velnor-job container(s) at startup.",
+            "Pruned {} stale Velnor container(s) at startup.",
             containers.len()
         );
     }
@@ -3983,6 +4544,9 @@ const EMPTY_JOB_NETWORK_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 /// Bound every Docker CLI invocation of the sweep: a stalled dockerd must
 /// never park an idle slot's broker poll loop indefinitely.
 const EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
+/// Startup cleanup runs before slots accept jobs, but a wedged Docker daemon
+/// must still not make daemon registration unbounded.
+const STARTUP_DOCKER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Remove this daemon's `velnor-net-*` networks that no longer have any
 /// attached container. Reconciliation runs while the daemon serves jobs — not
@@ -4003,16 +4567,19 @@ fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
         // Bounded execution: the sweep runs beside the async broker poll loop,
         // so an unbounded Docker CLI wait there would also stall message
         // polling, credential refresh, and drain observation for the slot.
-        crate::docker_lease::run_host_docker_bounded(
-            &owned,
-            crate::docker_lease::docker_cli_timeout(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT),
-        )
-        .ok()
-        .map(|stdout| std::process::Output {
-            status: success_exit_status(),
-            stdout: stdout.into_bytes(),
-            stderr: Vec::new(),
-        })
+        // The operation class deadline, further capped by the sweep's own
+        // budget: this runs beside the poll loop and must not hold it for the
+        // full class deadline.
+        let deadline = crate::docker::deadline_for(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT)
+            .1
+            .min(EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
+            .ok()
+            .map(|stdout| std::process::Output {
+                status: success_exit_status(),
+                stdout: stdout.into_bytes(),
+                stderr: Vec::new(),
+            })
     })
 }
 
@@ -4126,12 +4693,14 @@ fn daemon_slot_run_args(
     slot_count: usize,
 ) -> Result<RunArgs> {
     validate_daemon_slot_index(slot_index, slot_count)?;
+    let validated_slot_count = validated_slot_count(slot_count)?;
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slot_count);
     let require_docker_socket = crate::execution::load_execution_file(&slot_dir, None)
         .map(|file| file.backend().uses_host_docker_socket())
         .unwrap_or(false);
 
     Ok(RunArgs {
+        slot_count: validated_slot_count,
         config_dir: Some(slot_dir),
         pat: args.pat.clone(),
         max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
@@ -4339,6 +4908,16 @@ async fn run_v2(
         &session_id[..session_id.len().min(8)]
     ));
     forensics.lifecycle("broker session created");
+
+    // Settle anything a previous crash left unproven before this slot takes new
+    // work. Done once per startup, and bounded, because the probe renews leases.
+    resolve_provisional_acquisitions_at_startup(
+        &crate::node::complete::journal_dir_near(&config_dir),
+        &config_dir,
+        &run_service,
+        &mut forensics,
+    )
+    .await;
 
     let mut poll_state = BrokerPollState::default();
     let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
@@ -5141,6 +5720,31 @@ async fn handle_v2_message(
         .run_service_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    // Occupy the slot before asking GitHub for the job. A crash inside the
+    // request used to leave no local record at all — no renewal, no completion,
+    // and the job lost until its lease expired. If the intent cannot be
+    // recorded, do not make the request: an unrecorded acquisition is the exact
+    // failure this write exists to prevent, and the broker redelivers.
+    let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    if let Err(error) = intend_run_service_acquisition_in_journal(
+        &acquisition_journal_dir,
+        config_dir,
+        &reference.runner_request_id,
+        &message.message_id.to_string(),
+        run_service_url,
+    ) {
+        forensics.broker(&format!(
+            "acquire SKIPPED request={} durable intent failed: {}",
+            reference.runner_request_id,
+            sanitized_retry_error(&error)
+        ));
+        eprintln!(
+            "Not acquiring run-service job request {}: the acquisition intent could not be recorded: {}",
+            reference.runner_request_id,
+            sanitized_retry_error(&error)
+        );
+        return Ok(V2MessageAction::None);
+    }
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
     let acquire_result = tokio::select! {
@@ -5196,6 +5800,31 @@ async fn handle_v2_message(
             request_id,
             body,
         } => {
+            // Free the slot only on a *definite* gone, read from the typed body
+            // and never from the outer HTTP status. A 409 says the job is held
+            // and cannot say by whom — upstream's error envelope carries no
+            // runner identity — so it is not proof that this runner did not
+            // acquire the job and then crash. Its row stays for the renewjob
+            // probe, which is the only oracle that can tell.
+            if acquire_reply_is_definitely_gone(&body) {
+                if let Err(error) = abandon_run_service_acquisition_in_journal(
+                    &acquisition_journal_dir,
+                    config_dir,
+                    &reference.runner_request_id,
+                    "the run service reports the broker message is gone",
+                ) {
+                    eprintln!(
+                        "Warning: could not release the acquisition intent for request {}: {}",
+                        reference.runner_request_id,
+                        sanitized_retry_error(&error)
+                    );
+                }
+            } else {
+                println!(
+                    "Leaving the acquisition intent for request {} in place: the acquire reply does not prove this runner lost the job.",
+                    reference.runner_request_id
+                );
+            }
             println!(
                 "Skipping run-service job request {} after non-retriable acquire response: status={}, request_id={}, body={}",
                 reference.runner_request_id,
@@ -5209,7 +5838,18 @@ async fn handle_v2_message(
     };
     let acquired_identity = acquired_job_identity(&job_value)
         .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
-    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    // The reply names the job, so retarget the provisional row now — before the
+    // job message is even parsed. Until the plan id is durable no `renewjob`
+    // call can be built for this row, which is to say the crash window between
+    // here and ownership is the one recovery can actually settle.
+    resolve_run_service_acquisition_in_journal(
+        &acquisition_journal_dir,
+        config_dir,
+        &reference.runner_request_id,
+        &acquired_identity,
+    )
+    .context("retarget the acquisition intent onto the acquired job")?;
+    let journal_dir = acquisition_journal_dir;
     let fallback_run_service_job = RunServiceJobContext {
         client: run_service.clone(),
         run_service_url: run_service_url.to_string(),
@@ -5401,10 +6041,11 @@ async fn handle_job_request(
             const REJECTED_REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
             const WORKER_FAILURE_REASON: &str =
                 "operational store admission worker failed; job failed closed before execution";
-            let reason = if admission_outcome == AdmissionPersistenceOutcome::Rejected {
-                REJECTED_REASON
-            } else {
-                WORKER_FAILURE_REASON
+            const DEADLINE_REASON: &str = "operational store admission exceeded its 30s bounded deadline (wait_reason=operational_store_writer); job failed closed before execution";
+            let reason = match admission_outcome {
+                AdmissionPersistenceOutcome::Rejected => REJECTED_REASON,
+                AdmissionPersistenceOutcome::DeadlineExceeded => DEADLINE_REASON,
+                _ => WORKER_FAILURE_REASON,
             };
             // No admission row exists on either failure path. Writing a
             // JobRejected event would amplify an over-budget store or recurse
@@ -5493,11 +6134,24 @@ async fn handle_job_request(
                 } else {
                     repository_key
                 };
+                // Artifact GC evicts one complete workflow-run bucket. Keep
+                // that exact catalog scope live from acquisition through
+                // teardown, including the gaps between upload actions.
+                let artifact_run_scope = crate::container::sanitize_store_key(&format!(
+                    "{}-{}",
+                    crate::github_adapter::job_variable(&job, "github.run_id")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("local"),
+                    crate::github_adapter::job_variable(&job, "github.run_attempt")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("1")
+                ));
                 let stale_after = Duration::from_secs(24 * 3600);
                 let lease_holder = crate::container::sanitize_store_key(&job.job_id);
                 [
                     ("targets", target_scope),
                     ("actions-cache", actions_cache_scope),
+                    ("artifacts", artifact_run_scope),
                     ("cargo", "registry".into()),
                     ("cargo", "git".into()),
                     ("cargo", cargo_bin_scope),
@@ -5587,23 +6241,29 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             return Err(error);
         }
-        let admission_graph =
-            match admit_job_closure(&job, &early_context, &broker_cancellation.stored).await {
-                Ok(graph) => graph,
-                Err(error) => {
-                    complete_acquired_job_failure(
-                        &run_service_job,
-                        &AcquiredJobIdentity::from_job(&job),
-                        Some(&job),
-                        Some("action_admission".to_string()),
-                        &format!("{error:#}"),
-                    )
-                    .await?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
-                    return Err(error);
-                }
-            };
+        let admission_graph = match admit_job_closure(
+            &job,
+            &early_context,
+            &broker_cancellation.stored,
+            telemetry_admission.as_ref(),
+        )
+        .await
+        {
+            Ok(graph) => graph,
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
+                    Some("action_admission".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                clear_in_flight_job(config_dir)
+                    .context("failed to clear acknowledged in-flight job")?;
+                return Err(error);
+            }
+        };
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
@@ -5627,13 +6287,24 @@ async fn handle_job_request(
             registration_lost.clone(),
         )
         .await?;
+        // One token per job, installed as the active token for the job's whole
+        // scope so every host process spawned under it registers its process
+        // group with the thing that can actually terminate it. The poller
+        // drives this token; the executor reads it, which is what makes
+        // `cancelled()` and the `success()`/`failure()` pair truthful.
+        let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
+        let _job_cancellation_active =
+            crate::execution::cancel::set_active(job_cancellation.clone());
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
             broker_cancellation.disable_update,
-            job.job_id.clone(),
-            job_container_name(&job),
-            canceled.clone(),
+            JobCancellationWatch {
+                job_id: job.job_id.clone(),
+                job_container_name: job_container_name(&job),
+                canceled: canceled.clone(),
+                cancellation: job_cancellation.clone(),
+            },
             broker_cancellation.stored,
         );
 
@@ -5643,6 +6314,7 @@ async fn handle_job_request(
         // backpressure while the run-service renewal keeps the job lease live,
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
+        let capacity_wait_started_unix_ms = unix_millis_now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let ops_job_uid = crate::ops::global().map(|_| job.job_id.clone());
         let mut emitted_pressure = false;
@@ -5682,21 +6354,17 @@ async fn handle_job_request(
                         emitted_pressure = true;
                     }
                     let wait_ms = u64::try_from(sleep.as_millis()).unwrap_or(u64::MAX);
-                    if wait_ms >= 1_000
-                        && let (Some(sink), Some(admission)) =
-                            (crate::ops::global(), telemetry_admission.as_ref())
-                    {
-                        let fields = BTreeMap::from([
-                            (
-                                "cause".to_owned(),
-                                Value::String("host_capacity".to_owned()),
-                            ),
-                            ("ms".to_owned(), Value::from(wait_ms)),
-                        ]);
-                        let _ = sink.emit_telemetry_for_admission(
-                            admission,
-                            TelemetryEvent::PassiveWait,
-                            fields,
+                    if wait_ms >= 1_000 {
+                        // Same structured shape as the two admission stages, so
+                        // "the host had no disk budget" and "a sibling held the
+                        // admission limiter" are distinguishable without parsing
+                        // a log line.
+                        emit_stage_wait_telemetry(
+                            telemetry_admission.as_ref(),
+                            JobStage::HostCapacityWait,
+                            WaitReason::HostDiskCapacity,
+                            wait_ms,
+                            capacity_wait_started_unix_ms,
                         );
                     }
                     eprintln!(
@@ -5864,6 +6532,7 @@ async fn handle_job_request(
         let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
+        let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
         let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
@@ -5880,13 +6549,19 @@ async fn handle_job_request(
         // here so this async control path can emit its one post-execution
         // PlanSummary before sending run-service completion.
         let execution_telemetry_admission = telemetry_admission.clone();
-        let job_result = tokio::task::spawn_blocking(move || {
+        // Recorded the moment the job container exists, so the containers are
+        // torn down however execution ends — including the cancellation path,
+        // which previously produced `teardown: None` and left them running.
+        let teardown_slot: TeardownSlot = Arc::new(Mutex::new(None));
+        let execution_teardown_slot = Arc::clone(&teardown_slot);
+        let job_result = run_on_job_execution_thread(&job.job_id, move || {
             execute_script_job(
                 &config_dir,
                 work_dir,
                 docker_host_work_dir,
                 &docker_image,
                 resource_options,
+                slot_count,
                 &node_action_image,
                 &admission_graph,
                 &trust_scope,
@@ -5899,6 +6574,7 @@ async fn handle_job_request(
                 daemon_id,
                 reserved_bytes,
                 execution_telemetry_admission,
+                &execution_teardown_slot,
             )
         })
         .await;
@@ -5916,10 +6592,33 @@ async fn handle_job_request(
                 )
                 .await;
                 renewal.abort();
+                let teardown_result = if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                    start_failed_execution_teardown(
+                        teardown_config_dir.clone(),
+                        teardown,
+                        forensics.clone(),
+                        job_claim,
+                    )
+                    .await
+                } else {
+                    Ok(())
+                };
+                if let Err(teardown_error) = teardown_result {
+                    let detail = format!(
+                        "job execution thread failed and teardown handoff failed: {teardown_error:#}"
+                    );
+                    eprintln!("Warning: {detail}");
+                    return match completion {
+                        Ok(()) => Err(join_error.context(detail)),
+                        Err(completion_error) => {
+                            Err(completion_error.context(detail).context(join_error))
+                        }
+                    };
+                }
                 completion?;
                 clear_in_flight_job(&teardown_config_dir)
                     .context("failed to clear acknowledged in-flight job")?;
-                return Err(join_error).context("join Docker job execution task");
+                return Err(join_error).context("join Docker job execution thread");
             }
         };
         // Deliberately NOT aborting lock renewal yet: the job lock must stay
@@ -5944,7 +6643,9 @@ async fn handle_job_request(
                         // mirror after the step publishers drain below, so a
                         // canceled job still persists its partial log.
                         step_logs: Vec::new(),
-                        teardown: None,
+                        // The recorded owner, not `None`: a cancelled job still
+                        // has containers to tear down.
+                        teardown: take_teardown_owner(&teardown_slot),
                         timings: ExecutionTimings::default(),
                         executed_physical_actions: None,
                     }
@@ -5964,6 +6665,30 @@ async fn handle_job_request(
                     )
                     .await;
                     renewal.abort();
+                    let teardown_result =
+                        if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                            start_failed_execution_teardown(
+                                teardown_config_dir.clone(),
+                                teardown,
+                                forensics.clone(),
+                                job_claim,
+                            )
+                            .await
+                        } else {
+                            Ok(())
+                        };
+                    if let Err(teardown_error) = teardown_result {
+                        let detail = format!(
+                            "job execution failed and teardown handoff failed: {teardown_error:#}"
+                        );
+                        eprintln!("Warning: {detail}");
+                        return match completion {
+                            Ok(()) => Err(error.context(detail)),
+                            Err(completion_error) => {
+                                Err(completion_error.context(detail).context(error))
+                            }
+                        };
+                    }
                     completion?;
                     clear_in_flight_job(&teardown_config_dir)
                         .context("failed to clear acknowledged in-flight job")?;
@@ -6034,19 +6759,24 @@ async fn handle_job_request(
         let timing_record = JobTimingRecord {
             v: 1,
             job_id: job.job_id.clone(),
+            completed_at: unix_now_iso8601(),
             queue_ms: Some(queue_ms),
-            queue_to_first_step_ms: Some(
+            queue_to_first_step_ms: execution_timings.first_step_ms.map(|first_step_ms| {
                 queue_ms
                     .saturating_add(pickup_ms)
-                    .saturating_add(execution_timings.first_step_ms),
-            ),
+                    .saturating_add(first_step_ms)
+            }),
             pickup_ms,
-            first_step_ms: pickup_ms.saturating_add(execution_timings.first_step_ms),
+            first_step_ms: execution_timings
+                .first_step_ms
+                .map(|first_step_ms| pickup_ms.saturating_add(first_step_ms)),
             checkout_ms: execution_timings.checkout_ms,
             container_boot_ms: execution_timings.container_boot_ms,
             steps_ms: execution_timings.steps_ms,
             finalize_ms,
-            teardown_ms: 0,
+            // Not measured yet: only the teardown thread can fill this in, and
+            // only on a path that has teardown to run.
+            teardown_ms: None,
         };
         if let Some(teardown) = teardown {
             start_post_completion_teardown(
@@ -6057,8 +6787,8 @@ async fn handle_job_request(
                 job_claim,
             )
             .await?;
-        } else if let Ok(json) = serde_json::to_string(&timing_record) {
-            forensics.lifecycle(&format!("job-timing {json}"));
+        } else {
+            record_job_timing(&teardown_config_dir, forensics, &timing_record);
         }
         println!(
             "Job completed with result {:?} and message acknowledged.",
@@ -6477,16 +7207,50 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
     github_api_error_status(error) == Some(404)
 }
 
+/// What the cancellation poller needs to know about the job it is watching, as
+/// opposed to the broker it polls. Grouped so a caller cannot pair one job's id
+/// with another job's cancellation token.
+struct JobCancellationWatch {
+    job_id: String,
+    job_container_name: String,
+    canceled: Arc<AtomicBool>,
+    cancellation: crate::execution::cancel::JobCancellation,
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
     disable_update: bool,
-    job_id: String,
-    job_container_name: String,
-    canceled: Arc<AtomicBool>,
+    watch: JobCancellationWatch,
     stored: StoredRunnerConfig,
 ) -> JoinHandle<()> {
+    let JobCancellationWatch {
+        job_id,
+        job_container_name,
+        canceled,
+        cancellation,
+    } = watch;
     tokio::spawn(async move {
+        // Register the containers the job owns as termination targets, so the
+        // ladder terminates them rather than a separate `docker kill` racing it.
+        //
+        // The eager kill this replaces ran on the line after `request()`, which
+        // SIGKILLed the job container at *request* level — defeating the whole
+        // point of `terminate_at()` sparing it until `Forced` so `always()` and
+        // `cancelled()` post steps can still exec into a live container. Docker
+        // actions run in a sibling sidecar, so both names are registered: the
+        // sidecar first, because it is the current step's own work and dies on
+        // request, while the job container waits for escalation.
+        let _sidecar_target =
+            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+                name: format!("velnor-docker-action-{job_container_name}"),
+                role: crate::execution::cancel::ContainerRole::DockerAction,
+            });
+        let _job_container_target =
+            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+                name: job_container_name.clone(),
+                role: crate::execution::cancel::ContainerRole::Job,
+            });
         let mut broker = broker;
         let mut error_streak: u32 = 0;
         loop {
@@ -6513,7 +7277,8 @@ fn start_broker_cancellation_poll(
                             sanitized_retry_error(&error)
                         );
                         canceled.store(true, Ordering::SeqCst);
-                        kill_job_container(&job_container_name);
+                        cancellation
+                            .request(crate::execution::cancel::CancelReason::RegistrationLost);
                         break;
                     }
                     if is_credential_poll_error(&error) {
@@ -6591,7 +7356,15 @@ fn start_broker_cancellation_poll(
                 continue;
             }
             canceled.store(true, Ordering::SeqCst);
-            kill_job_container(&job_container_name);
+            // The server's own grace, when it sent one, decides how long the
+            // job has before escalation — not a fixed local constant.
+            if let Some(grace) = serde_json::from_str::<JobCancelMessage>(&message.body)
+                .ok()
+                .and_then(|cancel| cancel.grace())
+            {
+                cancellation.set_forced_after(grace);
+            }
+            cancellation.request(crate::execution::cancel::CancelReason::ServerRequested);
             break;
         }
     })
@@ -6797,9 +7570,11 @@ fn start_step_log_publisher(
                     *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
                 }
 
+                let masked_summary = mask_step_summary(&log.summary, &masker);
                 processed.push(ProcessedStepLog {
                     log,
                     lines,
+                    masked_summary,
                     live_chunk,
                 });
             }
@@ -6814,6 +7589,7 @@ fn start_step_log_publisher(
                 }
                 let log = processed_log.log;
                 let lines = processed_log.lines;
+                let masked_summary = processed_log.masked_summary;
 
                 // Send step completion via Twirp Results Service.
                 if let Some(client) = &twirp_client {
@@ -6877,9 +7653,19 @@ fn start_step_log_publisher(
                             );
                         }
                         // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
-                        if !log.summary.is_empty()
+                        // The bytes uploaded here are the MASKED summary: a
+                        // secret echoed into GITHUB_STEP_SUMMARY would
+                        // otherwise land in a durable blob in cleartext.
+                        // Upstream scrubs the file line by line before
+                        // queueing it (Runner.Worker/FileCommandManager.cs:256-267).
+                        if !masked_summary.is_empty()
                             && let Err(e) = client
-                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
+                                .upload_step_summary(
+                                    &plan_id,
+                                    &job_id,
+                                    &log.step_id,
+                                    &masked_summary,
+                                )
                                 .await
                         {
                             eprintln!(
@@ -6913,6 +7699,10 @@ type FeedWebSocket =
 struct ProcessedStepLog {
     log: StepLog,
     lines: Vec<String>,
+    /// `GITHUB_STEP_SUMMARY` content after the same masker that scrubs the
+    /// step log has been applied. The unmasked `log.summary` must never reach
+    /// the Results Service blob.
+    masked_summary: String,
     live_chunk: bool,
 }
 
@@ -7031,6 +7821,205 @@ impl MaskPatterns {
         masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
         Masker::new(masks)
     }
+
+    /// One masker carrying every secret any step registered.
+    ///
+    /// `StepLog.masks` records only what *that* step added — the job's running
+    /// set lives on `JobExecutionState`, which the log does not carry. So
+    /// masking each blob with `with_extra(&log.masks)` masked step three's
+    /// upload with step three's secrets only, and a value masked by an
+    /// `::add-mask::` in step one was uploaded in cleartext while looking
+    /// correctly masked in the live feed.
+    ///
+    /// Masking is a property of the upload, not of the record: a blob leaving
+    /// the process must be masked with everything known by then. The union is
+    /// a superset of any single log's set, so nothing that was masked before
+    /// stops being masked.
+    fn with_every_step(&self, logs: &[StepLog]) -> Masker {
+        let mut masks = self.masks.clone();
+        masks.extend(
+            logs.iter()
+                .flat_map(|log| log.masks.iter())
+                .filter(|mask| !mask.is_empty())
+                .cloned(),
+        );
+        Masker::new(masks)
+    }
+}
+
+/// Every encoding of a secret that the masker must also recognise.
+///
+/// `actions/runner` does not mask the verbatim secret only: `HostContext`
+/// registers eleven value encoders on the one `SecretMasker`
+/// (`Runner.Common/HostContext.cs:103-113`), and `SecretMasker.AddValue`
+/// stores the output of every registered encoder alongside the original
+/// (`Sdk/DTLogging/Logging/SecretMasker.cs`). Every value the masker holds —
+/// job secrets and anything added later by `::add-mask::` — is therefore
+/// masked in all of these forms. Bodies below follow
+/// `Sdk/DTLogging/Logging/ValueEncoders.cs` exactly; encoders that produce an
+/// empty string are dropped, matching `AddValue`'s
+/// `!String.IsNullOrEmpty(encodedValue)` guard.
+fn secret_value_encodings(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    let encoded = [
+        base64_string_escape(value),
+        base64_string_escape_shift(value, 1),
+        base64_string_escape_shift(value, 2),
+        command_line_argument_escape(value),
+        expression_string_escape(value),
+        json_string_escape(value),
+        uri_data_escape(value),
+        xml_data_escape(value),
+        trim_double_quotes(value),
+        power_shell_pre_ampersand_escape(value),
+        power_shell_post_ampersand_escape(value),
+    ];
+    encoded
+        .into_iter()
+        .filter(|form| !form.is_empty() && form != value)
+        .collect()
+}
+
+/// `ValueEncoders.Base64StringEscape`.
+fn base64_string_escape(value: &str) -> String {
+    general_purpose::STANDARD.encode(value.as_bytes())
+}
+
+/// `ValueEncoders.Base64StringEscapeShift1` / `Shift2` via
+/// `Base64StringEscapeShift`. Base64 packs 6 bits per character, so a secret
+/// that follows a prefix of unknown length (`base64(user:password)`) lands on
+/// one of three byte offsets; upstream registers all three.
+fn base64_string_escape_shift(value: &str, shift: usize) -> String {
+    let bytes = value.as_bytes();
+    if bytes.len() > shift {
+        general_purpose::STANDARD.encode(&bytes[shift..])
+    } else {
+        general_purpose::STANDARD.encode(bytes)
+    }
+}
+
+/// `ValueEncoders.CommandLineArgumentEscape`: how environment variables are
+/// escaped on their way to `docker`.
+fn command_line_argument_escape(value: &str) -> String {
+    value.replace('"', "\\\"")
+}
+
+/// `ValueEncoders.ExpressionStringEscape`, i.e.
+/// `Expressions2.Sdk.ExpressionUtility.StringEscape`
+/// (`Sdk/DTExpressions2/Expressions2/Sdk/ExpressionUtility.cs:259-262`).
+fn expression_string_escape(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// `ValueEncoders.JsonStringEscape`: `JsonConvert.ToString` with the wrapping
+/// double quotes removed. Mirrors Newtonsoft's default escape table.
+fn json_string_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{8}' => escaped.push_str("\\b"),
+            '\u{c}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            // Newtonsoft escapes the C0 controls plus NEL and the Unicode
+            // line/paragraph separators as \uXXXX with lower-case hex.
+            c if (c as u32) < 0x20 || c == '\u{85}' || c == '\u{2028}' || c == '\u{2029}' => {
+                escaped.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.UriDataEscape`, i.e. `Uri.EscapeDataString`: everything
+/// outside RFC 3986 unreserved is percent-encoded from its UTF-8 bytes in
+/// upper-case hex. Upstream's segment chunking only works around a .NET size
+/// limit and does not change the output.
+fn uri_data_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                escaped.push(*byte as char);
+            }
+            other => escaped.push_str(&format!("%{other:02X}")),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.XmlDataEscape`, i.e. `SecurityElement.Escape`.
+fn xml_data_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '&' => escaped.push_str("&amp;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// `ValueEncoders.TrimDoubleQuotes`. Not a general trim: it yields the inner
+/// text only for a value longer than eight characters that both starts and
+/// ends with a double quote, and the empty string otherwise.
+fn trim_double_quotes(value: &str) -> String {
+    if value.chars().count() > 8 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// `ValueEncoders.PowerShellPreAmpersandEscape`. PowerShell can split a secret
+/// containing `&` across colour-code boundaries; this covers the leading
+/// section, and refuses to register a section shorter than six characters.
+fn power_shell_pre_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => &value[..index + 2],
+        None => &value[..value.rfind('&').expect("value contains '&'") + 1],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// `ValueEncoders.PowerShellPostAmpersandEscape`, the trailing counterpart.
+/// After `&+` upstream also skips the single character PowerShell colours.
+fn power_shell_post_ampersand_escape(value: &str) -> String {
+    if value.is_empty() || !value.contains('&') {
+        return String::new();
+    }
+    let section = match value.find("&+") {
+        Some(index) => {
+            let after = &value[index + 2..];
+            match after.chars().next() {
+                Some(colored) => &after[colored.len_utf8()..],
+                None => "",
+            }
+        }
+        None => &value[value.rfind('&').expect("value contains '&'") + 1..],
+    };
+    if section.chars().count() >= 6 {
+        section.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 #[derive(Debug)]
@@ -7044,7 +8033,18 @@ impl Masker {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        // Expand every registered value into the encodings upstream's
+        // SecretMasker also holds, so a secret that reaches a sink base64-,
+        // JSON-, URI- or XML-encoded is masked in that form too.
+        let mut masks: Vec<_> = masks
+            .into_iter()
+            .filter(|mask| !mask.is_empty())
+            .flat_map(|mask| {
+                let mut forms = secret_value_encodings(&mask);
+                forms.push(mask);
+                forms
+            })
+            .collect();
         masks.sort();
         masks.dedup();
         let automaton = if masks.is_empty() {
@@ -7089,6 +8089,37 @@ fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String>
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
     job_id: Option<String>,
+    /// Upstream's `JobCancelMessage` carries the grace period alongside the id
+    /// (`src/Sdk/DTWebApi/WebApi/JobCancelMessage.cs`). Velnor discarded it and
+    /// used a fixed delay, so a server that asked for a longer or shorter wind
+    /// down did not get one.
+    #[serde(default, rename = "Timeout", alias = "timeout")]
+    timeout: Option<String>,
+}
+
+impl JobCancelMessage {
+    /// The server-supplied grace as a duration. Upstream serialises a .NET
+    /// `TimeSpan`, so accept both `hh:mm:ss` and a bare number of seconds, and
+    /// treat anything unparseable as absent rather than as zero — a zero grace
+    /// would silently turn a graceful cancellation into an immediate kill.
+    fn grace(&self) -> Option<Duration> {
+        let raw = self.timeout.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        if let Ok(seconds) = raw.parse::<f64>() {
+            return (seconds.is_finite() && seconds >= 0.0)
+                .then(|| Duration::from_secs_f64(seconds));
+        }
+        let mut parts = raw.split(':');
+        let hours: u64 = parts.next()?.parse().ok()?;
+        let minutes: u64 = parts.next()?.parse().ok()?;
+        let seconds: f64 = parts.next()?.parse().ok()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        Some(Duration::from_secs(hours * 3600 + minutes * 60) + Duration::from_secs_f64(seconds))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -7141,31 +8172,6 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
     }
 }
 
-fn kill_job_container(container_name: &str) {
-    // Docker actions run in a sibling sidecar, so killing only the long-lived
-    // job container leaves `docker run` blocked until the action exits. Stop
-    // the exact job-owned sidecar first, then the job container.
-    for name in [
-        format!("velnor-docker-action-{container_name}"),
-        container_name.to_string(),
-    ] {
-        match Command::new("docker").args(["kill", &name]).output() {
-            Ok(output) if output.status.success() => {
-                println!("Killed Docker container {name} after GitHub cancellation.");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("No such container") {
-                    eprintln!("Failed to kill Docker container {name}: {stderr}");
-                }
-            }
-            Err(error) => {
-                eprintln!("Failed to run docker kill for {name}: {error:#}");
-            }
-        }
-    }
-}
-
 /// Counters for the mutable side-effect classes that plan 009 requires to occur
 /// strictly after a job's action closure has been admitted. They start at zero
 /// in `execute_script_job_inner` (admission already succeeded) and only increment
@@ -7191,6 +8197,7 @@ fn execute_script_job(
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
@@ -7203,6 +8210,7 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
@@ -7213,6 +8221,7 @@ fn execute_script_job(
         docker_host_work_dir,
         docker_image,
         resource_options,
+        slot_count,
         node_action_image,
         admission_graph,
         trust_scope,
@@ -7226,8 +8235,10 @@ fn execute_script_job(
         reserved_bytes,
         telemetry_admission,
         execution_backend,
+        teardown_slot,
     );
     if result.is_err()
+        && !has_teardown_owner(teardown_slot)
         && let Err(e) = fs::remove_dir_all(&job_dir)
     {
         eprintln!(
@@ -7298,6 +8309,7 @@ fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     docker_image: &str,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     trust_scope: &str,
     run_service_url: &str,
@@ -7317,6 +8329,7 @@ fn execute_microvm_script_job(
         },
         docker_image,
         Vec::new(),
+        slot_count,
         node_action_image,
         "microvm".into(),
         trust_scope,
@@ -7527,12 +8540,10 @@ fn script_job_result_from_outcome(
         executed_physical_actions: outcome.executed_physical_actions,
         step_logs,
         teardown: None,
-        timings: ExecutionTimings {
-            first_step_ms: 0,
-            checkout_ms: 0,
-            container_boot_ms: 0,
-            steps_ms: 0,
-        },
+        // The microVM backend instruments none of these phases. Reporting
+        // zeroes would feed the doctor's percentiles four of the fastest
+        // possible samples; report "not measured" instead.
+        timings: ExecutionTimings::default(),
     }
 }
 
@@ -7705,6 +8716,7 @@ fn execute_script_job_inner(
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
@@ -7718,18 +8730,25 @@ fn execute_script_job_inner(
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
     execution_backend: velnor_model::ExecutionBackendKind,
+    teardown_slot: &TeardownSlot,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         return execute_microvm_script_job(
             job,
             script_steps,
             docker_image,
+            slot_count,
             node_action_image,
             trust_scope,
             run_service_url,
             billing_owner_id,
         );
     }
+    // Every runner slot is its own process running one job at a time, so this
+    // guard's process-global counters are exactly job scope. It reports the
+    // job's host `docker` invocation count and per-class latency however the
+    // job ends, including every early return below.
+    let _docker_invocations = crate::docker::begin_job(&job.job_id);
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.
@@ -7763,7 +8782,6 @@ fn execute_script_job_inner(
     if repaired > 0 {
         eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
     }
-    seed_mise_store_from_image(docker_image, &mise_store);
     let container = github_job_container_spec(
         job,
         GitHubJobContainerPaths {
@@ -7777,10 +8795,12 @@ fn execute_script_job_inner(
         },
         docker_image,
         resource_options,
+        slot_count,
         node_action_image,
         daemon_id,
         trust_scope,
     )?;
+    seed_mise_store_from_image(&container);
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -7826,7 +8846,7 @@ fn execute_script_job_inner(
     let eager_checkout_plans = eager_checkout_plans
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let git_mirror_store = crate::container::git_mirror_store_host(&temp, trust_scope);
     // Capability validation has already accepted the complete job. Start the
     // Docker environment while checkout performs host-side network and disk
@@ -8021,6 +9041,19 @@ fn execute_script_job_inner(
     let (environment_started, container_boot_duration, environment_lease) =
         precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
+    // Claim teardown ownership before the first fallible execution step. The
+    // environment may have been pre-created or may start lazily; cleanup by
+    // this job's deterministic name is idempotent when no container exists.
+    // This closes the error window before the final ScriptJobResult can return
+    // its owner, including credential-cleanup and service-stop failures.
+    record_teardown_owner(
+        teardown_slot,
+        TeardownHandle {
+            container: plan.execution.job_container.clone(),
+            job_dir: job_dir.to_path_buf(),
+            services_removed: false,
+        },
+    );
     let initialize_containers_log = initialize_containers_step.map(|(step_id, started_at)| {
         let log = StepLog {
             step_id,
@@ -8048,40 +9081,13 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = DockerJobEngine::new(command_runner)
+    let mut executor = DockerJobEngine::inert(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
-    if container.compiler_cache_service {
-        let root = container
-            .compiler_cache_service_root
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("compiler-cache service is enabled without a root"))?;
-        let mut config = velnor_cache_service::CompilerCacheConfig::new(
-            root,
-            format!("{}:{}", container.daemon_id, container.name),
-        );
-        config.trust_class = match container.compiler_cache_trust_class {
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted => {
-                velnor_action_model::TrustClass::Untrusted
-            }
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted => {
-                velnor_action_model::TrustClass::Trusted
-            }
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release => {
-                velnor_action_model::TrustClass::Release
-            }
-        };
-        let service = velnor_cache_service::CompilerCacheService::open_production(
-            config,
-            velnor_cache_service::WrapperDeclaration::default(),
-        )
-        .context("open structured compiler-cache service")?;
-        executor = executor.with_compiler_cache_service(service);
-    }
     // Adopt the pre-create thread's lease guard so the in-container docker
     // socket stays proxied until THIS executor's job cleanup drops it.
     if let Some(lease) = environment_lease {
@@ -8262,7 +9268,7 @@ fn execute_script_job_inner(
                 order: post_order,
             });
         }
-        let mut service_executor = DockerJobEngine::new(command_runner);
+        let mut service_executor = DockerJobEngine::inert(command_runner);
         service_executor.cleanup_services(&plan.execution.job_container)?;
         let stop_log = StepLog {
             step_id: stop_step_id,
@@ -8340,16 +9346,19 @@ fn execute_script_job_inner(
                 .saturating_add(eager_checkout_plans.len()),
         ),
         step_logs: all_step_logs,
-        teardown: Some(TeardownHandle {
-            container: plan.execution.job_container,
-            job_dir: job_dir.to_path_buf(),
-            services_removed,
-        }),
+        teardown: record_teardown_owner(
+            teardown_slot,
+            TeardownHandle {
+                container: plan.execution.job_container,
+                job_dir: job_dir.to_path_buf(),
+                services_removed,
+            },
+        ),
         timings: ExecutionTimings {
-            first_step_ms,
-            checkout_ms: duration_ms(checkout_duration),
-            container_boot_ms,
-            steps_ms,
+            first_step_ms: Some(first_step_ms),
+            checkout_ms: Some(duration_ms(checkout_duration)),
+            container_boot_ms: Some(container_boot_ms),
+            steps_ms: Some(steps_ms),
         },
     })
 }
@@ -8415,14 +9424,17 @@ fn resolve_checkout_plan_context(
     mut plan: CheckoutPlan,
     base_env: &[(String, String)],
     context_data: &[(String, Value)],
-) -> CheckoutPlan {
+) -> Result<CheckoutPlan> {
     if let Some(version) = plan.version.as_mut()
         && !contains_step_output_expression(version)
     {
-        *version =
-            crate::executor::render_expressions_with_context(version, base_env, context_data);
+        *version = crate::executor::render_expressions_with_context_checked(
+            version,
+            base_env,
+            context_data,
+        )?;
     }
-    plan
+    Ok(plan)
 }
 
 fn contains_step_output_expression(value: &str) -> bool {
@@ -8449,6 +9461,38 @@ struct TeardownHandle {
     services_removed: bool,
 }
 
+/// Where the teardown owner is recorded before execution can return an error.
+///
+/// Returning the handle only in `Ok` made cleanup a property of *succeeding*:
+/// a cancelled or failed job took the error path, `teardown` was `None`, and
+/// `start_post_completion_teardown` (or the failed-execution equivalent) was
+/// never called, so the workspace and its containers leaked. Recording it in a
+/// cell the caller also holds makes the cleanup contract independent of how
+/// execution ends.
+type TeardownSlot = Arc<Mutex<Option<TeardownHandle>>>;
+
+/// Record the teardown owner and hand back the same handle for the success
+/// path. The caller reads the slot on every other path, so cleanup runs whether
+/// the job succeeded, failed or was cancelled.
+fn record_teardown_owner(slot: &TeardownSlot, handle: TeardownHandle) -> Option<TeardownHandle> {
+    *slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle.clone());
+    Some(handle)
+}
+
+fn has_teardown_owner(slot: &TeardownSlot) -> bool {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+fn take_teardown_owner(slot: &TeardownSlot) -> Option<TeardownHandle> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 impl TeardownHandle {
     fn run(self, job_claim: &JobClaim, forensics: &SlotForensics) -> Result<()> {
         let TeardownHandle {
@@ -8458,7 +9502,7 @@ impl TeardownHandle {
         } = self;
         // Keep the duplicate-job claim owned by this teardown until every
         // cleanup operation, including BuildKit cleanup, has completed.
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
@@ -8479,7 +9523,7 @@ impl TeardownHandle {
             .name("velnor-buildkit-cleanup".into())
             .spawn(move || -> Result<()> {
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+                let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
                 let result = executor
                     .cleanup_job_buildkit(&worker_container)
                     .context("BuildKit teardown");
@@ -8522,18 +9566,45 @@ async fn start_post_completion_teardown(
     config_dir: PathBuf,
     teardown: TeardownHandle,
     forensics: SlotForensics,
-    mut timing_record: JobTimingRecord,
+    timing_record: JobTimingRecord,
     job_claim: JobClaim,
 ) -> Result<()> {
+    start_teardown_task(
+        config_dir,
+        teardown,
+        forensics,
+        Some(timing_record),
+        job_claim,
+    )
+    .await
+}
+
+async fn start_failed_execution_teardown(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    job_claim: JobClaim,
+) -> Result<()> {
+    start_teardown_task(config_dir, teardown, forensics, None, job_claim).await
+}
+
+async fn start_teardown_task(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    mut timing_record: Option<JobTimingRecord>,
+    job_claim: JobClaim,
+) -> Result<()> {
+    let timing_config_dir = config_dir.clone();
     let task = std::thread::spawn(move || {
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
         loop {
             match teardown.clone().run(&job_claim, &forensics) {
                 Ok(()) => {
-                    timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
-                    if let Ok(json) = serde_json::to_string(&timing_record) {
-                        forensics.lifecycle(&format!("job-timing {json}"));
+                    if let Some(timing_record) = timing_record.as_mut() {
+                        timing_record.teardown_ms = Some(duration_ms(teardown_started.elapsed()));
+                        record_job_timing(&timing_config_dir, &forensics, timing_record);
                     }
                     println!(
                         "forensics.lifecycle event=teardown-done timestamp={}",
@@ -8588,12 +9659,52 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
     let Some(task) = task else {
         return Ok(());
     };
-    tokio::task::spawn_blocking(move || task.join())
-        .await
-        .context("join prior slot teardown task")?
-        .map_err(|panic| anyhow::anyhow!("prior slot teardown task panicked: {panic:?}"))??;
+    // Bounded. The teardown thread retries on its own schedule, so an await
+    // with no deadline let a teardown that never succeeds pin the slot of a job
+    // GitHub had already been told was finished — the one place a *completed*
+    // job could hold a slot indefinitely.
+    //
+    // On expiry the thread is left running: it owns the containers and will
+    // keep trying, and abandoning its handle is strictly better than refusing
+    // to start the next job. What the operator must not get is silence, so the
+    // wait says which slot and how long it waited.
+    let joined = tokio::time::timeout(
+        PRIOR_TEARDOWN_JOIN_DEADLINE,
+        tokio::task::spawn_blocking(move || task.join()),
+    )
+    .await;
+    match joined {
+        Ok(joined) => {
+            joined
+                .context("join prior slot teardown task")?
+                .map_err(|panic| {
+                    anyhow::anyhow!("prior slot teardown task panicked: {panic:?}")
+                })??;
+        }
+        Err(_) => {
+            let message = format!(
+                "prior slot teardown for {} did not finish within {}s; continuing without it, \
+                 its containers may still be present",
+                config_dir.display(),
+                PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs()
+            );
+            eprintln!("{message}");
+            tracing::warn!(
+                target: "velnor.teardown",
+                slot_dir = %config_dir.display(),
+                waited_s = PRIOR_TEARDOWN_JOIN_DEADLINE.as_secs(),
+                "prior slot teardown exceeded its join deadline"
+            );
+        }
+    }
     Ok(())
 }
+
+/// How long a slot waits for the previous job's teardown before starting work.
+///
+/// Generous, because a legitimate teardown of a large workspace takes time, and
+/// bounded, because a completed job must never hold a slot forever.
+const PRIOR_TEARDOWN_JOIN_DEADLINE: Duration = Duration::from_secs(300);
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
@@ -8617,7 +9728,7 @@ struct PrecreatedJobEnvironment {
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         Self::spawn_with(container, |container| {
-            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
             // Hand the guard out of the thread-local executor BEFORE it is
             // dropped; the running container keeps using the proxied socket.
@@ -8690,7 +9801,7 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::inert(ProcessCommandRunner);
         // Hand the pre-create thread's guard to the cleanup executor: its
         // cleanup drops the guard only AFTER the abandoned environment's
         // container is removed, so the proxy never dies under a live mount.
@@ -8963,25 +10074,75 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
 /// repository token and admits every root (local and remote), recursing nested
 /// local and remote closures. Replaces the former flat + local-only preflight
 /// split; planning consumes the returned graph and never re-resolves identity.
+///
+/// Closure admission is read-only, so a job waits for a local admission slot
+/// instead of being failed for want of one. `ACTION_ADMISSION_TIMEOUT` bounds
+/// the whole stage — the wait for a slot plus the fetches — and an exhausted
+/// budget reports which of the two consumed it.
 async fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
     stored: &StoredRunnerConfig,
+    telemetry_admission: Option<&crate::ops::JobAdmission>,
 ) -> Result<crate::admission::AdmissionGraph> {
-    let permit = action_admission_permits()
-        .try_acquire_owned()
-        .context("action admission blocking worker is busy")?;
+    let stage_started_unix_ms = unix_millis_now();
+    let stage_started = Instant::now();
+    let permit = match acquire_action_admission_slot(ACTION_ADMISSION_TIMEOUT).await {
+        Ok((permit, _waited)) => permit,
+        Err(waited) => {
+            let waited_ms = duration_ms(waited);
+            emit_stage_wait_telemetry(
+                telemetry_admission,
+                JobStage::ActionAdmission,
+                WaitReason::LocalAdmissionLimiter,
+                waited_ms,
+                stage_started_unix_ms,
+            );
+            bail!(
+                "action admission waited {waited_ms}ms for one of {ACTION_ADMISSION_CONCURRENCY} \
+                 local admission slots and exhausted its {}s budget \
+                 (stage=action_admission wait_reason=local_admission_limiter)",
+                ACTION_ADMISSION_TIMEOUT.as_secs()
+            );
+        }
+    };
+    let limiter_wait_ms = duration_ms(stage_started.elapsed());
+    emit_stage_wait_telemetry(
+        telemetry_admission,
+        JobStage::ActionAdmission,
+        WaitReason::LocalAdmissionLimiter,
+        limiter_wait_ms,
+        stage_started_unix_ms,
+    );
     let job = job.clone();
     let context_data = context_data.to_vec();
     let stored = stored.clone();
+    let fetches_started = Instant::now();
     let admission = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         admit_job_closure_sync(&job, &context_data, &stored)
     });
-    tokio::time::timeout(ACTION_ADMISSION_TIMEOUT, admission)
-        .await
-        .context("action admission exceeded its deadline")?
-        .context("action admission blocking worker failed")?
+    // Whatever the limiter wait already spent is spent: the remaining budget
+    // belongs to the fetches, so the stage as a whole stays bounded.
+    let fetch_budget = ACTION_ADMISSION_TIMEOUT.saturating_sub(stage_started.elapsed());
+    let graph = tokio::time::timeout(fetch_budget, admission).await;
+    emit_stage_wait_telemetry(
+        telemetry_admission,
+        JobStage::ActionAdmission,
+        WaitReason::GithubContentsApi,
+        duration_ms(fetches_started.elapsed()),
+        stage_started_unix_ms,
+    );
+    match graph {
+        Ok(joined) => joined.context("action admission blocking worker failed")?,
+        Err(_elapsed) => bail!(
+            "action admission read {}ms of action.yml metadata after a {limiter_wait_ms}ms local \
+             wait and exhausted its {}s budget (stage=action_admission \
+             wait_reason=github_contents_api)",
+            duration_ms(fetches_started.elapsed()),
+            ACTION_ADMISSION_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 fn admit_job_closure_sync(
@@ -9267,7 +10428,7 @@ where
     while !pending.is_empty() {
         let downloadable = pending
             .iter()
-            .filter(|plan| native_action_adapter(&plan.repository).is_none())
+            .filter(|plan| action_requires_metadata_fetch(&plan.repository))
             .cloned()
             .collect::<Vec<_>>();
         if downloadable.is_empty() {
@@ -9281,7 +10442,7 @@ where
         pending = nested
             .into_iter()
             .filter(|plan| {
-                native_action_adapter(&plan.repository).is_none()
+                action_requires_metadata_fetch(&plan.repository)
                     && !resolved
                         .iter()
                         .any(|action| same_action(&action.plan, plan))
@@ -9292,6 +10453,13 @@ where
             .collect();
     }
     Ok(resolved)
+}
+
+fn action_requires_metadata_fetch(repository: &str) -> bool {
+    !matches!(
+        crate::manifest::find(repository).map(|capability| capability.adapter),
+        Some(ActionAdapter::Native(_))
+    )
 }
 
 fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> bool {
@@ -9484,27 +10652,43 @@ fn append_resolved_action_steps(
     // against the graph. An unknown action that still reaches this point is a
     // hard failure below, not a permissive fallback.
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
-    if let Some(invocation) = action.native_invocation()? {
-        ordered.push(ExecutableStep::Native {
-            step_id: action.plan.step_id.clone(),
-            display_name: display_name.to_string(),
-            invocation,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error,
-            timeout_minutes: action.plan.timeout_minutes,
-        });
-        return Ok(());
-    }
-    if let Some(message) = unsupported_action_error(&action.plan.repository) {
-        bail!("{message}");
-    }
-    match &action.runtime {
-        ActionRuntime::JavaScript { .. } => bail!(
+    let Some(adapter) =
+        crate::manifest::find(&action.plan.repository).map(|capability| capability.adapter)
+    else {
+        if let Some(message) = unsupported_action_error(&action.plan.repository) {
+            bail!("{message}");
+        }
+        bail!(
             "unknown action '{}@{}' reached execution — capability admission must reject this earlier",
             action.plan.repository,
             action.plan.git_ref
-        ),
-        ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
+        );
+    };
+    match adapter {
+        ActionAdapter::Native(expected) => {
+            let Some(invocation) = action.native_invocation()? else {
+                bail!(
+                    "native action '{}' has no native invocation",
+                    action.plan.repository
+                );
+            };
+            if invocation.adapter != expected {
+                bail!(
+                    "native action '{}' adapter mismatch: manifest={expected:?}, invocation={:?}",
+                    action.plan.repository,
+                    invocation.adapter
+                );
+            }
+            ordered.push(ExecutableStep::Native {
+                step_id: action.plan.step_id.clone(),
+                display_name: display_name.to_string(),
+                invocation,
+                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+                continue_on_error,
+                timeout_minutes: action.plan.timeout_minutes,
+            });
+        }
+        ActionAdapter::Docker => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
             invocation: action.docker_invocation(actions_host)?,
@@ -9512,7 +10696,15 @@ fn append_resolved_action_steps(
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
         }),
-        ActionRuntime::Composite => {
+        ActionAdapter::JavaScript => ordered.push(ExecutableStep::JavaScript {
+            step_id: action.plan.step_id.clone(),
+            display_name: display_name.to_string(),
+            invocation: action.javascript_invocation(actions_host)?,
+            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
+        }),
+        ActionAdapter::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
             let composite_display = if display_name.is_empty() {
@@ -9845,52 +11037,67 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
 /// without one the baked shims dangle ("gh is not a valid shim", observed on
 /// jackin-agent-brown). Seed the store from the image once per daemon work
 /// dir so jobs start with the baked toolset and only add tools on top.
-fn seed_mise_store_from_image(docker_image: &str, mise_store: &std::path::Path) {
+fn seed_mise_store_from_image(container: &crate::container::JobContainerSpec) {
+    let docker_image = &container.image;
+    let mise_store = crate::container::mise_store_host(&container.temp_host);
     let marker = mise_store.join(".image-seeded");
-    // Re-seed when the job image changes so a new image's toolset (or tool
-    // versions) reaches the store; docker cp merges over the existing tree.
-    if fs::read_to_string(&marker)
-        .map(|content| content == docker_image)
-        .unwrap_or(false)
+    let lock_path = mise_store.join(".image-seed.lock");
+    let lock = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
     {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!(
+                "Warning: mise store seed lock {} failed: {error}",
+                lock_path.display()
+            );
+            return;
+        }
+    };
+    if let Err(error) =
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+    {
+        eprintln!(
+            "Warning: mise store seed skipped while another job owns {}: {error}",
+            lock_path.display()
+        );
         return;
     }
-    let installs = mise_store.join("installs");
+
     let result = (|| -> Result<()> {
-        let created = std::process::Command::new("docker")
-            .args(["create", docker_image, "true"])
-            .output()
-            .context("docker create for mise store seed")?;
-        if !created.status.success() {
-            bail!(
-                "docker create {docker_image}: {}",
-                String::from_utf8_lossy(&created.stderr).trim()
-            );
+        // Recheck under the lock: sibling slots may have completed the seed
+        // between the initial job setup and this job acquiring ownership.
+        if fs::read_to_string(&marker)
+            .map(|content| content == docker_image.as_str())
+            .unwrap_or(false)
+        {
+            return Ok(());
         }
-        let container_id = String::from_utf8_lossy(&created.stdout).trim().to_string();
-        let copied = std::process::Command::new("docker")
-            .args([
-                "cp",
-                &format!("{container_id}:/opt/mise/installs/."),
-                &installs.to_string_lossy(),
-            ])
-            .output()
-            .context("docker cp mise installs")?;
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", &container_id])
-            .output();
-        if !copied.status.success() {
-            bail!(
-                "docker cp mise installs: {}",
-                String::from_utf8_lossy(&copied.stderr).trim()
-            );
-        }
+
+        let args = container
+            .seed_mise_store_args()
+            .context("build mise store seed command")?;
+        let deadline = crate::docker::deadline_for(&args, MISE_SEED_DOCKER_TIMEOUT)
+            .1
+            .min(MISE_SEED_DOCKER_TIMEOUT);
+        crate::docker_lease::run_host_docker_bounded(&args, deadline)
+            .context("run bounded Docker mise store seed")?;
         Ok(())
     })();
+    let _ = rustix::fs::flock(&lock, rustix::fs::FlockOperation::Unlock);
     match result {
         Ok(()) => {
-            println!("Seeded mise tool store from {docker_image}.");
-            let _ = fs::write(&marker, docker_image);
+            if !fs::read_to_string(&marker)
+                .map(|content| content == docker_image.as_str())
+                .unwrap_or(false)
+            {
+                println!("Seeded mise tool store from {docker_image}.");
+                let _ = fs::write(&marker, docker_image);
+            }
         }
         Err(error) => {
             // Best-effort: an image without /opt/mise/installs just leaves the
@@ -10008,7 +11215,7 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
             };
             out.push_str(&format!("{timestamp} ##[group]{name}\n"));
         }
-        let masker = secret_masks.with_extra(&log.masks);
+        let masker = secret_masks.with_every_step(step_logs);
         for line in &log.lines {
             let masked = masker.mask(line);
             out.push_str(&format!("{timestamp} {masked}\n"));
@@ -10104,6 +11311,8 @@ async fn upload_results_step_log_with_client(
     job: &AgentJobRequestMessage,
     log: &StepLog,
 ) -> Result<()> {
+    // The pre-execution failure path has exactly one log, so its own mask set
+    // is already the whole job's.
     let masker = MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks);
     let lines = mask_log_lines_with(&log.lines, &masker);
     let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
@@ -10216,6 +11425,10 @@ async fn complete_run_service_job(
         upload_results_job_log(job, &step_logs),
         upload_job_log_artifact(job, &step_logs),
     );
+    // Annotations ride the durable CompleteJob call in two places (per-step
+    // results and the job-level list); both are built through the one Masker
+    // so neither can publish a secret in cleartext.
+    let annotation_masks = MaskPatterns::new(job_secret_mask_values(job));
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
@@ -10250,14 +11463,17 @@ async fn complete_run_service_job(
                 log.completed_at.clone()
             }),
             completed_log_lines: log.lines.len() as i64,
-            annotations: log.annotations.iter().map(run_service_annotation).collect(),
+            annotations: run_service_annotations(
+                log,
+                &annotation_masks.with_every_step(&step_logs),
+            ),
         })
         .collect();
     let outputs = run_service_outputs(job_outputs, &job_secret_mask_values(job));
     let telemetry = run_service_telemetry(job, &step_logs);
     let annotations: Vec<RunServiceAnnotation> = step_logs
         .iter()
-        .flat_map(|log| log.annotations.iter().map(run_service_annotation))
+        .flat_map(|log| run_service_annotations(log, &annotation_masks.with_every_step(&step_logs)))
         .collect();
     // Plan 066 terminal transition for an executed job. Idempotent token
     // keeps the refreshing-completion retry path from duplicating events.
@@ -10350,6 +11566,43 @@ async fn send_guarded_run_service_complete(
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let job_id = velnor_model::JobId(completion.job_id.clone());
     let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
+    // Record the conclusion *before* the payload is serialised. A crash in the
+    // gap between producing a terminal result and writing the outbox otherwise
+    // leaves recovery with no idea what the job concluded, so it synthesises a
+    // failure — turning a job that finished green into a red one. The event is
+    // recorded once per generation; a second, different conclusion is refused
+    // rather than treated as a correction.
+    // Serialise through the wire representation, so the recorded conclusion is
+    // exactly the string GitHub is being sent.
+    let recorded_conclusion = serde_json::to_value(completion.conclusion)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned));
+    if let Some(conclusion) = recorded_conclusion
+        && let Err(error) = crate::node::complete::record_terminal_result(
+            &mut journal,
+            &job_id,
+            generation,
+            &conclusion,
+        )
+    {
+        // Deliberately not fatal. The record exists so recovery knows what a
+        // job concluded instead of synthesising a failure; failing the
+        // completion because we could not write that hint would trade a
+        // recovery aid for the very outcome it prevents. A replay legitimately
+        // re-records, and the reducer refuses a second, different conclusion
+        // rather than treating it as a correction — so a rejection here most
+        // often means the conclusion is already durable, which is the state we
+        // wanted.
+        eprintln!(
+            "Could not record the terminal conclusion for {}: {error:#}",
+            job_id.0
+        );
+        tracing::warn!(
+            target: "velnor.completion",
+            job_id = job_id.0.as_str(),
+            "terminal conclusion not recorded; recovery will fall back to a synthetic result"
+        );
+    }
     let payload = serde_json::to_vec(&completion)?;
     crate::node::complete::guarded_complete_async_with_ack(
         &mut journal,
@@ -10673,6 +11926,152 @@ async fn complete_acquired_job_failure(
     .await
 }
 
+fn load_acquisition_row_for_completion(
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<(
+    velnor_control::journal::Journal,
+    velnor_control::journal::JobRecord,
+)> {
+    if identity.plan_id.trim().is_empty() || identity.job_id.trim().is_empty() {
+        bail!(
+            "acquired job completion has an incomplete identity (plan_id={}, job_id={})",
+            identity.plan_id,
+            identity.job_id
+        );
+    }
+    let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let row = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .into_iter()
+        .find(|job| job.job_id.0 == identity.job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no durable acquisition row exists for acquired job {}",
+                identity.job_id
+            )
+        })?;
+    if row.plan_id != identity.plan_id {
+        bail!(
+            "durable acquisition row for job {} names plan {}, not {}",
+            identity.job_id,
+            row.plan_id,
+            identity.plan_id
+        );
+    }
+    Ok((journal, row))
+}
+
+/// Promote the row created by this process's successful acquire response.
+///
+/// The response is the ownership proof here, but the `JobOwned` event is still
+/// required before `CompletionIntended` can create an outbox. Missing or
+/// mismatched rows fail closed; this function never creates a replacement row.
+fn promote_acquired_job_for_completion(
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let (mut journal, row) = load_acquisition_row_for_completion(journal_dir, identity)?;
+    if !row.provisional {
+        return Ok(());
+    }
+    crate::node::complete::confirm_acquisition(
+        &mut journal,
+        &row.job_id,
+        &row.slot_id,
+        row.generation,
+    )
+    .context("promote acquired job to durable ownership")
+}
+
+/// Prove a provisional row left by a crashed worker before allowing recovery
+/// to publish a terminal completion. The marker and intent are only evidence;
+/// `renewjob` is the authority that distinguishes this runner from another.
+async fn prove_and_promote_recovered_acquisition(
+    client: &RunServiceClient,
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let (mut journal, row) = load_acquisition_row_for_completion(journal_dir, identity)?;
+    if !row.provisional {
+        return Ok(());
+    }
+    match probe_provisional_acquisition(client, &row).await {
+        crate::node::complete::AcquisitionVerdict::Owned => {}
+        crate::node::complete::AcquisitionVerdict::NotOurs => {
+            bail!(
+                "renewjob did not prove ownership of recovered job {}; completion withheld",
+                identity.job_id
+            )
+        }
+        crate::node::complete::AcquisitionVerdict::Indeterminate => {
+            bail!(
+                "renewjob could not prove ownership of recovered job {}; completion withheld",
+                identity.job_id
+            )
+        }
+    }
+
+    // Re-read after the network proof. A concurrent recovery may have already
+    // promoted the row; never apply JobOwned against a changed generation or
+    // identity.
+    let current = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .into_iter()
+        .find(|job| job.job_id.0 == identity.job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "acquisition row for recovered job {} disappeared during ownership proof",
+                identity.job_id
+            )
+        })?;
+    if current.plan_id != identity.plan_id {
+        bail!(
+            "acquisition row for recovered job {} changed plans during ownership proof",
+            identity.job_id
+        );
+    }
+    if current.provisional {
+        crate::node::complete::confirm_acquisition(
+            &mut journal,
+            &current.job_id,
+            &current.slot_id,
+            current.generation,
+        )
+        .context("promote recovered acquisition to durable ownership")?;
+    }
+    Ok(())
+}
+
+async fn establish_durable_completion_ownership(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    match run_service_job.journal_state {
+        RunServiceJobJournalState::Accepted => Ok(()),
+        RunServiceJobJournalState::Acquired => {
+            promote_acquired_job_for_completion(&run_service_job.journal_dir, identity)
+        }
+        RunServiceJobJournalState::Provisional => {
+            prove_and_promote_recovered_acquisition(
+                &run_service_job.client,
+                &run_service_job.journal_dir,
+                identity,
+            )
+            .await
+        }
+        RunServiceJobJournalState::Unproven => bail!(
+            "no durable ownership proof exists for recovered job {}; completion withheld",
+            identity.job_id
+        ),
+    }
+}
+
 async fn fail_closed_after_journal_acceptance_error(
     config_dir: &Path,
     run_service_job: &RunServiceJobContext,
@@ -10868,23 +12267,17 @@ async fn complete_acquired_job_outcome(
         infrastructure_failure_category,
         &masked_reason,
     ))?;
-    match run_service_job.journal_state {
-        RunServiceJobJournalState::Accepted => send_guarded_run_service_complete(
-            &run_service_job.client,
-            &run_service_job.run_service_url,
-            completion,
-            &run_service_job.journal_dir,
-        )
+    establish_durable_completion_ownership(run_service_job, identity)
         .await
-        .context("complete acquired run-service job after infrastructure failure"),
-        RunServiceJobJournalState::Acquired => run_service_job
-            .client
-            .complete_job(&run_service_job.run_service_url, completion)
-            .await
-            .context(
-                "complete acquired unjournaled run-service job after journal acceptance failure",
-            ),
-    }
+        .context("establish durable ownership before acquired-job completion")?;
+    send_guarded_run_service_complete(
+        &run_service_job.client,
+        &run_service_job.run_service_url,
+        completion,
+        &run_service_job.journal_dir,
+    )
+    .await
+    .context("complete acquired run-service job after infrastructure failure")
 }
 
 /// Guard the pre-execution complete_job payload.
@@ -10931,18 +12324,28 @@ fn run_service_telemetry(
 ) -> Vec<RunServiceTelemetry> {
     let masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut seen = BTreeSet::new();
-    step_logs
-        .iter()
-        .flat_map(|log| log.telemetry.iter().map(move |telemetry| (log, telemetry)))
-        .map(|(log, telemetry)| {
-            let masker = masks.with_extra(&log.masks);
-            RunServiceTelemetry {
-                message: masker.mask(&telemetry.message),
+    let mut collected = Vec::new();
+    for log in step_logs {
+        let masker = masks.with_extra(&log.masks);
+        // Upstream builds one StepTelemetry per step and stops after the first
+        // _maxIssueCountInTelemetry entries, each cut to
+        // _maxIssueMessageLengthInTelemetry characters
+        // (Runner.Worker/ExecutionContext.cs:1281-1306). Velnor sent every
+        // entry at full length.
+        for telemetry in log.telemetry.iter().take(MAX_ISSUE_COUNT_IN_TELEMETRY) {
+            let entry = RunServiceTelemetry {
+                message: truncate_chars(
+                    &masker.mask(&telemetry.message),
+                    MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY,
+                ),
                 kind: telemetry.kind.clone(),
+            };
+            if seen.insert((entry.kind.clone(), entry.message.clone())) {
+                collected.push(entry);
             }
-        })
-        .filter(|telemetry| seen.insert((telemetry.kind.clone(), telemetry.message.clone())))
-        .collect()
+        }
+    }
+    collected
 }
 
 async fn publish_timeline_job_started(
@@ -11142,7 +12545,15 @@ fn timeline_records_for_step_logs(
                 finish_time.to_string(),
                 step_log_result(log),
             )
-            .with_issue_counts(log.error_count, log.warning_count, log.notice_count)
+            // Upstream increments ErrorCount/WarningCount/NoticeCount only
+            // while the type is still under _maxCountPerIssueType, so the
+            // published count is min(total, 10) — never the raw total
+            // (Runner.Worker/ExecutionContext.cs:836-841).
+            .with_issue_counts(
+                capped_issue_count(log.error_count),
+                capped_issue_count(log.warning_count),
+                capped_issue_count(log.notice_count),
+            )
         })
         .collect()
 }
@@ -11159,6 +12570,27 @@ fn mask_value(value: &str, masks: &[String]) -> String {
 
 fn mask_log_lines_with(lines: &[String], masker: &Masker) -> Vec<String> {
     lines.iter().map(|line| masker.mask(line)).collect()
+}
+
+/// Scrub `GITHUB_STEP_SUMMARY` content before it is uploaded.
+///
+/// Upstream reads the summary file a line at a time, masks each line and
+/// writes it to a `<file>-scrubbed` copy, and it is that copy — never the
+/// original — that is queued for attachment upload
+/// (`Runner.Worker/FileCommandManager.cs:256-284`). Masking per line rather
+/// than over the whole blob keeps a mask from spanning a newline, and the
+/// `ReadLine`/`WriteLine` pair normalises CRLF to LF and terminates the last
+/// line, both of which this reproduces.
+fn mask_step_summary(summary: &str, masker: &Masker) -> String {
+    if summary.is_empty() {
+        return String::new();
+    }
+    let mut scrubbed = String::with_capacity(summary.len());
+    for line in summary.lines() {
+        scrubbed.push_str(&masker.mask(line));
+        scrubbed.push('\n');
+    }
+    scrubbed
 }
 
 fn current_time_rfc3339() -> Result<String> {
@@ -11185,21 +12617,91 @@ fn infrastructure_failure_category(error: &anyhow::Error) -> Option<&'static str
     None
 }
 
-fn run_service_annotation(annotation: &StepAnnotation) -> RunServiceAnnotation {
+/// `ExecutionContext._maxIssueMessageLength` (`Runner.Worker/ExecutionContext.cs:146`).
+/// Annotations ride the durable `CompleteJob` call, and GitHub cannot forward a
+/// larger message on to a check annotation.
+const MAX_ISSUE_MESSAGE_LENGTH: usize = 4096;
+
+/// `ExecutionContext._maxCountPerIssueType` (`Runner.Worker/ExecutionContext.cs:144`).
+const MAX_COUNT_PER_ISSUE_TYPE: usize = 10;
+
+/// `ExecutionContext._maxIssueCountInTelemetry` (`Runner.Worker/ExecutionContext.cs:147`).
+const MAX_ISSUE_COUNT_IN_TELEMETRY: usize = 3;
+
+/// `ExecutionContext._maxIssueMessageLengthInTelemetry` (`Runner.Worker/ExecutionContext.cs:148`).
+const MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY: usize = 256;
+
+/// An issue count as upstream publishes it: the counter is only bumped while
+/// the type is under `_maxCountPerIssueType`, so it saturates at the cap.
+fn capped_issue_count(count: i32) -> i32 {
+    count.clamp(0, MAX_COUNT_PER_ISSUE_TYPE as i32)
+}
+
+/// Upstream slices a UTF-16 string; take the same count of characters without
+/// splitting one.
+fn truncate_chars(value: &str, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((index, _)) => value[..index].to_owned(),
+        None => value.to_owned(),
+    }
+}
+
+/// The annotations one step contributes to the durable `CompleteJob` payload.
+///
+/// Mirrors `ExecutionContext.AddIssue`
+/// (`Runner.Worker/ExecutionContext.cs:796-871`) in its order: mask the
+/// message, then truncate it, then attach the step number, then apply the
+/// per-type cap. Issues past the cap are never added to the record upstream,
+/// so they are dropped here too. Velnor has no embedded-context annotation
+/// list of its own — composite step state is folded into its parent by
+/// `StepCommandState::merge` before a `StepLog` exists — so upstream's
+/// "embedded contexts never upload a record" carve-out needs no analogue.
+fn run_service_annotations(log: &StepLog, masker: &Masker) -> Vec<RunServiceAnnotation> {
+    // Upstream sets Data["stepNumber"] from _record.Order whenever it is
+    // non-null; Velnor's StepLog spells "unset" as order 0.
+    let step_number = (log.order > 0).then_some(log.order as i64);
+    let mut counts = [0_usize; 3];
+    let mut kept = Vec::new();
+    for annotation in &log.annotations {
+        let slot = match annotation.level {
+            StepAnnotationLevel::Failure => 0,
+            StepAnnotationLevel::Warning => 1,
+            StepAnnotationLevel::Notice => 2,
+        };
+        if counts[slot] >= MAX_COUNT_PER_ISSUE_TYPE {
+            continue;
+        }
+        counts[slot] += 1;
+        kept.push(run_service_annotation(annotation, masker, step_number));
+    }
+    kept
+}
+
+fn run_service_annotation(
+    annotation: &StepAnnotation,
+    masker: &Masker,
+    step_number: Option<i64>,
+) -> RunServiceAnnotation {
     RunServiceAnnotation {
         level: match annotation.level {
             StepAnnotationLevel::Notice => RunServiceAnnotationLevel::Notice,
             StepAnnotationLevel::Warning => RunServiceAnnotationLevel::Warning,
             StepAnnotationLevel::Failure => RunServiceAnnotationLevel::Failure,
         },
-        message: annotation.message.clone(),
-        title: annotation.title.clone(),
-        path: annotation.path.clone(),
+        // Mask before the length cap, as upstream does, so truncation cannot
+        // cut a secret in half and leave a recognisable prefix behind.
+        message: truncate_chars(&masker.mask(&annotation.message), MAX_ISSUE_MESSAGE_LENGTH),
+        // Upstream only masks Issue.Message because its title and path live in
+        // the untyped Issue.Data bag. Velnor carries them as fields on the same
+        // durable payload, and `::error title=<secret>::` puts a secret there,
+        // so they are masked too rather than reopening the hole.
+        title: annotation.title.as_deref().map(|title| masker.mask(title)),
+        path: annotation.path.as_deref().map(|path| masker.mask(path)),
         start_line: annotation.start_line,
         end_line: annotation.end_line,
         start_column: annotation.start_column,
         end_column: annotation.end_column,
-        step_number: None,
+        step_number,
         is_infrastructure_issue: false,
     }
 }
@@ -11338,76 +12840,191 @@ const DEFAULT_SLO_FINALIZE_MS: u64 = 2_000;
 const DEFAULT_SLO_TEARDOWN_MS: u64 = 2_000;
 const DEFAULT_SLO_SAMPLE_SIZE: usize = 100;
 
+/// Sample count a quantile needs before it can be told apart from the sample
+/// maximum. With `n` observations the largest quantile the sample can
+/// distinguish is `1 - 1/n`, so `q` needs `n >= 1 / (1 - q)`: p50 needs 2, p95
+/// needs 20, p99 needs 100.
+///
+/// This is the rule `crates/velnor-bench/src/stats.rs` enforces, and it is
+/// here for the same reason: the benchmark script this project deleted printed
+/// a "p95" at `n = 5` that was, by construction, its own maximum. That crate is
+/// maintainer-only tooling that is deliberately never shipped, so the shipped
+/// daemon mirrors the rule rather than taking a dependency on it; hoisting the
+/// one implementation into `velnor-model` is the outstanding consolidation.
+const fn min_samples_for_percentile(percentile: usize) -> usize {
+    if percentile >= 100 {
+        return usize::MAX;
+    }
+    100_usize.div_ceil(100 - percentile)
+}
+
+/// A percentile the sample was large enough to support, or the reason it was
+/// withheld. Mirrors `velnor_bench::stats::Quantile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingQuantile {
+    Value(u64),
+    /// The metric had samples, but too few for this quantile.
+    Unsupported {
+        samples: usize,
+        required: usize,
+    },
+    /// The metric had no samples at all: nothing on record measured it.
+    NoSamples,
+}
+
+impl std::fmt::Display for TimingQuantile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) => write!(formatter, "{value}ms"),
+            Self::Unsupported { samples, required } => {
+                write!(formatter, "unsupported(n={samples}, needs {required})")
+            }
+            Self::NoSamples => write!(formatter, "no-samples"),
+        }
+    }
+}
+
+impl TimingQuantile {
+    const fn value(self) -> Option<u64> {
+        match self {
+            Self::Value(value) => Some(value),
+            Self::Unsupported { .. } | Self::NoSamples => None,
+        }
+    }
+}
+
+/// One metric's distribution over the SLO window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingSeries {
+    samples: usize,
+    p50: TimingQuantile,
+    p95: TimingQuantile,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TimingPercentiles {
-    queue_p50: Option<u64>,
-    queue_p95: Option<u64>,
-    queue_to_first_step_p50: Option<u64>,
-    queue_to_first_step_p95: Option<u64>,
-    pickup_p50: u64,
-    pickup_p95: u64,
-    first_step_p50: u64,
-    first_step_p95: u64,
-    finalize_p50: u64,
-    finalize_p95: u64,
-    teardown_p50: u64,
-    teardown_p95: u64,
+    queue: TimingSeries,
+    queue_to_first_step: TimingSeries,
+    pickup: TimingSeries,
+    first_step: TimingSeries,
+    finalize: TimingSeries,
+    teardown: TimingSeries,
 }
 
-fn parse_job_timing_line(line: &str) -> Option<JobTimingRecord> {
-    let (_, json) = line.split_once("job-timing ")?;
-    serde_json::from_str(json.trim()).ok()
+/// Typed job-timing sink, one JSON object per line.
+///
+/// The SLO reader used to recover records by splitting `lifecycle.log` on the
+/// literal string `"job-timing "`. That coupled a health signal to the wording
+/// of a prose log: renaming the prefix would have made the SLOs report "no
+/// completed job-timing records yet" — which reads as health — instead of
+/// failing. Emitter and reader now share this file and one serialiser, and the
+/// lifecycle line is kept purely as human forensics.
+const JOB_TIMING_LOG: &str = "job-timing.jsonl";
+
+/// Records retained per slot. The doctor window is
+/// [`DEFAULT_SLO_SAMPLE_SIZE`]; keeping a few multiples of it bounds the file
+/// without needing log rotation.
+const JOB_TIMING_RETAINED: usize = 512;
+
+/// Append one record to the typed sink and mirror it into `lifecycle.log` for
+/// a human reading an incident. Best-effort in both directions: a logging
+/// failure must never affect the runner.
+fn record_job_timing(config_dir: &Path, forensics: &SlotForensics, record: &JobTimingRecord) {
+    let Ok(json) = serde_json::to_string(record) else {
+        return;
+    };
+    forensics.lifecycle(&format!("job-timing {json}"));
+    let dir = config_dir.join("logs");
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(JOB_TIMING_LOG);
+    let mut lines: Vec<String> = fs::read_to_string(&path)
+        .map(|contents| {
+            contents
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.push(json);
+    let keep_from = lines.len().saturating_sub(JOB_TIMING_RETAINED);
+    lines.drain(..keep_from);
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let _ = fs::write(&path, body);
 }
 
-fn parse_timestamped_job_timing_line(line: &str) -> Option<(&str, JobTimingRecord)> {
-    let (prefix, _) = line.split_once("job-timing ")?;
-    let timestamp = prefix.split_whitespace().next()?;
-    Some((timestamp, parse_job_timing_line(line)?))
+/// Read one slot's typed job-timing records back through the same serialiser
+/// that wrote them.
+fn read_job_timing_records(logs_dir: &Path) -> Vec<JobTimingRecord> {
+    let Ok(contents) = fs::read_to_string(logs_dir.join(JOB_TIMING_LOG)) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<JobTimingRecord>(line).ok())
+        .collect()
 }
 
-fn percentile(values: &mut [u64], percentile: usize) -> u64 {
-    if values.is_empty() {
-        return 0;
+/// Nearest-rank percentile, withheld when the sample cannot support it.
+fn percentile(values: &mut [u64], percentile: usize) -> TimingQuantile {
+    let samples = values.len();
+    if samples == 0 {
+        return TimingQuantile::NoSamples;
+    }
+    let required = min_samples_for_percentile(percentile);
+    if samples < required {
+        return TimingQuantile::Unsupported { samples, required };
     }
     values.sort_unstable();
-    let rank = (values.len() * percentile).div_ceil(100).saturating_sub(1);
-    values[rank.min(values.len() - 1)]
+    let rank = (samples * percentile).div_ceil(100).saturating_sub(1);
+    TimingQuantile::Value(values[rank.min(samples - 1)])
+}
+
+fn timing_series(mut values: Vec<u64>) -> TimingSeries {
+    let samples = values.len();
+    let p50 = percentile(&mut values, 50);
+    let p95 = percentile(&mut values, 95);
+    TimingSeries { samples, p50, p95 }
 }
 
 fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> {
     if records.is_empty() {
         return None;
     }
-    let mut queue: Vec<_> = records
-        .iter()
-        .filter_map(|record| record.queue_ms)
-        .collect();
-    let mut queue_to_first_step: Vec<_> = records
-        .iter()
-        .filter_map(|record| record.queue_to_first_step_ms)
-        .collect();
-    let mut pickup: Vec<_> = records.iter().map(|record| record.pickup_ms).collect();
-    let mut first_step: Vec<_> = records.iter().map(|record| record.first_step_ms).collect();
-    let mut finalize: Vec<_> = records.iter().map(|record| record.finalize_ms).collect();
-    let mut teardown: Vec<_> = records.iter().map(|record| record.teardown_ms).collect();
+    // Every metric filters out the records that did not measure it, exactly as
+    // queue_ms always has: an unmeasured phase must not contribute a sample.
     Some(TimingPercentiles {
-        queue_p50: optional_percentile(&mut queue, 50),
-        queue_p95: optional_percentile(&mut queue, 95),
-        queue_to_first_step_p50: optional_percentile(&mut queue_to_first_step, 50),
-        queue_to_first_step_p95: optional_percentile(&mut queue_to_first_step, 95),
-        pickup_p50: percentile(&mut pickup.clone(), 50),
-        pickup_p95: percentile(&mut pickup, 95),
-        first_step_p50: percentile(&mut first_step.clone(), 50),
-        first_step_p95: percentile(&mut first_step, 95),
-        finalize_p50: percentile(&mut finalize.clone(), 50),
-        finalize_p95: percentile(&mut finalize, 95),
-        teardown_p50: percentile(&mut teardown.clone(), 50),
-        teardown_p95: percentile(&mut teardown, 95),
+        queue: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.queue_ms)
+                .collect(),
+        ),
+        queue_to_first_step: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.queue_to_first_step_ms)
+                .collect(),
+        ),
+        pickup: timing_series(records.iter().map(|record| record.pickup_ms).collect()),
+        first_step: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.first_step_ms)
+                .collect(),
+        ),
+        finalize: timing_series(records.iter().map(|record| record.finalize_ms).collect()),
+        teardown: timing_series(
+            records
+                .iter()
+                .filter_map(|record| record.teardown_ms)
+                .collect(),
+        ),
     })
-}
-
-fn optional_percentile(values: &mut [u64], rank: usize) -> Option<u64> {
-    (!values.is_empty()).then(|| percentile(values, rank))
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -11423,32 +13040,27 @@ fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<Job
     };
     let mut records = Vec::new();
     for (slot_index, slot_dir) in slot_dirs.into_iter().enumerate() {
-        let mut line_index = 0_usize;
-        for file_name in [format!("{LIFECYCLE_LOG}.1"), LIFECYCLE_LOG.to_string()] {
-            let path = slot_dir.join("logs").join(file_name);
-            let Ok(contents) = fs::read_to_string(path) else {
-                continue;
-            };
-            for line in contents.lines() {
-                if let Some((timestamp, record)) = parse_timestamped_job_timing_line(line) {
-                    records.push((timestamp.to_owned(), slot_index, line_index, record));
-                }
-                line_index = line_index.saturating_add(1);
-            }
+        for (line_index, record) in read_job_timing_records(&slot_dir.join("logs"))
+            .into_iter()
+            .enumerate()
+        {
+            records.push((slot_index, line_index, record));
         }
     }
+    // Ordered by the record's own typed completion timestamp, not by a
+    // timestamp scraped off a log line. unix_now_iso8601 is fixed-width UTC,
+    // so a lexicographic compare is a chronological one; slot and write order
+    // break ties deterministically.
     records.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
+        left.2
+            .completed_at
+            .cmp(&right.2.completed_at)
+            .then(left.0.cmp(&right.0))
             .then(left.1.cmp(&right.1))
-            .then(left.2.cmp(&right.2))
     });
     let keep_from = records.len().saturating_sub(limit);
     records.drain(..keep_from);
-    records
-        .into_iter()
-        .map(|(_, _, _, record)| record)
-        .collect()
+    records.into_iter().map(|(_, _, record)| record).collect()
 }
 
 fn print_doctor_slos(records: &[JobTimingRecord]) {
@@ -11456,76 +13068,64 @@ fn print_doctor_slos(records: &[JobTimingRecord]) {
         println!("timing SLOs: no completed job-timing records yet");
         return;
     };
-    let queue_budget = env_u64("VELNOR_SLO_QUEUE_MS", DEFAULT_SLO_QUEUE_MS);
-    let queue_to_first_step_budget = env_u64(
-        "VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS",
-        DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS,
-    );
-    let pickup_budget = env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS);
-    let first_step_budget = env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS);
-    let finalize_budget = env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS);
-    let teardown_budget = env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS);
     println!("timing SLOs: samples={}", records.len());
-    if let (Some(p50), Some(p95)) = (summary.queue_p50, summary.queue_p95) {
-        let state = timing_slo_state(p95, queue_budget);
-        println!("  queue: p50={p50}ms p95={p95}ms budget={queue_budget}ms {state}");
-        if p95 > queue_budget {
-            eprintln!("WARNING: timing SLO breach: queue p95={p95}ms exceeds {queue_budget}ms");
-        }
-    }
-    if let (Some(p50), Some(p95)) = (
-        summary.queue_to_first_step_p50,
-        summary.queue_to_first_step_p95,
-    ) {
-        let state = timing_slo_state(p95, queue_to_first_step_budget);
-        println!(
-            "  queue-to-first-step: p50={p50}ms p95={p95}ms budget={queue_to_first_step_budget}ms {state}"
-        );
-        if p95 > queue_to_first_step_budget {
-            eprintln!(
-                "WARNING: timing SLO breach: queue-to-first-step p95={p95}ms exceeds {queue_to_first_step_budget}ms"
-            );
-        }
-    }
-    for (name, p50, p95, budget) in [
+    for (name, series, budget) in [
+        (
+            "queue",
+            summary.queue,
+            env_u64("VELNOR_SLO_QUEUE_MS", DEFAULT_SLO_QUEUE_MS),
+        ),
+        (
+            "queue-to-first-step",
+            summary.queue_to_first_step,
+            env_u64(
+                "VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS",
+                DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS,
+            ),
+        ),
         (
             "pickup",
-            summary.pickup_p50,
-            summary.pickup_p95,
-            pickup_budget,
+            summary.pickup,
+            env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS),
         ),
         (
             "pickup-to-first-step",
-            summary.first_step_p50,
-            summary.first_step_p95,
-            first_step_budget,
+            summary.first_step,
+            env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS),
         ),
         (
             "finalize",
-            summary.finalize_p50,
-            summary.finalize_p95,
-            finalize_budget,
+            summary.finalize,
+            env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS),
         ),
         (
             "teardown",
-            summary.teardown_p50,
-            summary.teardown_p95,
-            teardown_budget,
+            summary.teardown,
+            env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS),
         ),
     ] {
-        let state = timing_slo_state(p95, budget);
-        println!("  {name}: p50={p50}ms p95={p95}ms budget={budget}ms {state}");
-        if p95 > budget {
+        let state = timing_slo_state(series.p95, budget);
+        println!(
+            "  {name}: n={} p50={} p95={} budget={budget}ms {state}",
+            series.samples, series.p50, series.p95
+        );
+        if let Some(p95) = series.p95.value()
+            && p95 > budget
+        {
             eprintln!("WARNING: timing SLO breach: {name} p95={p95}ms exceeds {budget}ms");
         }
     }
 }
 
-fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
-    if p95 > budget {
-        "WARN"
-    } else {
-        "PASS"
+/// A budget can only be met by a percentile the sample actually supports.
+/// Reporting PASS for a metric nothing measured, or for one measured too few
+/// times, is the failure this replaces: it reads as health.
+fn timing_slo_state(p95: TimingQuantile, budget: u64) -> &'static str {
+    match p95 {
+        TimingQuantile::Value(p95) if p95 > budget => "WARN",
+        TimingQuantile::Value(_) => "PASS",
+        TimingQuantile::Unsupported { .. } => "UNSUPPORTED",
+        TimingQuantile::NoSamples => "NO-SAMPLES",
     }
 }
 
@@ -11587,7 +13187,6 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .unwrap_or(0);
     let (cache_logical, cache_physical) =
         crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
-    probe_compiler_cache(&cache_root, &args.name)?;
     let client = RegistrationClient::new()?;
     let runners = client
         .list_runners(&scope, pat)
@@ -11757,51 +13356,6 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-fn probe_compiler_cache(cache_root: &Path, owner: &str) -> Result<()> {
-    use velnor_action_model::TrustClass;
-    use velnor_cache_service::{
-        CompilerCacheConfig, CompilerCachePolicy, CompilerCacheService, WrapperDeclaration,
-        KACHE_VERSION, SCCACHE_VERSION,
-    };
-
-    println!(
-        "compiler-cache: policy=auto backend=kache version={KACHE_VERSION}; rollback=sccache version={SCCACHE_VERSION}"
-    );
-    let mut failures = Vec::new();
-    for trust_class in [
-        TrustClass::Untrusted,
-        TrustClass::Trusted,
-        TrustClass::Release,
-    ] {
-        let mut config = CompilerCacheConfig::new(cache_root, owner);
-        config.trust_class = trust_class;
-        config.policy = CompilerCachePolicy::Auto;
-        match CompilerCacheService::open_production(config, WrapperDeclaration::default())
-            .and_then(|service| service.probe_restore_path())
-        {
-            Ok(probe) if probe.writable && probe.regular_round_trip => println!(
-                "compiler-cache: trust={trust_class:?} path={} writable=true round_trip=true",
-                probe.path.display()
-            ),
-            Ok(probe) => failures.push(format!(
-                "{trust_class:?}: path={} writable={} round_trip={}",
-                probe.path.display(),
-                probe.writable,
-                probe.regular_round_trip
-            )),
-            Err(error) => failures.push(format!("{trust_class:?}: {error}")),
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        bail!(
-            "compiler-cache restore probe failed: {}; refusing degraded cache startup",
-            failures.join("; ")
-        )
-    }
-}
-
 pub async fn status(args: StatusArgs) -> Result<()> {
     let config_base = config::config_dir(args.config_dir.clone())?;
     let slot_dirs = daemon_slot_config_dirs(&config_base, args.slots)?;
@@ -11969,6 +13523,7 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slot_log::LIFECYCLE_LOG;
 
     #[test]
     fn workflow_source_context_requires_exact_workflow_sha() {
@@ -12510,6 +14065,7 @@ mod tests {
 
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
+            slot_count: NonZeroU32::MIN,
             config_dir: None,
             pat: None,
             max_idle_slot_age_seconds: None,
@@ -12531,6 +14087,22 @@ mod tests {
             skip_preflight: false,
             require_docker_socket: false,
         }
+    }
+
+    #[test]
+    fn runner_boundary_preserves_write_once_trust_scope() {
+        let _serial = crate::trust_scope::test_support::serialized();
+        let mut args = run_args(false, true, false);
+        args.trust_scope = "public-forks".into();
+
+        resolve_run_trust_scope(&mut args);
+        assert_eq!(args.trust_scope, "public-forks");
+        assert_eq!(crate::trust_scope::current(), "public-forks");
+
+        args.trust_scope = "trusted".into();
+        resolve_run_trust_scope(&mut args);
+        assert_eq!(args.trust_scope, "public-forks");
+        assert_eq!(crate::trust_scope::current(), "public-forks");
     }
 
     fn minimal_job_with_variables(
@@ -12585,6 +14157,7 @@ mod tests {
             &job,
             &[],
             "ubuntu:24.04",
+            NonZeroU32::MIN,
             "node:24",
             "trusted",
             "https://run.service/jobs/1",
@@ -12611,6 +14184,7 @@ mod tests {
             &job,
             &[],
             "ubuntu:24.04",
+            NonZeroU32::MIN,
             "node:24",
             "trusted",
             "https://run.service/jobs/1",
@@ -12621,7 +14195,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 10"), "{text}");
+        assert!(text.contains("manifest version 12"), "{text}");
     }
 
     #[test]
@@ -13008,6 +14582,148 @@ mod tests {
         assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
         assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
         assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
+    }
+
+    /// A cancelled or failed job still owns containers. Recording the teardown
+    /// owner when the container exists — rather than returning it only from the
+    /// success path — is what keeps cleanup independent of how the job ended.
+    #[cfg(unix)]
+    #[test]
+    fn the_teardown_owner_survives_a_failed_execution() {
+        let slot: TeardownSlot = Arc::new(Mutex::new(None));
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "nothing owns teardown before the container exists"
+        );
+
+        let temp =
+            std::env::temp_dir().join(format!("velnor-teardown-owner-{}", uuid::Uuid::new_v4()));
+        let handle = TeardownHandle {
+            container: lease_test_container_spec(&temp),
+            job_dir: temp.join("job"),
+            services_removed: false,
+        };
+        let returned = record_teardown_owner(&slot, handle.clone());
+
+        // The success path still gets the handle back...
+        assert_eq!(
+            returned.map(|owned| owned.job_dir),
+            Some(handle.job_dir.clone())
+        );
+        // ...and every other path can recover the same owner from the slot,
+        // which is what the cancellation path reads instead of `None`.
+        assert_eq!(
+            slot.lock().unwrap().clone().map(|owned| owned.job_dir),
+            Some(handle.job_dir)
+        );
+    }
+
+    #[test]
+    fn failed_execution_teardown_owner_is_transferred_once() {
+        let slot: TeardownSlot = Arc::new(Mutex::new(None));
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-failed-teardown-transfer-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let handle = TeardownHandle {
+            container: lease_test_container_spec(&temp),
+            job_dir: temp.join("job"),
+            services_removed: false,
+        };
+        record_teardown_owner(&slot, handle.clone());
+        assert!(has_teardown_owner(&slot));
+
+        let transferred = take_teardown_owner(&slot);
+        assert_eq!(transferred.map(|owned| owned.job_dir), Some(handle.job_dir));
+        assert!(!has_teardown_owner(&slot));
+        assert!(
+            take_teardown_owner(&slot).is_none(),
+            "an error path must transfer teardown ownership exactly once"
+        );
+    }
+
+    /// The server's grace is honoured, and the shapes upstream can send are
+    /// all accepted. A malformed value must be *absent*, never zero: a zero
+    /// grace would turn a graceful cancellation into an immediate kill.
+    /// A secret registered by `::add-mask::` in one step must not appear in a
+    /// later step's uploaded blob.
+    ///
+    /// Masking is cumulative on the live path, because the job state carries a
+    /// running set. `StepLog.masks` does not: it records only what that step
+    /// added. So masking each upload with that log's own set left a step-one
+    /// secret in cleartext in step three's durable blob while the live feed
+    /// looked correct — the failure is invisible in exactly the place people
+    /// check.
+    #[test]
+    fn a_secret_masked_in_one_step_does_not_leak_into_a_later_upload() {
+        let mut first = masking_step_log();
+        first.masks = vec!["hunter2".to_string()];
+        first.lines = vec!["registered hunter2".to_string()];
+        let mut third = masking_step_log();
+        third.masks = Vec::new();
+        third.lines = vec!["echoing hunter2 from a later step".to_string()];
+        let logs = vec![first, third];
+
+        let patterns = MaskPatterns::new(Vec::new());
+
+        // The old behaviour, kept here as the thing being ruled out.
+        let per_log = patterns.with_extra(&logs[1].masks);
+        assert!(
+            mask_log_lines_with(&logs[1].lines, &per_log)
+                .iter()
+                .any(|line| line.contains("hunter2")),
+            "per-log masking is what leaked the secret; if this stops holding \
+             the union below is no longer proving anything"
+        );
+
+        let union = patterns.with_every_step(&logs);
+        for line in mask_log_lines_with(&logs[1].lines, &union) {
+            assert!(
+                !line.contains("hunter2"),
+                "a later step's upload must carry every secret the job knows"
+            );
+        }
+    }
+
+    #[test]
+    fn server_cancellation_grace_is_parsed_not_discarded() {
+        let parse = |body: &str| {
+            serde_json::from_str::<JobCancelMessage>(body)
+                .expect("cancel message parses")
+                .grace()
+        };
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"00:05:00"}"#),
+            Some(Duration::from_secs(300))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"01:00:30.5"}"#),
+            Some(Duration::from_secs_f64(3630.5))
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"90"}"#),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(parse(r#"{"JobId":"j"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":""}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"garbage"}"#), None);
+        assert_eq!(parse(r#"{"JobId":"j","Timeout":"-5"}"#), None);
+    }
+
+    /// A grace that arrives after escalation has begun must not extend a
+    /// cancellation that is already counting down.
+    #[test]
+    fn a_late_grace_cannot_extend_a_running_escalation() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.set_forced_after(Duration::from_secs(120));
+        assert_eq!(token.forced_after(), Duration::from_secs(120));
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        token.set_forced_after(Duration::from_secs(3600));
+        assert_eq!(
+            token.forced_after(),
+            Duration::from_secs(120),
+            "a late grace must not extend an escalation already under way"
+        );
     }
 
     #[test]
@@ -13585,7 +15301,16 @@ jobs:
             run_args.dump_job_message,
             Some(Path::new("/tmp/job.json").to_path_buf())
         );
+        assert_eq!(run_args.slot_count, NonZeroU32::MIN);
         assert!(!run_args.once);
+    }
+
+    #[test]
+    fn daemon_multislot_run_args_carry_authoritative_slot_count() {
+        let args = daemon_args(2);
+        let run_args = daemon_slot_run_args(&args, Path::new("/config"), 2, 2).unwrap();
+
+        assert_eq!(run_args.slot_count, NonZeroU32::new(2).unwrap());
     }
 
     #[test]
@@ -14675,6 +16400,200 @@ jobs:
         );
     }
 
+    /// Prime a journal with one Ready slot, the state an acquisition starts from.
+    fn ready_slot_journal(dir: &Path) -> (velnor_control::journal::Journal, velnor_model::SlotId) {
+        use velnor_control::journal::{Event, Journal};
+        use velnor_model::{Generation, SlotId};
+
+        let slot = SlotId("velnor-1".to_owned());
+        let generation = Generation::INITIAL;
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        (journal, slot)
+    }
+
+    fn run_service_error_body(status: u16) -> String {
+        serde_json::json!({
+            "source": "actions-run-service",
+            "statusCode": status,
+            "errorMessage": "message",
+        })
+        .to_string()
+    }
+
+    /// A conflict is not proof that this runner lost the job.
+    ///
+    /// Upstream's `RunServiceError` carries `source`, `statusCode` and
+    /// `errorMessage` and no runner identity, so a 409 cannot distinguish "we
+    /// acquired this and then crashed" from "another runner has it". Dropping
+    /// the row on a 409 would throw away the only evidence that this runner may
+    /// hold the lease; promoting on one would let two runners publish a
+    /// terminal result. So it does neither: the row waits for `renewjob`.
+    #[test]
+    fn a_conflict_reply_neither_promotes_nor_drops_the_acquisition_intent() {
+        let dir = unique_temp_dir("acquire-conflict-keeps-intent");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "msg-1",
+            "https://run.example/run",
+        )
+        .unwrap();
+
+        let conflict = run_service_error_body(409);
+        assert!(
+            !acquire_reply_is_definitely_gone(&conflict),
+            "a conflict is never a definite gone"
+        );
+        // The runner only abandons when the reply is definitely gone, so on a
+        // conflict nothing is called and the row stays exactly as it was.
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(
+            state.jobs[0].provisional,
+            "a conflict must not promote the row to ownership"
+        );
+        assert_eq!(
+            state.jobs[0].job_id.0, "request-1",
+            "the row is still keyed by the broker request"
+        );
+        assert_eq!(state.advertised_capacity(), 0, "the slot stays occupied");
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A typed 404 or 422 *is* definite, so the slot comes back immediately
+    /// rather than waiting for the next restart to notice.
+    #[test]
+    fn a_typed_gone_reply_releases_the_acquisition_intent_and_the_slot() {
+        for status in [404u16, 422] {
+            let dir = unique_temp_dir(&format!("acquire-gone-{status}"));
+            fs::create_dir_all(&dir).unwrap();
+            drop(ready_slot_journal(&dir));
+
+            intend_run_service_acquisition_in_journal(
+                &dir,
+                &dir,
+                "request-1",
+                "msg-1",
+                "https://run.example/run",
+            )
+            .unwrap();
+
+            let body = run_service_error_body(status);
+            assert!(acquire_reply_is_definitely_gone(&body));
+            abandon_run_service_acquisition_in_journal(
+                &dir,
+                &dir,
+                "request-1",
+                "the run service reports the broker message is gone",
+            )
+            .unwrap();
+
+            let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+            let state = journal.materialized_state().unwrap();
+            assert!(state.jobs.is_empty(), "status {status} must free the row");
+            assert_eq!(
+                state.advertised_capacity(),
+                1,
+                "status {status} must give the permit back"
+            );
+            drop(journal);
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    /// The acquire reply's identity replaces the broker request's, in one write,
+    /// and the row only then becomes probeable.
+    #[test]
+    fn the_acquire_reply_retargets_the_intent_onto_the_run_service_job() {
+        let dir = unique_temp_dir("acquire-retarget-identity");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "msg-1",
+            "https://run.example/run",
+        )
+        .unwrap();
+        resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        {
+            let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+            let state = journal.materialized_state().unwrap();
+            assert_eq!(state.jobs.len(), 1, "one row, retargeted, never two");
+            assert_eq!(state.jobs[0].job_id.0, "job-1");
+            assert_eq!(state.jobs[0].plan_id, "plan-1");
+            assert_eq!(state.jobs[0].run_service_url, "https://run.example/run");
+            assert!(state.jobs[0].provisional, "the reply is not yet ownership");
+            assert_eq!(state.advertised_capacity(), 0);
+        }
+
+        // The durable marker then promotes that same row.
+        accept_run_service_job_in_journal(&dir, &dir, "job-1").unwrap();
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(!state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn acquired_job_identity_reads_raw_job_ids() {
         let lower = serde_json::json!({
@@ -14838,6 +16757,7 @@ jobs:
         let outcome = persist_admission_on_blocking_pool_with(
             sink,
             blocking_admission_test_input("job-blocking-panic"),
+            OPERATIONAL_ADMISSION_TIMEOUT,
             |_sink, _admission| -> bool { panic!("test-only admission worker panic") },
         )
         .await;
@@ -14864,31 +16784,165 @@ jobs:
         fs::remove_dir_all(base).unwrap();
     }
 
-    #[tokio::test]
-    async fn blocking_admission_busy_writer_fails_closed_without_waiting() {
-        let base = unique_temp_dir("blocking-admission-busy");
+    /// A busy neighbour must never fail an acquired job. `Store` already
+    /// serialises writers, so concurrent admissions queue and all succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_from_every_slot_all_succeed() {
+        let base = unique_temp_dir("blocking-admission-concurrent");
         fs::create_dir_all(&base).unwrap();
         let sink = Arc::new(
             crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
         );
-        let permit = operational_admission_permits()
-            .try_acquire_owned()
-            .expect("test must own the only admission permit");
+
+        let admissions = (0..8).map(|slot| {
+            let sink = Arc::clone(&sink);
+            async move {
+                persist_admission_on_blocking_pool(
+                    sink,
+                    blocking_admission_test_input(&format!("job-blocking-slot-{slot}")),
+                )
+                .await
+            }
+        });
+        let outcomes = futures_util::future::join_all(admissions).await;
+
+        assert_eq!(outcomes.len(), 8);
+        for outcome in outcomes {
+            assert_eq!(outcome, AdmissionPersistenceOutcome::Accepted);
+        }
+        assert!(!sink.degraded());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    /// Read-only closure admission serialises nothing it does not have to: up
+    /// to `ACTION_ADMISSION_CONCURRENCY` jobs admit at once, and the job that
+    /// arrives next waits for a slot instead of being rejected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn action_admission_slots_are_concurrent_and_waiting() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, waited) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            assert!(waited < Duration::from_secs(1));
+            held.push(permit);
+        }
+
+        // With every slot held, the next caller waits and then proceeds — the
+        // release, not a rejection, is what ends the wait.
+        let waiter = tokio::spawn(acquire_action_admission_slot(Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the caller must wait, not fail");
+        held.pop();
+        let (_permit, waited) = waiter
+            .await
+            .expect("waiter task")
+            .expect("a released slot must be granted, never rejected");
+        assert!(waited >= Duration::from_millis(50));
+    }
+
+    /// A genuinely exhausted budget is a bounded, explained wait — never an
+    /// instant "another slot is busy" failure.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exhausted_action_admission_budget_reports_a_bounded_wait() {
+        let mut held = Vec::new();
+        for _ in 0..ACTION_ADMISSION_CONCURRENCY {
+            let (permit, _) = acquire_action_admission_slot(Duration::from_secs(5))
+                .await
+                .expect("an unheld admission slot is granted immediately");
+            held.push(permit);
+        }
+
+        let budget = Duration::from_millis(120);
         let started = Instant::now();
-        let outcome = persist_admission_on_blocking_pool(
+        let waited = acquire_action_admission_slot(budget)
+            .await
+            .map(|_| ())
+            .expect_err("a fully held limiter must exhaust the budget, not return early");
+        assert!(waited >= budget, "the caller waited the whole budget");
+        assert!(
+            started.elapsed() < budget + Duration::from_secs(2),
+            "the wait stays bounded by the budget"
+        );
+        assert_eq!(
+            WaitReason::LocalAdmissionLimiter.as_str(),
+            "local_admission_limiter"
+        );
+    }
+
+    /// An operational store that cannot answer inside its bounded deadline is
+    /// a real infrastructure failure, and is reported as one — distinctly from
+    /// a rejected row and from a worker panic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operational_admission_deadline_is_bounded_and_distinct() {
+        let base = unique_temp_dir("blocking-admission-deadline");
+        fs::create_dir_all(&base).unwrap();
+        let sink = Arc::new(
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap(),
+        );
+
+        let deadline = Duration::from_millis(150);
+        let started = Instant::now();
+        let outcome = persist_admission_on_blocking_pool_with(
             sink,
-            blocking_admission_test_input("job-blocking-busy"),
+            blocking_admission_test_input("job-blocking-deadline"),
+            deadline,
+            |_sink, _admission| -> bool {
+                // Long enough that only the deadline can end the wait, short
+                // enough that the runtime's blocking task does not hold test
+                // shutdown open.
+                std::thread::sleep(Duration::from_secs(2));
+                true
+            },
         )
         .await;
-        assert_eq!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
-        assert!(started.elapsed() < Duration::from_secs(1));
-        drop(permit);
+
+        assert_eq!(outcome, AdmissionPersistenceOutcome::DeadlineExceeded);
+        assert_ne!(outcome, AdmissionPersistenceOutcome::InfrastructureFailure);
+        assert!(
+            started.elapsed() >= deadline && started.elapsed() < deadline + Duration::from_secs(5),
+            "the caller waits the deadline and no longer"
+        );
+
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn stage_wait_telemetry_is_machine_readable() {
+        let fields = stage_wait_telemetry_fields(
+            JobStage::HostCapacityWait,
+            WaitReason::HostDiskCapacity,
+            u64::MAX,
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            fields.get("stage"),
+            Some(&Value::from("host_capacity")),
+            "the stage names where the job is"
+        );
+        assert_eq!(
+            fields.get("wait_reason"),
+            Some(&Value::from("host_disk_capacity")),
+            "the wait reason names why it is not executing"
+        );
+        assert_eq!(
+            fields.get("stage_started_unix_ms"),
+            Some(&Value::from(1_700_000_000_000_u64))
+        );
+        assert_eq!(
+            fields.get("ms"),
+            Some(&Value::from(MAX_TELEMETRY_DURATION_MS)),
+            "durations stay bounded"
+        );
+        assert_eq!(fields.get("cause"), Some(&Value::from("host_capacity")));
     }
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
+    async fn acquired_completion_promotes_before_guarded_send() {
+        use velnor_control::journal::Journal;
+        use velnor_model::JobId;
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -14897,6 +16951,168 @@ jobs:
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = unique_temp_dir("acquired-completion-promotion");
+        fs::create_dir_all(&dir).unwrap();
+        let run_service_url = format!("{}/jobs/1", server.uri());
+        let job_id = JobId("job".to_owned());
+        let provisional_id = JobId("request-1".to_owned());
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan".to_owned(),
+            job_id: job_id.0.clone(),
+        };
+        let (mut journal, slot) = ready_slot_journal(&dir);
+        let generation = journal.materialized_state().unwrap().slots[0].generation;
+        crate::node::complete::intend_acquisition(
+            &mut journal,
+            &provisional_id,
+            &slot,
+            "message-1",
+            &run_service_url,
+            1_000,
+        )
+        .unwrap();
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &provisional_id,
+            &job_id,
+            &identity.plan_id,
+            generation,
+        )
+        .unwrap();
+        drop(journal);
+
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url,
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        complete_acquired_job_failure(
+            &context,
+            &identity,
+            None,
+            Some("promotion_test".to_owned()),
+            "durable promotion test",
+        )
+        .await
+        .unwrap();
+
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        server.verify().await;
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn provisional_recovery_with_indeterminate_proof_sends_nothing_and_retains_marker() {
+        use velnor_control::journal::Journal;
+        use velnor_model::JobId;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/jobs/1/renewjob"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(
+                r#"{"source":"actions-run-service","statusCode":500,"errorMessage":"temporary"}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/jobs/1/completejob"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let dir = unique_temp_dir("provisional-recovery-no-send");
+        fs::create_dir_all(&dir).unwrap();
+        let run_service_url = format!("{}/jobs/1", server.uri());
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let (mut journal, slot) = ready_slot_journal(&dir);
+        let generation = journal.materialized_state().unwrap().slots[0].generation;
+        let provisional_id = JobId("request-1".to_owned());
+        crate::node::complete::intend_acquisition(
+            &mut journal,
+            &provisional_id,
+            &slot,
+            "message-1",
+            &run_service_url,
+            1_000,
+        )
+        .unwrap();
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &provisional_id,
+            &JobId(identity.job_id.clone()),
+            &identity.plan_id,
+            generation,
+        )
+        .unwrap();
+        drop(journal);
+
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url,
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: recorded_job_journal_state(&dir, &identity.job_id),
+        };
+        assert_eq!(
+            context.journal_state,
+            RunServiceJobJournalState::Provisional
+        );
+        persist_in_flight_job(&dir, &context, &job).unwrap();
+
+        let error = complete_acquired_job_failure(
+            &context,
+            &identity,
+            None,
+            Some("recovery_test".to_owned()),
+            "ownership proof unavailable",
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("could not prove ownership"), "{rendered}");
+        assert!(in_flight_job_path(&dir).exists());
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        let row = journal
+            .materialized_state()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|row| row.job_id.0 == identity.job_id)
+            .unwrap();
+        assert!(row.provisional);
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        server.verify().await;
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn marker_only_journal_acceptance_failure_sends_nothing_and_retains_in_flight() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -14923,8 +17139,12 @@ jobs:
         .await
         .unwrap_err();
 
-        assert!(error.to_string().contains("Assigned rejected"));
-        assert!(!in_flight_job_path(&config_dir).exists());
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("Assigned rejected"), "{rendered}");
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("no durable acquisition row")));
+        assert!(in_flight_job_path(&config_dir).exists());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -15182,7 +17402,7 @@ jobs:
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(400))
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -15665,6 +17885,311 @@ jobs:
             "DeprecatedCommand: set-output *** ***"
         );
         assert_eq!(telemetry[0].kind, "ActionCommand");
+    }
+
+    /// A job carrying one secret variable, for the durable-sink masking tests.
+    fn masking_job(secret: &str) -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "SECRET_TOKEN": { "value": secret, "isSecret": true }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn masking_step_log() -> StepLog {
+        StepLog {
+            step_id: "step-1".into(),
+            display_name: String::new(),
+            order: 7,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: Vec::new(),
+            masks: vec!["step-secret".into()],
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }
+    }
+
+    /// The exact `Masker` the step-log streaming loop builds before it uploads
+    /// a step summary.
+    fn upload_masker(job: &AgentJobRequestMessage, log: &StepLog) -> Masker {
+        MaskPatterns::new(job_secret_mask_values(job)).with_extra(&log.masks)
+    }
+
+    #[test]
+    fn step_summary_upload_bytes_carry_no_secret() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            summary: "## Result\r\ntoken=job-secret\nstep=step-secret\n".into(),
+            ..masking_step_log()
+        };
+
+        // These are the bytes handed to TwirpResultsClient::upload_step_summary,
+        // which PUTs `content.as_bytes()` to the blob without further change.
+        let uploaded = mask_step_summary(&log.summary, &upload_masker(&job, &log)).into_bytes();
+
+        assert_eq!(
+            String::from_utf8(uploaded.clone()).unwrap(),
+            "## Result\ntoken=***\nstep=***\n"
+        );
+        assert!(!uploaded
+            .windows(b"job-secret".len())
+            .any(|window| window == b"job-secret"));
+        assert!(!uploaded
+            .windows(b"step-secret".len())
+            .any(|window| window == b"step-secret"));
+    }
+
+    #[test]
+    fn step_summary_upload_bytes_mask_encoded_secrets() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            summary: format!(
+                "b64={}\njson={}\nuri={}\nxml={}\n",
+                base64_string_escape("job-secret"),
+                json_string_escape("job-\"secret"),
+                uri_data_escape("job-secret"),
+                xml_data_escape("job&secret"),
+            ),
+            ..masking_step_log()
+        };
+        let mut masks = job_secret_mask_values(&job);
+        masks.push("job-\"secret".into());
+        masks.push("job&secret".into());
+        let masker = MaskPatterns::new(masks).with_extra(&log.masks);
+
+        let uploaded = mask_step_summary(&log.summary, &masker);
+
+        assert_eq!(uploaded, "b64=***\njson=***\nuri=***\nxml=***\n");
+    }
+
+    #[test]
+    fn value_encoders_match_upstream_bodies() {
+        // Fixed vectors read off Sdk/DTLogging/Logging/ValueEncoders.cs.
+        assert_eq!(base64_string_escape("abc"), "YWJj");
+        assert_eq!(base64_string_escape_shift("abcd", 1), "YmNk");
+        assert_eq!(base64_string_escape_shift("abcd", 2), "Y2Q=");
+        // Shorter than the shift: upstream falls back to the whole value.
+        assert_eq!(base64_string_escape_shift("a", 2), "YQ==");
+        assert_eq!(command_line_argument_escape("a\"b"), "a\\\"b");
+        assert_eq!(expression_string_escape("a'b"), "a''b");
+        assert_eq!(json_string_escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(json_string_escape("a\u{1}b"), "a\\u0001b");
+        assert_eq!(uri_data_escape("a b/c~d"), "a%20b%2Fc~d");
+        assert_eq!(
+            xml_data_escape("<a&b'c\"d>"),
+            "&lt;a&amp;b&apos;c&quot;d&gt;"
+        );
+        // TrimDoubleQuotes is not a general trim.
+        assert_eq!(trim_double_quotes("\"0123456789\""), "0123456789");
+        assert_eq!(trim_double_quotes("\"short\""), "");
+        assert_eq!(trim_double_quotes("0123456789"), "");
+        // The PowerShell ampersand encoders refuse sections under six chars.
+        assert_eq!(
+            power_shell_pre_ampersand_escape("secretpart1&secretpart2&secretpart3"),
+            "secretpart1&secretpart2&"
+        );
+        assert_eq!(
+            power_shell_post_ampersand_escape("secretpart1&secretpart2&secretpart3"),
+            "secretpart3"
+        );
+        assert_eq!(
+            power_shell_pre_ampersand_escape("secretpart1&+secretpart2&secretpart3"),
+            "secretpart1&+"
+        );
+        assert_eq!(
+            power_shell_post_ampersand_escape("secretpart1&+secretpart2&secretpart3"),
+            "ecretpart2&secretpart3"
+        );
+        assert_eq!(power_shell_pre_ampersand_escape("a&b"), "");
+        assert_eq!(power_shell_pre_ampersand_escape("no-ampersand"), "");
+    }
+
+    #[test]
+    fn masker_covers_every_registered_encoding() {
+        let masker = Masker::new(["job-secret".to_owned()]);
+
+        assert_eq!(masker.mask("job-secret"), "***");
+        assert_eq!(masker.mask(&base64_string_escape("job-secret")), "***");
+        assert_eq!(
+            masker.mask(&base64_string_escape_shift("job-secret", 1)),
+            "***"
+        );
+        assert_eq!(
+            masker.mask(&base64_string_escape_shift("job-secret", 2)),
+            "***"
+        );
+        assert_eq!(masker.mask(&uri_data_escape("job-secret")), "***");
+    }
+
+    #[test]
+    fn completion_payload_bytes_carry_no_secret_in_annotations() {
+        let job = masking_job("job-secret");
+        let log = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Failure,
+                message: "failed with token job-secret".into(),
+                title: Some("job-secret leaked".into()),
+                path: Some("src/step-secret.rs".into()),
+                start_line: Some(1),
+                end_line: Some(1),
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+        let annotations = run_service_annotations(&log, &upload_masker(&job, &log));
+        let completion = crate::protocol::RunServiceCompleteJob {
+            plan_id: job.plan.plan_id.clone(),
+            job_id: job.job_id.clone(),
+            conclusion: TaskResult::Failed,
+            outputs: BTreeMap::new(),
+            step_results: Vec::new(),
+            annotations,
+            telemetry: Vec::new(),
+            environment_url: None,
+            billing_owner_id: None,
+            infrastructure_failure_category: None,
+        };
+
+        // Exactly what RunServiceClient::complete_job serializes and POSTs.
+        let payload = serde_json::to_vec(&completion).unwrap();
+        let body = String::from_utf8(payload).unwrap();
+
+        assert!(!body.contains("job-secret"), "leaked in payload: {body}");
+        assert!(!body.contains("step-secret"), "leaked in payload: {body}");
+        assert!(body.contains("failed with token ***"));
+        assert!(body.contains("*** leaked"));
+        assert!(body.contains("src/***.rs"));
+        assert!(body.contains("\"stepNumber\":7"));
+    }
+
+    #[test]
+    fn annotations_are_truncated_after_masking() {
+        let job = masking_job("job-secret");
+        let mut message = "job-secret".repeat(600);
+        message.push_str("tail");
+        let log = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Warning,
+                message,
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+
+        let annotations = run_service_annotations(&log, &upload_masker(&job, &log));
+
+        // 600 masked occurrences render as 1800 characters, well under the cap,
+        // proving the mask ran first: truncating the 6004-character original
+        // would have cut mid-secret and left "job-secre" visible.
+        assert_eq!(annotations[0].message, format!("{}tail", "***".repeat(600)));
+        assert!(!annotations[0].message.contains("job-secr"));
+
+        let long = StepLog {
+            annotations: vec![StepAnnotation {
+                level: StepAnnotationLevel::Warning,
+                message: "x".repeat(MAX_ISSUE_MESSAGE_LENGTH + 10),
+                title: None,
+                path: None,
+                start_line: None,
+                end_line: None,
+                start_column: None,
+                end_column: None,
+            }],
+            ..masking_step_log()
+        };
+        let annotations = run_service_annotations(&long, &upload_masker(&job, &long));
+        assert_eq!(annotations[0].message.len(), MAX_ISSUE_MESSAGE_LENGTH);
+    }
+
+    #[test]
+    fn annotations_are_capped_per_issue_type() {
+        let job = masking_job("job-secret");
+        let annotation = |level, index: usize| StepAnnotation {
+            level,
+            message: format!("issue-{index}"),
+            title: None,
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+        };
+        let mut annotations = Vec::new();
+        for index in 0..15 {
+            annotations.push(annotation(StepAnnotationLevel::Failure, index));
+            annotations.push(annotation(StepAnnotationLevel::Warning, index));
+            annotations.push(annotation(StepAnnotationLevel::Notice, index));
+        }
+        let log = StepLog {
+            annotations,
+            ..masking_step_log()
+        };
+
+        let published = run_service_annotations(&log, &upload_masker(&job, &log));
+
+        assert_eq!(published.len(), 3 * MAX_COUNT_PER_ISSUE_TYPE);
+        for level in [
+            RunServiceAnnotationLevel::Failure,
+            RunServiceAnnotationLevel::Warning,
+            RunServiceAnnotationLevel::Notice,
+        ] {
+            let level = serde_json::to_string(&level).unwrap();
+            let count = published
+                .iter()
+                .filter(|item| serde_json::to_string(&item.level).unwrap() == level)
+                .count();
+            assert_eq!(count, MAX_COUNT_PER_ISSUE_TYPE, "level {level}");
+        }
+        // The kept issues are the first ten of each type, as upstream keeps
+        // them: everything past the cap is never added to the record.
+        assert_eq!(published[0].message, "issue-0");
+        assert!(!published.iter().any(|item| item.message == "issue-10"));
+        // The published counters saturate at the cap too.
+        assert_eq!(capped_issue_count(15), 10);
+        assert_eq!(capped_issue_count(4), 4);
+    }
+
+    #[test]
+    fn telemetry_is_capped_and_truncated_per_step() {
+        let job = masking_job("job-secret");
+        let telemetry: Vec<_> = (0..5)
+            .map(|index| StepCommandTelemetry {
+                message: format!("{index}{}", "y".repeat(400)),
+                kind: "ActionCommand".into(),
+            })
+            .collect();
+        let log = StepLog {
+            telemetry,
+            ..masking_step_log()
+        };
+
+        let published = run_service_telemetry(&job, &[log]);
+
+        assert_eq!(published.len(), MAX_ISSUE_COUNT_IN_TELEMETRY);
+        for entry in &published {
+            assert_eq!(entry.message.len(), MAX_ISSUE_MESSAGE_LENGTH_IN_TELEMETRY);
+        }
     }
 
     fn legacy_mask_value(value: &str, masks: &[String]) -> String {
@@ -16473,7 +18998,7 @@ runs:
             }),
         )];
 
-        let resolved = resolve_checkout_plan_context(plan, &[], &context_data);
+        let resolved = resolve_checkout_plan_context(plan, &[], &context_data).unwrap();
 
         assert_eq!(resolved.version.as_deref(), Some("def456"));
         assert!(!resolved.requires_runtime_context());
@@ -16498,7 +19023,7 @@ runs:
             timeout_minutes: None,
         };
 
-        let resolved = resolve_checkout_plan_context(plan, &[], &[]);
+        let resolved = resolve_checkout_plan_context(plan, &[], &[]).unwrap();
 
         assert_eq!(
             resolved.version.as_deref(),
@@ -16527,7 +19052,7 @@ runs:
         };
         let base_env = vec![("GITHUB_SHA".to_string(), "abc123".to_string())];
 
-        let resolved = resolve_checkout_plan_context(plan, &base_env, &[]);
+        let resolved = resolve_checkout_plan_context(plan, &base_env, &[]).unwrap();
 
         assert_eq!(resolved.version.as_deref(), Some("abc123"));
         assert!(!resolved.requires_runtime_context());
@@ -18031,15 +20556,23 @@ runs:
         JobTimingRecord {
             v: 1,
             job_id: job_id.to_string(),
+            completed_at: "2026-07-18T00:00:00.0000000Z".to_string(),
             queue_ms: Some(20),
             queue_to_first_step_ms: Some(50),
             pickup_ms,
-            first_step_ms: 30,
-            checkout_ms: 20,
-            container_boot_ms: 30,
-            steps_ms: 40,
+            first_step_ms: Some(30),
+            checkout_ms: Some(20),
+            container_boot_ms: Some(30),
+            steps_ms: Some(40),
             finalize_ms: 50,
-            teardown_ms: 60,
+            teardown_ms: Some(60),
+        }
+    }
+
+    fn timing_record_at(job_id: &str, completed_at: &str) -> JobTimingRecord {
+        JobTimingRecord {
+            completed_at: completed_at.to_string(),
+            ..timing_record(job_id, 1)
         }
     }
 
@@ -18055,21 +20588,20 @@ runs:
     }
 
     #[test]
-    fn timing_record_reads_legacy_json_without_queue_fields() {
-        let legacy = r#"{
+    fn timing_record_reads_json_without_optional_fields() {
+        let sparse = r#"{
             "v": 1,
-            "job_id": "legacy",
+            "job_id": "sparse",
             "pickup_ms": 10,
-            "first_step_ms": 20,
-            "checkout_ms": 3,
-            "container_boot_ms": 4,
-            "steps_ms": 5,
-            "finalize_ms": 6,
-            "teardown_ms": 7
+            "finalize_ms": 6
         }"#;
-        let record: JobTimingRecord = serde_json::from_str(legacy).unwrap();
+        let record: JobTimingRecord = serde_json::from_str(sparse).unwrap();
         assert_eq!(record.queue_ms, None);
         assert_eq!(record.queue_to_first_step_ms, None);
+        // An absent duration is "not measured", never zero.
+        assert_eq!(record.first_step_ms, None);
+        assert_eq!(record.container_boot_ms, None);
+        assert_eq!(record.teardown_ms, None);
     }
 
     #[cfg(unix)]
@@ -18084,6 +20616,7 @@ runs:
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: true,
+            slot_count: NonZeroU32::MIN,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -18096,11 +20629,9 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Off,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
         }
     }
 
@@ -18209,7 +20740,7 @@ runs:
     #[test]
     fn abandoned_precreated_environment_cleanup_takes_lease() {
         let test_binary = std::env::current_exe().expect("test binary path");
-        let status = Command::new(test_binary)
+        let status = std::process::Command::new(test_binary)
             .args([
                 "--exact",
                 "runner::tests::abandoned_precreated_environment_cleanup_takes_lease_child",
@@ -18229,16 +20760,31 @@ runs:
         abandoned_precreated_environment_cleanup_takes_lease_impl();
     }
 
+    /// The emitter and the reader are bound to each other, not to the wording
+    /// of a prose log line: whatever `record_job_timing` writes is exactly what
+    /// `recent_job_timings` reads back.
     #[test]
-    fn timing_parser_ignores_unrelated_and_malformed_lines() {
-        assert!(parse_job_timing_line("broker session created").is_none());
-        assert!(parse_job_timing_line("job-timing not-json").is_none());
-        let record = timing_record("job-2", 11);
-        let line = format!(
-            "2026-07-18T00:00:00Z runner=slot-1 job-timing {}",
-            serde_json::to_string(&record).unwrap()
+    fn job_timing_round_trips_from_emitter_to_slo_reader() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        // Single-slot layout: the slot config dir is the config base itself.
+        let slot = root.clone();
+        fs::create_dir_all(slot.join("logs")).unwrap();
+        let forensics = SlotForensics::new(slot.join("logs"), "runner=slot-1".to_string());
+        let first = timing_record_at("first", "2026-07-18T00:00:00.0000000Z");
+        let second = timing_record_at("second", "2026-07-18T00:00:01.0000000Z");
+
+        record_job_timing(&slot, &forensics, &first);
+        record_job_timing(&slot, &forensics, &second);
+
+        assert_eq!(
+            recent_job_timings(&root, 1, 100),
+            vec![first.clone(), second.clone()]
         );
-        assert_eq!(parse_job_timing_line(&line), Some(record));
+        assert_eq!(recent_job_timings(&root, 1, 1), vec![second]);
+        // The human lifecycle line stays, but nothing parses it any more.
+        let lifecycle = fs::read_to_string(slot.join("logs").join(LIFECYCLE_LOG)).unwrap();
+        assert!(lifecycle.contains("job-timing "));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -18247,19 +20793,101 @@ runs:
         let mut slow = timing_record("slow", 9_000);
         slow.queue_ms = Some(8_000);
         slow.queue_to_first_step_ms = Some(21_000);
-        slow.first_step_ms = 4_000;
+        slow.first_step_ms = Some(4_000);
         let summary = timing_percentiles(&[fast, slow]).unwrap();
-        assert_eq!(summary.queue_p95, Some(8_000));
-        assert_eq!(summary.queue_to_first_step_p95, Some(21_000));
-        assert_eq!(summary.pickup_p50, 100);
-        assert_eq!(summary.pickup_p95, 9_000);
-        assert_eq!(summary.first_step_p95, 4_000);
+        // Two samples support a p50 but not a p95.
+        assert_eq!(summary.pickup.p50, TimingQuantile::Value(100));
+        assert_eq!(
+            summary.pickup.p95,
+            TimingQuantile::Unsupported {
+                samples: 2,
+                required: 20
+            }
+        );
+        assert_eq!(summary.queue.p50, TimingQuantile::Value(20));
+        assert_eq!(summary.queue_to_first_step.p50, TimingQuantile::Value(50));
+        assert_eq!(summary.first_step.p50, TimingQuantile::Value(30));
+    }
+
+    #[test]
+    fn percentile_thresholds_match_the_bench_crate_rule() {
+        assert_eq!(min_samples_for_percentile(50), 2);
+        assert_eq!(min_samples_for_percentile(95), 20);
+        assert_eq!(min_samples_for_percentile(99), 100);
+    }
+
+    /// The window holds 100 records, so a supported p95 is reachable; a single
+    /// completed job must never report itself as one.
+    #[test]
+    fn a_single_job_is_never_its_own_p95() {
+        let one = [timing_record("only", 9_999)];
+        let summary = timing_percentiles(&one).unwrap();
+        assert_eq!(
+            summary.pickup.p95,
+            TimingQuantile::Unsupported {
+                samples: 1,
+                required: 20
+            }
+        );
+        assert_eq!(timing_slo_state(summary.pickup.p95, 10), "UNSUPPORTED");
+
+        let many: Vec<_> = (0..20)
+            .map(|index| timing_record(&format!("job-{index}"), index as u64 * 100))
+            .collect();
+        let summary = timing_percentiles(&many).unwrap();
+        assert_eq!(summary.pickup.p95, TimingQuantile::Value(1_800));
+        assert_eq!(timing_slo_state(summary.pickup.p95, 1_000), "WARN");
+        assert_eq!(timing_slo_state(summary.pickup.p95, 2_000), "PASS");
+    }
+
+    /// BC-32/BC-33: teardown_ms used to be built as a literal 0, so the
+    /// teardown SLO could never breach. An unmeasured teardown must now be
+    /// absent from the sample rather than a zero-millisecond one.
+    #[test]
+    fn unmeasured_teardown_reports_no_samples_instead_of_passing() {
+        let records: Vec<_> = (0..25)
+            .map(|index| JobTimingRecord {
+                teardown_ms: None,
+                container_boot_ms: None,
+                first_step_ms: None,
+                queue_to_first_step_ms: None,
+                ..timing_record(&format!("job-{index}"), 10)
+            })
+            .collect();
+
+        let summary = timing_percentiles(&records).unwrap();
+
+        assert_eq!(summary.teardown.samples, 0);
+        assert_eq!(summary.teardown.p95, TimingQuantile::NoSamples);
+        assert_eq!(
+            timing_slo_state(summary.teardown.p95, DEFAULT_SLO_TEARDOWN_MS),
+            "NO-SAMPLES"
+        );
+        assert_eq!(summary.first_step.p95, TimingQuantile::NoSamples);
+        // A measured teardown over budget still breaches.
+        let breached: Vec<_> = (0..25)
+            .map(|index| JobTimingRecord {
+                teardown_ms: Some(DEFAULT_SLO_TEARDOWN_MS + 1),
+                ..timing_record(&format!("job-{index}"), 10)
+            })
+            .collect();
+        let summary = timing_percentiles(&breached).unwrap();
+        assert_eq!(
+            timing_slo_state(summary.teardown.p95, DEFAULT_SLO_TEARDOWN_MS),
+            "WARN"
+        );
     }
 
     #[test]
     fn doctor_timing_slo_marks_pass_and_breach() {
-        assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
-        assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+        assert_eq!(
+            timing_slo_state(TimingQuantile::Value(3_000), 3_000),
+            "PASS"
+        );
+        assert_eq!(
+            timing_slo_state(TimingQuantile::Value(3_001), 3_000),
+            "WARN"
+        );
     }
 
     #[test]
@@ -18285,59 +20913,75 @@ runs:
     }
 
     #[test]
-    fn recent_job_timings_reads_rotated_logs_and_honors_limit() {
+    fn recent_job_timings_ignores_the_prose_lifecycle_log() {
         let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
         let logs = root.join("logs");
         fs::create_dir_all(&logs).unwrap();
-        let old = timing_record("old", 1);
-        let current = timing_record("current", 2);
-        fs::write(
-            logs.join(format!("{LIFECYCLE_LOG}.1")),
-            format!(
-                "2026-07-18T00:00:00Z job-timing {}\n",
-                serde_json::to_string(&old).unwrap()
-            ),
-        )
-        .unwrap();
+        let record = timing_record("prose-only", 1);
+        // A record that only ever reached lifecycle.log is not a timing sample:
+        // the reader is bound to the typed sink, not to log wording.
         fs::write(
             logs.join(LIFECYCLE_LOG),
             format!(
                 "2026-07-18T00:00:01Z job-timing {}\n",
-                serde_json::to_string(&current).unwrap()
+                serde_json::to_string(&record).unwrap()
             ),
         )
         .unwrap();
-        assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
+
+        assert!(recent_job_timings(&root, 1, 10).is_empty());
+
+        fs::write(
+            logs.join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&record).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(recent_job_timings(&root, 1, 10), vec![record]);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn recent_job_timings_orders_records_across_slots_by_timestamp() {
+    fn recent_job_timings_orders_records_across_slots_by_completion_time() {
         let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
         for slot in 1..=2 {
             fs::create_dir_all(root.join("slots").join(format!("slot-{slot}")).join("logs"))
                 .unwrap();
         }
-        let newest = timing_record("newest-slot-1", 1);
-        let older = timing_record("older-slot-2", 2);
+        let newest = timing_record_at("newest-slot-1", "2026-07-18T00:00:02.0000000Z");
+        let older = timing_record_at("older-slot-2", "2026-07-18T00:00:01.0000000Z");
         fs::write(
-            root.join("slots/slot-1/logs").join(LIFECYCLE_LOG),
-            format!(
-                "2026-07-18T00:00:02Z job-timing {}\n",
-                serde_json::to_string(&newest).unwrap()
-            ),
+            root.join("slots/slot-1/logs").join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&newest).unwrap()),
         )
         .unwrap();
         fs::write(
-            root.join("slots/slot-2/logs").join(LIFECYCLE_LOG),
-            format!(
-                "2026-07-18T00:00:01Z job-timing {}\n",
-                serde_json::to_string(&older).unwrap()
-            ),
+            root.join("slots/slot-2/logs").join(JOB_TIMING_LOG),
+            format!("{}\n", serde_json::to_string(&older).unwrap()),
         )
         .unwrap();
 
         assert_eq!(recent_job_timings(&root, 2, 1), vec![newest]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn job_timing_sink_is_bounded() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        let slot = root.clone();
+        fs::create_dir_all(slot.join("logs")).unwrap();
+        let forensics = SlotForensics::new(slot.join("logs"), "runner=slot-1".to_string());
+        for index in 0..(JOB_TIMING_RETAINED + 5) {
+            record_job_timing(
+                &slot,
+                &forensics,
+                &timing_record(&format!("job-{index}"), 1),
+            );
+        }
+
+        let retained = read_job_timing_records(&slot.join("logs"));
+
+        assert_eq!(retained.len(), JOB_TIMING_RETAINED);
+        assert_eq!(retained[0].job_id, "job-5");
         fs::remove_dir_all(root).unwrap();
     }
 

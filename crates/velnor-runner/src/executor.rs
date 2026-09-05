@@ -7,8 +7,8 @@ use crate::{
     },
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
-    compiler_action::CompilerActionSession,
     container::{JobContainerSpec, Shell},
+    expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -200,6 +200,15 @@ pub struct SpawnedProcess {
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 
+    /// True when this runner spawns real host processes.
+    ///
+    /// Host- and daemon-generation facts are facts only when they were learned
+    /// from the host. A test double or a guest-side runner answers `false`, and
+    /// what it reports is never cached as a fact about this host.
+    fn is_host_process_runner(&self) -> bool {
+        false
+    }
+
     /// Spawn without waiting. Default refuses so accidental long waits stay fail-closed.
     ///
     /// # Errors
@@ -328,56 +337,262 @@ pub enum CommandStream {
     Stderr,
 }
 
+/// A template could not be safely interpolated. The error deliberately keeps
+/// no expression text: parse/evaluation diagnostics can contain secrets or
+/// attacker-controlled source, while callers only need a stable failure class
+/// and location for lifecycle reporting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpressionInterpolationError {
+    BudgetExceeded,
+    Unterminated { offset: usize },
+    MismatchedDelimiter { offset: usize },
+    Parse { offset: usize },
+    Evaluation { offset: usize },
+}
+
+impl std::fmt::Display for ExpressionInterpolationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BudgetExceeded => f.write_str("expression interpolation budget exceeded"),
+            Self::Unterminated { offset } => {
+                write!(f, "unterminated expression interpolation at byte {offset}")
+            }
+            Self::MismatchedDelimiter { offset } => {
+                write!(f, "mismatched expression delimiter at byte {offset}")
+            }
+            Self::Parse { offset } => {
+                write!(f, "expression interpolation parse failure at byte {offset}")
+            }
+            Self::Evaluation { offset } => {
+                write!(
+                    f,
+                    "expression interpolation evaluation failure at byte {offset}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExpressionInterpolationError {}
+
+/// A validated `${{ ... }}` span. Keeping offsets instead of copied source
+/// makes the scanner reusable without putting untrusted expression text in
+/// errors or logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExpressionSpan {
+    start: usize,
+    expression_start: usize,
+    expression_end: usize,
+    end: usize,
+}
+
+impl ExpressionSpan {
+    pub(crate) fn start(self) -> usize {
+        self.start
+    }
+
+    pub(crate) fn end(self) -> usize {
+        self.end
+    }
+
+    pub(crate) fn source<'a>(self, value: &'a str) -> &'a str {
+        &value[self.start..self.end]
+    }
+
+    pub(crate) fn expression<'a>(self, value: &'a str) -> &'a str {
+        &value[self.expression_start..self.expression_end]
+    }
+}
+
+/// Scan and validate all template delimiters before evaluating any span.
+/// Quotes and index/group delimiters are respected, so `}}` inside a literal
+/// or nested expression cannot terminate the wrong span.
+pub(crate) fn expression_template_spans(
+    value: &str,
+) -> Result<Vec<ExpressionSpan>, ExpressionInterpolationError> {
+    const MAX_TEMPLATE_BYTES: usize = 64 * 1024;
+    const MAX_EXPRESSION_DEPTH: usize = 64;
+    const MAX_OPERATORS: usize = 1024;
+
+    let Some(first_start) = value.find("${{") else {
+        return Ok(Vec::new());
+    };
+    if value.len() > MAX_TEMPLATE_BYTES {
+        return Err(ExpressionInterpolationError::BudgetExceeded);
+    }
+
+    let mut spans = Vec::new();
+    let mut search_from = first_start;
+    while let Some(relative_start) = value[search_from..].find("${{") {
+        let start = search_from + relative_start;
+        let expression_start = start + 3;
+        let mut cursor = expression_start;
+        let mut quote = None;
+        let mut delimiters = Vec::new();
+        let mut operators = 0usize;
+        let mut end = None;
+
+        while cursor < value.len() {
+            let byte = value.as_bytes()[cursor];
+            if let Some(quote_byte) = quote {
+                if byte == quote_byte {
+                    // Expression string literals use doubled quotes for an
+                    // escaped quote. Accepting this here keeps scanning in
+                    // lockstep with the evaluator instead of closing early.
+                    if value.as_bytes().get(cursor + 1) == Some(&quote_byte) {
+                        cursor += 2;
+                    } else {
+                        quote = None;
+                        cursor += 1;
+                    }
+                } else {
+                    let width = value[cursor..].chars().next().map_or(1, char::len_utf8);
+                    cursor += width;
+                }
+                continue;
+            }
+
+            match byte {
+                b'\'' | b'"' => {
+                    quote = Some(byte);
+                    cursor += 1;
+                }
+                b'(' | b'[' => {
+                    delimiters.push(byte);
+                    if delimiters.len() > MAX_EXPRESSION_DEPTH {
+                        return Err(ExpressionInterpolationError::BudgetExceeded);
+                    }
+                    cursor += 1;
+                }
+                b')' | b']' => {
+                    let expected = if byte == b')' { b'(' } else { b'[' };
+                    if delimiters.pop() != Some(expected) {
+                        return Err(ExpressionInterpolationError::MismatchedDelimiter {
+                            offset: cursor,
+                        });
+                    }
+                    cursor += 1;
+                }
+                b'&' | b'|' | b'=' | b'!' => {
+                    operators = operators.saturating_add(1);
+                    if operators > MAX_OPERATORS {
+                        return Err(ExpressionInterpolationError::BudgetExceeded);
+                    }
+                    cursor += 1;
+                }
+                b'}' if value.as_bytes().get(cursor + 1) == Some(&b'}')
+                    && delimiters.is_empty() =>
+                {
+                    end = Some(cursor);
+                    break;
+                }
+                _ => {
+                    let width = value[cursor..].chars().next().map_or(1, char::len_utf8);
+                    cursor += width;
+                }
+            }
+        }
+
+        let Some(expression_end) = end else {
+            return Err(ExpressionInterpolationError::Unterminated { offset: start });
+        };
+        let end = expression_end + 2;
+        spans.push(ExpressionSpan {
+            start,
+            expression_start,
+            expression_end,
+            end,
+        });
+        search_from = end;
+    }
+    Ok(spans)
+}
+
+/// Validate a template whose runtime-context values are intentionally kept for
+/// a later execution pass. This catches malformed/unknown expressions at the
+/// metadata boundary without evaluating context that does not exist yet.
+pub(crate) fn validate_deferred_expression_template(
+    value: &str,
+) -> Result<(), ExpressionInterpolationError> {
+    let spans = expression_template_spans(value)?;
+    let state = JobExecutionState::try_new_with_context(&[], &[])?;
+    let context = state.expression_context();
+    for span in spans {
+        expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+            ExpressionInterpolationError::Parse {
+                offset: span.start(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Validate a template and report whether any expression reads state that is
+/// unavailable until step execution. Admission uses this before rendering
+/// capability-affecting inputs, so a runtime expression cannot be collapsed to
+/// a permissive value before the capability check. The walk parses every span
+/// before returning, including spans after the first runtime reference.
+pub(crate) fn template_reads_runtime_context(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> Result<bool, ExpressionInterpolationError> {
+    let spans = expression_template_spans(value)?;
+    let state = JobExecutionState::try_new_with_context(&[], context_data)?;
+    let context = state.expression_context();
+    let mut reads_runtime = false;
+    for span in spans {
+        let node = expression::parse(span.expression(value).trim(), &context).map_err(|_| {
+            ExpressionInterpolationError::Parse {
+                offset: span.start(),
+            }
+        })?;
+        if let Some(node) = node {
+            reads_runtime |= node_reads_runtime_context(&node);
+        }
+    }
+    Ok(reads_runtime)
+}
+
+pub(crate) fn render_context_expressions_checked(
+    value: &str,
+    context_data: &[(String, Value)],
+) -> Result<String, ExpressionInterpolationError> {
+    JobExecutionState::try_new_with_context(&[], context_data)?
+        .resolve_job_context_expressions(value)
+}
+
+/// Compatibility boundary for callers that cannot yet surface typed errors.
+/// Errors become an empty value, never the original template source.
 pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
-    JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
+    render_context_expressions_checked(value, context_data).unwrap_or_default()
 }
 
 pub(crate) fn render_context_expressions_bounded(
     value: &str,
     context_data: &[(String, Value)],
-) -> String {
-    if !expression_within_budget(value) {
-        return value.to_string();
-    }
-    render_context_expressions(value, context_data)
+) -> Result<String, ExpressionInterpolationError> {
+    // Scanning first makes budget exhaustion and malformed templates explicit;
+    // the resolver then parses/evaluates every non-deferred span.
+    let _ = expression_template_spans(value)?;
+    render_context_expressions_checked(value, context_data)
 }
 
-fn expression_within_budget(value: &str) -> bool {
-    const MAX_BYTES: usize = 64 * 1024;
-    const MAX_DEPTH: usize = 64;
-    const MAX_OPERATORS: usize = 1024;
-    if value.len() > MAX_BYTES {
-        return false;
-    }
-    let mut depth = 0usize;
-    let mut operators = 0usize;
-    for byte in value.bytes() {
-        match byte {
-            b'(' => {
-                depth = depth.saturating_add(1);
-                if depth > MAX_DEPTH {
-                    return false;
-                }
-            }
-            b')' => depth = depth.saturating_sub(1),
-            b'&' | b'|' | b'=' | b'!' => {
-                operators = operators.saturating_add(1);
-                if operators > MAX_OPERATORS {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    true
+pub(crate) fn render_expressions_with_context_checked(
+    value: &str,
+    base_env: &[(String, String)],
+    context_data: &[(String, Value)],
+) -> Result<String, ExpressionInterpolationError> {
+    JobExecutionState::try_new_with_context(base_env, context_data)?.resolve_expressions(value)
 }
 
+/// Compatibility boundary for legacy non-lifecycle callers. It is fail-closed
+/// and never returns unresolved attacker-controlled source text.
 pub fn render_expressions_with_context(
     value: &str,
     base_env: &[(String, String)],
     context_data: &[(String, Value)],
 ) -> String {
-    JobExecutionState::new_with_context(base_env, context_data).resolve_expressions(value)
+    render_expressions_with_context_checked(value, base_env, context_data).unwrap_or_default()
 }
 
 fn node_action_image(runtime: &str, fallback: &str) -> String {
@@ -402,11 +617,72 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
+/// Put a host child in its own process group.
+///
+/// Every host process Velnor starts becomes a group leader, so cancellation can
+/// signal `-pgid` and reach the whole tree — the shell, the compiler it forked,
+/// and the sibling daemon that compiler started. Without this a cancelled job's
+/// host children were never killed at all: the runner only ever knew the direct
+/// child's pid, and a `sh -c` wrapper exiting left everything under it running.
+fn own_process_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Register a spawned child's process group with the running job's
+/// cancellation, for as long as the returned guard lives.
+///
+/// `ProcessCommandRunner` is the single seam every host spawn passes through,
+/// which is why registration lives here: no call site can forget it, and a
+/// process that outlives its `Command` is still a cancellation target.
+#[must_use]
+fn register_process_group(
+    pid: u32,
+    program: &str,
+) -> Option<crate::execution::cancel::TargetRegistration> {
+    let token = crate::execution::cancel::active()?;
+    Some(
+        token.register(crate::execution::cancel::TerminationTarget::ProcessGroup {
+            pgid: pid,
+            // Deliberately the program name only. An argument vector can carry
+            // a registry URL or a secret into an unredacted log sink.
+            label: program.to_string(),
+        }),
+    )
+}
+
 const PACKAGE_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
-fn record_docker_result(program: &str, result: &CommandResult) {
-    if program == "docker" && result.code != 0 {
-        crate::execution::invalidate_docker_job_cgroup_boundary();
+/// Deadline and operation class for one host process invocation.
+///
+/// A non-`docker` program keeps the caller's deadline. A `docker` invocation
+/// gets the deadline its operation class earns: control-plane classes are
+/// bounded by the class, and only the payload class — the job's own work —
+/// takes the caller's step deadline. This is the single place a host `docker`
+/// deadline is decided.
+fn docker_deadline(
+    program: &str,
+    args: &[String],
+    requested: Duration,
+) -> (Option<crate::docker::DockerOp>, Duration) {
+    if program != "docker" {
+        return (None, requested);
+    }
+    let (op, deadline) = crate::docker::deadline_for(args, requested);
+    (Some(op), deadline)
+}
+
+/// Record one completed host `docker` invocation against the running job.
+///
+/// This is the only invocation counter: `CommandRunner` is the single seam
+/// every host process spawn passes through, so no call site carries one.
+fn record_docker_result(
+    op: Option<crate::docker::DockerOp>,
+    started: std::time::Instant,
+    result: &CommandResult,
+) {
+    if let Some(op) = op {
+        crate::docker::observe(op, started.elapsed(), result.code, result.code == 124);
     }
 }
 
@@ -487,9 +763,14 @@ pub(crate) fn configure_host_docker_command(
 }
 
 impl CommandRunner for ProcessCommandRunner {
+    fn is_host_process_runner(&self) -> bool {
+        true
+    }
+
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
         let mut command = Command::new(program);
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let child = command
             .args(args)
             .stdin(Stdio::null())
@@ -550,11 +831,8 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
     ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
-        let timeout = if program == "docker" {
-            crate::docker_lease::docker_cli_timeout(args, timeout)
-        } else {
-            timeout
-        };
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let rm_claim = if program == "docker" {
             crate::docker_lease::claim_docker_container_rm(args)
         } else {
@@ -582,9 +860,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
             spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         let output = child
@@ -597,7 +877,7 @@ impl CommandRunner for ProcessCommandRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(output.status)?,
@@ -605,7 +885,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 
@@ -636,6 +916,8 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
@@ -645,9 +927,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let stdout = child
             .stdout
             .take()
@@ -687,7 +971,7 @@ impl CommandRunner for ProcessCommandRunner {
             let _ = watchdog.join();
         }
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(status)?,
@@ -695,7 +979,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 
@@ -705,22 +989,37 @@ impl CommandRunner for ProcessCommandRunner {
         args: &[String],
         env: &[(String, String)],
     ) -> Result<CommandResult> {
+        if program == "docker" {
+            // No host Docker invocation runs unbounded. The step default is
+            // only ever reachable by the payload class; every control-plane
+            // class is bounded by its own deadline inside `run_timeout_with_env`.
+            return self.run_timeout_with_env(program, args, env, DEFAULT_STEP_TIMEOUT);
+        }
         let mut command = Command::new(program);
-        command.args(args);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (name, value) in env {
             command.env(name, value);
         }
         configure_host_docker_command(&mut command, program, args)?;
-        let output = command
-            .output()
+        own_process_group(&mut command);
+        // Spawn rather than `output()` so the process group is registered with
+        // the job's cancellation before this thread blocks waiting for it.
+        let child = command
+            .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
 
         let result = CommandResult {
             code: exit_code(output.status)?,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         };
-        record_docker_result(program, &result);
         Ok(result)
     }
 
@@ -751,6 +1050,8 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
+        let (op, timeout) = docker_deadline(program, args, timeout);
+        let started = std::time::Instant::now();
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
@@ -761,9 +1062,11 @@ impl CommandRunner for ProcessCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_host_docker_command(&mut command, program, args)?;
+        own_process_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let _group = register_process_group(child.id(), program);
         let (timed_out, watchdog_cancel, watchdog) =
             spawn_docker_timeout_watchdog(program, args, child.id(), timeout);
         if let Some(mut child_stdin) = child.stdin.take() {
@@ -781,7 +1084,7 @@ impl CommandRunner for ProcessCommandRunner {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let result = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
-            timeout_command_result(stdout, stderr)
+            timeout_command_result(op, timeout, stdout, stderr)
         } else {
             CommandResult {
                 code: exit_code(output.status)?,
@@ -789,7 +1092,7 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr,
             }
         };
-        record_docker_result(program, &result);
+        record_docker_result(op, started, &result);
         Ok(result)
     }
 }
@@ -1368,7 +1671,12 @@ pub(crate) struct DockerJobEngine<R> {
     /// leak a `velnor-net-*` network (address-pool exhaustion class).
     job_network_guard: Option<crate::docker_lease::JobNetworkGuard>,
     lifecycle_telemetry: Option<LifecycleTelemetry>,
-    compiler_cache: Option<Arc<velnor_cache_service::ProductionCompilerCache>>,
+    /// The running job's cancellation. Required, not optional: a job that could
+    /// not be cancelled is the defect this field exists to remove, so there is
+    /// no constructor that leaves it unset. Cleanup and teardown engines, which
+    /// are definitionally not the job, take an inert token through
+    /// [`DockerJobEngine::inert`].
+    cancellation: crate::execution::cancel::JobCancellation,
 }
 
 #[derive(Debug, Clone)]
@@ -1383,7 +1691,8 @@ impl<R> DockerJobEngine<R>
 where
     R: CommandRunner,
 {
-    pub fn new(runner: R) -> Self {
+    /// Engine for one cancellable job.
+    pub fn new(runner: R, cancellation: crate::execution::cancel::JobCancellation) -> Self {
         Self {
             runner,
             step_start_sender: None,
@@ -1399,8 +1708,15 @@ where
             docker_lease: None,
             job_network_guard: None,
             lifecycle_telemetry: None,
-            compiler_cache: None,
+            cancellation,
         }
+    }
+
+    /// Engine for work that is not a cancellable job: post-completion Docker
+    /// teardown, workspace cleanup, and tests. Its token can never be
+    /// cancelled, which is the truth about that work rather than a default.
+    pub fn inert(runner: R) -> Self {
+        Self::new(runner, crate::execution::cancel::JobCancellation::inert())
     }
 
     pub fn with_job_timeout_minutes(mut self, timeout_minutes: Option<u64>) -> Self {
@@ -1445,14 +1761,6 @@ where
 
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
-        self
-    }
-
-    pub(crate) fn with_compiler_cache_service(
-        mut self,
-        service: velnor_cache_service::ProductionCompilerCache,
-    ) -> Self {
-        self.compiler_cache = Some(Arc::new(service));
         self
     }
 
@@ -1727,12 +2035,12 @@ where
         if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
             effective_base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
         }
-        let mut state = JobExecutionState::new_with_workspace(
+        let mut state = JobExecutionState::try_new_with_workspace(
             &effective_base_env,
             context_data,
             &container.workspace_host,
             temp_host,
-        );
+        )?;
         state.persistent_workspace_target = container.cargo_target_host.is_some();
         state.cargo_target_host = container
             .cargo_target_host
@@ -1741,8 +2049,20 @@ where
         state.workflow_env = self
             .workflow_env
             .iter()
-            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
-            .collect();
+            .map(|(name, value)| {
+                state
+                    .resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Result<_, _>>()?;
+        // The job's status for `success()`, `failure()` and `cancelled()` is
+        // this token. Installing it here is what makes those functions truthful
+        // instead of constant.
+        state.set_cancellation(self.cancellation.clone());
+        // `ProcessCommandRunner` registers every host process group it spawns
+        // with the active token, so the current step's whole process tree is a
+        // cancellation target without any call site naming it.
+        let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
         let mut step_error = None;
         let mut post_actions = Vec::new();
         let mut native_post_actions = Vec::new();
@@ -1779,9 +2099,23 @@ where
                         frame.depth += 1;
                     } else {
                         let frame_state = state.with_step_action(step_id);
-                        let resolved_display = frame_state.resolve_expressions(display_name);
+                        let resolved_display = frame_state.resolve_expressions(display_name)?;
                         let backend_step_id = github_backend_step_id(step_id);
-                        let skipped = !frame_state.evaluate_condition(condition.as_deref());
+                        let skipped = match frame_state.evaluate_condition(condition.as_deref()) {
+                            Ok(condition_met) => !condition_met,
+                            Err(error) => {
+                                // actions/runner fails the step when its
+                                // condition cannot be evaluated
+                                // (src/Runner.Worker/StepsRunner.cs:231-242).
+                                // A composite umbrella has no result row of
+                                // its own before the frame exists, so the job
+                                // carries the failure.
+                                step_error = Some(anyhow::anyhow!(
+                                    "Step '{resolved_display}' condition could not be evaluated: {error}"
+                                ));
+                                break;
+                            }
+                        };
                         if skipped {
                             eprintln!(
                                 "forensics.lifecycle event=step-skipped step={resolved_display}"
@@ -1830,11 +2164,58 @@ where
             let step_context_id = step.id().to_string();
             let step_backend_id = github_backend_step_id(&step_context_id);
             let step_state = state.with_step_action(&step_context_id);
-            // GitHub evaluates `${{ }}` in step display names at runtime
-            // (ActionRunner.TryUpdateDisplayName); unresolvable expressions
-            // stay raw, matching the upstream prettified-token fallback.
-            let display_name = step_state.resolve_expressions(step.display_name());
-            if !step_state.evaluate_condition(step.condition()) {
+            // Display names are resolved at the same execution boundary as
+            // the step. A malformed/evaluation failure must stop before the
+            // shell or action is dispatched; never carry raw template source
+            // into lifecycle or action execution.
+            let display_name = step_state.resolve_expressions(step.display_name())?;
+            let condition_met = match step_state.evaluate_condition(step.condition()) {
+                Ok(condition_met) => condition_met,
+                Err(error) => {
+                    // actions/runner reports the error and completes the step
+                    // as failed, then keeps running the remaining steps
+                    // (src/Runner.Worker/StepsRunner.cs:231-242). The
+                    // string-rewriting evaluator this replaces was fail-open
+                    // and ran the step instead.
+                    let message =
+                        format!("Step '{display_name}' condition could not be evaluated: {error}");
+                    eprintln!("{message}");
+                    let reports = composite_frame.is_none() && step.reports_timeline_start();
+                    let mut failed_started_at = String::new();
+                    if reports {
+                        failed_started_at = self.emit_step_started(
+                            step_backend_id.clone(),
+                            &display_name,
+                            &mut timeline_order,
+                        );
+                    }
+                    let result = StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: message,
+                    };
+                    if reports {
+                        let log = step_log_with_name(
+                            &step_backend_id,
+                            &display_name,
+                            timeline_order,
+                            &failed_started_at,
+                            &unix_now_rfc3339(),
+                            &result,
+                            &step_log_prelude(step, &step_state),
+                        );
+                        self.emit_step_log(&log);
+                        step_logs.push(log);
+                    }
+                    state.apply(&step_context_id, &result);
+                    results.push(result);
+                    continue;
+                }
+            };
+            if !condition_met {
                 // Embedded composite steps never surface their own rows;
                 // a skipped one simply leaves no trace in the parent's log.
                 eprintln!("forensics.lifecycle event=step-skipped step={display_name}");
@@ -1881,7 +2262,7 @@ where
                 ..
             } = step
                 && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
-                && step_state.evaluate_post_condition(invocation.pre_condition.as_deref())
+                && step_state.post_condition_met(invocation.pre_condition.as_deref())
             {
                 if invocation.post_container_path.is_some() {
                     post_actions.push(PostJavaScriptAction {
@@ -1914,7 +2295,7 @@ where
                     effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 )?;
                 let failed = result.exit_code != 0;
-                if failed && *continue_on_error {
+                if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
                 }
                 if let Some(frame) = composite_frame.as_mut() {
@@ -2034,7 +2415,7 @@ where
                     self.execute_checkout_step(container, plan, &step_state)
                 }
                 ExecutableStep::Script(step) => {
-                    let step = step_state.resolve_script_step(step);
+                    let step = step_state.resolve_script_step(step)?;
                     let test_runner = test_command_kind(&step.script);
                     let test_started = test_runner.map(|_| Instant::now());
                     let compiler = compile_command_kind(&step.script);
@@ -2079,38 +2460,13 @@ where
                     };
                     let step_timeout =
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
-                    let cache_execution = self
-                        .compiler_cache
-                        .as_ref()
-                        .and_then(|service| {
-                            CompilerActionSession::new(
-                                Arc::clone(service),
-                                container,
-                                &step.script,
-                                &env,
-                                step_timeout,
-                            )
-                            .transpose()
-                        })
-                        .transpose()?;
-                    let step_result = if let Some(session) = cache_execution {
-                        session
-                            .execute(
-                                &mut self.runner,
-                                exec_args.args(),
-                                exec_args.process_env(),
-                                &mut on_output,
-                            )?
-                            .result
-                    } else {
-                        self.runner.run_streaming_timeout_with_env(
-                            "docker",
-                            exec_args.args(),
-                            exec_args.process_env(),
-                            step_timeout,
-                            &mut on_output,
-                        )?
-                    };
+                    let step_result = self.runner.run_streaming_timeout_with_env(
+                        "docker",
+                        exec_args.args(),
+                        exec_args.process_env(),
+                        step_timeout,
+                        &mut on_output,
+                    )?;
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -2195,7 +2551,7 @@ where
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
-                        outputs: step_state.evaluate_named_outputs(outputs),
+                        outputs: step_state.evaluate_named_outputs(outputs)?,
                         ..StepCommandState::default()
                     },
                     skipped: false,
@@ -2208,7 +2564,13 @@ where
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
-                    if failed && step.continue_on_error() {
+                    // `continue-on-error` is gated on not-cancelled. Without
+                    // this gate a cancelled job promoted its killed step's
+                    // conclusion to success, `success()` stayed true, and every
+                    // remaining step was dispatched — the "a cancelled job keeps
+                    // running ordinary steps" defect, removed at its root rather
+                    // than by a flag check in the step loop.
+                    if failed && step.continue_on_error() && !state.is_cancelled() {
                         result.failure_ignored = true;
                     }
                     if let Some(frame) = composite_frame.as_mut() {
@@ -2248,7 +2610,7 @@ where
                     // a step that fails by throwing still honors
                     // continue-on-error — outcome stays failure, the reported
                     // conclusion is success, and the job runs remaining steps.
-                    if step.continue_on_error() {
+                    if step.continue_on_error() && !state.is_cancelled() {
                         eprintln!(
                             "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
                         );
@@ -2316,13 +2678,25 @@ where
         let native_post_actions = native_post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
             .collect::<Vec<_>>();
         let post_actions = post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
             .collect::<Vec<_>>();
+        // Every post step's condition above was evaluated against the job's
+        // real status, so `always()` and `cancelled()` posts are selected on a
+        // cancelled job. Their *execution* then runs under a fresh unlinked
+        // token, so nothing can cancel the cleanup — exactly as upstream gives
+        // every post child a new `CancellationTokenSource`
+        // (`src/Runner.Worker/ExecutionContext.cs:436`, reached with `null`
+        // from `CreatePostChild`, `:1384-1395`). The job's status itself stays
+        // `cancelled`, which is why `state` keeps the job token.
+        let post_cancellation = self.cancellation.unlinked();
+        self.cancellation = post_cancellation.clone();
+        drop(active_cancellation);
+        let _post_cancellation = crate::execution::cancel::set_active(post_cancellation);
         reserve_github_post_step_orders(
             &mut timeline_order,
             native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
@@ -2498,8 +2872,8 @@ where
             return Err(error);
         }
         Ok(JobExecutionSummary {
-            job_outputs: evaluate_job_outputs(job_outputs, &state),
-            environment_url: evaluate_environment_url(environment_url, &state),
+            job_outputs: evaluate_job_outputs(job_outputs, &state)?,
+            environment_url: evaluate_environment_url(environment_url, &state)?,
             step_results: results,
             executed_physical_actions,
             step_logs,
@@ -2560,7 +2934,7 @@ where
         )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
@@ -2660,7 +3034,11 @@ where
                 },
             )?;
             self.run_docker_with_env(
-                &container.build_docker_action_args(&action.image, dockerfile_host, context_host),
+                &container.build_docker_action_args(
+                    &action.image,
+                    dockerfile_host,
+                    context_host,
+                )?,
                 &[(
                     "DOCKER_CONFIG".to_string(),
                     docker_config.display().to_string(),
@@ -2683,7 +3061,7 @@ where
         )?;
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
         set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
         env.extend(command_files.env.iter().cloned());
@@ -2691,12 +3069,13 @@ where
         let entrypoint = action
             .entrypoint
             .as_ref()
-            .map(|value| state.resolve_expressions(value));
+            .map(|value| state.resolve_expressions(value))
+            .transpose()?;
         let args = action
             .args
             .iter()
             .map(|value| state.resolve_expressions(value))
-            .collect::<Vec<_>>();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let secret_masks = action_state.secret_masks(&self.secret_masks);
         let exec_args = container.prepare_run_docker_action_args(
             "/github/workspace",
@@ -2762,7 +3141,6 @@ where
             }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
-            NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
             NativeActionAdapter::SetupMold => {
                 self.native_setup_mold(_container, action, state, timeout)
             }
@@ -2773,9 +3151,7 @@ where
             NativeActionAdapter::Renovate => {
                 self.native_renovate(_container, action, state, timeout)
             }
-            NativeActionAdapter::GitHubRuntimeExport => {
-                Ok(native_github_runtime_export(action, state))
-            }
+            NativeActionAdapter::GitHubRuntimeExport => native_github_runtime_export(action, state),
             NativeActionAdapter::GitHubScript => native_github_script(action, state),
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
@@ -2784,7 +3160,7 @@ where
             NativeActionAdapter::DockerLogin => {
                 self.native_docker_login(_container, action, state, timeout)
             }
-            NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
+            NativeActionAdapter::DockerMetadata => native_docker_metadata(action, state),
             NativeActionAdapter::DockerBuildPush => {
                 self.native_docker_build_push(_container, action, state, timeout)
             }
@@ -2849,21 +3225,12 @@ where
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
-            NativeActionAdapter::Kache => {
-                let result = self.native_shell(
-                    _container,
-                    state,
-                    "stats=$(kache stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## Kache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; kache report --format github >> \"$GITHUB_STEP_SUMMARY\" 2>/dev/null || true; fi",
-                    timeout,
-                )?;
-                Ok(native_command_result(result, StepCommandState::default()))
-            }
             NativeActionAdapter::DockerSetupBuildx => {
-                let action_state = state.with_env(state.resolve_env(&action.env));
+                let action_state = state.with_env(state.resolve_env(&action.env)?);
                 let requested_name =
-                    native_input_or(&action_state, action, "name", "velnor-builder");
+                    native_input_or(&action_state, action, "name", "velnor-builder")?;
                 let name = job_scoped_buildx_builder_name(&requested_name, state);
-                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")) {
+                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?) {
                     return Ok(StepExecutionResult {
                         exit_code: 0,
                         state: StepCommandState::default(),
@@ -2878,7 +3245,7 @@ where
                     action,
                     "keep-state",
                     "false",
-                ));
+                )?);
                 let keep_state_arg = if keep_state { " --keep-state" } else { "" };
                 let script = format!(
                     "docker buildx rm{keep_state_arg} {name} 2>/dev/null || true; echo \"Removing builder {name}\""
@@ -2887,8 +3254,8 @@ where
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             NativeActionAdapter::DockerLogin => {
-                let action_state = state.with_env(state.resolve_env(&action.env));
-                let registry = native_input_or(&action_state, action, "registry", "");
+                let action_state = state.with_env(state.resolve_env(&action.env)?);
+                let registry = native_input_or(&action_state, action, "registry", "")?;
                 let script = if registry.is_empty() {
                     "docker logout 2>/dev/null || true".to_string()
                 } else {
@@ -2928,19 +3295,19 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
-        let version = native_input(action, &action_state, "version");
-        let install_args = native_input(action, &action_state, "install_args");
-        let working_directory = native_input(action, &action_state, "working_directory");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let install = input_truthy(&native_input_or(&action_state, action, "install", "true")?);
+        let version = native_input(action, &action_state, "version")?;
+        let install_args = native_input(action, &action_state, "install_args")?;
+        let working_directory = native_input(action, &action_state, "working_directory")?;
         let cache_key_prefix =
-            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2");
+            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2")?;
         let cache_save = input_truthy(&native_input_or(
             &action_state,
             action,
             "cache_save",
             "true",
-        ));
+        )?);
         // 008-R5: resolve the exact mise binary version now (an omitted version
         // becomes the fleet pin — never a live "latest" lookup) so it is
         // auditable and keys the persistent binary store.
@@ -3044,21 +3411,6 @@ where
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
-    fn native_kache(
-        &mut self,
-        container: &JobContainerSpec,
-        _action: &NativeActionInvocation,
-        state: &JobExecutionState,
-        timeout: Duration,
-    ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
-        let mut command_state = StepCommandState::default();
-        command_state.set_env("KACHE_CACHE_DIR".into(), "/var/cache/kache".into());
-        command_state.set_env("KACHE_MAX_SIZE".into(), "20GiB".into());
-        command_state.set_env("RUSTC_WRAPPER".into(), "kache".into());
-        Ok(native_command_result(result, command_state))
-    }
-
     fn native_setup_mold(
         &mut self,
         container: &JobContainerSpec,
@@ -3083,23 +3435,23 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let inputs = HadolintInputs {
-            dockerfile: native_input_or(&action_state, action, "dockerfile", "Dockerfile"),
-            config: native_input(action, &action_state, "config"),
-            recursive: native_input_or(&action_state, action, "recursive", "false"),
-            output_file: native_input_or(&action_state, action, "output-file", "/dev/stdout"),
-            no_color: native_input_or(&action_state, action, "no-color", "false"),
-            no_fail: native_input_or(&action_state, action, "no-fail", "false"),
-            verbose: native_input_or(&action_state, action, "verbose", "false"),
-            format: native_input_or(&action_state, action, "format", "tty"),
-            failure_threshold: native_input_or(&action_state, action, "failure-threshold", "info"),
-            override_error: native_input(action, &action_state, "override-error"),
-            override_warning: native_input(action, &action_state, "override-warning"),
-            override_info: native_input(action, &action_state, "override-info"),
-            override_style: native_input(action, &action_state, "override-style"),
-            ignore: native_input(action, &action_state, "ignore"),
-            trusted_registries: native_input(action, &action_state, "trusted-registries"),
+            dockerfile: native_input_or(&action_state, action, "dockerfile", "Dockerfile")?,
+            config: native_input(action, &action_state, "config")?,
+            recursive: native_input_or(&action_state, action, "recursive", "false")?,
+            output_file: native_input_or(&action_state, action, "output-file", "/dev/stdout")?,
+            no_color: native_input_or(&action_state, action, "no-color", "false")?,
+            no_fail: native_input_or(&action_state, action, "no-fail", "false")?,
+            verbose: native_input_or(&action_state, action, "verbose", "false")?,
+            format: native_input_or(&action_state, action, "format", "tty")?,
+            failure_threshold: native_input_or(&action_state, action, "failure-threshold", "info")?,
+            override_error: native_input(action, &action_state, "override-error")?,
+            override_warning: native_input(action, &action_state, "override-warning")?,
+            override_info: native_input(action, &action_state, "override-info")?,
+            override_style: native_input(action, &action_state, "override-style")?,
+            ignore: native_input(action, &action_state, "ignore")?,
+            trusted_registries: native_input(action, &action_state, "trusted-registries")?,
         };
         let result =
             self.native_shell(container, &action_state, &hadolint_script(&inputs), timeout)?;
@@ -3152,9 +3504,9 @@ where
                 self.trust_scope
             );
         }
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_image =
-            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE);
+            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE)?;
         if requested_image.trim() != SETUP_QEMU_BINFMT_IMAGE {
             eprintln!(
                 "Velnor ignored docker/setup-qemu-action image override `{}`; using pinned {}",
@@ -3163,8 +3515,8 @@ where
             );
         }
         let image = SETUP_QEMU_BINFMT_IMAGE.to_string();
-        let platforms = native_input_or(&action_state, action, "platforms", "all");
-        let reset = native_input_or(&action_state, action, "reset", "false");
+        let platforms = native_input_or(&action_state, action, "platforms", "all")?;
+        let reset = native_input_or(&action_state, action, "reset", "false")?;
         if reset.trim() == "true" {
             let uninstall = vec![
                 "run".to_string(),
@@ -3214,9 +3566,9 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let release = native_input(action, &action_state, "cosign-release");
-        let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let release = native_input(action, &action_state, "cosign-release")?;
+        let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign")?;
         // install-dir is interpolated inside double quotes so $HOME expands
         // in-shell (the action's documented default) — reject anything that
         // could escape the quoting or substitute commands.
@@ -3377,9 +3729,9 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let version = native_input(action, &action_state, "renovate-version");
-        let image = native_input(action, &action_state, "renovate-image");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let version = native_input(action, &action_state, "renovate-version")?;
+        let image = native_input(action, &action_state, "renovate-image")?;
         let image = if !image.is_empty() {
             image
         } else if !version.is_empty() {
@@ -3387,9 +3739,9 @@ where
         } else {
             "ghcr.io/renovatebot/renovate:latest".to_string()
         };
-        let token = native_input(action, &action_state, "token");
+        let token = native_input(action, &action_state, "token")?;
         let mut env = action_state.step_env(&[]);
-        env.extend(action_state.resolve_env(&action.env));
+        env.extend(action_state.resolve_env(&action.env)?);
         if !token.is_empty() {
             set_env_value(&mut env, "RENOVATE_TOKEN", &token);
             set_env_value(&mut env, "INPUT_TOKEN", &token);
@@ -3420,12 +3772,12 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
         let name = job_scoped_buildx_builder_name(&requested_name, state);
-        let driver = native_input_or(&action_state, action, "driver", "docker-container");
+        let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
-            native_input(action, &action_state, "buildkitd-config-inline");
+            native_input(action, &action_state, "buildkitd-config-inline")?;
         let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
             None
         } else {
@@ -3462,7 +3814,7 @@ where
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
             }
-            if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
+            if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
                 args.push("--bootstrap".to_string());
             }
             self.container_docker(container, &action_state, &args, None, timeout)?
@@ -3474,7 +3826,7 @@ where
                     ("name".to_string(), name.clone()),
                     (
                         "driver".to_string(),
-                        native_input_or(&action_state, action, "driver", "docker-container"),
+                        native_input_or(&action_state, action, "driver", "docker-container")?,
                     ),
                     (
                         "platforms".to_string(),
@@ -3495,15 +3847,15 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let registry = native_input_or(
             &action_state,
             action,
             "registry",
             "https://index.docker.io/v1/",
-        );
-        let username = native_input(action, &action_state, "username");
-        let password = native_input(action, &action_state, "password");
+        )?;
+        let username = native_input(action, &action_state, "username")?;
+        let password = native_input(action, &action_state, "password")?;
         if !password.is_empty()
             && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
         {
@@ -3532,33 +3884,35 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let context = native_input_or(&action_state, action, "context", ".");
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
+        let context = native_input_or(&action_state, action, "context", ".")?;
         let mut args = vec!["buildx".to_string(), "build".to_string()];
         // build-push-action resolves an explicit `file` from the workspace,
         // independently from `context`. Passing context/file twice here turned
         // `context: docker`, `file: docker/Dockerfile` into
         // `docker/docker/Dockerfile`.
-        let file_input = native_input(action, &action_state, "file");
+        let file_input = native_input(action, &action_state, "file")?;
         if !file_input.trim().is_empty() {
             push_arg(&mut args, "--file", &file_input);
         }
         push_arg(
             &mut args,
             "--platform",
-            &native_input(action, &action_state, "platforms"),
+            &native_input(action, &action_state, "platforms")?,
         );
-        for tag in input_values(&native_input(action, &action_state, "tags")) {
+        for tag in input_values(&native_input(action, &action_state, "tags")?) {
             push_arg(&mut args, "--tag", &tag);
         }
-        for label in input_values(&native_input(action, &action_state, "labels")) {
+        for label in input_values(&native_input(action, &action_state, "labels")?) {
             push_arg(&mut args, "--label", &label);
         }
-        for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
+        for build_arg in input_values(&native_input(action, &action_state, "build-args")?) {
             push_arg(&mut args, "--build-arg", &build_arg);
         }
-        let secret_input = native_input(action, &action_state, "secrets");
-        if !secret_input.trim().is_empty() && self.trust_scope != "trusted" {
+        let secret_input = native_input(action, &action_state, "secrets")?;
+        if !secret_input.trim().is_empty()
+            && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
+        {
             bail!(
                 "docker/build-push-action refuses BuildKit secrets in trust scope '{}'; accepted trust scope: trusted",
                 self.trust_scope
@@ -3585,24 +3939,24 @@ where
             );
             secret_files.push(secret_file);
         }
-        for cache in input_values(&native_input(action, &action_state, "cache-from")) {
+        for cache in input_values(&native_input(action, &action_state, "cache-from")?) {
             push_arg(&mut args, "--cache-from", &cache);
         }
-        for cache in input_values(&native_input(action, &action_state, "cache-to")) {
+        for cache in input_values(&native_input(action, &action_state, "cache-to")?) {
             push_arg(&mut args, "--cache-to", &cache);
         }
         // The `outputs` input maps to buildx --output (e.g. the publish
         // workflows' push-by-digest exporter: type=image,push-by-digest=true,
         // name=...,push=true).
         let mut has_output = false;
-        for output in input_values(&native_input(action, &action_state, "outputs")) {
+        for output in input_values(&native_input(action, &action_state, "outputs")?) {
             push_arg(&mut args, "--output", &output);
             has_output = true;
         }
-        if input_truthy(&native_input(action, &action_state, "push")) && !has_output {
+        if input_truthy(&native_input(action, &action_state, "push")?) && !has_output {
             args.push("--push".to_string());
         }
-        if input_truthy(&native_input(action, &action_state, "load")) && !has_output {
+        if input_truthy(&native_input(action, &action_state, "load")?) && !has_output {
             args.push("--load".to_string());
         }
         // build-push-action exposes digest/imageid/metadata step outputs from
@@ -3658,24 +4012,24 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
+        let action_state = state.with_env(state.resolve_env(&action.env)?);
         let mut args = vec!["buildx".to_string(), "bake".to_string()];
         // The command runs inside the job container with CWD /__w (the
         // workspace), so workflow-relative bake file paths resolve as-is.
-        for file in input_values(&native_input(action, &action_state, "files")) {
+        for file in input_values(&native_input(action, &action_state, "files")?) {
             push_arg(&mut args, "--file", &file);
         }
-        for set in input_values(&native_input(action, &action_state, "set")) {
+        for set in input_values(&native_input(action, &action_state, "set")?) {
             push_arg(&mut args, "--set", &set);
         }
-        if input_truthy(&native_input(action, &action_state, "push")) {
+        if input_truthy(&native_input(action, &action_state, "push")?) {
             args.push("--push".to_string());
         }
         args.extend(input_values(&native_input(
             action,
             &action_state,
             "targets",
-        )));
+        )?));
         let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
@@ -3685,14 +4039,13 @@ where
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let filters = parse_paths_filter_rules(
-            action
-                .inputs
-                .get("filters")
-                .map(|value| state.resolve_expressions(value))
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
+        let filters_input = action
+            .inputs
+            .get("filters")
+            .map(|value| state.resolve_expressions(value))
+            .transpose()?
+            .unwrap_or_default();
+        let filters = parse_paths_filter_rules(&filters_input)?;
         let changed_files = self.changed_files_for_paths_filter(state)?;
         let mut outputs = BTreeMap::new();
         let mut matched_names = Vec::new();
@@ -4049,15 +4402,17 @@ where
                 container.temp_host.display()
             )
         })?;
-        // Resolve the same trust-scoped runtime used for mounts and env so
-        // Plan 066's shared cache root is initialized without crossing scopes.
-        let cache_runtime = container.compiler_cache_runtime();
-        if let Some(cache_host) = cache_runtime.host_path() {
+        if let Some(cache_host) = &container.mbx_store_host {
             fs::create_dir_all(cache_host).with_context(|| {
                 format!(
-                    "create shared compiler-cache directory for {}",
+                    "create Mr Boxington store for {}",
                     container.temp_host.display()
                 )
+            })?;
+        }
+        if let Some(cache_host) = &container.sccache_store_host {
+            fs::create_dir_all(cache_host).with_context(|| {
+                format!("create sccache store for {}", container.temp_host.display())
             })?;
         }
         // The temp dir is bind-mounted over the job container's /tmp. A plain
@@ -4106,10 +4461,18 @@ where
             container.network.clone(),
         ));
         for service in &container.services {
-            self.with_docker_lifecycle(|executor| executor.run_docker(&service.start_args()))?;
+            // Service environment holds workflow credentials; start_args keeps
+            // it in a mode-0600 env file instead of the world-readable argv.
+            let prepared = service.start_args(&container.env_dir())?;
+            self.with_docker_lifecycle(|executor| {
+                executor.run_docker_with_env(prepared.args(), prepared.process_env())
+            })?;
             self.wait_for_service(service)?;
         }
-        self.with_docker_lifecycle(|executor| executor.run_docker(&container.start_args()))?;
+        let prepared = container.start_args()?;
+        self.with_docker_lifecycle(|executor| {
+            executor.run_docker_with_env(prepared.args(), prepared.process_env())
+        })?;
         // Docker accepts repeated network-shaped create options with behavior
         // that depends on option placement. Reconcile the runner-owned
         // topology explicitly after every container exists, before any step
@@ -4199,7 +4562,7 @@ where
         {
             return Ok(());
         }
-        self.run_docker(&container.seed_mise_store_args())?;
+        self.run_docker(&container.seed_mise_store_args()?)?;
         fs::create_dir_all(&store).ok();
         fs::write(&marker, &image_id)
             .with_context(|| format!("write mise store seed marker {}", marker.display()))?;
@@ -4390,10 +4753,10 @@ fn resolve_checkout_plan_expressions(
 ) -> Result<CheckoutPlan> {
     let mut plan = plan.clone();
     if let Some(version) = plan.version.as_mut() {
-        *version = state.resolve_expressions(version);
+        *version = state.resolve_expressions(version)?;
     }
     if let Some(token) = plan.token.as_mut() {
-        *token = state.resolve_expressions(token);
+        *token = state.resolve_expressions(token)?;
         if token.is_empty() || token.contains("${{") {
             anyhow::bail!("explicit checkout token expression did not resolve");
         }
@@ -4809,8 +5172,8 @@ fn parse_mise_environment(
 fn sccache_setup_script() -> String {
     // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
     // (download the release if the job image doesn't ship it), then start the
-    // server. The workflow sets RUSTC_WRAPPER=sccache, so the binary MUST exist on
-    // PATH or every rustc/clippy invocation fails with
+    // server. Velnor selects RUSTC_WRAPPER=sccache only when this explicit
+    // action is present, so the binary MUST exist on PATH or every invocation fails with
     // "could not execute process `sccache ...`: No such file or directory".
     // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
     // Velnor injects let sccache use the GitHub Actions cache backend.
@@ -4826,9 +5189,11 @@ sccache --version | grep -F 'sccache 0.16.0'
 SCCACHE_LOCAL_DIR=/var/cache/sccache
 mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
 if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
   echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
   echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
 fi
+export RUSTC_WRAPPER=sccache
 export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
 export SCCACHE_GHA_ENABLED=false
 export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
@@ -4837,24 +5202,6 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 # Best-effort: cargo will auto-start the server on first use anyway.
 sccache --start-server 2>/dev/null || true
-"#
-    .to_string()
-}
-
-fn kache_setup_script() -> String {
-    r#"set -e
-command -v kache >/dev/null 2>&1 || { echo 'kache v0.14.2 must be preinstalled in the job image' >&2; exit 1; }
-kache --version | grep -F 'kache 0.14.2'
-mkdir -p /var/cache/kache
-export KACHE_CACHE_DIR=/var/cache/kache
-export KACHE_MAX_SIZE=20GiB
-export RUSTC_WRAPPER=kache
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo 'KACHE_CACHE_DIR=/var/cache/kache' >> "$GITHUB_ENV"
-  echo 'KACHE_MAX_SIZE=20GiB' >> "$GITHUB_ENV"
-  echo 'RUSTC_WRAPPER=kache' >> "$GITHUB_ENV"
-fi
-kache stats >/dev/null
 "#
     .to_string()
 }
@@ -5047,7 +5394,6 @@ fn native_post_condition(
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
-        NativeActionAdapter::Kache => Some("always()"),
         // GitHub's setup-buildx post removes the builder it created.
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
@@ -5083,14 +5429,14 @@ fn native_cache_restore_main(
     state: &JobExecutionState,
     kind: CacheActionKind,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     validate_cache_paths(&action_state, &path)?;
-    let restore_keys = native_input(action, &action_state, "restore-keys");
+    let restore_keys = native_input(action, &action_state, "restore-keys")?;
     let fail_on_cache_miss =
-        input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
-    let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
+        input_truthy(&native_input(action, &action_state, "fail-on-cache-miss")?);
+    let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only")?);
     let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version, &path)?;
@@ -5198,9 +5544,9 @@ fn native_cache_save_main(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     validate_cache_paths(&action_state, &path)?;
     let version = cache_scope_version_for(action, &action_state, &path);
     save_cache_result(&action_state, &key, &path, false, &version)
@@ -5210,11 +5556,11 @@ fn native_rust_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let shared_key = native_cache_key(action, &action_state, "shared-key");
-    let cache_directories = native_input(action, &action_state, "cache-directories");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let shared_key = native_cache_key(action, &action_state, "shared-key")?;
+    let cache_directories = native_input(action, &action_state, "cache-directories")?;
     validate_cache_paths(&action_state, &cache_directories)?;
-    let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false")?;
     let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
     let matched = find_cache_match(&action_state, &shared_key, "", &version, &cache_directories)?;
@@ -5269,9 +5615,9 @@ fn native_cache_save(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "key");
-    let path = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "key")?;
+    let path = native_input(action, &action_state, "path")?;
     let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
@@ -5286,9 +5632,9 @@ fn native_rust_cache_save(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_cache_key(action, &action_state, "shared-key");
-    let path = native_input(action, &action_state, "cache-directories");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let key = native_cache_key(action, &action_state, "shared-key")?;
+    let path = native_input(action, &action_state, "cache-directories")?;
     let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
@@ -5315,8 +5661,8 @@ fn native_cache_key(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
     name: &str,
-) -> String {
-    native_input(action, state, name).trim().to_string()
+) -> Result<String, ExpressionInterpolationError> {
+    Ok(native_input(action, state, name)?.trim().to_string())
 }
 
 /// Deterministic cache-version segment that isolates entries by runtime
@@ -7018,20 +7364,23 @@ fn native_upload_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let name = native_input_or(&action_state, action, "name", "artifact");
-    let path_input = native_input(action, &action_state, "path");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let name = native_input_or(&action_state, action, "name", "artifact")?;
+    let path_input = native_input(action, &action_state, "path")?;
     let if_no_files_found =
-        native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
-    let include_hidden_files =
-        input_truthy(&native_input(action, &action_state, "include-hidden-files"));
-    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
+        native_input_or(&action_state, action, "if-no-files-found", "warn")?.to_ascii_lowercase();
+    let include_hidden_files = input_truthy(&native_input(
+        action,
+        &action_state,
+        "include-hidden-files",
+    )?);
+    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite")?);
     // The strict manifest admits only the estate-approved v4 value `0`.
     // upload-artifact defines it as no compression (ZIP Stored).
     let store_uncompressed =
-        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
+        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level")?);
     let retention_days = artifact_retention_days(
-        &native_input(action, &action_state, "retention-days"),
+        &native_input(action, &action_state, "retention-days")?,
         action_state
             .env
             .get("GITHUB_RETENTION_DAYS")
@@ -7054,6 +7403,13 @@ fn native_upload_artifact(
     sources.dedup();
 
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
+    let artifact_run_dir = artifact_dir
+        .parent()
+        .context("artifact directory has no run bucket")?;
+    // GC removes one complete run bucket at a time. Lock that same bucket
+    // across staging, hashing, and Results Service streaming so the collector
+    // cannot delete the source between any of those phases.
+    let _artifact_lock = CacheEntryLock::exclusive(artifact_run_dir)?;
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
         // and the latest run's content is what compare-results should see.
@@ -7218,11 +7574,11 @@ fn native_download_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let name = native_input(action, &action_state, "name");
-    let pattern = native_input(action, &action_state, "pattern");
-    let destination_input = native_input_or(&action_state, action, "path", ".");
-    let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple"));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let name = native_input(action, &action_state, "name")?;
+    let pattern = native_input(action, &action_state, "pattern")?;
+    let destination_input = native_input_or(&action_state, action, "path", ".")?;
+    let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple")?);
     let destination = resolve_host_path(state, &destination_input)
         .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
     let destination_scope = trusted_job_destination(state, &destination)?;
@@ -7282,6 +7638,10 @@ fn native_download_artifact(
         // Unit/offline fallback. Product jobs always carry Results Service
         // credentials and therefore use the host-independent v4 path above.
         let store = artifact_store_dir(state)?;
+        // The GC candidate is the whole run bucket, not one artifact child.
+        // Hold the bucket lock before listing or opening any child so a
+        // concurrent reclaim either waits for this read or wins before it.
+        let _artifact_lock = CacheEntryLock::shared(&store)?;
         let artifacts = matching_artifacts(&store, &name, &pattern)?;
         for (artifact_name, artifact_dir) in &artifacts {
             let target_relative = if merge_multiple || !name.is_empty() {
@@ -7342,8 +7702,8 @@ fn native_upload_pages_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let source_input = native_input_or(&action_state, action, "path", "_site/");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let source_input = native_input_or(&action_state, action, "path", "_site/")?;
     let source = resolve_host_path(state, &source_input)
         .context("actions/upload-pages-artifact requires a workspace path")?;
     let workspace = state
@@ -7381,7 +7741,7 @@ fn native_upload_pages_artifact(
     let mut page_action = action.clone();
     page_action.inputs.insert(
         "name".to_string(),
-        native_input_or(&action_state, action, "name", "github-pages"),
+        native_input_or(&action_state, action, "name", "github-pages")?,
     );
     page_action
         .inputs
@@ -7890,7 +8250,7 @@ fn native_attest_build_provenance(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let workspace = state
         .workspace_host
         .as_deref()
@@ -7906,7 +8266,7 @@ fn native_attest_build_provenance(
     let api_url = trusted_github_api_base(state)?;
     let server_url = trusted_github_server_base(state)?;
     let visibility = action_state
-        .resolve_context_data_expression("github.event.repository.visibility")
+        .context_string("github.event.repository.visibility")
         .or_else(|| {
             action_state
                 .immutable_env
@@ -8017,13 +8377,13 @@ fn native_create_github_app_token(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
     let (repository_owner, repository_name) = repository
         .split_once('/')
         .context("GITHUB_REPOSITORY must be owner/name")?;
-    let owner = native_input_or(&action_state, action, "owner", repository_owner);
-    let repositories = native_input_or(&action_state, action, "repositories", repository_name);
+    let owner = native_input_or(&action_state, action, "owner", repository_owner)?;
+    let repositories = native_input_or(&action_state, action, "repositories", repository_name)?;
     if owner != repository_owner || repositories != repository_name {
         bail!("actions/create-github-app-token is restricted to current repository {repository}");
     }
@@ -8033,15 +8393,15 @@ fn native_create_github_app_token(
         action,
         "skip-token-revoke",
         "false",
-    )) {
+    )?) {
         bail!("actions/create-github-app-token does not permit skip-token-revoke");
     }
     // v3 recommends client-id and retains app-id as a legacy alias. Resolve
     // the same pair here so admission and native execution cannot disagree.
-    let client_id = native_input(action, &action_state, "client-id");
-    let legacy_app_id = native_input(action, &action_state, "app-id");
+    let client_id = native_input(action, &action_state, "client-id")?;
+    let legacy_app_id = native_input(action, &action_state, "app-id")?;
     let app_id = github_app_identifier(client_id, legacy_app_id);
-    let private_key = native_input(action, &action_state, "private-key");
+    let private_key = native_input(action, &action_state, "private-key")?;
     if app_id.trim().is_empty() || private_key.trim().is_empty() {
         bail!(
             "actions/create-github-app-token requires client-id (or legacy app-id) and private-key"
@@ -8214,7 +8574,7 @@ fn native_deploy_pages(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let repository = required_immutable_env(state, "GITHUB_REPOSITORY")?;
     let build_version = required_immutable_env(state, "GITHUB_SHA")?.to_owned();
     let github_token = required_immutable_env(state, "GITHUB_TOKEN")?;
@@ -8225,7 +8585,7 @@ fn native_deploy_pages(
     let oidc_url = crate::protocol::validate_authenticated_url(oidc_url)?;
     let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
         .context("actions/deploy-pages runtime token is missing workflow backend IDs")?;
-    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
+    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages")?;
     let api_url = trusted_github_api_base(state)?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("velnor-runner")
@@ -8259,7 +8619,7 @@ fn native_deploy_pages(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .context("Pages OIDC response is missing value")?;
-    let preview = native_input_or(&action_state, action, "preview", "false") == "true";
+    let preview = native_input_or(&action_state, action, "preview", "false")? == "true";
     let mut payload = serde_json::json!({
         "artifact_id": artifact_id,
         "pages_build_version": build_version,
@@ -8300,14 +8660,14 @@ fn native_deploy_pages(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| pages_url_for_repository(repository));
-    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000);
+    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000)?;
     let timeout = if requested_timeout == 0 {
         600_000
     } else {
         requested_timeout.min(600_000)
     };
-    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000);
-    let max_errors = native_u64_input(action, &action_state, "error_count", 10).max(1);
+    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000)?;
+    let max_errors = native_u64_input(action, &action_state, "error_count", 10)?.max(1);
     let started = std::time::Instant::now();
     let status_url = format!("{api_url}/repos/{repository}/pages/deployments/{deployment_id}");
     let mut errors = 0_u64;
@@ -8421,8 +8781,10 @@ fn native_u64_input(
     state: &JobExecutionState,
     name: &str,
     default: u64,
-) -> u64 {
-    native_input(action, state, name).parse().unwrap_or(default)
+) -> Result<u64, ExpressionInterpolationError> {
+    Ok(native_input(action, state, name)?
+        .parse()
+        .unwrap_or(default))
 }
 
 fn cancel_pages_deployment(
@@ -8445,10 +8807,10 @@ fn cancel_pages_deployment(
 fn native_docker_metadata(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let images = input_values(&native_input(action, &action_state, "images"));
-    let tags_input = native_input(action, &action_state, "tags");
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let images = input_values(&native_input(action, &action_state, "images")?);
+    let tags_input = native_input(action, &action_state, "tags")?;
     let mut tags = Vec::new();
     for image in &images {
         for tag in docker_metadata_tags(&action_state, &tags_input) {
@@ -8458,7 +8820,7 @@ fn native_docker_metadata(
     let labels = docker_metadata_labels(&action_state).join("\n");
     let tags = tags.join("\n");
     let json = docker_metadata_json(&tags, &labels);
-    StepExecutionResult {
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs: [
@@ -8484,14 +8846,14 @@ fn native_docker_metadata(
             "{ANSI_CYAN}{ANSI_BOLD}Generated Docker metadata{ANSI_RESET}\n{tags}\n{labels}\n"
         ),
         stderr: String::new(),
-    }
+    })
 }
 
 fn native_github_runtime_export(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
-    let action_state = state.with_env(state.resolve_env(&action.env));
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
     let mut exported = BTreeMap::new();
     let mut stdout = String::new();
     for (name, value) in action_state.step_env(&[]) {
@@ -8500,7 +8862,7 @@ fn native_github_runtime_export(
             exported.insert(name, value);
         }
     }
-    StepExecutionResult {
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             env: exported,
@@ -8510,7 +8872,7 @@ fn native_github_runtime_export(
         failure_ignored: false,
         stdout,
         stderr: String::new(),
-    }
+    })
 }
 
 fn native_github_script(
@@ -8520,8 +8882,8 @@ fn native_github_script(
     const CONTRACT_OUTPUT: &str = "core.setOutput('docs-xtask', process.env.CONTRACT)";
     const PREPARED_RUNTIME: &str =
         "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())";
-    let action_state = state.with_env(state.resolve_env(&action.env));
-    let script = native_input(action, &action_state, "script");
+    let action_state = state.with_env(state.resolve_env(&action.env)?);
+    let script = native_input(action, &action_state, "script")?;
     if script == CONTRACT_OUTPUT {
         let contract = action_state
             .env
@@ -9323,14 +9685,18 @@ fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
         .to_string()
 }
 
-fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
+fn native_input(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    name: &str,
+) -> Result<String, ExpressionInterpolationError> {
     action
         .inputs
         .iter()
         .find(|(input_name, _)| input_name.eq_ignore_ascii_case(name))
         .map(|(_, value)| value)
         .map(|value| state.resolve_expressions(value))
-        .unwrap_or_default()
+        .unwrap_or_else(|| Ok(String::new()))
 }
 
 fn native_input_or(
@@ -9338,12 +9704,12 @@ fn native_input_or(
     action: &NativeActionInvocation,
     name: &str,
     default: &str,
-) -> String {
-    let value = native_input(action, state, name);
+) -> Result<String, ExpressionInterpolationError> {
+    let value = native_input(action, state, name)?;
     if value.is_empty() {
-        default.to_string()
+        Ok(default.to_string())
     } else {
-        value
+        Ok(value)
     }
 }
 
@@ -9360,8 +9726,7 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
     let run_key = artifact_run_key(state);
-    let run_root = shared_work_root(temp);
-    Ok(run_root.join("_velnor_artifacts").join(run_key))
+    Ok(crate::store_catalog::StoreCatalog::for_job_temp(temp).artifacts_run(&run_key))
 }
 
 /// Resolve the store directory for a cache entry. Trust and repository remain
@@ -9377,7 +9742,7 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
     let repository = state
-        .resolve_context_expression("github.repository")
+        .context_string("github.repository")
         .filter(|value| !value.is_empty());
     let Some(repository) = repository else {
         eprintln!(
@@ -11067,7 +11432,7 @@ fn docker_metadata_tags(state: &JobExecutionState, input: &str) -> Vec<String> {
                     }
                     "pr" => {
                         if let Some(pr_number) = state
-                            .resolve_context_data_expression("github.event.pull_request.number")
+                            .context_string("github.event.pull_request.number")
                             .filter(|v| !v.is_empty())
                         {
                             tags.push(format!("pr-{pr_number}"));
@@ -11174,11 +11539,11 @@ fn paths_filter_patterns(value: &serde_yaml::Value) -> Result<Vec<String>> {
 
 fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
     state
-        .resolve_context_data_expression("github.event.pull_request.base.sha")
+        .context_string("github.event.pull_request.base.sha")
         .filter(|value| !value.is_empty())
         .or_else(|| {
             state
-                .resolve_context_data_expression("github.event.before")
+                .context_string("github.event.before")
                 .filter(|value| !value.is_empty())
         })
         .or_else(|| state.env.get("GITHUB_BASE_REF").cloned())
@@ -11188,7 +11553,7 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
         // detached, depth-one SHA and has no local default-branch ref.
         .or_else(|| {
             state
-                .resolve_context_data_expression("github.event.repository.default_branch")
+                .context_string("github.event.repository.default_branch")
                 .filter(|value| !value.is_empty())
                 .map(|branch| format!("origin/{branch}"))
         })
@@ -11196,7 +11561,7 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
 
 fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
     state
-        .resolve_context_data_expression("github.event.pull_request.head.sha")
+        .context_string("github.event.pull_request.head.sha")
         .filter(|value| !value.is_empty())
         .or_else(|| state.env.get("GITHUB_SHA").cloned())
 }
@@ -11228,6 +11593,11 @@ pub(crate) struct JobExecutionState {
     masks: Vec<String>,
     composite_stack: Vec<String>,
     composite_conclusion_stack: Vec<CompositeConclusionFrame>,
+    /// The running job's cancellation, so `success()`, `failure()` and
+    /// `cancelled()` answer from the job's real status instead of from a
+    /// constant. The engine installs its own required token here before the
+    /// first step runs.
+    cancellation: crate::execution::cancel::JobCancellation,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -11262,7 +11632,7 @@ impl JobExecutionState {
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
     ) -> Self {
-        Self::new_internal(base_env, context_data, None, None)
+        Self::try_new_with_context(base_env, context_data).unwrap_or_default()
     }
 
     fn new_with_workspace(
@@ -11271,7 +11641,28 @@ impl JobExecutionState {
         workspace_host: &Path,
         temp_host: &Path,
     ) -> Self {
-        Self::new_internal(
+        Self::try_new_with_workspace(base_env, context_data, workspace_host, temp_host)
+            .unwrap_or_default()
+    }
+
+    fn try_new(base_env: &[(String, String)]) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_with_context(base_env, &[])
+    }
+
+    pub(crate) fn try_new_with_context(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+    ) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_internal(base_env, context_data, None, None)
+    }
+
+    pub(crate) fn try_new_with_workspace(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: &Path,
+        temp_host: &Path,
+    ) -> Result<Self, ExpressionInterpolationError> {
+        Self::try_new_internal(
             base_env,
             context_data,
             Some(workspace_host.to_path_buf()),
@@ -11285,6 +11676,16 @@ impl JobExecutionState {
         workspace_host: Option<PathBuf>,
         temp_host: Option<PathBuf>,
     ) -> Self {
+        Self::try_new_internal(base_env, context_data, workspace_host, temp_host)
+            .unwrap_or_default()
+    }
+
+    fn try_new_internal(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: Option<PathBuf>,
+        temp_host: Option<PathBuf>,
+    ) -> Result<Self, ExpressionInterpolationError> {
         let initial_env: BTreeMap<_, _> = base_env.iter().cloned().collect();
         let mut state = Self {
             env: initial_env.clone(),
@@ -11304,14 +11705,19 @@ impl JobExecutionState {
             masks: Vec::new(),
             composite_stack: Vec::new(),
             composite_conclusion_stack: Vec::new(),
+            cancellation: crate::execution::cancel::JobCancellation::inert(),
         };
         state.env = state
             .env
             .iter()
-            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
-            .collect();
+            .map(|(name, value)| {
+                state
+                    .resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
+            .collect::<Result<_, _>>()?;
         state.immutable_env = state.env.clone();
-        state
+        Ok(state)
     }
 
     pub(crate) fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
@@ -11353,6 +11759,10 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            // A derived state is the same job, so it carries the same
+            // cancellation. Dropping it here would make every step's condition
+            // — which is evaluated on a derived state — read as not cancelled.
+            cancellation: self.cancellation.clone(),
         };
         state
             .env
@@ -11379,6 +11789,10 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            // A derived state is the same job, so it carries the same
+            // cancellation. Dropping it here would make every step's condition
+            // — which is evaluated on a derived state — read as not cancelled.
+            cancellation: self.cancellation.clone(),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -11471,19 +11885,22 @@ impl JobExecutionState {
             .collect()
     }
 
-    pub(crate) fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
-        ScriptStep {
+    pub(crate) fn resolve_script_step(
+        &self,
+        step: &ScriptStep,
+    ) -> Result<ScriptStep, ExpressionInterpolationError> {
+        Ok(ScriptStep {
             id: step.id.clone(),
             display_name: step.display_name.clone(),
-            script: self.resolve_expressions(&step.script),
+            script: self.resolve_expressions(&step.script)?,
             shell: step.shell,
             working_directory_container: self
-                .resolve_expressions(&step.working_directory_container),
-            env: self.resolve_env(&step.env),
+                .resolve_expressions(&step.working_directory_container)?,
+            env: self.resolve_env(&step.env)?,
             condition: step.condition.clone(),
             continue_on_error: step.continue_on_error,
             timeout_minutes: step.timeout_minutes,
-        }
+        })
     }
 
     /// The `env:` block GitHub prints in a step's header group: workflow env
@@ -11507,242 +11924,162 @@ impl JobExecutionState {
         for (name, value) in step_env {
             upsert(name, value);
         }
-        self.resolve_env(&ordered)
+        ordered
+            .into_iter()
+            .map(|(name, value)| (name, self.resolve_for_log(&value)))
+            .collect()
     }
 
-    pub(crate) fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+    /// Logs are an observational sink, not an execution boundary. If a
+    /// display expression is malformed, emit a fixed diagnostic token rather
+    /// than the original source (which may contain a secret); execution uses
+    /// `resolve_expressions` and still returns the typed error.
+    fn resolve_for_log(&self, value: &str) -> String {
+        self.resolve_expressions(value)
+            .unwrap_or_else(|_| "<expression-interpolation-failed>".to_string())
+    }
+
+    pub(crate) fn resolve_env(
+        &self,
+        env: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, ExpressionInterpolationError> {
         env.iter()
-            .map(|(name, value)| (name.clone(), self.resolve_expressions(value)))
+            .map(|(name, value)| {
+                self.resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
+            })
             .collect()
     }
 
     fn evaluate_named_outputs(
         &self,
         outputs: &BTreeMap<String, String>,
-    ) -> BTreeMap<String, String> {
+    ) -> Result<BTreeMap<String, String>, ExpressionInterpolationError> {
         outputs
             .iter()
-            .filter_map(|(name, value)| {
-                let value = self.resolve_expressions(value);
-                (!value.is_empty()).then(|| (name.clone(), value))
+            .map(|(name, value)| {
+                self.resolve_expressions(value)
+                    .map(|value| (name.clone(), value))
             })
-            .collect()
+            .collect::<Result<BTreeMap<_, _>, _>>()
+            .map(|outputs| {
+                outputs
+                    .into_iter()
+                    .filter(|(_, value)| !value.is_empty())
+                    .collect()
+            })
     }
 
-    pub(crate) fn resolve_expressions(&self, value: &str) -> String {
-        if !expression_within_budget(value) {
-            return value.to_string();
+    /// Interpolate every `${{ ... }}` span in `value`.
+    ///
+    /// Each span is parsed and evaluated by [`crate::expression`] and rendered
+    /// with upstream's `ConvertToString` rules
+    /// (`src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs:136-155`).
+    /// Malformed, unevaluable, and over-budget templates return a typed error;
+    /// the original source is never returned to an execution boundary.
+    pub(crate) fn resolve_expressions(
+        &self,
+        value: &str,
+    ) -> Result<String, ExpressionInterpolationError> {
+        self.render_template(value, false)
+    }
+
+    /// Render only the spans the job message alone can answer, leaving every
+    /// span that reads runtime state as its literal source text.
+    ///
+    /// Upstream evaluates a step's templates exactly once, at step
+    /// preparation, with `env`, `steps`, `job` and `runner` already populated
+    /// (`src/Runner.Worker/StepsRunner.cs:99-140`). Velnor renders twice —
+    /// once when the plan is built from the job message and again at step
+    /// time — so the first pass must not collapse a not-yet-known value to
+    /// null. Collapsing the second pass would be correct; collapsing the
+    /// first one silently drops runtime env and step outputs.
+    pub(crate) fn resolve_job_context_expressions(
+        &self,
+        value: &str,
+    ) -> Result<String, ExpressionInterpolationError> {
+        self.render_template(value, true)
+    }
+
+    fn render_template(
+        &self,
+        value: &str,
+        defer_runtime_contexts: bool,
+    ) -> Result<String, ExpressionInterpolationError> {
+        let spans = expression_template_spans(value)?;
+        if spans.is_empty() {
+            return Ok(value.to_string());
         }
         let mut rendered = String::with_capacity(value.len());
-        let mut rest = value;
-        while let Some(start) = rest.find("${{") {
-            rendered.push_str(&rest[..start]);
-            let after_start = &rest[start + 3..];
-            let Some(end) = after_start.find("}}") else {
-                rendered.push_str(&rest[start..]);
-                return rendered;
-            };
-            let expression = after_start[..end].trim();
-            if let Some(value) = self.resolve_expression_value(expression) {
-                rendered.push_str(&value);
-            } else {
-                rendered.push_str(&rest[start..start + 3 + end + 2]);
+        let mut cursor = 0usize;
+        for span in spans {
+            rendered.push_str(&value[cursor..span.start()]);
+            let expression = span.expression(value).trim();
+            let context = self.expression_context();
+            let node = expression::parse(expression, &context).map_err(|_| {
+                ExpressionInterpolationError::Parse {
+                    offset: span.start(),
+                }
+            })?;
+            if let Some(node) = node {
+                if defer_runtime_contexts && node_reads_runtime_context(&node) {
+                    rendered.push_str(span.source(value));
+                } else {
+                    let value = expression::evaluate_node(&node, &context).map_err(|_| {
+                        ExpressionInterpolationError::Evaluation {
+                            offset: span.start(),
+                        }
+                    })?;
+                    rendered.push_str(&value.convert_to_string());
+                }
             }
-            rest = &after_start[end + 2..];
+            cursor = span.end();
         }
-        rendered.push_str(rest);
-        rendered
+        rendered.push_str(&value[cursor..]);
+        Ok(rendered)
     }
 
-    fn resolve_step_output_expression(&self, expression: &str) -> Option<&str> {
-        let expression = expression.strip_prefix("steps.")?;
-        let (step_id, output) = expression.split_once(".outputs")?;
-        let output = if let Some(output) = output.strip_prefix('.') {
-            output
-        } else {
-            output.strip_prefix("['")?.strip_suffix("']")?
-        };
-        self.outputs
-            .get(step_id)
-            .and_then(|outputs| outputs.get(output))
-            .map(String::as_str)
+    /// Whether this job has been cancelled.
+    ///
+    /// Upstream sets `JobContext.Status` to `cancelled` on the cancellation
+    /// callback and re-evaluates every remaining step's condition against it
+    /// (`src/Runner.Worker/StepsRunner.cs:146-187`). Velnor evaluates each
+    /// step's condition immediately before dispatching it, so reading the live
+    /// token here gives the same result without a separate re-evaluation pass.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
     }
 
-    fn resolve_expression_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if let Some(inner) = strip_wrapping_parentheses(expression) {
-            return self.resolve_expression_value(inner);
-        }
-        if let Some((left, right)) = split_top_level(expression, "||") {
-            let left = self.resolve_expression_value(left).unwrap_or_default();
-            if expression_truthy(&left) {
-                return Some(left);
-            }
-            return self.resolve_expression_value(right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "&&") {
-            let left = self.resolve_expression_value(left).unwrap_or_default();
-            if expression_truthy(&left) {
-                return self.resolve_expression_value(right);
-            }
-            return Some("false".to_string());
-        }
-        if let Some(inner) = expression.strip_prefix('!') {
-            let value = self.resolve_expression_value(inner).unwrap_or_default();
-            return Some((!expression_truthy(&value)).to_string());
-        }
-        if let Some((left, right)) = split_top_level(expression, "!=") {
-            return Some(
-                (!github_string_eq(
-                    &self.resolve_expression_value(left).unwrap_or_default(),
-                    &self.resolve_expression_value(right).unwrap_or_default(),
-                ))
-                .to_string(),
-            );
-        }
-        if let Some((left, right)) = split_top_level(expression, "==") {
-            return Some(
-                github_string_eq(
-                    &self.resolve_expression_value(left).unwrap_or_default(),
-                    &self.resolve_expression_value(right).unwrap_or_default(),
-                )
-                .to_string(),
-            );
-        }
-        if let Some((value, needle)) = parse_contains(expression) {
-            return Some(
-                self.resolve_expression_value(value)
-                    .is_some_and(|value| github_contains(&value, unquote(needle.trim())))
-                    .to_string(),
-            );
-        }
-        if is_quoted(expression) {
-            return Some(unquote(expression).to_string());
-        }
-        if expression == "true" || expression == "false" {
-            return Some(expression.to_string());
-        }
-        if expression == "null" {
-            return Some(String::new());
-        }
-        if let Some(output) = self.resolve_step_output_expression(expression) {
-            return Some(output.to_string());
-        }
-        if expression.starts_with("steps.") && expression.contains(".outputs.") {
-            return Some(String::new());
-        }
-        if let Some(context) = parse_to_json(expression) {
-            return self
-                .resolve_context_data_value(context)
-                .and_then(|value| serde_json::to_string(value).ok());
-        }
-        if let Some(patterns) = parse_hash_files(expression) {
-            return self.resolve_hash_files_expression(patterns);
-        }
-        if expression.trim().starts_with("format(") {
-            // Resolve format() args through the full state resolver so that runtime
-            // values like `steps.run-output.outputs.output` are available (not just
-            // compile-time context_data values from the job message).
-            return self.resolve_format_expression(expression.trim());
-        }
-        self.resolve_context_expression(expression)
+    /// Install the running job's cancellation.
+    pub(crate) fn set_cancellation(
+        &mut self,
+        cancellation: crate::execution::cancel::JobCancellation,
+    ) {
+        self.cancellation = cancellation;
     }
 
-    fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
-        let workspace = self.workspace_host.as_ref()?;
-        // Match actions/runner's HashFilesFunction: evaluate against the
-        // workspace as it exists at this expression call. In particular, an
-        // evaluation before checkout may correctly be empty, but must not
-        // poison the same expression after checkout has populated the tree.
-        Some(hash_files(workspace, &patterns))
+    /// `success()` — `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
+    /// reads the status of the enclosing scope, which cancellation sets to
+    /// `cancelled`. A cancelled job is therefore not successful, which is what
+    /// stops its remaining ordinary steps: their implicit condition is
+    /// `success()`.
+    fn success_status(&self) -> bool {
+        !self.is_cancelled() && !self.status_scope_has_failure()
     }
 
-    /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
-    /// so runtime step outputs (`steps.X.outputs.Y`) are accessible for args.
-    fn resolve_format_expression(&self, expression: &str) -> Option<String> {
-        let inner = expression.strip_prefix("format(")?.strip_suffix(')')?;
-        let parts = crate::script_step::split_format_args_pub(inner);
-        const MAX_FORMAT_ARGS: usize = 64;
-        const MAX_FORMAT_TEMPLATE_BYTES: usize = 64 * 1024;
-        if parts.is_empty() || parts.len().saturating_sub(1) > MAX_FORMAT_ARGS {
-            return None;
-        }
-        let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
-        if template.len() > MAX_FORMAT_TEMPLATE_BYTES {
-            return None;
-        }
-        let args = parts[1..]
-            .iter()
-            .map(|arg| {
-                self.resolve_expression_value(arg.trim())
-                    .unwrap_or_default()
-            })
-            .collect::<Vec<_>>();
-        render_format_template(template.replace("''", "'").as_str(), &args)
+    /// `failure()` — `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`.
+    /// Also false under cancellation: the status is `cancelled`, not `failure`,
+    /// so `if: failure()` cleanup does not run on a cancelled job.
+    fn failure_status(&self) -> bool {
+        !self.is_cancelled() && self.status_scope_has_failure()
     }
 
-    fn resolve_context_expression(&self, expression: &str) -> Option<String> {
-        if let Some(name) = expression.trim().strip_prefix("env.") {
-            return self.env.get(name).cloned();
-        }
-        if expression.trim() == "job.status" {
-            return Some(self.job_status().to_string());
-        }
-        if expression.trim() == "github.action_status" {
-            return Some(self.action_status().to_string());
-        }
-
-        let env_name = match expression.trim() {
-            "github.actor" => "GITHUB_ACTOR",
-            "github.actor_id" => "GITHUB_ACTOR_ID",
-            "github.action" => "GITHUB_ACTION",
-            "github.action_path" => "GITHUB_ACTION_PATH",
-            "github.action_ref" => "GITHUB_ACTION_REF",
-            "github.action_repository" => "GITHUB_ACTION_REPOSITORY",
-            "github.api_url" => "GITHUB_API_URL",
-            "github.base_ref" => "GITHUB_BASE_REF",
-            "github.event_name" => "GITHUB_EVENT_NAME",
-            "github.event_path" => "GITHUB_EVENT_PATH",
-            "github.graphql_url" => "GITHUB_GRAPHQL_URL",
-            "github.head_ref" => "GITHUB_HEAD_REF",
-            "github.ref" => "GITHUB_REF",
-            "github.ref_protected" => "GITHUB_REF_PROTECTED",
-            "github.ref_type" => "GITHUB_REF_TYPE",
-            "github.repository" => "GITHUB_REPOSITORY",
-            "github.repository_id" => "GITHUB_REPOSITORY_ID",
-            "github.repository_owner" => "GITHUB_REPOSITORY_OWNER",
-            "github.repository_owner_id" => "GITHUB_REPOSITORY_OWNER_ID",
-            "github.retention_days" => "GITHUB_RETENTION_DAYS",
-            "github.run_id" => "GITHUB_RUN_ID",
-            "github.run_attempt" => "GITHUB_RUN_ATTEMPT",
-            "github.run_number" => "GITHUB_RUN_NUMBER",
-            "github.server_url" => "GITHUB_SERVER_URL",
-            "github.sha" => "GITHUB_SHA",
-            "github.token" => "GITHUB_TOKEN",
-            "github.triggering_actor" => "GITHUB_TRIGGERING_ACTOR",
-            "github.workflow" => "GITHUB_WORKFLOW",
-            "github.workflow_ref" => "GITHUB_WORKFLOW_REF",
-            "github.workflow_sha" => "GITHUB_WORKFLOW_SHA",
-            "github.ref_name" => "GITHUB_REF_NAME",
-            "github.workspace" => "GITHUB_WORKSPACE",
-            "runner.arch" => "RUNNER_ARCH",
-            "runner.debug" => "RUNNER_DEBUG",
-            "runner.environment" => "RUNNER_ENVIRONMENT",
-            "runner.name" => "RUNNER_NAME",
-            "runner.os" => "RUNNER_OS",
-            "runner.temp" => "RUNNER_TEMP",
-            "runner.tool_cache" => "RUNNER_TOOL_CACHE",
-            "runner.workspace" => "RUNNER_WORKSPACE",
-            _ => return self.resolve_context_data_expression(expression),
-        };
-        self.env
-            .get(env_name)
-            .cloned()
-            .or_else(|| self.resolve_context_data_expression(expression))
-    }
-
+    /// `job.status` — `cancelled` once the job is cancelled, otherwise
+    /// `success` unless a step has already concluded failed.
     fn job_status(&self) -> &'static str {
-        if self
+        if self.is_cancelled() {
+            "cancelled"
+        } else if self
             .conclusions
             .values()
             .any(|outcome| *outcome == StepOutcome::Failure)
@@ -11753,104 +12090,17 @@ impl JobExecutionState {
         }
     }
 
+    /// `github.action_status` — the composite-scoped equivalent of
+    /// `job.status`, matching how `SuccessFunction` picks its source
+    /// (`src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`).
     fn action_status(&self) -> &'static str {
-        if self.status_scope_has_failure() {
+        if self.is_cancelled() {
+            "cancelled"
+        } else if self.status_scope_has_failure() {
             "failure"
         } else {
             "success"
         }
-    }
-
-    pub(crate) fn evaluate_condition(&self, condition: Option<&str>) -> bool {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return self.evaluate_condition_expr("success()");
-        };
-        let expression = strip_expression(condition);
-        if condition_has_status_check(expression) {
-            return self.evaluate_condition_expr(expression);
-        }
-        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
-    }
-
-    fn evaluate_post_condition(&self, condition: Option<&str>) -> bool {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return true;
-        };
-        let expression = strip_expression(condition);
-        if condition_has_status_check(expression) {
-            return self.evaluate_condition_expr(expression);
-        }
-        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
-    }
-
-    fn evaluate_condition_expr(&self, expression: &str) -> bool {
-        if !expression_within_budget(expression) {
-            return false;
-        }
-        let expression = expression.trim();
-        if expression == "always()" {
-            return true;
-        }
-        if expression == "success()" {
-            return !self.status_scope_has_failure();
-        }
-        if expression == "failure()" {
-            return self.status_scope_has_failure();
-        }
-        if expression == "cancelled()" {
-            return false;
-        }
-        if let Some(inner) = strip_wrapping_parentheses(expression) {
-            return self.evaluate_condition_expr(inner);
-        }
-        if let Some((left, right)) = split_top_level(expression, "||") {
-            return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "&&") {
-            return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
-        }
-        if let Some(inner) = expression.strip_prefix('!') {
-            return !self.evaluate_condition_expr(inner);
-        }
-        if let Some((value, needle)) = parse_contains(expression) {
-            return self
-                .resolve_condition_value(value)
-                .is_some_and(|value| github_contains(&value, unquote(needle.trim())));
-        }
-        if let Some((left, right)) = split_top_level(expression, "!=") {
-            let left = self
-                .resolve_condition_comparison_value(left)
-                .unwrap_or_default();
-            let right = self
-                .resolve_condition_comparison_value(right)
-                .unwrap_or_default();
-            return !github_string_eq(&left, &right);
-        }
-        if let Some((left, right)) = split_top_level(expression, "==") {
-            let left = self
-                .resolve_condition_comparison_value(left)
-                .unwrap_or_default();
-            let right = self
-                .resolve_condition_comparison_value(right)
-                .unwrap_or_default();
-            return github_string_eq(&left, &right);
-        }
-        if expression == "true" {
-            return true;
-        }
-        if expression == "false" {
-            return false;
-        }
-        if let Some(value) = self.resolve_condition_value(expression) {
-            return expression_truthy(&value);
-        }
-        true
     }
 
     fn status_scope_has_failure(&self) -> bool {
@@ -11866,104 +12116,444 @@ impl JobExecutionState {
         }
     }
 
-    fn resolve_condition_comparison_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if condition_returns_bool(expression) {
-            return Some(self.evaluate_condition_expr(expression).to_string());
+    /// Read a dotted context path (e.g. `github.event.pull_request.number`)
+    /// as a string, through the same evaluator every expression uses.
+    ///
+    /// `None` when the path is absent, empty, or resolves to a collection —
+    /// upstream's `ConvertToString` would render those as `"Object"`/`"Array"`
+    /// (`EvaluationResult.cs:152-153`), which is never a usable value here.
+    pub(crate) fn context_string(&self, path: &str) -> Option<String> {
+        let value = expression::evaluate(path, &self.expression_context()).ok()?;
+        if !value.is_primitive() {
+            return None;
         }
-        self.resolve_condition_value(expression)
+        let rendered = value.convert_to_string();
+        (!rendered.is_empty()).then_some(rendered)
     }
 
-    fn resolve_condition_value(&self, expression: &str) -> Option<String> {
-        let expression = expression.trim();
-        if let Some(output) = self.resolve_step_output_expression(expression) {
-            return Some(output.to_string());
-        }
-        if let Some(expression) = expression.strip_prefix("steps.") {
-            let (step_id, field) = expression.split_once('.')?;
-            if field == "outcome" {
-                return self
-                    .outcomes
-                    .get(step_id)
-                    .map(|outcome| outcome.as_str().to_string());
+    fn expression_context(&self) -> JobExpressionContext<'_> {
+        JobExpressionContext { state: self }
+    }
+
+    /// Evaluate a step condition.
+    ///
+    /// The default condition is `success()`, and a condition that does not
+    /// itself reference a status function is implicitly `success() && (...)`
+    /// — how the service composes `if:` before handing the runner a
+    /// `Condition` string.
+    ///
+    /// A condition that fails to evaluate returns `Err`, which callers must
+    /// turn into a failed step, matching
+    /// `src/Runner.Worker/StepsRunner.cs:231-242`.
+    pub(crate) fn evaluate_condition(
+        &self,
+        condition: Option<&str>,
+    ) -> Result<bool, expression::ExpressionError> {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
+            return Ok(self.success_status());
+        };
+        self.evaluate_condition_expression(strip_expression(condition))
+    }
+
+    /// Pre/post step conditions. An absent condition runs unconditionally
+    /// (`ActionRunner` only registers a pre/post step when its condition is
+    /// satisfied), otherwise the `success()` default applies as above.
+    fn evaluate_post_condition(
+        &self,
+        condition: Option<&str>,
+    ) -> Result<bool, expression::ExpressionError> {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
+            return Ok(true);
+        };
+        self.evaluate_condition_expression(strip_expression(condition))
+    }
+
+    /// Whether a pre/post step's condition is satisfied.
+    ///
+    /// Deferred root cause: upstream fails the owning step when a pre/post
+    /// condition cannot be evaluated
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`). Velnor registers pre/post
+    /// steps outside the main step-result path, so there is no result row to
+    /// fail here; giving them one belongs to the lifecycle work package. Until
+    /// then the condition is fail-*closed* and the error is reported — never
+    /// fail-open, which is the divergence this module removes.
+    fn post_condition_met(&self, condition: Option<&str>) -> bool {
+        match self.evaluate_post_condition(condition) {
+            Ok(condition_met) => condition_met,
+            Err(error) => {
+                eprintln!(
+                    "Pre/post step condition {:?} could not be evaluated: {error}",
+                    condition.unwrap_or_default()
+                );
+                false
             }
-            if field == "conclusion" {
-                return self
-                    .conclusions
-                    .get(step_id)
-                    .map(|outcome| outcome.as_str().to_string());
-            }
         }
-        if expression == "runner.os" {
-            return self
-                .resolve_context_expression(expression)
-                .or_else(|| Some("Linux".to_string()));
-        }
-        if let Some(value) = self.resolve_context_expression(expression) {
-            return Some(value);
-        }
-        Some(unquote(expression).to_string())
     }
 
-    fn resolve_context_data_expression(&self, expression: &str) -> Option<String> {
-        self.resolve_context_data_value(expression)
-            .and_then(context_value_string)
-            .or_else(|| missing_context_value(expression))
-    }
-
-    fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
-        let mut segments = expression.trim().split('.');
-        let root = segments.next()?;
-        let (root_name, mut value) = self.context_data.iter().find(|(name, _)| {
-            *name == root
-                || root.eq_ignore_ascii_case("inputs") && name.eq_ignore_ascii_case("inputs")
-        })?;
-        let input_context = root_name.eq_ignore_ascii_case("inputs");
-        for segment in segments {
-            value = if input_context {
-                value
-                    .as_object()?
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(segment))
-                    .map(|(_, value)| value)?
-            } else {
-                value.get(segment)?
-            };
+    fn evaluate_condition_expression(
+        &self,
+        expression: &str,
+    ) -> Result<bool, expression::ExpressionError> {
+        let context = self.expression_context();
+        let Some(node) = expression::parse(expression, &context)? else {
+            return Ok(self.success_status());
+        };
+        // `success() && (...)` short-circuits, so a job that has already failed
+        // — or been cancelled — never evaluates, and therefore never errors on,
+        // the rest.
+        if !node_references_status_function(&node) && !self.success_status() {
+            return Ok(false);
         }
-        Some(value)
+        Ok(expression::evaluate_node(&node, &context)?.is_truthy())
     }
 }
 
-fn render_format_template(template: &str, args: &[String]) -> Option<String> {
-    const MAX_FORMAT_OUTPUT_BYTES: usize = 256 * 1024;
-    let mut result = String::with_capacity(template.len());
-    let mut cursor = 0usize;
-    while cursor < template.len() {
-        let byte = template.as_bytes()[cursor];
-        if byte == b'{' {
-            if template.as_bytes().get(cursor + 1) == Some(&b'{') {
-                result.push('{');
-                cursor += 2;
-                continue;
-            }
-            let end = template[cursor + 1..].find('}')? + cursor + 1;
-            let index = template[cursor + 1..end].parse::<usize>().ok()?;
-            let replacement = args.get(index)?;
-            result.push_str(replacement);
-            cursor = end + 1;
-        } else if byte == b'}' && template.as_bytes().get(cursor + 1) == Some(&b'}') {
-            result.push('}');
-            cursor += 2;
-        } else {
-            let character = template[cursor..].chars().next()?;
-            result.push(character);
-            cursor += character.len_utf8();
+/// Whether the tree calls one of the runner's status functions, which is what
+/// suppresses the implicit `success() &&` prefix.
+fn node_references_status_function(node: &expression::Node) -> bool {
+    if let expression::Node::Function { name, .. } = node
+        && matches!(
+            name.to_ascii_lowercase().as_str(),
+            "success" | "failure" | "always" | "cancelled"
+        )
+    {
+        return true;
+    }
+    node.children()
+        .iter()
+        .any(|child| node_references_status_function(child))
+}
+
+/// Whether the tree reads state that may only be authoritative once the job
+/// is running. Plan-time rendering defers those spans to the step-time pass;
+/// parsing still happens before deferral, so malformed source cannot pass.
+fn node_reads_runtime_context(node: &expression::Node) -> bool {
+    match node {
+        expression::Node::NamedValue(name) => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "env" | "steps" | "job" | "jobs" | "runner"
+        ),
+        expression::Node::Function { name, .. } => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "success" | "failure" | "always" | "cancelled" | "hashfiles"
+            ) || node
+                .children()
+                .iter()
+                .any(|child| node_reads_runtime_context(child))
         }
-        if result.len() > MAX_FORMAT_OUTPUT_BYTES {
-            return None;
+        node => node
+            .children()
+            .iter()
+            .any(|child| node_reads_runtime_context(child)),
+    }
+}
+
+/// The root contexts and extension functions an expression is evaluated
+/// against, mirroring `IExecutionContext.ExpressionValues` /
+/// `ExpressionFunctions` (`src/Runner.Worker/StepsRunner.cs:92-106`).
+struct JobExpressionContext<'a> {
+    state: &'a JobExecutionState,
+}
+
+/// The root contexts GitHub always defines for a step. Referencing anything
+/// outside this set is a parse error upstream
+/// (`ExpressionParser.cs:144-147`), never a silent null.
+const ROOT_CONTEXTS: &[&str] = &[
+    "github", "env", "job", "jobs", "runner", "steps", "secrets", "strategy", "matrix", "needs",
+    "inputs", "vars",
+];
+
+/// `github.*` keys the runner exports as environment variables. Environment
+/// wins over the job message's `github` context, preserving the precedence
+/// Velnor's runtime already relied on.
+const GITHUB_ENV_KEYS: &[(&str, &str)] = &[
+    ("actor", "GITHUB_ACTOR"),
+    ("actor_id", "GITHUB_ACTOR_ID"),
+    ("action", "GITHUB_ACTION"),
+    ("action_path", "GITHUB_ACTION_PATH"),
+    ("action_ref", "GITHUB_ACTION_REF"),
+    ("action_repository", "GITHUB_ACTION_REPOSITORY"),
+    ("api_url", "GITHUB_API_URL"),
+    ("base_ref", "GITHUB_BASE_REF"),
+    ("event_name", "GITHUB_EVENT_NAME"),
+    ("event_path", "GITHUB_EVENT_PATH"),
+    ("graphql_url", "GITHUB_GRAPHQL_URL"),
+    ("head_ref", "GITHUB_HEAD_REF"),
+    ("ref", "GITHUB_REF"),
+    ("ref_protected", "GITHUB_REF_PROTECTED"),
+    ("ref_type", "GITHUB_REF_TYPE"),
+    ("repository", "GITHUB_REPOSITORY"),
+    ("repository_id", "GITHUB_REPOSITORY_ID"),
+    ("repository_owner", "GITHUB_REPOSITORY_OWNER"),
+    ("repository_owner_id", "GITHUB_REPOSITORY_OWNER_ID"),
+    ("retention_days", "GITHUB_RETENTION_DAYS"),
+    ("run_id", "GITHUB_RUN_ID"),
+    ("run_attempt", "GITHUB_RUN_ATTEMPT"),
+    ("run_number", "GITHUB_RUN_NUMBER"),
+    ("server_url", "GITHUB_SERVER_URL"),
+    ("sha", "GITHUB_SHA"),
+    ("token", "GITHUB_TOKEN"),
+    ("triggering_actor", "GITHUB_TRIGGERING_ACTOR"),
+    ("workflow", "GITHUB_WORKFLOW"),
+    ("workflow_ref", "GITHUB_WORKFLOW_REF"),
+    ("workflow_sha", "GITHUB_WORKFLOW_SHA"),
+    ("ref_name", "GITHUB_REF_NAME"),
+    ("workspace", "GITHUB_WORKSPACE"),
+];
+
+/// `runner.*` keys, likewise environment-backed.
+const RUNNER_ENV_KEYS: &[(&str, &str)] = &[
+    ("arch", "RUNNER_ARCH"),
+    ("debug", "RUNNER_DEBUG"),
+    ("environment", "RUNNER_ENVIRONMENT"),
+    ("name", "RUNNER_NAME"),
+    ("os", "RUNNER_OS"),
+    ("temp", "RUNNER_TEMP"),
+    ("tool_cache", "RUNNER_TOOL_CACHE"),
+    ("workspace", "RUNNER_WORKSPACE"),
+];
+
+fn upsert_entry(
+    entries: &mut Vec<(String, expression::Value)>,
+    name: &str,
+    value: expression::Value,
+) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+    {
+        existing.1 = value;
+    } else {
+        entries.push((name.to_string(), value));
+    }
+}
+
+impl JobExpressionContext<'_> {
+    fn context_data_entries(&self, root: &str) -> Vec<(String, expression::Value)> {
+        match self.state.context_data.get(root) {
+            Some(Value::Object(map)) => map
+                .iter()
+                .map(|(name, value)| (name.clone(), expression::eval::from_serde_json(value)))
+                .collect(),
+            _ => Vec::new(),
         }
     }
-    Some(result)
+
+    fn github_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("github");
+        for (name, variable) in GITHUB_ENV_KEYS {
+            if let Some(value) = self.state.env.get(*variable) {
+                upsert_entry(&mut entries, name, expression::Value::string(value));
+            }
+        }
+        upsert_entry(
+            &mut entries,
+            "action_status",
+            expression::Value::string(self.state.action_status()),
+        );
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    fn runner_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("runner");
+        for (name, variable) in RUNNER_ENV_KEYS {
+            if let Some(value) = self.state.env.get(*variable) {
+                upsert_entry(&mut entries, name, expression::Value::string(value));
+            }
+        }
+        if entries
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("os"))
+        {
+            upsert_entry(&mut entries, "os", expression::Value::string("Linux"));
+        }
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    /// The `env` context is case-sensitive on every non-Windows runner
+    /// (`src/Runner.Worker/StepsRunner.cs:101-106`).
+    fn env_context(&self) -> expression::Value {
+        expression::Value::Object(expression::ObjectValue::case_sensitive(
+            self.state
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                .collect(),
+        ))
+    }
+
+    /// `steps.<id>.{outputs,outcome,conclusion}`, built from the runtime
+    /// step state rather than parsed out of the expression text.
+    fn steps_context(&self) -> expression::Value {
+        let mut ids: Vec<&String> = Vec::new();
+        for id in self
+            .state
+            .outputs
+            .keys()
+            .chain(self.state.outcomes.keys())
+            .chain(self.state.conclusions.keys())
+        {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+
+        let entries = ids
+            .into_iter()
+            .map(|id| {
+                let mut step: Vec<(String, expression::Value)> = Vec::new();
+                let outputs = self
+                    .state
+                    .outputs
+                    .get(id)
+                    .map(|outputs| {
+                        outputs
+                            .iter()
+                            .map(|(name, value)| (name.clone(), expression::Value::string(value)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                step.push((
+                    "outputs".to_string(),
+                    expression::Value::Object(expression::ObjectValue::new(outputs)),
+                ));
+                if let Some(outcome) = self.state.outcomes.get(id) {
+                    step.push((
+                        "outcome".to_string(),
+                        expression::Value::string(outcome.as_str()),
+                    ));
+                }
+                if let Some(conclusion) = self.state.conclusions.get(id) {
+                    step.push((
+                        "conclusion".to_string(),
+                        expression::Value::string(conclusion.as_str()),
+                    ));
+                }
+                (
+                    id.clone(),
+                    expression::Value::Object(expression::ObjectValue::new(step)),
+                )
+            })
+            .collect();
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    fn job_context(&self) -> expression::Value {
+        let mut entries = self.context_data_entries("job");
+        upsert_entry(
+            &mut entries,
+            "status",
+            expression::Value::string(self.state.job_status()),
+        );
+        expression::Value::Object(expression::ObjectValue::new(entries))
+    }
+
+    /// `hashFiles(...)` — `src/Runner.Worker/Expressions/HashFilesFunction.cs:19-60`.
+    fn hash_files_function(
+        &self,
+        args: &[expression::Value],
+    ) -> Result<expression::Value, expression::ExpressionError> {
+        let mut patterns: Vec<String> = Vec::new();
+        for (position, arg) in args.iter().enumerate() {
+            let arg = arg.convert_to_string();
+            if position == 0 && arg.starts_with("--") {
+                if arg.eq_ignore_ascii_case("--follow-symbolic-links") {
+                    continue;
+                }
+                return Err(expression::ExpressionError::evaluation(format!(
+                    "Invalid glob option {arg}, avaliable option: '--follow-symbolic-links'."
+                )));
+            }
+            patterns.push(arg);
+        }
+
+        // Evaluated against the workspace as it exists at this call: an
+        // evaluation before checkout may correctly be empty, and must not
+        // poison the same expression after checkout populated the tree.
+        let Some(workspace) = self.state.workspace_host.as_ref() else {
+            return Ok(expression::Value::string(""));
+        };
+        Ok(expression::Value::string(hash_files(workspace, &patterns)))
+    }
+}
+
+impl expression::ParseEnvironment for JobExpressionContext<'_> {
+    fn is_named_value(&self, name: &str) -> bool {
+        ROOT_CONTEXTS
+            .iter()
+            .any(|root| root.eq_ignore_ascii_case(name))
+            || self
+                .state
+                .context_data
+                .keys()
+                .any(|root| root.eq_ignore_ascii_case(name))
+    }
+
+    fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
+        match name.to_ascii_lowercase().as_str() {
+            // `src/Runner.Worker/StepsRunner.cs:92-97`.
+            "success" | "failure" | "always" | "cancelled" => Some((0, 0)),
+            "hashfiles" => Some((1, 255)),
+            _ => None,
+        }
+    }
+}
+
+impl expression::EvaluationContext for JobExpressionContext<'_> {
+    fn named_value(&self, name: &str) -> expression::Value {
+        match name.to_ascii_lowercase().as_str() {
+            "github" => self.github_context(),
+            "env" => self.env_context(),
+            "runner" => self.runner_context(),
+            "steps" => self.steps_context(),
+            "job" => self.job_context(),
+            other => {
+                let entries = self.context_data_entries(other);
+                if entries.is_empty()
+                    && let Some(value) = self
+                        .state
+                        .context_data
+                        .iter()
+                        .find(|(root, _)| root.eq_ignore_ascii_case(other))
+                        .map(|(_, value)| value)
+                {
+                    return expression::eval::from_serde_json(value);
+                }
+                expression::Value::Object(expression::ObjectValue::new(entries))
+            }
+        }
+    }
+
+    fn call_function(
+        &self,
+        name: &str,
+        args: &[expression::Value],
+    ) -> Result<expression::Value, expression::ExpressionError> {
+        match name.to_ascii_lowercase().as_str() {
+            // `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
+            "success" => Ok(expression::Value::Boolean(self.state.success_status())),
+            // `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`
+            "failure" => Ok(expression::Value::Boolean(self.state.failure_status())),
+            // `src/Runner.Worker/Expressions/AlwaysFunction.cs:19-23`
+            "always" => Ok(expression::Value::Boolean(true)),
+            // `src/Runner.Worker/Expressions/CancelledFunction.cs:20-29` returns
+            // `job.status == cancelled`. The job's cancellation token is that
+            // status: it is a required field of the state, so this can never
+            // fall back to a constant again.
+            "cancelled" => Ok(expression::Value::Boolean(self.state.is_cancelled())),
+            "hashfiles" => self.hash_files_function(args),
+            other => Err(expression::ExpressionError::evaluation(format!(
+                "Unrecognized function: '{other}'"
+            ))),
+        }
+    }
 }
 
 /// Return true only when a step condition is provably false from immutable
@@ -11980,80 +12570,101 @@ pub(crate) fn condition_is_statically_false(
     let Some(condition) = condition else {
         return false;
     };
-    immutable_github_expression_is_false(
-        strip_expression(condition),
-        &JobExecutionState::new_with_context(base_env, context_data),
-    )
-}
-
-fn immutable_github_expression_is_false(expression: &str, state: &JobExecutionState) -> bool {
-    let expression = expression.trim();
-    if let Some(inner) = strip_wrapping_parentheses(expression) {
-        return immutable_github_expression_is_false(inner, state);
-    }
-    // A conjunction is false when any operand is independently provable
-    // false. GitHub's broker prefixes ordinary step conditions with
-    // `success() &&`; the immutable operand can still prove the whole value.
-    if let Some((left, right)) = split_top_level(expression, "&&") {
-        return immutable_github_expression_is_false(left, state)
-            || immutable_github_expression_is_false(right, state);
-    }
-    // A disjunction is false only when both operands are independently
-    // provable false.
-    if let Some((left, right)) = split_top_level(expression, "||") {
-        return immutable_github_expression_is_false(left, state)
-            && immutable_github_expression_is_false(right, state);
-    }
-    let lower = expression.to_ascii_lowercase();
-    if !lower.contains("github.")
-        || [
-            "steps.",
-            "needs.",
-            "env.",
-            "job.",
-            "matrix.",
-            "strategy.",
-            "runner.",
-            "secrets.",
-        ]
-        .iter()
-        .any(|runtime| lower.contains(runtime))
-    {
+    let Ok(state) = JobExecutionState::try_new_with_context(base_env, context_data) else {
+        // A malformed immutable expression is not proof that a condition is
+        // false; leave the step for normal fail-closed lifecycle handling.
         return false;
-    }
-    !state.evaluate_condition(Some(expression))
+    };
+    let context = state.expression_context();
+    let Ok(Some(node)) = expression::parse(strip_expression(condition), &context) else {
+        // An expression that does not even parse is not provably false.
+        return false;
+    };
+    immutable_expression_is_false(&node, &context)
 }
 
-fn missing_context_value(expression: &str) -> Option<String> {
-    let expression = expression.trim();
-    if expression.starts_with("github.event.") {
-        return Some(String::new());
+/// Walk the parsed condition rather than its text: a conjunction is provably
+/// false when any operand is, a disjunction only when every operand is, and a
+/// leaf counts only when it reads exclusively immutable `github` context.
+fn immutable_expression_is_false(
+    node: &expression::Node,
+    context: &JobExpressionContext<'_>,
+) -> bool {
+    match node {
+        expression::Node::And(parameters) => parameters
+            .iter()
+            .any(|parameter| immutable_expression_is_false(parameter, context)),
+        expression::Node::Or(parameters) => parameters
+            .iter()
+            .all(|parameter| immutable_expression_is_false(parameter, context)),
+        node => {
+            if !reads_only_immutable_github(node) {
+                return false;
+            }
+            matches!(
+                expression::evaluate_node(node, context),
+                Ok(value) if value.is_falsy()
+            )
+        }
     }
-    let root = expression.split('.').next()?;
-    matches!(root, "matrix" | "needs" | "inputs" | "vars" | "secrets").then(String::new)
+}
+
+/// True when the subtree reads the `github` context and nothing that only
+/// exists once the job is running: other root contexts, the status functions,
+/// or `hashFiles`.
+fn reads_only_immutable_github(node: &expression::Node) -> bool {
+    fn walk(node: &expression::Node, saw_github: &mut bool, immutable: &mut bool) {
+        match node {
+            expression::Node::NamedValue(name) => {
+                if name.eq_ignore_ascii_case("github") {
+                    *saw_github = true;
+                } else {
+                    *immutable = false;
+                }
+            }
+            expression::Node::Function { .. } => *immutable = false,
+            _ => {}
+        }
+        for child in node.children() {
+            walk(child, saw_github, immutable);
+        }
+    }
+
+    let mut saw_github = false;
+    let mut immutable = true;
+    walk(node, &mut saw_github, &mut immutable);
+    saw_github && immutable
 }
 
 fn evaluate_job_outputs(
     job_outputs: Option<&Value>,
     state: &JobExecutionState,
-) -> BTreeMap<String, String> {
+) -> Result<BTreeMap<String, String>, ExpressionInterpolationError> {
     job_output_pairs(job_outputs)
         .into_iter()
-        .filter_map(|(name, value)| {
-            let value = state.resolve_expressions(&value);
-            (!value.is_empty()).then_some((name, value))
+        .map(|(name, value)| state.resolve_expressions(&value).map(|value| (name, value)))
+        .collect::<Result<BTreeMap<_, _>, _>>()
+        .map(|outputs| {
+            outputs
+                .into_iter()
+                .filter(|(_, value)| !value.is_empty())
+                .collect()
         })
-        .collect()
 }
 
 fn evaluate_environment_url(
     environment_url: Option<&Value>,
     state: &JobExecutionState,
-) -> Option<String> {
+) -> Result<Option<String>, ExpressionInterpolationError> {
     environment_url
         .and_then(template_string_value)
-        .map(|value| state.resolve_expressions(value))
-        .filter(|value| !value.is_empty())
+        .map(|value| {
+            state
+                .resolve_expressions(value)
+                .map(|value| (!value.is_empty()).then_some(value))
+        })
+        .transpose()
+        .map(|value| value.flatten())
 }
 
 fn template_string_value(value: &Value) -> Option<&str> {
@@ -12207,7 +12818,7 @@ fn javascript_post_log_prelude(
 
 fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
     let mut lines = Vec::new();
-    let script = state.resolve_expressions(&step.script);
+    let script = state.resolve_for_log(&step.script);
     if !script.trim().is_empty() {
         // GitHub prints the script body in bold cyan inside the header group
         // (no repeated `Run …` line — the group title already carries it).
@@ -12237,7 +12848,7 @@ fn checkout_log_prelude(plan: &CheckoutPlan, state: &JobExecutionState) -> Vec<S
         checkout_repository_for_log(&plan.clone_url),
     ));
     if let Some(version) = &plan.version {
-        inputs.push(("ref".to_string(), state.resolve_expressions(version)));
+        inputs.push(("ref".to_string(), state.resolve_for_log(version)));
     }
     inputs.push(("token".to_string(), "***".to_string()));
     inputs.push(("ssh-strict".to_string(), "true".to_string()));
@@ -12277,7 +12888,7 @@ fn append_with_pairs(
     for (name, value) in inputs {
         lines.push(format!(
             "  {name}: {}",
-            redact_log_value(name, &state.resolve_expressions(value))
+            redact_log_value(name, &state.resolve_for_log(value))
         ));
     }
 }
@@ -12316,7 +12927,7 @@ fn append_with_lines(
     for (name, value) in inputs {
         lines.push(format!(
             "  {name}: {}",
-            redact_log_value(name, &state.resolve_expressions(value))
+            redact_log_value(name, &state.resolve_for_log(value))
         ));
     }
 }
@@ -12502,7 +13113,13 @@ fn rendered_output_lines(stdout: &str, stderr: &str) -> Vec<String> {
 }
 
 fn rendered_output_line(line: &str) -> Option<String> {
-    let Some(rest) = line.strip_prefix("::") else {
+    // `ActionCommand.TryParseV2` trims leading whitespace before testing for
+    // the `::` keyword (src/Runner.Common/ActionCommand.cs:61-66), and
+    // `OutputManager.OnDataReceived` returns without emitting the line once a
+    // command is recognized (src/Runner.Worker/Handlers/OutputManager.cs:80-91).
+    // Matching on the untrimmed line let an indented command be processed and
+    // still echoed into the log.
+    let Some(rest) = line.trim_start().strip_prefix("::") else {
         return Some(line.to_string());
     };
     let Some((command, value)) = rest.split_once("::") else {
@@ -12555,62 +13172,6 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
         Value::Null => None,
         value => serde_json::to_string(value).ok(),
     }
-}
-
-fn context_value_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => Some(String::new()),
-        Value::String(value) => Some(value.clone()),
-        Value::Bool(value) => Some(value.to_string()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_contains(expression: &str) -> Option<(&str, &str)> {
-    let inner = expression
-        .trim()
-        .strip_prefix("contains(")?
-        .strip_suffix(')')?;
-    split_top_level(inner, ",")
-}
-
-fn parse_to_json(expression: &str) -> Option<&str> {
-    expression
-        .trim()
-        .strip_prefix("toJSON(")?
-        .strip_suffix(')')
-        .map(str::trim)
-}
-
-fn parse_hash_files(expression: &str) -> Option<Vec<String>> {
-    let inner = expression
-        .trim()
-        .strip_prefix("hashFiles(")?
-        .strip_suffix(')')?;
-    let mut patterns = Vec::new();
-    let mut rest = inner.trim();
-    while !rest.is_empty() {
-        rest = rest.trim_start();
-        if rest.starts_with(',') {
-            rest = rest[1..].trim_start();
-            continue;
-        }
-        let quote = rest.chars().next()?;
-        if quote != '\'' && quote != '"' {
-            return None;
-        }
-        let value_start = quote.len_utf8();
-        let value_end = rest[value_start..].find(quote)? + value_start;
-        patterns.push(rest[value_start..value_end].to_string());
-        rest = rest[value_end + quote.len_utf8()..].trim_start();
-        if rest.starts_with(',') {
-            rest = rest[1..].trim_start();
-        } else if !rest.is_empty() {
-            return None;
-        }
-    }
-    Some(patterns)
 }
 
 fn hash_files(workspace: &Path, patterns: &[String]) -> String {
@@ -12770,63 +13331,6 @@ fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
-    let mut depth = 0_i32;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in expression.char_indices() {
-        if let Some(quote_char) = quote {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if ch == '\\' {
-                escaped = true;
-                continue;
-            }
-            if ch == quote_char {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && expression[index..].starts_with(operator) {
-            return Some((
-                expression[..index].trim(),
-                expression[index + operator.len()..].trim(),
-            ));
-        }
-    }
-    None
-}
-
-fn strip_wrapping_parentheses(expression: &str) -> Option<&str> {
-    let expression = expression.trim();
-    let inner = expression.strip_prefix('(')?.strip_suffix(')')?;
-    let mut depth = 0_i32;
-    for (index, ch) in expression.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 && index != expression.len() - 1 {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-        if depth < 0 {
-            return None;
-        }
-    }
-    (depth == 0).then_some(inner.trim())
-}
-
 fn strip_expression(condition: &str) -> &str {
     condition
         .strip_prefix("${{")
@@ -12835,64 +13339,8 @@ fn strip_expression(condition: &str) -> &str {
         .unwrap_or(condition)
 }
 
-fn expression_truthy(value: &str) -> bool {
-    let value = value.trim();
-    !(value.is_empty()
-        || value.eq_ignore_ascii_case("false")
-        || value == "0"
-        || value.eq_ignore_ascii_case("null"))
-}
-
 fn github_string_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
-}
-
-fn github_contains(value: &str, needle: &str) -> bool {
-    value
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
-}
-
-fn condition_returns_bool(expression: &str) -> bool {
-    let expression = expression.trim();
-    if matches!(
-        expression,
-        "always()" | "success()" | "failure()" | "cancelled()" | "true" | "false"
-    ) {
-        return true;
-    }
-    if expression.starts_with('!') {
-        return true;
-    }
-    let expression = strip_wrapping_parentheses(expression).unwrap_or(expression);
-    split_top_level(expression, "||").is_some()
-        || split_top_level(expression, "&&").is_some()
-        || split_top_level(expression, "!=").is_some()
-        || split_top_level(expression, "==").is_some()
-        || parse_contains(expression).is_some()
-}
-
-fn condition_has_status_check(expression: &str) -> bool {
-    ["always()", "success()", "failure()", "cancelled()"]
-        .iter()
-        .any(|function| expression.contains(function))
-}
-
-fn is_quoted(value: &str) -> bool {
-    (value.starts_with('\'') && value.ends_with('\''))
-        || (value.starts_with('"') && value.ends_with('"'))
-}
-
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('\'')
-        .and_then(|value| value.strip_suffix('\''))
-        .or_else(|| {
-            value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-        })
-        .unwrap_or(value)
 }
 
 fn exit_code(status: ExitStatus) -> Result<i32> {
@@ -12913,11 +13361,30 @@ fn effective_step_timeout(
     )
 }
 
-fn timeout_command_result(stdout: String, mut stderr: String) -> CommandResult {
+/// Result of an invocation the watchdog killed.
+///
+/// A control-plane `docker` call that expired is a daemon fault, not the
+/// workflow exceeding its own `timeout-minutes`, and says so: reporting the
+/// workflow message for a wedged daemon sent operators looking at the wrong
+/// thing.
+fn timeout_command_result(
+    op: Option<crate::docker::DockerOp>,
+    deadline: Duration,
+    stdout: String,
+    mut stderr: String,
+) -> CommandResult {
     if !stderr.is_empty() {
         stderr.push('\n');
     }
-    stderr.push_str("##[error]The operation was canceled because it exceeded timeout-minutes.\n");
+    match op.filter(|op| op.is_control_plane()) {
+        Some(op) => {
+            stderr.push_str("##[error]");
+            stderr.push_str(&crate::docker::DockerTimeout::new(op, deadline).to_string());
+            stderr.push('\n');
+        }
+        None => stderr
+            .push_str("##[error]The operation was canceled because it exceeded timeout-minutes.\n"),
+    }
     CommandResult {
         code: 124,
         stdout,
@@ -13141,7 +13608,7 @@ mod tests {
             env: Vec::new(),
         };
         assert_eq!(
-            native_input(&action, &JobExecutionState::default(), "lookup-only"),
+            native_input(&action, &JobExecutionState::default(), "lookup-only").unwrap(),
             "true"
         );
     }
@@ -13150,7 +13617,10 @@ mod tests {
     fn over_budget_expression_is_not_evaluated() {
         let state = JobExecutionState::default();
         let expression = format!("${{{{ {} }}}}", "github.sha ".repeat(7000));
-        assert_eq!(state.resolve_expressions(&expression), expression);
+        assert_eq!(
+            state.resolve_expressions(&expression).unwrap_err(),
+            ExpressionInterpolationError::BudgetExceeded
+        );
     }
 
     #[cfg(unix)]
@@ -13193,20 +13663,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(with_stdin.stdout, "line-one\nline-two|payload");
-    }
-
-    #[test]
-    fn compiler_cache_setup_scripts_never_download_tools() {
-        let sccache = sccache_setup_script();
-        let kache = kache_setup_script();
-        for script in [&sccache, &kache] {
-            assert!(!script.contains("curl"));
-            assert!(!script.contains("wget"));
-        }
-        assert!(sccache.contains("0.16.0"));
-        assert!(kache.contains("0.14.2"));
-        assert!(!sccache.contains("node"));
-        assert!(!kache.contains("node"));
     }
 
     #[test]
@@ -13284,18 +13740,6 @@ mod tests {
             ],
         )
         .expect("shell -c belongs to docker exec payload");
-    }
-
-    #[test]
-    fn compiler_cache_post_actions_always_run() {
-        assert_eq!(
-            native_post_condition(NativeActionAdapter::Sccache, None),
-            Some("always()")
-        );
-        assert_eq!(
-            native_post_condition(NativeActionAdapter::Kache, None),
-            Some("always()")
-        );
     }
 
     #[test]
@@ -13513,7 +13957,7 @@ mod tests {
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default())
             .with_job_environment_started(true)
             .with_tool_prep_telemetry(Arc::clone(&sink), admission);
 
@@ -13582,7 +14026,7 @@ mod tests {
         };
         let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &temp);
         let job_container = container(&temp);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default())
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission);
 
         let root_result = executor
@@ -13712,12 +14156,62 @@ mod tests {
 
     #[test]
     fn timeout_step_returns_failure_not_hang() {
-        let result = timeout_command_result("stdout\n".into(), "stderr\n".into());
+        let result = timeout_command_result(
+            Some(crate::docker::DockerOp::Payload),
+            Duration::from_secs(60),
+            "stdout\n".into(),
+            "stderr\n".into(),
+        );
 
         assert_eq!(result.code, 124);
         assert_eq!(result.stdout, "stdout\n");
         assert!(result.stderr.contains("timeout-minutes"));
         assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[test]
+    fn control_plane_timeout_names_the_daemon_not_the_workflow() {
+        let result = timeout_command_result(
+            Some(crate::docker::DockerOp::Remove),
+            Duration::from_secs(20),
+            String::new(),
+            String::new(),
+        );
+
+        assert_eq!(result.code, 124);
+        assert!(
+            result.stderr.contains("docker remove operation"),
+            "{result:?}"
+        );
+        assert!(result.stderr.contains("20s"), "{result:?}");
+        assert!(!result.stderr.contains("timeout-minutes"), "{result:?}");
+    }
+
+    #[test]
+    fn no_control_plane_docker_call_inherits_the_step_default() {
+        for args in [
+            vec![
+                "info".to_string(),
+                "--format".to_string(),
+                "{{.ID}}".to_string(),
+            ],
+            vec!["rm".to_string(), "--force".to_string(), "job".to_string()],
+            vec!["kill".to_string(), "job".to_string()],
+            vec!["inspect".to_string(), "job".to_string()],
+        ] {
+            let (op, deadline) = docker_deadline("docker", &args, DEFAULT_STEP_TIMEOUT);
+            assert!(
+                op.is_some_and(crate::docker::DockerOp::is_control_plane),
+                "{args:?}"
+            );
+            assert!(
+                deadline < DEFAULT_STEP_TIMEOUT,
+                "{args:?} inherited the step default"
+            );
+        }
+        let (op, deadline) = docker_deadline("git", &["status".to_string()], DEFAULT_STEP_TIMEOUT);
+        assert!(op.is_none());
+        assert_eq!(deadline, DEFAULT_STEP_TIMEOUT);
     }
 
     #[test]
@@ -13802,8 +14296,48 @@ mod tests {
         args.first().is_some_and(|a| a == "image") && args.get(1).is_some_and(|a| a == "inspect")
     }
 
+    impl RecordingRunner {
+        /// Record one call whose environment travels outside argv: the env
+        /// file is expanded and process-environment forwards are appended, so
+        /// assertions see the effective command.
+        fn record_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: String,
+        ) -> Result<CommandResult> {
+            let mut args = crate::execution::expand_env_file_args(args);
+            for (name, value) in env {
+                args.push("-e".to_string());
+                args.push(format!("{name}={value}"));
+            }
+            if is_seed_probe(&args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args));
+            self.stdin.push(stdin);
+            self.env.push(env.to_vec());
+            let code = if self.codes.is_empty() {
+                0
+            } else {
+                self.codes.remove(0)
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -13867,6 +14401,41 @@ mod tests {
                 stderr: String::new(),
             })
         }
+
+        /// Values an env file cannot carry (anything multi-line) are forwarded
+        /// from the Docker client's own process environment, so the double has
+        /// to accept them instead of failing closed.
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, String::new())
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, String::new())
+        }
+
+        fn run_with_stdin_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            stdin: &str,
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.record_with_env(program, args, env, stdin.to_string())
+        }
     }
 
     #[derive(Default)]
@@ -13876,6 +14445,7 @@ mod tests {
 
     impl CommandRunner for BuildkitCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
             let stdout = match args.first().map(String::as_str) {
                 Some("ps") => {
@@ -13899,6 +14469,7 @@ mod tests {
 
     impl CommandRunner for ServiceContextRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             let stdout = match args.first().map(String::as_str) {
                 Some("inspect") => "container-id\n",
                 Some("port") => "5432/tcp -> 0.0.0.0:32768\n5432/tcp -> [::]:32768\n",
@@ -13925,7 +14496,7 @@ mod tests {
             ports: vec!["5432".into()],
             options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
         });
-        let mut executor = DockerJobEngine::new(ServiceContextRunner);
+        let mut executor = DockerJobEngine::inert(ServiceContextRunner);
         let context = executor.service_context(&job).unwrap().unwrap();
 
         assert_eq!(context["postgres"]["id"], "container-id");
@@ -13943,6 +14514,7 @@ mod tests {
 
     impl CommandRunner for GitDiffRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: if self.missing_refs && args.iter().any(|arg| arg == "cat-file") {
@@ -13967,6 +14539,7 @@ mod tests {
 
     impl CommandRunner for FailingPostRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let code = if args.iter().any(|arg| {
                 arg.contains("/__a/_actions/sccache/dist/show_stats/index.js")
@@ -13993,7 +14566,17 @@ mod tests {
 
     impl CommandRunner for CheckoutOutputRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
+            if program == "git"
+                && args.first().is_some_and(|arg| arg == "init")
+                && args.iter().any(|arg| arg == "--bare")
+                && let Some(path) = args.last()
+            {
+                // Strict checkout hydration requires the fake mirror to model
+                // the object database that `git init --bare` creates.
+                std::fs::create_dir_all(Path::new(path).join("objects"))?;
+            }
             let stdout = if program == "docker"
                 && args.first().is_some_and(|arg| arg == "exec")
                 && args.iter().any(|arg| arg == "/__t/source.sh")
@@ -14021,6 +14604,7 @@ mod tests {
 
     impl CommandRunner for ErroringExecRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14068,6 +14652,7 @@ mod tests {
 
     impl CommandRunner for StreamingErrorExecRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14091,6 +14676,7 @@ mod tests {
             _timeout: Duration,
             on_output: &mut dyn FnMut(CommandStream, &str),
         ) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if args.first().is_some_and(|arg| arg == "exec")
                 && has_container_env_path(args, "GITHUB_OUTPUT", "masked_output")
@@ -14115,6 +14701,7 @@ mod tests {
 
     impl CommandRunner for MainActionErrorRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if args
                 .last()
@@ -14137,6 +14724,7 @@ mod tests {
 
     impl CommandRunner for FailingCheckoutRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             if is_seed_probe(args) {
                 return Ok(CommandResult {
                     code: 0,
@@ -14163,7 +14751,26 @@ mod tests {
     }
 
     impl CommandRunner for OutputWritingRunner {
+        /// Multi-line values cannot live in a Docker env file, so they are
+        /// forwarded from the client's process environment. Fold them back in
+        /// so the double still observes the effective command.
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            let mut args = args.to_vec();
+            for (name, value) in env {
+                args.push("-e".to_string());
+                args.push(format!("{name}={value}"));
+            }
+            self.run(program, &args)
+        }
+
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let action_process = program == "docker"
                 && (args.first().is_some_and(|arg| arg == "exec")
@@ -14239,6 +14846,7 @@ mod tests {
 
     impl CommandRunner for PhaseStateRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let state_file = has_container_env_path(args, "GITHUB_STATE", "wrapped_state")
                 .then(|| self.temp.join("wrapped_state"));
@@ -14268,6 +14876,7 @@ mod tests {
 
     impl CommandRunner for EnvAndFailureRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             if has_container_env_path(args, "GITHUB_ENV", "enable_env") {
                 fs::write(self.temp.join("enable_env"), "CACHE_ON_FAILURE=true\n")?;
@@ -14292,9 +14901,10 @@ mod tests {
 
     impl CommandRunner for StdoutCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::error::broken\nhidden\n"
+                "::set-output name=answer::42\n::add-mask::hidden\n::error::broken\nhidden\n"
                     .to_string()
             } else {
                 String::new()
@@ -14314,6 +14924,7 @@ mod tests {
 
     impl CommandRunner for StreamingMaskRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: 0,
@@ -14328,6 +14939,7 @@ mod tests {
             args: &[String],
             on_output: &mut dyn FnMut(CommandStream, &str),
         ) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             on_output(CommandStream::Stdout, "::add-mask::dynsecret");
             on_output(CommandStream::Stdout, "echo dynsecret");
@@ -14346,6 +14958,7 @@ mod tests {
 
     impl CommandRunner for SilentCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
                 code: 0,
@@ -14362,9 +14975,10 @@ mod tests {
 
     impl CommandRunner for StderrCommandRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push((program.to_string(), args.to_vec()));
             let stderr = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::warning::slow\nhidden\n"
+                "::set-output name=answer::42\n::add-mask::hidden\n::warning::slow\nhidden\n"
                     .to_string()
             } else {
                 String::new()
@@ -14741,6 +15355,7 @@ esac
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
+            slot_count: std::num::NonZeroU32::MIN,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -14753,11 +15368,9 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
         }
     }
 
@@ -14799,6 +15412,7 @@ esac
             "velnor.daemon-id=test-daemon",
             "--label",
             "velnor.job-id=job",
+            "--",
             "net",
         ]
         .into_iter()
@@ -14812,7 +15426,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.start_job_environment_once(&spec).unwrap();
 
@@ -14831,7 +15445,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -14844,9 +15458,9 @@ esac
 
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
-        assert!(calls
-            .iter()
-            .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| {
+            args.starts_with(&["rm".into(), "--force".into(), "--".into(), "job".into()])
+        }));
         assert!(calls
             .iter()
             .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
@@ -14863,6 +15477,7 @@ esac
         }
         impl CommandRunner for ReclaimRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 self.calls.push(args.to_vec());
                 let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
                     "guest-id\tguest-postgres\nbk-id\tbuildx_buildkit_velnor-builder-job0\n".into()
@@ -14884,7 +15499,7 @@ esac
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(ReclaimRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(ReclaimRunner { calls: Vec::new() });
         executor.cleanup(&spec).unwrap();
         let calls = &executor.runner().calls;
         assert!(calls
@@ -14915,7 +15530,7 @@ esac
         let temp = root.join("job-scope").join("temp");
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(BuildkitCleanupRunner::default());
+        let mut executor = DockerJobEngine::inert(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
         // Created + removing of this job's builder must both be force-removed,
@@ -14979,8 +15594,17 @@ esac
 
         impl CommandRunner for LeaseOrderRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                if args
+                    == [
+                        "rm".to_string(),
+                        "--force".to_string(),
+                        "--".to_string(),
+                        "job".to_string(),
+                    ]
+                    .as_slice()
+                {
                     assert!(
                         lease_live,
                         "lease must stay mounted until the job container is removed"
@@ -15026,7 +15650,7 @@ esac
             "lease socket must exist before cleanup"
         );
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(LeaseOrderRunner {
+        let mut executor = DockerJobEngine::inert(LeaseOrderRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             buildkit_saw_dead_lease: false,
@@ -15060,8 +15684,17 @@ esac
 
         impl CommandRunner for SkipBuildkitRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
                 let lease_live = self.lease_path.exists();
-                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                if args
+                    == [
+                        "rm".to_string(),
+                        "--force".to_string(),
+                        "--".to_string(),
+                        "job".to_string(),
+                    ]
+                    .as_slice()
+                {
                     assert!(
                         lease_live,
                         "lease must stay mounted until the job container is removed"
@@ -15097,7 +15730,7 @@ esac
         )
         .unwrap();
         let spec = container(&temp);
-        let mut executor = DockerJobEngine::new(SkipBuildkitRunner {
+        let mut executor = DockerJobEngine::inert(SkipBuildkitRunner {
             lease_path: lease_path.clone(),
             job_rm_saw_lease: false,
             calls: Vec::new(),
@@ -15145,7 +15778,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let spec = container(&temp);
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_job_environment_started(true);
+            DockerJobEngine::inert(RecordingRunner::default()).with_job_environment_started(true);
 
         executor
             .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
@@ -15169,7 +15802,7 @@ esac
         fs::create_dir_all(&temp).unwrap();
         let mut spec = container(&temp);
         spec.verify_bind_mounts = true;
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15210,7 +15843,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let result = executor
             .execute_step(&container(&temp), &step, &temp)
@@ -15268,7 +15901,7 @@ esac
             timeout_minutes: None,
         };
 
-        let result = DockerJobEngine::new(RecordingRunner::default())
+        let result = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_step(&container(&temp), &step, &temp)
             .unwrap();
@@ -15351,7 +15984,7 @@ esac
             timeout_minutes: None,
         };
 
-        let result = DockerJobEngine::new(RecordingRunner::default())
+        let result = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_step(&container(&temp), &step, &temp)
             .unwrap();
@@ -15414,7 +16047,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -15459,7 +16092,7 @@ esac
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_steps(&container(&temp), &steps, &temp)
@@ -15496,7 +16129,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -15619,7 +16252,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(GitDiffRunner {
+        let mut executor = DockerJobEngine::inert(GitDiffRunner {
             calls: Vec::new(),
             stdout: "docker/construct/Dockerfile\ncontent/docs/index.mdx\nCargo.toml\n".into(),
             missing_refs: true,
@@ -15741,7 +16374,7 @@ esac
         expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -15889,7 +16522,7 @@ esac
         fs::create_dir_all(root.join("partial-job/home")).unwrap();
         fs::create_dir_all(root.join("miss-job/home")).unwrap();
 
-        let exact_results = DockerJobEngine::new(RecordingRunner::default())
+        let exact_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&exact_temp),
                 &cache_step("linux-rust-exact", ""),
@@ -15897,7 +16530,7 @@ esac
                 &exact_temp,
             )
             .unwrap();
-        let partial_results = DockerJobEngine::new(RecordingRunner::default())
+        let partial_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&partial_temp),
                 &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
@@ -15905,7 +16538,7 @@ esac
                 &partial_temp,
             )
             .unwrap();
-        let miss_results = DockerJobEngine::new(RecordingRunner::default())
+        let miss_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&miss_temp),
                 &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
@@ -15948,7 +16581,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -16048,7 +16681,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&save_temp),
                 &save,
@@ -16099,7 +16732,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&restore_temp),
                 &restore,
@@ -16258,7 +16891,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "empty-glob")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -16276,7 +16909,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "empty-glob")],
         )];
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(results[0].state.outputs["cache-hit"], "true");
@@ -16359,7 +16992,7 @@ esac
             Some("invalid"),
             &[("path", "/etc/**"), ("key", "invalid-glob")],
         );
-        let error = DockerJobEngine::new(RecordingRunner::default())
+        let error = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &[step],
@@ -16387,7 +17020,7 @@ esac
             &[("path", paths), ("key", "malformed-actions-cache")],
         );
 
-        let error = DockerJobEngine::new(RecordingRunner::default())
+        let error = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &[step],
@@ -16489,7 +17122,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -16530,7 +17163,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -16569,7 +17202,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
         assert!(save_results[0]
@@ -16609,7 +17242,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-round-trip")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -16655,7 +17288,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&save_container, &save, &env, &save_temp)
             .unwrap();
         assert!(save_results[0]
@@ -16684,7 +17317,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&restore_container, &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -16749,7 +17382,7 @@ esac
             Some("save"),
             &[("path", paths), ("key", "glob-traversal")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
         let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-traversal");
@@ -16763,7 +17396,7 @@ esac
             Some("restore"),
             &[("path", paths), ("key", "glob-traversal")],
         )];
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
@@ -16793,7 +17426,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -16834,7 +17467,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -16875,7 +17508,7 @@ esac
 
         let mut spec = container(&temp);
         spec.cargo_target_host = Some(temp.join("target-store"));
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -16910,7 +17543,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -16955,7 +17588,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -16979,7 +17612,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17023,7 +17656,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17062,7 +17695,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17157,6 +17790,8 @@ esac
         spec.cargo_target_host = Some(store.clone());
         assert!(!spec
             .start_args()
+            .unwrap()
+            .args()
             .iter()
             .any(|arg| arg.contains(":/__w/target")));
 
@@ -17524,7 +18159,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let save_results = DockerJobEngine::new(RecordingRunner::default())
+        let save_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17557,7 +18192,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17610,7 +18245,7 @@ esac
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
@@ -17634,7 +18269,7 @@ esac
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let lookup_results = DockerJobEngine::new(RecordingRunner::default())
+        let lookup_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&lookup_temp), &lookup, &env, &lookup_temp)
             .unwrap();
 
@@ -17689,7 +18324,7 @@ esac
             timeout_minutes: None,
         }];
 
-        let restore_results = DockerJobEngine::new(RecordingRunner::default())
+        let restore_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
@@ -17749,7 +18384,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-miss")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -17779,7 +18414,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-save-only")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -17823,7 +18458,7 @@ esac
             &[("path", "~/.cache/rust-script"), ("key", "linux-existing")],
         )];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
             .unwrap();
 
@@ -17852,7 +18487,7 @@ esac
                 source_path,
                 &[("path", "~/.cache/rust-script"), ("key", "some-key")],
             )];
-            let results = DockerJobEngine::new(RecordingRunner::default())
+            let results = DockerJobEngine::inert(RecordingRunner::default())
                 .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
                 .unwrap();
             let keys: std::collections::BTreeSet<String> =
@@ -17929,7 +18564,7 @@ esac
             Some("save"),
             &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
         )];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &save_env, &save_temp)
             .unwrap();
 
@@ -17943,7 +18578,7 @@ esac
         let win_temp = root.join("win/temp");
         fs::create_dir_all(root.join("win/home")).unwrap();
         let win_env = vec![repo.clone(), ("RUNNER_OS".into(), "Windows".into())];
-        let win_results = DockerJobEngine::new(RecordingRunner::default())
+        let win_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
             .unwrap();
         assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
@@ -17953,7 +18588,7 @@ esac
         let lin_temp = root.join("lin/temp");
         fs::create_dir_all(root.join("lin/home")).unwrap();
         let lin_env = vec![repo, ("RUNNER_OS".into(), "Linux".into())];
-        let lin_results = DockerJobEngine::new(RecordingRunner::default())
+        let lin_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
             .unwrap();
         assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
@@ -18196,7 +18831,7 @@ type=sha,format=long,prefix=,enable=true"
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -18281,11 +18916,12 @@ type=sha,format=long,prefix=,enable=true"
             .contains("'--cache-from' 'type=gha,scope=bitcoin-processor-app-pr'"));
         assert!(calls[build_call.unwrap()]
             .contains("'--cache-to' 'type=gha,scope=bitcoin-processor-app-pr,mode=max'"));
-        // Non-secret runtime env remains inline, while credentials use a
-        // mode-0600 env file and never occur in the process argument vector.
+        // Every variable travels in a mode-0600 env file and never occurs in
+        // the process argument vector. The recorder expands the file, so these
+        // assert delivery; argv confidentiality is enforced by construction
+        // (docker_argv) and tested in container.rs.
         let build_invocation = &calls[build_call.unwrap()];
-        assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
-        assert!(!build_invocation.contains("docker-token"));
+        assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
         assert!(build_invocation
             .contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/"));
         assert!(build_invocation.contains("--env-file"));
@@ -18325,7 +18961,7 @@ type=sha,format=long,prefix=,enable=true"
     fn docker_login_refused_outside_trusted_scope() {
         let temp = temp_dir();
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
         let error = executor
             .native_docker_login(
                 &container(&temp),
@@ -18349,6 +18985,66 @@ type=sha,format=long,prefix=,enable=true"
         assert!(error.to_string().contains("public-forks"));
         assert!(error.to_string().contains("accepted trust scope: trusted"));
         assert!(executor.runner().calls.is_empty());
+    }
+
+    #[test]
+    fn docker_build_push_allows_buildkit_secrets_for_normalized_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope(" TRUSTED ");
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
+            env: Vec::new(),
+        };
+        let state = JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp);
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .expect("normalized trusted scope must permit BuildKit secrets");
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        assert!(calls.iter().any(|call| {
+            call.contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/")
+        }));
+        assert_eq!(
+            fs::read_dir(temp.join("_velnor/build-secrets"))
+                .expect("secret directory created")
+                .count(),
+            0
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_build_push_refuses_buildkit_secrets_outside_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
+        let error = executor
+            .native_docker_build_push(
+                &container(&temp),
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerBuildPush,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .expect_err("untrusted scope must refuse BuildKit secrets");
+
+        assert!(error.to_string().contains("public-forks"));
+        assert!(error.to_string().contains("accepted trust scope: trusted"));
+        assert!(executor.runner().calls.is_empty());
+        assert!(!temp.join("_velnor/build-secrets").exists());
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -18547,7 +19243,7 @@ type=sha,format=long,prefix=,enable=true"
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -18608,7 +19304,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -18673,7 +19369,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let publish_result = native_docker_metadata(&publish_action, &publish_state);
+        let publish_result = native_docker_metadata(&publish_action, &publish_state).unwrap();
         assert_eq!(
             publish_result.state.outputs["tags"],
             "chainargos/rust-bitcoin-processor:latest\nchainargos/rust-bitcoin-processor:abcdef1234567890"
@@ -18706,7 +19402,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let result = native_docker_metadata(&action, &state);
+        let result = native_docker_metadata(&action, &state).unwrap();
         assert_eq!(
             result.state.outputs["tags"],
             "ghcr.io/org/repo/fixture:main\nghcr.io/org/repo/fixture:sha-abcdef1"
@@ -18735,7 +19431,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .into(),
             env: Vec::new(),
         };
-        let result = native_docker_metadata(&action, &state);
+        let result = native_docker_metadata(&action, &state).unwrap();
         // no branch ref → falls back to sha default
         assert!(result.state.outputs["tags"].starts_with("ghcr.io/org/repo/fixture:sha-"));
     }
@@ -18832,7 +19528,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -18916,36 +19612,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
-    fn native_kache_exports_compile_environment_to_later_steps() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Native {
-            step_id: "kache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::Kache,
-                cache_kind: None,
-                source_path: None,
-                inputs: BTreeMap::new(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
-        let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results[0].state.env["RUSTC_WRAPPER"], "kache");
-        assert_eq!(results[0].state.env["KACHE_CACHE_DIR"], "/var/cache/kache");
-        assert_eq!(results[0].state.env["KACHE_MAX_SIZE"], "20GiB");
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
     fn starts_and_waits_for_service_before_job_container() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -18970,7 +19636,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.execute_step(&container, &step, &temp).unwrap();
 
@@ -18996,12 +19662,15 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor.cleanup_services(&spec).unwrap();
 
         assert_eq!(executor.runner().calls.len(), 1);
-        assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
+        assert_eq!(
+            executor.runner().calls[0].1,
+            vec!["rm", "--force", "--", "svc"]
+        );
     }
 
     struct ContainerRemovalRaceRunner;
@@ -19032,7 +19701,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             options: Vec::new(),
         });
 
-        DockerJobEngine::new(ContainerRemovalRaceRunner)
+        DockerJobEngine::inert(ContainerRemovalRaceRunner)
             .cleanup_services(&spec)
             .unwrap();
     }
@@ -19044,6 +19713,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
     impl CommandRunner for StaleServiceCleanupRunner {
         fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
             self.calls.push(args.to_vec());
             let running_service_refusal =
                 args.len() == 2 && args[0] == "rm" && args[1] == "running-service";
@@ -19081,7 +19751,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ports: Vec::new(),
             options: Vec::new(),
         });
-        let mut executor = DockerJobEngine::new(StaleServiceCleanupRunner::default());
+        let mut executor = DockerJobEngine::inert(StaleServiceCleanupRunner::default());
 
         executor.cleanup_stale(&spec);
 
@@ -19128,7 +19798,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -19171,7 +19841,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn start_job_double_failure_cleans_up_retry_resources() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -19259,16 +19929,23 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.masks, vec!["secret"]);
         assert_eq!(
-            state.resolve_expressions("value=${{ steps.producer.outputs.answer }}"),
+            state
+                .resolve_expressions("value=${{ steps.producer.outputs.answer }}")
+                .unwrap(),
             "value=42"
         );
         assert_eq!(
-            state.resolve_expressions("value=${{ steps.producer.outputs['answer'] }}"),
+            state
+                .resolve_expressions("value=${{ steps.producer.outputs['answer'] }}")
+                .unwrap(),
             "value=42"
         );
+        // A context value that is not set is null, and null renders as the
+        // empty string (EvaluationResult.cs:140-141). The deleted evaluator
+        // rendered the source text instead, which is divergence D-4.
         assert_eq!(
-            state.resolve_expressions("keep=${{ github.ref }}"),
-            "keep=${{ github.ref }}"
+            state.resolve_expressions("keep=${{ github.ref }}").unwrap(),
+            "keep="
         );
     }
 
@@ -19344,7 +20021,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(CheckoutOutputRunner::default());
+        let mut executor = DockerJobEngine::inert(CheckoutOutputRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -19387,8 +20064,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
         );
 
-        let env =
-            state.resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())]);
+        let env = state
+            .resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())])
+            .unwrap();
 
         assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
     }
@@ -19424,33 +20102,37 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         ]);
 
         assert_eq!(
-            state.resolve_expressions("${{ github.ref }} ${{ github.sha }}"),
+            state
+                .resolve_expressions("${{ github.ref }} ${{ github.sha }}")
+                .unwrap(),
             "refs/heads/main abc123"
         );
         assert_eq!(
-            state.resolve_env(&[
-                ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
-                ("ACTION".into(), "${{ github.action }}".into()),
-                ("ACTION_PATH".into(), "${{ github.action_path }}".into()),
-                ("ACTION_REF".into(), "${{ github.action_ref }}".into()),
-                (
-                    "ACTION_REPOSITORY".into(),
-                    "${{ github.action_repository }}".into(),
-                ),
-                ("EVENT_PATH".into(), "${{ github.event_path }}".into()),
-                ("OWNER".into(), "${{ github.repository_owner }}".into()),
-                ("SERVER_URL".into(), "${{ github.server_url }}".into()),
-                ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
-                ("WORKSPACE".into(), "${{ github.workspace }}".into()),
-                ("OS".into(), "${{ runner.os }}".into()),
-                ("RUNNER_NAME".into(), "${{ runner.name }}".into()),
-                (
-                    "RUNNER_ENVIRONMENT".into(),
-                    "${{ runner.environment }}".into()
-                ),
-                ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
-                ("ACTION_STATUS".into(), "${{ github.action_status }}".into()),
-            ]),
+            state
+                .resolve_env(&[
+                    ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                    ("ACTION".into(), "${{ github.action }}".into()),
+                    ("ACTION_PATH".into(), "${{ github.action_path }}".into()),
+                    ("ACTION_REF".into(), "${{ github.action_ref }}".into()),
+                    (
+                        "ACTION_REPOSITORY".into(),
+                        "${{ github.action_repository }}".into(),
+                    ),
+                    ("EVENT_PATH".into(), "${{ github.event_path }}".into()),
+                    ("OWNER".into(), "${{ github.repository_owner }}".into()),
+                    ("SERVER_URL".into(), "${{ github.server_url }}".into()),
+                    ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
+                    ("WORKSPACE".into(), "${{ github.workspace }}".into()),
+                    ("OS".into(), "${{ runner.os }}".into()),
+                    ("RUNNER_NAME".into(), "${{ runner.name }}".into()),
+                    (
+                        "RUNNER_ENVIRONMENT".into(),
+                        "${{ runner.environment }}".into()
+                    ),
+                    ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
+                    ("ACTION_STATUS".into(), "${{ github.action_status }}".into()),
+                ])
+                .unwrap(),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
                 ("ACTION".into(), "setup".into()),
@@ -19531,100 +20213,137 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         );
 
         assert_eq!(
-            state.resolve_expressions("target=${{ matrix.target }}"),
+            state
+                .resolve_expressions("target=${{ matrix.target }}")
+                .unwrap(),
             "target=x86_64-apple-darwin"
         );
+        // toJSON is pretty-printed upstream: two-space indent, a newline
+        // before every element and ": " between key and value
+        // (src/Sdk/DTExpressions2/Expressions2/Sdk/Functions/ToJson.cs:158-282).
         assert_eq!(
-            state.resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}"),
-            r#"needs={"bake-targets":"bitcoin-processor-app","bitcoin-processor":"false"}"#
+            state
+                .resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}")
+                .unwrap(),
+            "needs={\n  \"bake-targets\": \"bitcoin-processor-app\",\n  \"bitcoin-processor\": \"false\"\n}"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "tool=${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
-            ),
+            state
+                .resolve_expressions(
+                    "tool=${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
+                )
+                .unwrap(),
             "tool=rust zig cargo:cargo-zigbuild"
         );
         assert_eq!(
-            state.resolve_expressions("literal=${{ 'a || b && c == d' }}"),
+            state
+                .resolve_expressions("literal=${{ 'a || b && c == d' }}")
+                .unwrap(),
             "literal=a || b && c == d"
         );
         assert_eq!(
             state.resolve_expressions(
                 "push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.packages) }}"
-            ),
+            ).unwrap(),
             "push=bitcoin-processor-app"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
-            ),
+            state
+                .resolve_expressions(
+                    "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
+                )
+                .unwrap(),
             "selected=true"
         );
         assert_eq!(
-            state.resolve_expressions("comma=${{ contains('alpha,beta', 'BETA') }}"),
+            state
+                .resolve_expressions("comma=${{ contains('alpha,beta', 'BETA') }}")
+                .unwrap(),
             "comma=true"
         );
         assert_eq!(
             state.resolve_expressions(
                 "fallback=${{ steps.dispatch.outputs.docs || needs.changes.outputs.bake-targets }}"
-            ),
+            ).unwrap(),
             "fallback=bitcoin-processor-app"
         );
         assert_eq!(
-            state.resolve_expressions(
-                "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
-            ),
+            state
+                .resolve_expressions(
+                    "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
+                )
+                .unwrap(),
             "enabled=true"
         );
         assert_eq!(
-            state.resolve_expressions("event=${{ github.event_name == 'WORKFLOW_DISPATCH' }}"),
+            state
+                .resolve_expressions("event=${{ github.event_name == 'WORKFLOW_DISPATCH' }}")
+                .unwrap(),
             "event=true"
         );
         assert_eq!(
-            state.resolve_expressions("pr=${{ github.event.pull_request.number }}"),
+            state
+                .resolve_expressions("pr=${{ github.event.pull_request.number }}")
+                .unwrap(),
             "pr=42"
         );
         assert_eq!(
-            state.resolve_expressions("head=${{ github.event.workflow_run.head_sha }}"),
+            state
+                .resolve_expressions("head=${{ github.event.workflow_run.head_sha }}")
+                .unwrap(),
             "head=def456"
         );
         assert_eq!(
             state.resolve_expressions(
                 "same=${{ github.event.workflow_run.head_repository.full_name == github.repository }}"
-            ),
+            ).unwrap(),
             "same=true"
         );
         assert_eq!(
-            state.resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}"),
+            state
+                .resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}")
+                .unwrap(),
             "token=docker_secret"
         );
         assert_eq!(
-            state.resolve_expressions("missing=${{ github.event.issue.number }}"),
+            state
+                .resolve_expressions("missing=${{ github.event.issue.number }}")
+                .unwrap(),
             "missing="
         );
         assert_eq!(
-            state.resolve_expressions("missing-input=${{ inputs.publish }}"),
+            state
+                .resolve_expressions("missing-input=${{ inputs.publish }}")
+                .unwrap(),
             "missing-input="
         );
-        assert!(state.evaluate_condition(Some("matrix.zigbuild")));
-        assert!(state.evaluate_condition(Some("matrix.target")));
-        assert!(!state.evaluate_condition(Some("inputs.publish")));
-        assert!(!state.evaluate_condition(Some("secrets.MISSING_TOKEN")));
-        assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
-        assert!(state.evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'")));
+        assert!(state.evaluate_condition(Some("matrix.zigbuild")).unwrap());
+        assert!(state.evaluate_condition(Some("matrix.target")).unwrap());
+        assert!(!state.evaluate_condition(Some("inputs.publish")).unwrap());
+        assert!(!state
+            .evaluate_condition(Some("secrets.MISSING_TOKEN"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(matrix.target, 'apple')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'"))
+            .unwrap());
         assert!(state.evaluate_condition(Some(
             "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))"
-        )));
-        assert!(
-            state.evaluate_condition(Some("contains(inputs.packages, 'BITCOIN-PROCESSOR-APP')"))
-        );
-        assert!(state.evaluate_condition(Some("needs.changes.outputs.bake-targets != ''")));
-        assert!(
-            !state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
-        );
-        assert!(
-            state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
-        );
+        )).unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(inputs.packages, 'BITCOIN-PROCESSOR-APP')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("needs.changes.outputs.bake-targets != ''"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
+            .unwrap());
 
         let false_state = JobExecutionState::new_with_context(
             &[],
@@ -19635,7 +20354,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 }),
             )],
         );
-        assert!(!false_state.evaluate_condition(Some("matrix.zigbuild")));
+        assert!(!false_state
+            .evaluate_condition(Some("matrix.zigbuild"))
+            .unwrap());
     }
 
     #[test]
@@ -19664,15 +20385,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )],
         );
 
-        assert!(state.evaluate_condition(Some(
-            "github.event_name == 'workflow_run' && \
+        assert!(state
+            .evaluate_condition(Some(
+                "github.event_name == 'workflow_run' && \
              github.event.workflow_run.conclusion == 'success' && \
              github.event.workflow_run.event == 'push' && \
              github.event.workflow_run.head_repository.full_name == github.repository && \
              github.event.workflow_run.head_branch == 'main'"
-        )));
+            ))
+            .unwrap());
         assert_eq!(
-            state.resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}"),
+            state
+                .resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}")
+                .unwrap(),
             "sha=def456"
         );
     }
@@ -19730,7 +20455,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 collect_yaml_strings(&yaml, &mut strings);
                 for value in strings {
                     if value.contains("${{") {
-                        let rendered = state.resolve_expressions(value);
+                        let rendered = state.resolve_expressions(value).unwrap();
                         assert!(
                             !rendered.contains("${{"),
                             "{} left unresolved expression in {value:?}: {rendered:?}",
@@ -19742,7 +20467,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 let mut conditions = Vec::new();
                 collect_yaml_key_strings(&yaml, "if", &mut conditions);
                 for condition in conditions {
-                    state.evaluate_condition(Some(condition));
+                    state.evaluate_condition(Some(condition)).unwrap();
                 }
             }
         }
@@ -19793,7 +20518,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 collect_yaml_strings(&yaml, &mut strings);
                 for value in strings {
                     if value.contains("${{") {
-                        let rendered = state.resolve_expressions(value);
+                        let rendered = state.resolve_expressions(value).unwrap();
                         assert!(
                             !rendered.contains("${{"),
                             "{} left unresolved expression in {value:?}: {rendered:?}",
@@ -19805,7 +20530,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 let mut conditions = Vec::new();
                 collect_yaml_key_strings(&yaml, "if", &mut conditions);
                 for condition in conditions {
-                    state.evaluate_condition(Some(condition));
+                    state.evaluate_condition(Some(condition)).unwrap();
                 }
             }
         }
@@ -19829,7 +20554,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -19901,7 +20626,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -19938,7 +20663,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
         );
 
-        let resolved = state.resolve_env(&[("GENERATED".into(), "${{ env.OUTER }}".into())]);
+        let resolved = state
+            .resolve_env(&[("GENERATED".into(), "${{ env.OUTER }}".into())])
+            .unwrap();
 
         assert_eq!(
             resolved,
@@ -19970,7 +20697,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 }
             }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
@@ -20013,7 +20740,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20125,7 +20852,7 @@ fi"#
                 }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20153,7 +20880,7 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].contains(&"INPUT_USERNAME=docker_user".into()));
-        assert!(!node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
         assert!(node_calls[0].contains(&"--env-file".into()));
         let build_exec = executor
             .runner()
@@ -20161,7 +20888,7 @@ fi"#
             .iter()
             .find(|(_, args)| args.iter().any(|arg| arg == "/__t/build-docker-image.sh"))
             .expect("build script should execute");
-        assert!(!build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
         assert!(build_exec.1.contains(&"--env-file".into()));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -20186,7 +20913,7 @@ fi"#
             "fallback": "${{ steps.missing.outputs.value || 'default' }}",
             "empty": "${{ steps.missing.outputs.value }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20228,7 +20955,7 @@ fi"#
             "type": "String",
             "value": "${{ steps.deployment.outputs.page_url }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20283,7 +21010,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20357,7 +21084,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20430,7 +21157,7 @@ fi"#
                 }
             ]
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20473,7 +21200,7 @@ fi"#
             "bitcoin-processor": "${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor }}",
             "bake-targets": "${{ steps.targets.outputs.list }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20513,7 +21240,7 @@ fi"#
         let job_outputs = serde_json::json!({
             "docs": "${{ steps.dispatch.outputs.docs || steps.filter.outputs.docs }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20557,7 +21284,7 @@ fi"#
             "x86_linux": "${{ steps.shas.outputs.x86_linux }}",
             "x86_macos": "${{ steps.shas.outputs.x86_macos }}"
         });
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20622,7 +21349,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -20700,7 +21427,7 @@ fi"#
                 step_id: "composite".into(),
             },
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -20776,7 +21503,7 @@ fi"#
             }),
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -20830,7 +21557,7 @@ fi"#
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerJobEngine::new(StdoutCommandRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::inert(StdoutCommandRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -20865,7 +21592,7 @@ fi"#
         })];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor =
-            DockerJobEngine::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
+            DockerJobEngine::inert(StreamingMaskRunner::default()).with_step_log_sender(sender);
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -20913,7 +21640,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(SilentCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(SilentCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -20977,7 +21704,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StdoutCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(StdoutCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -20993,7 +21720,6 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
         assert_eq!(results[0].state.error_count, 1);
         assert_eq!(results[0].state.warning_count, 0);
         assert_eq!(results[0].state.notice_count, 0);
@@ -21005,7 +21731,7 @@ fi"#
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21038,7 +21764,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StderrCommandRunner::default());
+        let mut executor = DockerJobEngine::inert(StderrCommandRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_job_outputs(
@@ -21054,13 +21780,12 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
         assert_eq!(results[0].state.warning_count, 1);
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
         assert_eq!(summary.step_logs[0].warning_count, 1);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -21148,7 +21873,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -21244,9 +21969,9 @@ fi"#
         let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
 
         let expression = "hash=${{ hashFiles('Cargo.toml') }}";
-        let first = state.resolve_expressions(expression);
+        let first = state.resolve_expressions(expression).unwrap();
         fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
-        let second = state.resolve_expressions(expression);
+        let second = state.resolve_expressions(expression).unwrap();
 
         assert_eq!(first, "hash=");
         assert_ne!(second, "hash=");
@@ -21281,7 +22006,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -21355,7 +22080,7 @@ fi"#
                 "test-bitcoin-processor": { "result": "cancelled" }
             }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -21433,7 +22158,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -21507,7 +22232,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+        let mut executor = DockerJobEngine::inert(ErroringExecRunner {
             calls: Vec::new(),
             fail_execs: 1,
         });
@@ -21562,7 +22287,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let mut executor = DockerJobEngine::new(ErroringExecRunner {
+        let mut executor = DockerJobEngine::inert(ErroringExecRunner {
             calls: Vec::new(),
             fail_execs: 1,
         });
@@ -21614,7 +22339,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(StreamingErrorExecRunner {
+        let mut executor = DockerJobEngine::inert(StreamingErrorExecRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -21666,7 +22391,7 @@ fi"#
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+        let mut executor = DockerJobEngine::inert(MainActionErrorRunner {
             calls: Vec::new(),
             failure_marker: "/__a/_actions/acme_action/v1/main.js".into(),
         });
@@ -21727,7 +22452,7 @@ fi"#
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(MainActionErrorRunner {
+        let mut executor = DockerJobEngine::inert(MainActionErrorRunner {
             calls: Vec::new(),
             failure_marker: "sccache --start-server".into(),
         });
@@ -21788,7 +22513,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(FailingCheckoutRunner::default());
+        let mut executor = DockerJobEngine::inert(FailingCheckoutRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -21853,7 +22578,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let summary = executor
             .execute_ordered_steps_with_completion(
@@ -21921,7 +22646,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -21971,24 +22696,47 @@ fi"#
             },
         );
 
-        assert!(state.evaluate_condition(Some("steps.sccache.outcome == 'success'")));
-        assert!(state.evaluate_condition(Some("steps.sccache.conclusion == 'success'")));
-        assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
-        assert!(state.evaluate_condition(Some("steps.disabled.conclusion == 'skipped'")));
-        assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
-        assert!(state.evaluate_condition(Some("runner.os == 'linux'")));
-        assert!(state.evaluate_condition(Some("runner.os != 'windows'")));
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
+        assert!(state
+            .evaluate_condition(Some("steps.sccache.outcome == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.sccache.conclusion == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.disabled.outcome != 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.disabled.conclusion == 'skipped'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os == 'Linux'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os == 'linux'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("runner.os != 'windows'"))
+            .unwrap());
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
             "success"
         );
-        assert!(state.evaluate_condition(Some("job.status == 'success'")));
-        assert!(state.evaluate_condition(Some("github.action_status == 'success'")));
-        assert!(state.evaluate_condition(Some("success()")));
-        assert!(!state.evaluate_condition(Some("failure()")));
-        assert!(!state.evaluate_condition(Some("cancelled()")));
-        assert!(state.evaluate_condition(Some("!cancelled()")));
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
+            "success"
+        );
+        assert!(state
+            .evaluate_condition(Some("job.status == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.action_status == 'success'"))
+            .unwrap());
+        assert!(state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("!cancelled()")).unwrap());
 
         state.apply(
             "failed",
@@ -22002,17 +22750,30 @@ fi"#
             },
         );
 
-        assert!(!state.evaluate_condition(Some("success()")));
-        assert!(state.evaluate_condition(Some("failure()")));
-        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
-        assert!(state.evaluate_condition(Some("always() && failure()")));
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
+        assert!(!state.evaluate_condition(Some("success()")).unwrap());
+        assert!(state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("failure() && !cancelled()"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("always() && failure()"))
+            .unwrap());
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
             "failure"
         );
-        assert!(state.evaluate_condition(Some("always() && job.status == 'failure'")));
-        assert!(state.evaluate_condition(Some("always() && github.action_status == 'failure'")));
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
+            "failure"
+        );
+        assert!(state
+            .evaluate_condition(Some("always() && job.status == 'failure'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("always() && github.action_status == 'failure'"))
+            .unwrap());
 
         let mut ignored_state = JobExecutionState::default();
         ignored_state.apply(
@@ -22027,14 +22788,267 @@ fi"#
             },
         );
 
-        assert!(ignored_state.evaluate_condition(Some("steps.ignored.outcome == 'failure'")));
-        assert!(ignored_state.evaluate_condition(Some("steps.ignored.conclusion == 'success'")));
-        assert!(ignored_state.evaluate_condition(Some("success()")));
-        assert!(!ignored_state.evaluate_condition(Some("failure()")));
+        assert!(ignored_state
+            .evaluate_condition(Some("steps.ignored.outcome == 'failure'"))
+            .unwrap());
+        assert!(ignored_state
+            .evaluate_condition(Some("steps.ignored.conclusion == 'success'"))
+            .unwrap());
+        assert!(ignored_state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!ignored_state.evaluate_condition(Some("failure()")).unwrap());
         assert_eq!(
-            ignored_state.resolve_expressions("${{ job.status }}"),
+            ignored_state
+                .resolve_expressions("${{ job.status }}")
+                .unwrap(),
             "success"
         );
+    }
+
+    /// A cancelled job's status is `cancelled`, so `success()` and `failure()`
+    /// are both false while `always()` and `cancelled()` are true
+    /// (`src/Runner.Worker/StepsRunner.cs:146-187`,
+    /// `src/Runner.Worker/Expressions/CancelledFunction.cs:20-29`).
+    #[test]
+    fn cancellation_makes_the_status_functions_truthful() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+
+        assert!(state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert_eq!(
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "success"
+        );
+
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        assert!(!state.evaluate_condition(Some("success()")).unwrap());
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        assert_eq!(
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "cancelled"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
+            "cancelled"
+        );
+        // Surprising, and upstream-correct: an explicit condition that names no
+        // status function is compiled as `success() && <CONDITION>`
+        // (`src/Sdk/DTPipelines/Pipelines/ObjectTemplating/PipelineTemplateConverter.cs:657-658`
+        // — "When empty, default to success(). When a status function is not
+        // referenced, format as success() && <CONDITION>"). So on a cancelled
+        // job this reads the true `job.status` and is still skipped, because
+        // the implied `success()` is false. Writing `cancelled() &&
+        // job.status == 'cancelled'` is what runs.
+        assert!(!state
+            .evaluate_condition(Some("job.status == 'cancelled'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("cancelled() && job.status == 'cancelled'"))
+            .unwrap());
+    }
+
+    /// A cancelled job does not run its ordinary remaining steps — their
+    /// implicit condition is `success()` — but does run `always()` and
+    /// `cancelled()` steps.
+    #[test]
+    fn a_cancelled_job_skips_ordinary_steps_and_runs_cancelled_ones() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        // No `if:` at all: the default condition is `success()`.
+        assert!(!state.evaluate_condition(None).unwrap());
+        // An `if:` that names no status function is implicitly
+        // `success() && (...)`, so it is skipped too, however true it is.
+        assert!(!state.evaluate_condition(Some("true")).unwrap());
+        assert!(!state
+            .evaluate_condition(Some("runner.os == 'Linux'"))
+            .unwrap());
+        // Cleanup that asked to run on cancellation still runs.
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+        // `failure()` cleanup does not: the status is cancelled, not failure.
+        assert!(!state.evaluate_condition(Some("failure()")).unwrap());
+    }
+
+    /// Job `timeout-minutes` is an ordinary cancellation, so it reaches the
+    /// same status functions through the same token.
+    #[test]
+    fn a_timed_out_job_reads_as_cancelled() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::JobTimeout);
+        assert!(state.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(!state.evaluate_condition(None).unwrap());
+    }
+
+    /// Post steps run under a fresh unlinked token, so a cancelled job still
+    /// runs its cleanup (`src/Runner.Worker/ExecutionContext.cs:436`,
+    /// `:1384-1395`), while the job's own status stays `cancelled`.
+    #[test]
+    fn post_step_token_is_unlinked_from_the_cancelled_job() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let post = token.unlinked();
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        assert!(token.is_cancelled());
+        assert!(!post.is_cancelled());
+
+        let mut state = JobExecutionState::default();
+        state.set_cancellation(token);
+        // The condition is evaluated against the job's real status, which is
+        // what selects an `always()` post step on a cancelled job.
+        assert!(state.evaluate_condition(Some("always()")).unwrap());
+    }
+
+    /// D-3: string truthiness was inverted. GitHub runs a step whose
+    /// condition is `steps.x.outputs.count` when the output is "0", because
+    /// only the empty string is falsy
+    /// (src/Sdk/DTExpressions2/Expressions2/EvaluationResult.cs:64-66).
+    #[test]
+    fn condition_string_truthiness_matches_github() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "counter",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState {
+                    outputs: BTreeMap::from([
+                        ("count".to_string(), "0".to_string()),
+                        ("flag".to_string(), "false".to_string()),
+                        ("blank".to_string(), String::new()),
+                    ]),
+                    ..StepCommandState::default()
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        // GitHub: runs.
+        assert!(state
+            .evaluate_condition(Some("steps.counter.outputs.count"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("steps.counter.outputs.flag"))
+            .unwrap());
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("steps.counter.outputs.blank"))
+            .unwrap());
+    }
+
+    /// D-4: an unresolvable expression used to evaluate to its own source
+    /// text. GitHub coerces it to null, and null equals the empty string
+    /// (EvaluationResult.cs:385-396).
+    #[test]
+    fn condition_missing_values_coerce_to_null() {
+        let state =
+            JobExecutionState::new_with_context(&[("SET".to_string(), "value".to_string())], &[]);
+
+        // GitHub: true.
+        assert!(state.evaluate_condition(Some("env.UNSET == ''")).unwrap());
+        assert!(state.evaluate_condition(Some("env.UNSET == null")).unwrap());
+        assert!(!state.evaluate_condition(Some("env.UNSET")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("env.SET == 'value'"))
+            .unwrap());
+        // The source text must never leak into the rendered value.
+        assert_eq!(
+            state.resolve_expressions("[${{ env.UNSET }}]").unwrap(),
+            "[]"
+        );
+    }
+
+    /// D-5: the relational operators did not exist, so this condition ran on
+    /// run 1. GitHub skips it (Sdk/Operators/GreaterThan.cs:34-42).
+    #[test]
+    fn condition_relational_operators_match_github() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_RUN_NUMBER".to_string(), "1".to_string())],
+            &[],
+        );
+
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("github.run_number > 5"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.run_number < 5"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("github.run_number >= 1"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("github.run_number >= 2"))
+            .unwrap());
+    }
+
+    /// D-6: startsWith and friends were absent, so a release step guarded by
+    /// `startsWith(github.ref, 'refs/tags/')` ran on a branch push. GitHub
+    /// skips it (ExpressionConstants.cs:10-20).
+    #[test]
+    fn condition_function_set_matches_github() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_REF".to_string(), "refs/heads/main".to_string())],
+            &[],
+        );
+
+        // GitHub: skips.
+        assert!(!state
+            .evaluate_condition(Some("startsWith(github.ref, 'refs/tags/')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("startsWith(github.ref, 'refs/heads/')"))
+            .unwrap());
+        assert!(!state
+            .evaluate_condition(Some("endsWith(github.ref, '/v1')"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("contains(fromJson('[\"main\"]'), 'main')"))
+            .unwrap());
+        assert_eq!(
+            state
+                .resolve_expressions("${{ join(fromJson('[\"a\",\"b\"]'), '+') }}")
+                .unwrap(),
+            "a+b"
+        );
+    }
+
+    /// D-7: a condition that cannot be evaluated was fail-open and ran the
+    /// step. Upstream fails the step (src/Runner.Worker/StepsRunner.cs:231-242),
+    /// which requires a typed error out of the evaluator.
+    #[test]
+    fn condition_evaluation_failure_is_reported() {
+        let state = JobExecutionState::default();
+
+        for condition in [
+            "unknownContext.value",
+            "noSuchFunction('a')",
+            "contains('a')",
+            "github.ref ==",
+        ] {
+            assert!(
+                state.evaluate_condition(Some(condition)).is_err(),
+                "{condition} must fail the step rather than run it"
+            );
+        }
+        // A failed condition is not "provably false" either: the planner must
+        // not prune the step on it.
+        assert!(!condition_is_statically_false(
+            Some("noSuchFunction('a')"),
+            &[],
+            &[]
+        ));
     }
 
     #[test]
@@ -22052,13 +23066,17 @@ fi"#
             },
         );
 
-        assert!(
-            !state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
-        );
-        assert!(state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'")));
-        assert!(state.evaluate_condition(Some("!cancelled()")));
-        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
-        assert!(!state.evaluate_condition(Some("!failure()")));
+        assert!(!state
+            .evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
+            .unwrap());
+        assert!(state
+            .evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'"))
+            .unwrap());
+        assert!(state.evaluate_condition(Some("!cancelled()")).unwrap());
+        assert!(state
+            .evaluate_condition(Some("failure() && !cancelled()"))
+            .unwrap());
+        assert!(!state.evaluate_condition(Some("!failure()")).unwrap());
     }
 
     #[test]
@@ -22077,9 +23095,14 @@ fi"#
         );
         state.push_composite("composite");
 
-        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state.resolve_expressions("${{ job.status }}").unwrap(),
+            "failure"
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "success"
         );
 
@@ -22096,12 +23119,16 @@ fi"#
         );
 
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "failure"
         );
         state.pop_composite("composite");
         assert_eq!(
-            state.resolve_expressions("${{ github.action_status }}"),
+            state
+                .resolve_expressions("${{ github.action_status }}")
+                .unwrap(),
             "failure"
         );
     }
@@ -22131,7 +23158,7 @@ fi"#
                 ),
             ],
         };
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let result = executor
             .execute_javascript_action(&container(&temp), "action1", &action, &temp)
@@ -22191,7 +23218,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22271,7 +23298,7 @@ fi"#
                 serde_json::json!({ "DOCKER_TOKEN": "secret-token" }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -22320,7 +23347,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22403,7 +23430,7 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(
@@ -22566,7 +23593,7 @@ fi"#
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -22681,7 +23708,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -22689,7 +23716,7 @@ fi"#
                 &upload_temp,
             )
             .unwrap();
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -22747,7 +23774,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            DockerJobEngine::new(RecordingRunner::default())
+            DockerJobEngine::inert(RecordingRunner::default())
                 .execute_ordered_steps(
                     &container(&upload_temp),
                     &upload,
@@ -22772,7 +23799,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -22888,7 +23915,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -22916,7 +23943,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -22973,7 +24000,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&upload_temp),
                 &upload,
@@ -23001,7 +24028,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        DockerJobEngine::new(RecordingRunner::default())
+        DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&download_temp),
                 &download,
@@ -23336,7 +24363,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .with_tool_prep_telemetry(Arc::clone(&sink), admission)
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
@@ -23465,7 +24492,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
@@ -23517,10 +24544,10 @@ fi"#
             }]
         };
 
-        let default_results = DockerJobEngine::new(RecordingRunner::default())
+        let default_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload(None, "default"), &[], &temp)
             .unwrap();
-        let explicit_results = DockerJobEngine::new(RecordingRunner::default())
+        let explicit_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload(Some("true"), "explicit"),
@@ -23739,7 +24766,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -23953,10 +24980,10 @@ fi"#
             }]
         };
 
-        let first_results = DockerJobEngine::new(RecordingRunner::default())
+        let first_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
             .unwrap();
-        let duplicate_results = DockerJobEngine::new(RecordingRunner::default())
+        let duplicate_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
             .unwrap();
 
@@ -23968,7 +24995,7 @@ fi"#
                 .unwrap(),
             "second\n"
         );
-        let overwrite_results = DockerJobEngine::new(RecordingRunner::default())
+        let overwrite_results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(
                 &container(&temp),
                 &upload("second.txt", Some("true")),
@@ -24021,7 +25048,7 @@ fi"#
             timeout_minutes: None,
         }];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
@@ -24069,7 +25096,7 @@ fi"#
             ),
         ];
 
-        let results = DockerJobEngine::new(RecordingRunner::default())
+        let results = DockerJobEngine::inert(RecordingRunner::default())
             .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
             .unwrap();
 
@@ -24169,7 +25196,7 @@ fi"#
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -24198,7 +25225,7 @@ fi"#
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(!node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
         assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"INPUT_BASE=main".into()));
         assert!(node_call
@@ -24324,7 +25351,7 @@ fi"#
                 "id-token-request-token".into(),
             ),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -24473,7 +25500,7 @@ fi"#
         spec.mount_docker_socket = true;
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(
@@ -24516,7 +25543,7 @@ fi"#
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
             ));
-            assert!(!call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"GITHUB_TOKEN=ghs_token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
@@ -24552,7 +25579,7 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -24618,7 +25645,7 @@ fi"#
                 continue_on_error: false,
                 timeout_minutes: None,
             }];
-            let mut executor = DockerJobEngine::new(RecordingRunner::default());
+            let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
             executor
                 .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -24835,7 +25862,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
                 }),
             ),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -24955,7 +25982,7 @@ bitcoin-processor-app.push=true")
             "secrets".into(),
             serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" }),
         )];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps_with_context(
@@ -24990,8 +26017,8 @@ bitcoin-processor-app.push=true")
             "guest Docker must use the job lease socket, got {node_call:?}"
         );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
-        assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
-        assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
         assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
         assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
@@ -25046,7 +26073,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25142,7 +26169,7 @@ bitcoin-processor-app.push=true")
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25170,11 +26197,11 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
-        assert!(!node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
         assert!(node_calls[0].contains(&"--env-file".into()));
         assert!(node_calls[0].contains(&"GITHUB_PATH=/github/file_commands/mise_path".into()));
         assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
-        assert!(!node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
         assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
@@ -25280,7 +26307,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
             ("RUNNER_OS".into(), "Linux".into()),
         ];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25316,7 +26343,7 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"INPUT_CRATE=cargo-binstall".into()));
         assert!(node_calls[1].contains(&"INPUT_VERSION=latest".into()));
         assert!(node_calls[1].contains(&"INPUT_LOCKED=true".into()));
-        assert!(!node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
         assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
@@ -25366,7 +26393,7 @@ bitcoin-processor-app.push=true")
             },
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
@@ -25446,7 +26473,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(OutputWritingRunner {
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25500,7 +26527,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(PhaseStateRunner {
+        let mut executor = DockerJobEngine::inert(PhaseStateRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25546,7 +26573,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -25616,7 +26643,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(RecordingRunner {
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
@@ -25664,7 +26691,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: true,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &[], &temp)
@@ -25724,7 +26751,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(FailingPostRunner { calls: Vec::new() });
+        let mut executor = DockerJobEngine::inert(FailingPostRunner { calls: Vec::new() });
 
         let results = executor
             .execute_ordered_steps(
@@ -25757,7 +26784,7 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         for call in &node_calls {
-            assert!(!call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"INPUT_TOKEN=ghs_token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"INPUT_DISABLE_ANNOTATIONS=false".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
@@ -25820,7 +26847,7 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             }),
         ];
-        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::inert(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25916,7 +26943,7 @@ bitcoin-processor-app.push=true")
             ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
         ];
-        let mut executor = DockerJobEngine::new(EnvAndFailureRunner {
+        let mut executor = DockerJobEngine::inert(EnvAndFailureRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         });
@@ -25943,7 +26970,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(!call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
             assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
             assert!(call.contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
@@ -26584,7 +27611,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -26629,7 +27656,7 @@ bitcoin-processor-app.push=true")
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::new(RecordingRunner::default());
+        let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -26687,7 +27714,7 @@ bitcoin-processor-app.push=true")
     #[test]
     fn setup_qemu_uses_pinned_image() {
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("trusted");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("trusted");
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "image".to_string(),
@@ -26723,7 +27750,7 @@ bitcoin-processor-app.push=true")
     #[test]
     fn setup_qemu_rejects_untrusted_scope_before_host_docker() {
         let mut executor =
-            DockerJobEngine::new(RecordingRunner::default()).with_trust_scope("public-forks");
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
         let error = executor
             .native_setup_qemu(
                 &NativeActionInvocation {

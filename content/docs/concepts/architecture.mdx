@@ -132,6 +132,8 @@ The important ordering is:
 | Cancellation delivery | Velnor | Active-session broker polling. The runner matches the cancellation to its job. |
 | Step status and logs | Velnor | Authenticated uploads to Results Service and timeline/feed services; progress publishing is best effort and bounded. |
 | Completion | Velnor | Authenticated Run Service request/response carrying terminal result, outputs, and metadata. |
+| Workflow generation | `velnor-workflow` | Static repository scan, owned workflow/config rendering, affected-unit planning, policy, and release checks. It does not schedule GitHub work. |
+| Workflow monitoring | `velnor-tools` | Read-only correlation of GitHub run state with Velnor control-plane evidence. GitHub owns the terminal result. |
 | Operator inspection | Operator | Local Unix-socket control API, local health files, metrics files, and bounded local logs, normally through `velnorctl`. |
 
 GitHub initiates scheduling and sends work requests. Velnor initiates every
@@ -142,9 +144,11 @@ daemon in the normal runner flow.
 ## Admission, execution, and isolation
 
 Admission resolves local, remote, and composite action requirements before
-side effects. Unknown or unsupported action forms, invalid references,
-capability mismatches, trust-policy violations, and resource-bound failures
-are rejected closed.
+side effects against a closed allowlist of action identities. An action that is
+not on the allowlist, an unpinned or invalid reference, an input outside an
+action's declared rules, a capability mismatch, a trust-policy violation, or a
+resource-bound failure is rejected closed. See
+[what Velnor does not support](/guides/execution#what-velnor-does-not-support).
 
 Docker uses the host Docker socket within the configured host and cgroup
 boundary. Firecracker uses KVM, verified artifacts, a jailer, isolated
@@ -170,16 +174,25 @@ continue long enough to finish and report when possible. Stop escalation is
 bounded by service policy; active work is eventually terminated if the drain
 deadline expires.
 
-Cancellation is checked separately for active jobs. Velnor cancels execution,
-collects what it can, publishes the terminal state, and completes the GitHub
-job. Malformed cancellation input is treated conservatively as cancellation.
+Cancellation is checked separately for active jobs. One cancellation token per
+job carries two levels, `Requested` and `Forced`; each thing that can be
+terminated registers the level at which it may die, and is walked down a
+`SIGINT → SIGTERM → SIGKILL` ladder. Cancellation signals; removal is
+teardown's job. Malformed cancellation input is treated conservatively as
+cancellation. See [Cancellation](/guides/execution#cancellation).
 
 Completion has a stronger durability contract than ordinary progress. Velnor
-writes the exact job/generation completion payload to a local outbox before
-transport. It removes that entry only after GitHub's terminal acknowledgement.
-After a crash, recovery can replay the same payload rather than inventing a
-second completion. Orphaned, malformed, symlinked, oversized, or ambiguous
-outbox entries fail closed and are preserved or quarantined for diagnosis.
+records the terminal conclusion, writes the exact job/generation payload to a
+local outbox file, journals the intent and its digest, takes one durable send
+claim, and only then transports it. After a crash, recovery replays the same
+payload under the same claim rather than inventing a second completion.
+
+The outbox is bounded rather than infinite. An entry ends in one of three ways:
+GitHub acknowledges it; the run service reports the job already terminal; or
+its budget — a permanent refusal, eight attempts, or six hours — is spent, in
+which case the entry is abandoned, GitHub is never told, and the reason is
+preserved in the journal. Orphaned, malformed, symlinked, oversized, or
+ambiguous outbox entries fail closed and are quarantined for diagnosis.
 
 Progress logs and telemetry are bounded operational evidence, not an archival
 record. Local projections may be incomplete after service recreation; durable
@@ -188,16 +201,17 @@ events and completion intent are the stronger recovery evidence.
 ## Cancellation difference from the upstream runner
 
 Velnor follows the upstream GitHub Runner V2 shapes for broker sessions, job
-acquisition, lease renewal, and completion. Its active-job cancellation path is
-not fully equivalent to upstream behavior.
+acquisition, lease renewal, and completion. Cancellation is modelled on
+upstream's split — the current step's own work dies on the cancel token, while
+the job and service containers are stopped later so `always()` and
+`cancelled()` post steps still have a container to run in.
 
-The upstream runner dispatches cancellation to the worker, allows graceful
-handling, and escalates after a cancellation timeout. Velnor's Docker path
-currently performs host-side container termination from its active cancellation
-path. Firecracker cancellation is narrower and is not end-to-end equivalent to
-the upstream worker-dispatch model. Operators must therefore treat a
-cancellation as a Velnor termination/recovery event, not assume identical
-step-level cancellation semantics.
+It is not yet fully equivalent. Only host process groups register as
+termination targets on the live path, so containers are terminated by name
+rather than through the ladder's escalation levels, and Firecracker
+cancellation is not wired end to end. Treat a cancellation as a Velnor
+termination and recovery event rather than assuming identical step-level
+cancellation semantics.
 
 ## Operator mental model
 

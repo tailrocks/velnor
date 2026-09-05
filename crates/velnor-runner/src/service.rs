@@ -11,7 +11,7 @@
 //! proves the packaged files never reference a verb dropped from either
 //! binary. Plan 079 records the long-term home of each verb.
 
-use std::path::PathBuf;
+use std::{num::NonZeroU32, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -190,9 +190,11 @@ pub struct DaemonArgs {
     #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
     pub job_memory: String,
 
-    /// Trust boundary for this daemon/pool. "trusted" keeps full capabilities; any other value disables shared Docker socket access and rejects user secrets.
-    #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
-    pub trust_scope: String,
+    /// Pool trust boundary. Declared once in [`crate::trust_scope`] and
+    /// flattened here so this binary and `velnorctl` cannot disagree about a
+    /// security gate.
+    #[command(flatten)]
+    pub trust: crate::trust_scope::TrustScopeArg,
 
     /// Filesystem bytes never available to new jobs.
     #[arg(
@@ -235,6 +237,8 @@ pub struct DaemonArgs {
 /// parsed service verb — kept for the library API and characterization tests.
 #[derive(Debug, Clone)]
 pub struct RunArgs {
+    /// Validated number of slots provisioned by the owning daemon.
+    pub slot_count: NonZeroU32,
     pub config_dir: Option<PathBuf>,
     pub pat: Option<String>,
     pub max_idle_slot_age_seconds: Option<u64>,
@@ -429,7 +433,10 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             docker_image: a.docker_image,
             job_cpus: a.job_cpus,
             job_memory: a.job_memory,
-            trust_scope: a.trust_scope,
+            // The one resolution point of the pool trust boundary. Everything
+            // downstream — the capability gates and every trust-scoped store
+            // path — reads the value published here.
+            trust_scope: a.trust.resolve().into_string(),
             emergency_reserve_bytes: a.emergency_reserve_bytes,
             job_peak_bytes: a.job_peak_bytes,
             node_action_image: a.node_action_image,
@@ -512,6 +519,7 @@ fwd_release!(
 impl From<RunArgs> for crate::args::RunArgs {
     fn from(a: RunArgs) -> Self {
         Self {
+            slot_count: a.slot_count,
             config_dir: a.config_dir,
             pat: a.pat,
             max_idle_slot_age_seconds: a.max_idle_slot_age_seconds,
@@ -524,7 +532,7 @@ impl From<RunArgs> for crate::args::RunArgs {
             docker_image: a.docker_image,
             job_cpus: a.job_cpus,
             job_memory: a.job_memory,
-            trust_scope: a.trust_scope,
+            trust_scope: crate::trust_scope::resolve(&a.trust_scope).into_string(),
             emergency_reserve_bytes: a.emergency_reserve_bytes,
             job_peak_bytes: a.job_peak_bytes,
             node_action_image: a.node_action_image,

@@ -12,7 +12,6 @@
 //! `retention_state` singleton for accounting.
 
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::path::Path;
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
@@ -1756,48 +1755,23 @@ fn passive_checkpoint(conn: &rusqlite::Connection) -> StoreResult<WalCheckpointS
 }
 
 /// Return available bytes on the filesystem containing `path` without
-/// invoking a shell or parsing human-formatted `df` output. The small FFI
-/// buffer intentionally contains more words than every supported Unix
-/// `statvfs` layout; only the POSIX prefix (block size and available blocks)
-/// is read. The call writes a plain C structure into an aligned buffer and
-/// does not retain any pointer after returning.
+/// invoking a shell or parsing human-formatted `df` output. `rustix` owns the
+/// platform-specific `statvfs` ABI, including macOS's layout, so this uses the
+/// unprivileged `f_bavail` field rather than guessing structure offsets.
 #[cfg(unix)]
 fn filesystem_free_bytes(path: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-
-    #[repr(C)]
-    struct StatvfsBuffer {
-        words: [usize; 32],
-    }
-
-    unsafe extern "C" {
-        fn statvfs(path: *const std::ffi::c_char, buffer: *mut StatvfsBuffer) -> i32;
-    }
-
     let probe = if path.exists() {
         path
     } else {
         path.parent().filter(|parent| parent.exists())?
     };
-    let path = CString::new(probe.as_os_str().as_bytes()).ok()?;
-    let mut buffer = StatvfsBuffer { words: [0; 32] };
-    // POSIX statvfs stores f_frsize at word 1. Linux keeps f_bavail at word
-    // 4; macOS uses 32-bit block counters packed into the preceding words.
-    // The oversized repr(C) buffer is aligned and large enough for the full
-    // platform structure, while avoiding shell utilities and platform-
-    // specific struct declarations.
-    let result = unsafe { statvfs(path.as_ptr(), &mut buffer) };
-    if result != 0 {
-        return None;
-    }
-    let block_size = buffer.words[1];
-    #[cfg(target_os = "macos")]
-    let available_blocks = buffer.words[3] & (u32::MAX as usize);
-    #[cfg(not(target_os = "macos"))]
-    let available_blocks = buffer.words[4];
-    block_size
-        .checked_mul(available_blocks)
-        .and_then(|bytes| u64::try_from(bytes).ok())
+    let stat = rustix::fs::statvfs(probe).ok()?;
+    free_bytes_from_stat(&stat)
+}
+
+#[cfg(unix)]
+fn free_bytes_from_stat(stat: &rustix::fs::StatVfs) -> Option<u64> {
+    stat.f_frsize.max(1).checked_mul(stat.f_bavail)
 }
 
 #[cfg(not(unix))]
@@ -2442,6 +2416,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.db");
         (dir, Store::open(&path).unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_free_bytes_matches_the_platform_statvfs_contract() {
+        let path = std::env::temp_dir();
+        let stat = rustix::fs::statvfs(&path).unwrap();
+        let expected = stat.f_frsize.max(1).checked_mul(stat.f_bavail);
+        assert_eq!(free_bytes_from_stat(&stat), expected);
+        assert!(filesystem_free_bytes(&path).is_some());
     }
 
     #[test]

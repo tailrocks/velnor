@@ -4,9 +4,9 @@ use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
 use crate::ports::{LogItem, LogPort, LogRequest, PortError};
-use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
+use velnor_model::redaction::SecretMasker;
 
 const MAX_BUFFER: usize = 16_384;
 const MAX_RECORD_BYTES: usize = 256 * 1024;
@@ -23,16 +23,37 @@ struct LogState {
 }
 
 /// One bounded log stream. Raw input is redacted before it enters state.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct LogService {
     state: Arc<RwLock<LogState>>,
+    supported: bool,
+}
+
+impl Default for LogService {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LogService {
     /// Create an empty log service.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_support(true)
+    }
+
+    /// Create the production placeholder until durable log storage is wired.
+    /// It fails closed rather than reporting an empty stream.
+    #[must_use]
+    pub(crate) fn unsupported() -> Self {
+        Self::with_support(false)
+    }
+
+    fn with_support(supported: bool) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(LogState::default())),
+            supported,
+        }
     }
 
     /// Append a line after replacing known secrets and path-like internals.
@@ -43,6 +64,9 @@ impl LogService {
         message: &str,
         secrets: &[&str],
     ) -> Result<String, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if !valid_identity(subject) || !valid_identity(source) {
             return Err(PortError::Invalid {
                 field: "subject/source".to_owned(),
@@ -107,6 +131,9 @@ impl LogService {
 
 impl LogPort for LogService {
     fn logs(&self, request: LogRequest) -> Result<Vec<LogItem>, PortError> {
+        if !self.supported {
+            return Err(unsupported());
+        }
         if !valid_identity(&request.subject)
             || request
                 .source
@@ -222,30 +249,13 @@ fn redact_message(message: &str, secrets: &[&str]) -> Result<String, PortError> 
 }
 
 fn replace_literal_secrets(message: &str, secrets: &[&str]) -> Result<String, PortError> {
-    let patterns: Vec<&str> = secrets
-        .iter()
-        .copied()
-        .filter(|secret| !secret.is_empty())
-        .collect();
-    if patterns.is_empty() {
+    // One masker for the whole system: same sentinel, same encoded-variant
+    // and multi-line rules as the runner and the durable store validator.
+    let masker = SecretMasker::new(secrets.iter().copied());
+    if masker.is_empty() {
         return Ok(message.to_owned());
     }
-    let matcher = AhoCorasickBuilder::new()
-        .match_kind(MatchKind::LeftmostLongest)
-        .build(&patterns)
-        .map_err(|_| PortError::Operation {
-            operation: "log secret matcher could not be built".to_owned(),
-        })?;
-    let mut output = String::with_capacity(message.len());
-    let mut cursor = 0;
-    for matched in matcher.find_iter(message) {
-        let start = matched.start();
-        let end = matched.end();
-        output.push_str(&message[cursor..start]);
-        output.push_str("[REDACTED]");
-        cursor = end;
-    }
-    output.push_str(&message[cursor..]);
+    let output = masker.mask(message);
     if output.len() > MAX_RECORD_BYTES {
         return Err(PortError::Invalid {
             field: "message".to_owned(),
@@ -342,6 +352,12 @@ fn cursor_fingerprint(subject: &str, source: &str) -> String {
 fn unavailable() -> PortError {
     PortError::Unavailable {
         resource: "log stream".to_owned(),
+    }
+}
+
+fn unsupported() -> PortError {
+    PortError::Unsupported {
+        operation: "read logs".to_owned(),
     }
 }
 

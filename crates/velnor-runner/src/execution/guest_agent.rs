@@ -1,7 +1,7 @@
 //! Guest-side vsock session. Production binds AF_VSOCK inside the microVM.
 
 use std::io::{Read, Write};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 use velnor_model::{
@@ -65,7 +65,7 @@ impl GuestSessionEnv {
             GUEST_DOCKER_RETRY_INTERVAL,
             probe_guest_docker,
             std::thread::sleep,
-        );
+        )?;
         if !docker_healthy {
             return Err(format!(
                 "guest Docker health probe did not become ready before the {} second deadline",
@@ -359,58 +359,62 @@ fn wait_for_guest_docker<F, S>(
     retry_interval: Duration,
     mut probe: F,
     mut sleep: S,
-) -> bool
+) -> Result<bool, String>
 where
-    F: FnMut(Duration) -> bool,
+    F: FnMut(Duration) -> Result<bool, String>,
     S: FnMut(Duration),
 {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return false;
+            return Ok(false);
         }
-        if probe(remaining) {
-            return true;
+        if probe(remaining)? {
+            return Ok(true);
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return false;
+            return Ok(false);
         }
         sleep(retry_interval.min(remaining));
     }
 }
 
-fn probe_guest_docker(timeout: Duration) -> bool {
+fn probe_guest_docker(timeout: Duration) -> Result<bool, String> {
     let mut command = Command::new("docker");
     command.args(["info", "--format", "{{.ServerVersion}}"]);
     run_command_with_deadline(&mut command, timeout)
 }
 
-fn run_command_with_deadline(command: &mut Command, timeout: Duration) -> bool {
-    let Ok(mut child) = command.spawn() else {
-        return false;
-    };
+fn run_command_with_deadline(command: &mut Command, timeout: Duration) -> Result<bool, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn guest Docker probe: {error}"))?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => return Ok(status.success()),
             Ok(None) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return false;
+                    kill_and_reap(&mut child);
+                    return Ok(false);
                 }
                 std::thread::sleep(Duration::from_millis(10).min(remaining));
             }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
+            Err(error) => {
+                let message = format!("wait for guest Docker probe: {error}");
+                kill_and_reap(&mut child);
+                return Err(message);
             }
         }
     }
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn new_session_challenge(previous: Option<&str>) -> String {
@@ -609,10 +613,11 @@ mod tests {
             |_| {
                 let attempt = attempts.get() + 1;
                 attempts.set(attempt);
-                attempt >= 3
+                Ok(attempt >= 3)
             },
             |_| {},
-        );
+        )
+        .unwrap();
         assert!(ready);
         assert_eq!(attempts.get(), 3);
     }
@@ -622,11 +627,15 @@ mod tests {
         let started = Instant::now();
         let mut command = Command::new("sh");
         command.args(["-c", "sleep 5"]);
-        assert!(!run_command_with_deadline(
-            &mut command,
-            Duration::from_millis(50)
-        ));
+        assert!(!run_command_with_deadline(&mut command, Duration::from_millis(50)).unwrap());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn guest_docker_probe_preserves_spawn_error() {
+        let mut command = Command::new("/velnor/path/that/does/not/exist");
+        let error = run_command_with_deadline(&mut command, Duration::from_millis(50)).unwrap_err();
+        assert!(error.contains("spawn guest Docker probe"), "{error}");
     }
 
     #[test]
@@ -745,7 +754,6 @@ mod tests {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            compiler_cache: velnor_model::guest_plan::GuestCompilerCacheDescriptor::off(),
             command_files: Vec::new(),
             outputs: Vec::new(),
             env: Vec::new(),
@@ -849,7 +857,6 @@ mod tests {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            compiler_cache: velnor_model::guest_plan::GuestCompilerCacheDescriptor::off(),
             command_files: Vec::new(),
             outputs: Vec::new(),
             env: Vec::new(),
@@ -1026,7 +1033,6 @@ mod tests {
             cancel_requested: false,
             fail: false,
             cache_digest: None,
-            compiler_cache: velnor_model::guest_plan::GuestCompilerCacheDescriptor::off(),
             command_files: Vec::new(),
             outputs: Vec::new(),
             env: Vec::new(),

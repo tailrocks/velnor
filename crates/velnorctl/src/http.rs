@@ -27,7 +27,7 @@ use velnor_model::{
 };
 
 use velnor_control::ports::{
-    LogPort, LogRequest, MutationKind, MutationPort, QueryPage, QueryPort, QueryRequest,
+    LogPort, LogRequest, MutationKind, MutationPort, PortError, QueryPage, QueryPort, QueryRequest,
     TelemetryPort, TelemetryRequest, WatchPort, WatchRequest,
 };
 
@@ -669,6 +669,10 @@ async fn info_admin() -> Json<InfoResponse> {
     Json(InfoResponse {
         api_version: "v1",
         schema_version: SCHEMA_VERSION,
+        // The durable ledger is not an actuator until a reconciler is wired
+        // into this daemon. Advertising write capability here would make the
+        // client claim that a lifecycle request can take effect when the
+        // handler correctly returns 501.
         mutations: false,
     })
 }
@@ -688,6 +692,11 @@ async fn query_resource(
     AxumPath(resource_kind): AxumPath<String>,
     query: Result<Query<QueryParams>, QueryRejection>,
 ) -> Result<Json<QueryPage>, ApiError> {
+    if resource_kind.eq_ignore_ascii_case("storage") {
+        return Err(ApiError::from(PortError::Unsupported {
+            operation: "storage catalog query".to_owned(),
+        }));
+    }
     let Query(params) = query.map_err(|_| {
         ApiError::bad_request("query", "query parameters are malformed or unsupported")
     })?;
@@ -1313,6 +1322,10 @@ mod tests {
         assert_eq!(response_status(&info), 200);
         assert!(String::from_utf8_lossy(&info).contains("\"mutations\":false"));
 
+        let storage = socket_request(&path, "GET", "/v1/storage", b"").await;
+        assert_eq!(response_status(&storage), 501);
+        assert!(String::from_utf8_lossy(&storage).contains("operation.unsupported"));
+
         let mutation = socket_request(
             &path,
             "POST",
@@ -1325,6 +1338,37 @@ mod tests {
         shutdown.send(true).expect("signal control shutdown");
         server.await.expect("join control server").expect("serve");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn production_control_socket_fails_closed_for_undurable_reads() {
+        let path = test_socket_path("production-control");
+        let database = path.with_extension("db");
+        let services = velnor_control::application::ApplicationServices::with_store(
+            Arc::new(velnor_control::store::Store::open(&database).expect("open store")),
+            "default",
+        )
+        .expect("compose production services");
+        let state = ApiState::from_services_for_instance(&services, "default");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind control socket");
+        let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_unix(listener, control_router(state), async move {
+            let _ = shutdown_rx.changed().await;
+        }));
+
+        let query = socket_request(&path, "GET", "/v1/jobs", b"").await;
+        assert_eq!(response_status(&query), 501);
+        assert!(String::from_utf8_lossy(&query).contains("operation.unsupported"));
+
+        let logs = socket_request(&path, "GET", "/v1/logs/job-1", b"").await;
+        assert_eq!(response_status(&logs), 501);
+        assert!(String::from_utf8_lossy(&logs).contains("operation.unsupported"));
+
+        shutdown.send(true).expect("signal control shutdown");
+        server.await.expect("join control server").expect("serve");
+        drop(services);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(database);
     }
 
     #[tokio::test]

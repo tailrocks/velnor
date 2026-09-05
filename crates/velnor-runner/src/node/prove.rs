@@ -413,9 +413,14 @@ impl GitHubProbe {
 }
 
 /// Trust scope the process is actually running with.
+///
+/// Reads the one boundary this process resolved at startup, falling back to the
+/// scope carried in the exec record when the probe runs in a process that never
+/// resolved one. It must never re-read `VELNOR_TRUST_SCOPE`: an independent
+/// ambient read is exactly the split brain this proof exists to detect.
 #[must_use]
 pub fn runtime_trust_scope(configured: &str) -> String {
-    std::env::var("VELNOR_TRUST_SCOPE").unwrap_or_else(|_| configured.to_owned())
+    crate::trust_scope::observed(configured)
 }
 
 /// Desired policy from a GitHub URL plus configured labels/trust.

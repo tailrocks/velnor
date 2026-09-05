@@ -38,8 +38,9 @@ copyright = "2026, Tailrocks"
 license-file = []
 extended-description = """
 Velnor is a self-hosted GitHub Actions runner daemon. This package installs the
-velnor-runner daemon binary, the velnorctl operator CLI, systemd units
-(velnor-daemon), and a config file at /etc/velnor/velnor.env. Set
+velnor-runner daemon binary, the velnorctl operator CLI, the velnor-workflow
+workflow generator/runtime, systemd units (velnor-daemon), and a config file at
+/etc/velnor/velnor.env. Set
 GITHUB_TOKEN + VELNOR_URL there, then start the service to register JIT runners
 and execute jobs through an explicit execution backend (docker or microvm)."""
 section = "devel"
@@ -59,6 +60,8 @@ assets = [
   ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
   # Maintainer-only fleet policy and verification tooling.
   ["target/release/velnor-tools", "usr/bin/velnor-tools", "755"],
+  # Workflow generation and CI execution binary used by Velnor nodes.
+  ["target/release/velnor-workflow", "usr/bin/velnor-workflow", "755"],
   ["target/release/velnor-guest-agent", "usr/bin/velnor-guest-agent", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
@@ -109,8 +112,6 @@ anyhow.workspace = true
 clap.workspace = true
 libc = "0.2"
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
-velnor-cache-service = { path = "../velnor-cache-service", version = "0.1.0" }
-velnor-action-model = { path = "../velnor-action-model", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 aho-corasick = "1.1.4"
 blake3.workspace = true

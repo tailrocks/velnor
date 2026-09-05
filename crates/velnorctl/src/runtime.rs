@@ -15,6 +15,10 @@ use velnor_runner::args as rt;
 
 pub use velnor_runner::scaffold::{dispatch, enforce_admission, init_telemetry, telemetry_dir};
 
+fn github_pat_from_environment() -> Option<String> {
+    std::env::var("GITHUB_TOKEN").ok()
+}
+
 /// Service daemon arguments. Runtime ownership moves to the lifecycle engine
 /// during Plan 079; this typed boundary keeps one parser and one conversion.
 #[derive(Debug, Clone, Args)]
@@ -26,7 +30,7 @@ pub struct DaemonArgs {
     pub config_dir: Option<PathBuf>,
     #[arg(long)]
     pub url: Option<String>,
-    #[arg(long, env = "GITHUB_TOKEN")]
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
@@ -64,17 +68,37 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
     #[arg(long, default_value = "velnor/job-ubuntu:26.04")]
     pub docker_image: String,
-    #[arg(long, default_value = "2")]
+    /// Docker `--cpus` limit appended to every job container. Empty leaves the
+    /// per-job cap to the derived host budget, which divides the machine
+    /// between the provisioned slots; a value here is an operator cap that
+    /// only ever narrows that share. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
     pub job_cpus: String,
-    #[arg(long, default_value = "4g")]
+    /// Docker `--memory` limit appended to every job container. Empty leaves
+    /// the job uncapped by the daemon; the derived budget still sizes the
+    /// compile scheduler. Must match `velnor_runner::service`.
+    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
     pub job_memory: String,
-    #[arg(long, default_value = "public")]
-    pub trust_scope: String,
-    #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024_u64)]
+    /// Pool trust boundary. Flattened from the single declaration in
+    /// `velnor_runner::trust_scope`, so this binary and `velnor-runner` cannot
+    /// disagree about a security gate.
+    #[command(flatten)]
+    pub trust: velnor_runner::trust_scope::TrustScopeArg,
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
     pub emergency_reserve_bytes: u64,
-    #[arg(long, default_value_t = 4 * 1024 * 1024 * 1024_u64)]
+    #[arg(
+        long,
+        env = "VELNOR_JOB_PEAK_BYTES",
+        default_value_t = 32_212_254_720u64
+    )]
     pub job_peak_bytes: u64,
-    #[arg(long, default_value = "velnor/node-actions:latest")]
+    /// Empty keeps each JavaScript action on its own declared Node runtime
+    /// image. Must match `velnor_runner::service`.
+    #[arg(long, default_value = "")]
     pub node_action_image: String,
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
@@ -95,6 +119,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     enforce_admission()?;
     crate::http::validate_socket_groups()?;
     let instance = args.name.as_deref().unwrap_or("default");
+    // `--name` is the GitHub runner/socket identity. Durable runner rows use
+    // the host identity, so the API must compose services with that same
+    // operational scope while retaining `instance` for socket authorization.
+    let operational_instance = velnor_runner::scaffold::operational_instance_slug();
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
@@ -114,8 +142,10 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let command = rt::Command::Daemon(Box::new(legacy_args));
     init_telemetry(telemetry_dir(&command).as_deref());
     let store = Arc::new(velnor_control::store::Store::open(state_path)?);
-    let services =
-        velnor_control::application::ApplicationServices::with_store(Arc::clone(&store), instance)?;
+    let services = velnor_control::application::ApplicationServices::with_store(
+        Arc::clone(&store),
+        &operational_instance,
+    )?;
     let api_state = crate::http::ApiState::from_services_for_instance(&services, instance);
     let control_listener = OwnedUnixListener::new(
         crate::http::bind_unix(
@@ -321,7 +351,7 @@ impl From<DaemonArgs> for velnor_runner::args::DaemonArgs {
             docker_image: args.docker_image,
             job_cpus: args.job_cpus,
             job_memory: args.job_memory,
-            trust_scope: args.trust_scope,
+            trust_scope: args.trust.resolve().into_string(),
             emergency_reserve_bytes: args.emergency_reserve_bytes,
             job_peak_bytes: args.job_peak_bytes,
             node_action_image: args.node_action_image,
@@ -475,8 +505,8 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub url: String,
 
-    /// GitHub personal access token used to create a JIT runner configuration.
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub personal access token read from `GITHUB_TOKEN`; never accepted as argv.
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 
     /// Runner display name.
@@ -598,8 +628,8 @@ pub struct DoctorArgs {
     #[arg(long, default_value_t = 1)]
     pub slots: usize,
 
-    /// GitHub token used to list runners (same credential as the daemon).
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub token read from `GITHUB_TOKEN` (same credential as the daemon).
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 }
 
@@ -665,11 +695,11 @@ impl From<PreflightArgs> for rt::PreflightArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// GitHub personal access token used to delete the exact stored JIT runner id.
-    #[arg(long, env = "GITHUB_TOKEN")]
+    /// GitHub token read from `GITHUB_TOKEN` to delete the exact stored JIT runner id.
+    #[arg(skip = github_pat_from_environment())]
     pub pat: Option<String>,
 
-    /// Only remove local configuration, even if --pat is provided.
+    /// Only remove local configuration; never contact GitHub.
     #[arg(long)]
     pub local_only: bool,
 
@@ -805,5 +835,36 @@ mod tests {
     fn explicit_state_db_path_is_carried_without_environment_mutation() {
         let explicit = Path::new("/tmp/velnor-test/state.db");
         assert_eq!(resolve_state_db_path(Some(explicit)), explicit);
+    }
+
+    #[test]
+    fn github_pat_is_not_accepted_as_a_cli_argument() {
+        use clap::Parser;
+
+        for argv in [
+            vec!["velnorctl", "daemon", "--pat", "secret"],
+            vec![
+                "velnorctl",
+                "configure",
+                "--url",
+                "https://github.com/acme",
+                "--pat",
+                "secret",
+            ],
+            vec![
+                "velnorctl",
+                "doctor",
+                "--url",
+                "https://github.com/acme",
+                "--pat",
+                "secret",
+            ],
+            vec!["velnorctl", "remove", "--pat", "secret"],
+        ] {
+            assert!(
+                crate::Cli::try_parse_from(argv).is_err(),
+                "raw GitHub PAT unexpectedly accepted in argv"
+            );
+        }
     }
 }

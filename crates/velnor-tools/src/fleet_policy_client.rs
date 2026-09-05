@@ -32,6 +32,7 @@ use std::{
     sync::OnceLock,
     time::Duration,
 };
+use velnor_model::redaction::{SecretMasker, REDACTION};
 
 const PER_PAGE: u32 = 100;
 const MAX_PAGES: u32 = 1000;
@@ -135,18 +136,22 @@ impl Secrets {
         }
     }
 
+    /// Scrub every registered credential and every token-shaped string.
+    ///
+    /// Registered values go through the one shared masker
+    /// (`velnor_model::redaction`), so this client uses the same sentinel and
+    /// the same encoded-variant and multi-line rules as the runner, the log
+    /// service and the durable store validator. The token-shape and bearer
+    /// patterns stay: they catch credentials this client was never told
+    /// about.
+    #[must_use]
     pub fn redact(&self, text: &str) -> String {
-        let mut out = text.to_owned();
-        for value in &self.values {
-            if !value.is_empty() {
-                out = out.replace(value.as_str(), "[redacted]");
-            }
-        }
+        let out = SecretMasker::new(self.values.iter()).mask(text);
         let out = token_shape_pattern()
-            .replace_all(&out, "[redacted]")
+            .replace_all(&out, REDACTION)
             .into_owned();
         bearer_pattern()
-            .replace_all(&out, "${1}[redacted]")
+            .replace_all(&out, format!("${{1}}{REDACTION}"))
             .into_owned()
     }
 }
@@ -1381,7 +1386,7 @@ mod tests {
 
         // Documented failure point + redacted embedded token.
         assert!(
-            err.contains("returned HTTP 500") && err.contains("[redacted]") && !err.contains(TOKEN),
+            err.contains("returned HTTP 500") && err.contains(REDACTION) && !err.contains(TOKEN),
             "{err}"
         );
 
@@ -1450,17 +1455,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!err.contains(TOKEN), "raw token surfaced: {err}");
-        assert!(
-            err.contains("[redacted]"),
-            "redaction marker present: {err}"
-        );
+        assert!(err.contains(REDACTION), "redaction marker present: {err}");
 
         // Bearer-form scrubbing works even for unregistered values.
         let secrets = Secrets::new("unused");
         let text =
             secrets.redact("Authorization: Bearer abcdef.012345 and ghx_unknownvalue1234567890");
         assert!(!text.contains("abcdef.012345"), "{text}");
-        assert!(text.contains("[redacted]"), "{text}");
+        assert!(text.contains(REDACTION), "{text}");
     }
 
     #[tokio::test]

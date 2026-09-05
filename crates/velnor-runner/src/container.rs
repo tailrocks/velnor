@@ -1,19 +1,19 @@
 #![allow(dead_code)]
 
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs, io,
+    num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
-use velnor_cache_service::{CompilerCacheBackend, CompilerCacheRuntime};
-use velnor_model::guest_plan::GuestCompilerCacheTrustClass;
+use crate::container::host_budget::{HostBudget, SlotBudget};
+use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+/// One derived resource budget for the machine, and the share of it that
+/// belongs to a single runner slot. Every job container is sized from it.
+pub(crate) mod host_budget;
 
-static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub use crate::docker_argv::PreparedDockerArgs;
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
@@ -23,6 +23,126 @@ fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
         || name.eq_ignore_ascii_case("DOCKER_CONFIG")
+}
+
+fn append_flags_without_limits(
+    command: &mut impl FlagSink,
+    options: &[String],
+    strip_cpu: bool,
+    strip_memory: bool,
+) {
+    let mut index = 0;
+    while index < options.len() {
+        let option = &options[index];
+        if strip_cpu && option == "--cpus" {
+            index += 1;
+            if options
+                .get(index)
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if strip_cpu && option.starts_with("--cpus=") {
+            index += 1;
+            continue;
+        }
+        if strip_memory && option == "--memory" {
+            index += 1;
+            if options
+                .get(index)
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if strip_memory && option.starts_with("--memory=") {
+            index += 1;
+            continue;
+        }
+        command.flag(option.clone());
+        index += 1;
+    }
+}
+
+fn parse_memory_options(options: &[String]) -> io::Result<Vec<u64>> {
+    let mut limits = Vec::new();
+    let mut index = 0;
+    while index < options.len() {
+        let option = &options[index];
+        let value = if option == "--memory" {
+            let value = options.get(index + 1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "docker --memory option is missing its value",
+                )
+            })?;
+            if value.starts_with('-') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "docker --memory option has an invalid value",
+                ));
+            }
+            index += 2;
+            value.as_str()
+        } else if let Some(value) = option.strip_prefix("--memory=") {
+            index += 1;
+            value
+        } else {
+            index += 1;
+            continue;
+        };
+        let Some(bytes) = parse_docker_memory_bytes(value) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "docker --memory option has an invalid value",
+            ));
+        };
+        limits.push(bytes);
+    }
+    Ok(limits)
+}
+
+/// Parse the RAM units accepted by Docker's `--memory` flag. Normalize to
+/// bytes before comparing limits so a larger textual unit cannot bypass the
+/// derived per-slot cap.
+fn parse_docker_memory_bytes(value: &str) -> Option<u64> {
+    let value = value.trim();
+    let split = value
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(value.len());
+    let (number, suffix) = value.split_at(split);
+    if number.is_empty() || number == "." || number.matches('.').count() > 1 {
+        return None;
+    }
+    let number = number.parse::<f64>().ok()?;
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+    let multiplier = match suffix.to_ascii_lowercase().as_str() {
+        "" | "b" => 1_u64,
+        "k" | "kb" | "ki" | "kib" => 1_u64 << 10,
+        "m" | "mb" | "mi" | "mib" => 1_u64 << 20,
+        "g" | "gb" | "gi" | "gib" => 1_u64 << 30,
+        "t" | "tb" | "ti" | "tib" => 1_u64 << 40,
+        "p" | "pb" | "pi" | "pib" => 1_u64 << 50,
+        _ => return None,
+    };
+    let bytes = number * multiplier as f64;
+    if !bytes.is_finite() || bytes < 1.0 || bytes > u64::MAX as f64 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(bytes.floor() as u64)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreTrustClass {
+    Untrusted,
+    Trusted,
+    Release,
 }
 
 #[derive(Debug, Clone)]
@@ -36,9 +156,13 @@ pub struct JobContainerSpec {
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
+    /// Validated daemon slot count carried into this job. Resource budgeting
+    /// must not infer topology from this job's filesystem layout.
+    pub slot_count: NonZeroU32,
     pub env: Vec<(String, String)>,
-    /// Daemon-enforced Docker resource limits. Appended after workflow
-    /// createOptions so operator policy wins for shared warm-runner hosts.
+    /// Daemon-enforced Docker resource limits. CPU and memory limits are
+    /// normalized with workflow createOptions into runner-owned values before
+    /// emission.
     pub resource_options: Vec<String>,
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
@@ -55,65 +179,218 @@ pub struct JobContainerSpec {
     /// one would make rename(2) across `target` return EXDEV even though the
     /// same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
-    /// Exactly one compiler-cache store is exposed to a job.
-    pub compiler_cache_backend: CompilerCacheBackend,
-    /// Trust namespace admitted for compiler-cache entries. The selected
-    /// namespace remains below the daemon-shared Plan 066 cache root, so slots
-    /// share warm entries without crossing trust boundaries.
-    pub compiler_cache_trust_class: GuestCompilerCacheTrustClass,
-    /// Host-operator opt-in for the structured service-owned compiler path.
-    /// Existing wrapper backends remain unchanged when this is false.
-    pub compiler_cache_service: bool,
-    pub compiler_cache_service_root: Option<PathBuf>,
+    /// Trust namespace admitted for executable and build stores.
+    pub store_trust_class: StoreTrustClass,
+    /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
+    pub mbx_store_host: Option<PathBuf>,
+    /// Docker-only explicit sccache action store.
+    pub sccache_store_host: Option<PathBuf>,
 }
 
+/// Job environment that carries the daemon's resource budget. A workflow that
+/// sets any of these is asking for a share of a machine it cannot see, so the
+/// daemon's derived value wins and the override is named in the notice.
+const BUDGET_ENV: [&str; 4] = [
+    "CARGO_BUILD_JOBS",
+    "MAKEFLAGS",
+    "MBX_SCHEDULER_CPUS",
+    "MBX_SCHEDULER_MEMORY",
+];
+
 impl JobContainerSpec {
-    pub(crate) fn compiler_cache_runtime(&self) -> CompilerCacheRuntime {
-        if self.compiler_cache_service {
-            return CompilerCacheRuntime::off();
+    /// The tightest valid `--cpus` limit declared by the operator
+    /// (`--job-cpus`/`VELNOR_JOB_CPUS`) or workflow createOptions.
+    fn declared_container_cpus(&self) -> Option<f64> {
+        [&self.resource_options, &self.options]
+            .into_iter()
+            .flat_map(|options| {
+                options
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--cpus")
+                    .map(|pair| pair[1].as_str())
+                    .chain(
+                        options
+                            .iter()
+                            .filter_map(|option| option.strip_prefix("--cpus=")),
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .min_by(f64::total_cmp)
+    }
+
+    /// The tightest valid Docker memory limit declared by the operator or
+    /// workflow createOptions. Invalid or incomplete limits are rejected by
+    /// `start_args` instead of being silently dropped while enforcing policy.
+    fn declared_container_memory(&self) -> io::Result<Option<u64>> {
+        let mut limits = Vec::new();
+        for options in [&self.options, &self.resource_options] {
+            limits.extend(parse_memory_options(options)?);
         }
-        match self.compiler_cache_backend {
-            CompilerCacheBackend::Sccache => CompilerCacheRuntime::new(
-                CompilerCacheBackend::Sccache,
-                sccache_host(&self.temp_host, self.compiler_cache_trust_class),
-            ),
-            CompilerCacheBackend::Kache => CompilerCacheRuntime::new(
-                CompilerCacheBackend::Kache,
-                kache_host(&self.temp_host, self.compiler_cache_trust_class),
-            ),
-            CompilerCacheBackend::Off => CompilerCacheRuntime::off(),
+        Ok(limits.into_iter().min())
+    }
+
+    /// The share of the machine this job may use.
+    ///
+    /// The packaged `velnor-jobs.slice` quota is an *aggregate* ceiling for
+    /// every job on the host, not a per-slot allowance. Nothing used to divide
+    /// it, so four slots each ran a Cargo build sized to the whole machine.
+    fn slot_budget(&self) -> SlotBudget {
+        HostBudget::observe_host()
+            .per_slot(self.slot_count)
+            .capped_by_container_cpus(self.declared_container_cpus())
+    }
+
+    /// One line naming the budget, how it was derived, and any workflow value
+    /// it overrode. Resource policy that nobody can see is indistinguishable
+    /// from the mysterious idleness it is meant to remove.
+    pub fn resource_budget_notice(&self) -> String {
+        let budget = self.slot_budget();
+        budget.notice(&self.workflow_budget_overrides())
+    }
+
+    fn workflow_budget_overrides(&self) -> Vec<String> {
+        BUDGET_ENV
+            .iter()
+            .filter(|name| {
+                self.env
+                    .iter()
+                    .any(|(key, _)| key.eq_ignore_ascii_case(name))
+            })
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    /// Append workflow and daemon flags while replacing every declared CPU
+    /// limit with the runner-derived hard cap. Docker's last duplicate flag
+    /// wins, so leaving an operator value in argv would let it silently defeat
+    /// the smaller per-slot limit.
+    fn append_container_options(
+        &self,
+        command: &mut DockerCommand,
+        budget: &SlotBudget,
+    ) -> io::Result<()> {
+        let cpu_option = budget.docker_cpu_option();
+        let memory_cap = budget
+            .memory_bytes
+            .value()
+            .copied()
+            .filter(|bytes| *bytes > 0);
+        let declared_memory = self.declared_container_memory()?;
+
+        if cpu_option.is_some() || memory_cap.is_some() {
+            append_flags_without_limits(
+                command,
+                &self.options,
+                cpu_option.is_some(),
+                memory_cap.is_some(),
+            );
+            append_flags_without_limits(
+                command,
+                &self.resource_options,
+                cpu_option.is_some(),
+                memory_cap.is_some(),
+            );
+        } else {
+            // No derived hard cap exists. Retain explicit policy instead of
+            // widening the container by deleting the only known limit.
+            command.flags(self.options.iter().cloned());
+            command.flags(self.resource_options.iter().cloned());
+        }
+
+        if let Some(cpu_option) = cpu_option {
+            command.flags(cpu_option);
+        }
+        if let Some(memory_cap) = memory_cap {
+            // An explicit operator/workflow value may narrow the derived
+            // share, never widen it. The final Docker flag is the one source
+            // of truth after all user options have been expanded.
+            let memory = declared_memory.map_or(memory_cap, |declared| declared.min(memory_cap));
+            command.flags(["--memory".to_owned(), memory.to_string()]);
+        }
+        Ok(())
+    }
+
+    /// Daemon-derived CPU and memory budget for this job.
+    ///
+    /// Appended after workflow environment and workflow createOptions, so a
+    /// workflow cannot widen its own share — the same precedence the
+    /// acceleration stores and `resource_options` already use. Cargo and
+    /// `make` are capped through `CARGO_BUILD_JOBS` and `MAKEFLAGS`, which is
+    /// also mbx's documented way to cap one build's permits without shrinking
+    /// the machine-wide pool its siblings share, and mbx's own scheduler is
+    /// sized through its documented `MBX_SCHEDULER_*` contract instead of its
+    /// "logical CPUs / 85% of physical memory" defaults, neither of which can
+    /// see the slice quota. An unobservable budget produces nothing at all.
+    fn append_resource_budget(&self, command: &mut DockerCommand, budget: &SlotBudget) {
+        for (name, value) in budget.job_env() {
+            command.env(name, value);
+        }
+        command.env(
+            "VELNOR_JOB_BUDGET",
+            budget.notice(&self.workflow_budget_overrides()),
+        );
+    }
+
+    fn append_rust_acceleration(&self, command: &mut DockerCommand) {
+        if let Some(host) = &self.mbx_store_host {
+            command.pair("-v", self.mount_arg(host, "/var/cache/mbx"));
+            command.envs([
+                ("MBX_CACHE_DIR", "/var/cache/mbx"),
+                ("MBX_TARGET_ROOT", "/var/cache/mbx/targets"),
+                ("MBX_GC_AUTO", "true"),
+                ("MBX_GC_MAX_SIZE", "20GiB"),
+                ("MBX_TARGET_MAX_SIZE", "30GiB"),
+                ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
+            ]);
+        } else if let Some(host) = &self.sccache_store_host {
+            command.pair("-v", self.mount_arg(host, "/var/cache/sccache"));
+            command.envs([
+                ("MBX_DISABLE", "1"),
+                ("RUSTC_WRAPPER", "sccache"),
+                ("SCCACHE_DIR", "/var/cache/sccache"),
+                ("SCCACHE_CACHE_SIZE", "20G"),
+                ("SCCACHE_GHA_ENABLED", "false"),
+            ]);
         }
     }
 
-    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
-        let runtime = self.compiler_cache_runtime();
-        let (Some(host), Some(container)) = (runtime.host_path(), runtime.container_path()) else {
-            return;
-        };
-        args.extend(["-v".into(), self.mount_arg(host, container)]);
+    /// Directory that holds the mode-0600 env files backing this job's Docker
+    /// commands. Job-scoped, so it disappears with the job temp tree.
+    pub(crate) fn env_dir(&self) -> PathBuf {
+        self.temp_host.join("_velnor").join("exec-env")
     }
 
-    fn append_compiler_cache_environment(&self, args: &mut Vec<String>) {
-        for (name, value) in &self.compiler_cache_runtime().environment().variables {
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
+    /// Validated image for this job container.
+    ///
+    /// # Errors
+    /// The configured image is not an OCI reference.
+    fn image_reference(&self) -> io::Result<ImageReference> {
+        Ok(ImageReference::parse(&self.image)?)
     }
 
     pub fn create_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "create".into(),
-            "--label".into(),
+        let mut command = DockerArgv::new(["network", "create"]);
+        command.flags([
+            "--label".to_owned(),
             format!("velnor.daemon-id={}", self.daemon_id),
-            "--label".into(),
+            "--label".to_owned(),
             format!("velnor.job-id={}", self.name),
-            self.network.clone(),
-        ]
+        ]);
+        command.operands().operand(self.network.clone()).into_argv()
     }
 
-    pub fn start_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
+    /// `docker run` for the job container.
+    ///
+    /// # Errors
+    /// The job image is not a valid OCI reference, or an env file backing the
+    /// job environment could not be created.
+    pub fn start_args(&self) -> io::Result<PreparedDockerArgs> {
+        let image = self.image_reference()?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
             "--detach".into(),
             "--add-host".into(),
             // Standard alias for host services (GitHub-hosted runners expose
@@ -204,84 +481,85 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
             "-v".into(),
             self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
-            "-e".into(),
-            "RUSTUP_HOME=/root/.rustup".into(),
-            "-e".into(),
-            "CARGO_HOME=/github/home/.cargo".into(),
-            "-e".into(),
-            "RUNNER_TEMP=/__t".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-            "-e".into(),
-            format!(
-                "VELNOR_DOCKER_HOST_TEMP={}",
-                self.docker_host_path(&self.temp_host).display()
-            ),
-            "-e".into(),
-            format!(
-                "VELNOR_DOCKER_HOST_WORKSPACE={}",
-                self.docker_host_path(&self.workspace_host).display()
-            ),
-        ];
-        self.append_compiler_cache_mount(&mut args);
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        args.env("RUSTUP_HOME", "/root/.rustup");
+        args.env("CARGO_HOME", "/github/home/.cargo");
+        args.env("RUNNER_TEMP", "/__t");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        args.env(
+            "VELNOR_DOCKER_HOST_TEMP",
+            self.docker_host_path(&self.temp_host).display().to_string(),
+        );
+        args.env(
+            "VELNOR_DOCKER_HOST_WORKSPACE",
+            self.docker_host_path(&self.workspace_host)
+                .display()
+                .to_string(),
+        );
         for (name, value) in &self.env {
             if is_docker_control_env(name) {
                 continue;
             }
-            args.extend(["-e".into(), format!("{name}={value}")]);
+            args.env(name.clone(), value.clone());
         }
-        // Daemon-owned compiler-cache variables are appended after workflow
-        // variables so a job cannot replace the selected wrapper or store.
-        self.append_compiler_cache_environment(&mut args);
-        self.append_ownership_labels(&mut args);
-        args.extend(self.options.iter().cloned());
-        args.extend(self.resource_options.iter().cloned());
+        self.append_ownership_labels(args);
+        let budget = self.slot_budget();
+        self.append_container_options(args, &budget)?;
         // Docker creates the actual workload in dockerd's cgroup, not in the
         // Velnor worker process. Keep the outer job below the package-owned
         // aggregate cap; the job lease proxy applies the same policy to
         // containers created from inside the job.
-        self.append_job_cgroup_parent(&mut args);
+        self.append_job_cgroup_parent(args);
 
         // Docker Engine 29 inherits systemd's 1024-file descriptor default
         // when no container limit is explicit. Large Rust/Zig links open one
         // descriptor per object and fail with ProcessFdQuotaExceeded. Make the
         // job contract deterministic and large enough for GitHub-scale builds.
-        args.extend(["--ulimit".into(), format!("nofile={JOB_NOFILE_LIMIT}")]);
+        args.flags(["--ulimit".to_owned(), format!("nofile={JOB_NOFILE_LIMIT}")]);
 
         // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
         // assigns localhost to ::1, which can split same-process servers and
         // clients across address families (for example Vite binds ::1 while
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
-        args.extend(["--sysctl".into(), "net.ipv6.conf.all.disable_ipv6=1".into()]);
+        args.flags(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]);
 
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
 
         // The per-job network is runner policy. Keep it after expanded job
         // and daemon resource options so the job cannot be displaced from the
         // network shared with its workflow services.
-        args.extend(["--network".into(), self.network.clone()]);
+        args.pair("--network", self.network.clone());
+
+        // Daemon-owned acceleration mounts and variables must follow both
+        // workflow environment and expanded container options. A trusted job
+        // may add options, but cannot redirect a persistent store or stack
+        // sccache with the image's mbx shim.
+        self.append_rust_acceleration(args);
+
+        // The machine budget divided by the number of provisioned slots. Last,
+        // so neither workflow environment nor workflow createOptions can widen
+        // this job's share of a host it cannot see.
+        self.append_resource_budget(args, &budget);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
         // Velnor appends each masked step's lines to this file (mounted at
         // /__t). `tail -F` waits for the file if it does not exist yet.
-        args.extend([
-            self.image.clone(),
-            "sh".into(),
-            "-c".into(),
-            "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log".into(),
-        ]);
-        args
+        command
+            .image(&image)
+            .operands([
+                "sh",
+                "-c",
+                "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log",
+            ])
+            .finish()
     }
 
     /// `docker run` args that copy the job image's baked /opt/mise installs +
@@ -290,44 +568,42 @@ impl JobContainerSpec {
     /// shadows the image-baked tools while the baked shims keep pointing at
     /// them — observed live as `mise ERROR gh is not a valid shim` on a fresh
     /// store. Seeding once per image digest removes that class.
-    pub fn seed_mise_store_args(&self) -> Vec<String> {
+    ///
+    /// # Errors
+    /// The job image is not a valid OCI reference.
+    pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
+        let image = self.image_reference()?;
         let store = mise_store_host(&self.temp_host);
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--entrypoint".into(),
-            "sh".into(),
-        ];
+        let mut args = DockerArgv::new(["run"]);
+        args.flags([
+            "--rm".to_owned(),
+            "--entrypoint".to_owned(),
+            "sh".to_owned(),
+            "--name".to_owned(),
+            format!("velnor-mise-seed-{}", self.name),
+        ]);
+        // This is a transient job-owned container, not an anonymous helper.
+        // Labels let crash recovery distinguish it from co-located Docker
+        // workloads if the CLI dies before Docker processes `--rm`.
+        self.append_ownership_labels(&mut args);
         self.append_job_cgroup_parent(&mut args);
-        args.extend([
-            "-v".into(),
+        args.flags([
+            "-v".to_owned(),
             self.mount_arg(
                 &self.mise_executable_store_host(),
                 "/__velnor_seed/installs",
             ),
-            "-v".into(),
+            "-v".to_owned(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
-            self.image.clone(),
-            "-c".into(),
-            "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
-             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
-                .into(),
         ]);
-        args
-    }
-
-    fn exec_script_args(
-        &self,
-        script_path_in_container: &str,
-        shell: Shell,
-        working_directory: &str,
-        env: &[(String, String)],
-    ) -> Vec<String> {
-        self.exec_process_args(
-            working_directory,
-            env,
-            &shell.command_args(script_path_in_container),
-        )
+        Ok(args
+            .image(&image)
+            .operands([
+                "-c",
+                "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
+                 cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true",
+            ])
+            .into_argv())
     }
 
     pub fn prepare_exec_script_args(
@@ -346,25 +622,9 @@ impl JobContainerSpec {
         )
     }
 
-    fn exec_process_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        command: &[String],
-    ) -> Vec<String> {
-        let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
-        self.append_base_exec_env(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        args.push(self.name.clone());
-        args.extend(command.iter().cloned());
-        args
-    }
-
+    /// # Errors
+    /// Creating an env file for the step environment failed, or a masked
+    /// secret would have reached argv.
     pub fn prepare_exec_process_args(
         &self,
         working_directory: &str,
@@ -372,20 +632,15 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(vec![
-            "exec".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ]);
-        self.append_base_exec_env(&mut prepared.args);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.push(self.name.clone());
-        prepared.args.extend(command.iter().cloned());
-        Ok(prepared)
+        self.exec_command(working_directory, env, secret_masks, command, false)
     }
 
     /// Like prepare_exec_process_args, but with stdin kept open (`docker exec
     /// -i`) so the caller can stream data (for example a registry password).
+    ///
+    /// # Errors
+    /// Creating an env file for the step environment failed, or a masked
+    /// secret would have reached argv.
     pub fn prepare_exec_process_stdin_args(
         &self,
         working_directory: &str,
@@ -393,50 +648,43 @@ impl JobContainerSpec {
         secret_masks: &[String],
         command: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(vec![
-            "exec".into(),
-            "-i".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ]);
-        self.append_base_exec_env(&mut prepared.args);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.push(self.name.clone());
-        prepared.args.extend(command.iter().cloned());
+        self.exec_command(working_directory, env, secret_masks, command, true)
+    }
+
+    fn exec_command(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+        stdin: bool,
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut builder = DockerCommand::new(self.env_dir(), ["exec"]);
+        if stdin {
+            builder.flag("-i");
+        }
+        builder.pair("--workdir", working_directory);
+        self.append_base_exec_env(&mut builder);
+        self.append_step_env(&mut builder, env);
+        let prepared = builder
+            .operands()
+            .operand(self.name.clone())
+            .operands(command.iter().cloned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
-    fn append_step_env(
-        &self,
-        prepared: &mut PreparedDockerArgs,
-        env: &[(String, String)],
-        secret_masks: &[String],
-    ) -> io::Result<()> {
+    /// Step environment. Every entry is recorded as an environment variable,
+    /// never as an argv token: the builder decides between a mode-0600
+    /// `--env-file` and a bare `-e NAME` process-environment forward.
+    fn append_step_env(&self, command: &mut DockerCommand, env: &[(String, String)]) {
         for (name, value) in env {
             if is_docker_control_env(name) {
                 continue;
             }
-            let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
-            if is_secret && value.contains('\n') {
-                // Docker env files are line-oriented and cannot represent an
-                // armored key or certificate. Ask Docker to forward this
-                // variable from its own process environment instead: the
-                // value stays out of argv, logs, and the env-file parser.
-                prepared.args.extend(["-e".into(), name.clone()]);
-                prepared.process_env.push((name.clone(), value.clone()));
-            } else if is_secret {
-                let env_file = write_exec_env_file(&self.temp_host, name, value)?;
-                prepared
-                    .args
-                    .extend(["--env-file".into(), env_file.path().display().to_string()]);
-                prepared.env_files.push(env_file);
-            } else {
-                prepared
-                    .args
-                    .extend(["-e".into(), format!("{name}={value}")]);
-            }
+            command.env(name.clone(), value.clone());
         }
-        Ok(())
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -451,100 +699,32 @@ impl JobContainerSpec {
     /// host user's HOME into exec'd processes; explicit -e wins. Docker
     /// endpoint/context/config overrides from workflow and step env are
     /// dropped, so every in-container Docker client stays on the lease.
-    fn append_base_exec_env(&self, args: &mut Vec<String>) {
-        for kv in [
-            "HOME=/github/home".to_string(),
-            format!("DOCKER_HOST={JOB_DOCKER_HOST}"),
-            "RUSTUP_HOME=/root/.rustup".to_string(),
-            "CARGO_HOME=/github/home/.cargo".to_string(),
-            "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            format!(
-                "VELNOR_DOCKER_HOST_TEMP={}",
-                self.docker_host_path(&self.temp_host).display()
-            ),
-            format!(
-                "VELNOR_DOCKER_HOST_WORKSPACE={}",
-                self.docker_host_path(&self.workspace_host).display()
-            ),
-        ] {
-            args.extend(["-e".into(), kv]);
-        }
+    fn append_base_exec_env(&self, command: &mut DockerCommand) {
+        command.env("HOME", "/github/home");
+        command.env("DOCKER_HOST", JOB_DOCKER_HOST);
+        command.env("RUSTUP_HOME", "/root/.rustup");
+        command.env("CARGO_HOME", "/github/home/.cargo");
+        command.env(
+            "PATH",
+            "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
+        command.env(
+            "VELNOR_DOCKER_HOST_TEMP",
+            self.docker_host_path(&self.temp_host).display().to_string(),
+        );
+        command.env(
+            "VELNOR_DOCKER_HOST_WORKSPACE",
+            self.docker_host_path(&self.workspace_host)
+                .display()
+                .to_string(),
+        );
     }
 
-    fn run_node_action_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        path_prepend: &[String],
-        node_image: &str,
-        entrypoint_container_path: &str,
-    ) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            self.sidecar_container_name("node-action"),
-            "--network".into(),
-            self.network.clone(),
-            "--workdir".into(),
-            working_directory.into(),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/__w"),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/github/workspace"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/__t"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/tmp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/runner_temp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/file_commands"),
-            "-v".into(),
-            self.mount_arg(&self.home_host, "/github/home"),
-            "-v".into(),
-            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
-            "-v".into(),
-            self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-            // The Node image entrypoint/shell drops env names with '-', but
-            // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
-            "--entrypoint".into(),
-            "node".into(),
-        ];
-        self.append_ownership_labels(&mut args);
-        self.append_compiler_cache_mount(&mut args);
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        self.append_compiler_cache_environment(&mut args);
-        self.append_job_cgroup_parent(&mut args);
-        if !path_prepend.is_empty() {
-            let path = path_prepend
-                .iter()
-                .cloned()
-                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_string()))
-                .collect::<Vec<_>>()
-                .join(":");
-            args.extend(["-e".into(), format!("PATH={path}")]);
-        }
-        args.push(node_image.into());
-        args.push(entrypoint_container_path.into());
-        args
-    }
-
+    /// `docker run` for a Node action sidecar.
+    ///
+    /// # Errors
+    /// The node image is not a valid OCI reference, an env file could not be
+    /// created, or a masked secret would have reached argv.
     pub fn prepare_run_node_action_args(
         &self,
         working_directory: &str,
@@ -554,102 +734,102 @@ impl JobContainerSpec {
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(self.run_node_action_args(
-            working_directory,
-            &[],
-            path_prepend,
-            node_image,
-            entrypoint_container_path,
-        ));
-        let image_position = prepared.args.len() - 2;
-        let trailing = prepared.args.split_off(image_position);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.extend(trailing);
+        let image = ImageReference::parse(node_image)?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--rm".to_owned(),
+            "--name".to_owned(),
+            self.sidecar_container_name("node-action"),
+            "--network".to_owned(),
+            self.network.clone(),
+            "--workdir".to_owned(),
+            working_directory.to_owned(),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/__w"),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/__t"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/tmp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
+            "-v".to_owned(),
+            self.mount_arg(&self.home_host, "/github/home"),
+            "-v".to_owned(),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".to_owned(),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            "-v".to_owned(),
+            self.mount_arg(&self.tools_host, "/__tool"),
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        // The Node image entrypoint/shell drops env names with '-', but
+        // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
+        args.pair("--entrypoint", "node");
+        self.append_ownership_labels(args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
+        self.append_rust_acceleration(args);
+        self.append_job_cgroup_parent(args);
+        if !path_prepend.is_empty() {
+            let path = path_prepend
+                .iter()
+                .cloned()
+                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_owned()))
+                .collect::<Vec<_>>()
+                .join(":");
+            args.env("PATH", path);
+        }
+        self.append_step_env(args, env);
+        let prepared = command
+            .image(&image)
+            .operand(entrypoint_container_path.to_owned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
+    /// `docker build` for a Dockerfile action.
+    ///
+    /// # Errors
+    /// The generated tag is not a valid OCI reference.
     pub fn build_docker_action_args(
         &self,
         image: &str,
         dockerfile_host: &Path,
         context_host: &Path,
-    ) -> Vec<String> {
-        vec![
-            "build".into(),
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-            "--tag".into(),
-            image.into(),
-            "--file".into(),
+    ) -> io::Result<Vec<String>> {
+        let image = ImageReference::parse(image)?;
+        let mut args = DockerArgv::new(["build"]);
+        args.flags([
+            "--cgroup-parent".to_owned(),
+            crate::docker_lease::JOB_CGROUP_PARENT.to_owned(),
+            "--tag".to_owned(),
+            image.as_str().to_owned(),
+            "--file".to_owned(),
             self.docker_host_path(dockerfile_host).display().to_string(),
-            self.docker_host_path(context_host).display().to_string(),
-        ]
+        ]);
+        Ok(args
+            .operands()
+            .operand(self.docker_host_path(context_host).display().to_string())
+            .into_argv())
     }
 
-    fn run_docker_action_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        image: &str,
-        entrypoint: Option<&str>,
-        command_args: &[String],
-    ) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--rm".into(),
-            "--name".into(),
-            self.sidecar_container_name("docker-action"),
-            "--network".into(),
-            self.network.clone(),
-            "--workdir".into(),
-            working_directory.into(),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/__w"),
-            "-v".into(),
-            self.mount_arg(&self.workspace_host, "/github/workspace"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/__t"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/tmp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/runner_temp"),
-            "-v".into(),
-            self.mount_arg(&self.temp_host, "/github/file_commands"),
-            "-v".into(),
-            self.mount_arg(&self.home_host, "/github/home"),
-            "-v".into(),
-            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            "-v".into(),
-            self.mount_arg(&self.actions_host, "/__a"),
-            "-v".into(),
-            self.mount_arg(&self.tools_host, "/__tool"),
-            "-e".into(),
-            "HOME=/github/home".into(),
-            "-e".into(),
-            "RUNNER_TOOL_CACHE=/__tool".into(),
-            "-e".into(),
-            "AGENT_TOOLSDIRECTORY=/__tool".into(),
-        ];
-        self.append_ownership_labels(&mut args);
-        self.append_compiler_cache_mount(&mut args);
-        self.append_docker_socket_mount(&mut args);
-        self.append_docker_cli_mounts(&mut args);
-        for (name, value) in env {
-            if is_docker_control_env(name) {
-                continue;
-            }
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        self.append_compiler_cache_environment(&mut args);
-        self.append_job_cgroup_parent(&mut args);
-        if let Some(entrypoint) = entrypoint {
-            args.extend(["--entrypoint".into(), entrypoint.into()]);
-        }
-        args.push(image.into());
-        args.extend(command_args.iter().cloned());
-        args
-    }
-
+    /// `docker run` for a Dockerfile/`docker://` action.
+    ///
+    /// The action's `runs.args` are workflow-controlled and are emitted only
+    /// after the end-of-flags separator, so they can never become Docker
+    /// flags.
+    ///
+    /// # Errors
+    /// The action image is not a valid OCI reference, an env file could not
+    /// be created, or a masked secret would have reached argv.
     pub fn prepare_run_docker_action_args(
         &self,
         working_directory: &str,
@@ -659,102 +839,142 @@ impl JobContainerSpec {
         entrypoint: Option<&str>,
         command_args: &[String],
     ) -> io::Result<PreparedDockerArgs> {
-        let mut prepared = PreparedDockerArgs::new(self.run_docker_action_args(
-            working_directory,
-            &[],
-            image,
-            entrypoint,
-            command_args,
-        ));
-        let image_position = prepared.args.len() - command_args.len() - 1;
-        let trailing = prepared.args.split_off(image_position);
-        self.append_step_env(&mut prepared, env, secret_masks)?;
-        prepared.args.extend(trailing);
+        let image = ImageReference::parse(image)?;
+        let mut command = DockerCommand::new(self.env_dir(), ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--rm".to_owned(),
+            "--name".to_owned(),
+            self.sidecar_container_name("docker-action"),
+            "--network".to_owned(),
+            self.network.clone(),
+            "--workdir".to_owned(),
+            working_directory.to_owned(),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/__w"),
+            "-v".to_owned(),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/__t"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/tmp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
+            "-v".to_owned(),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
+            "-v".to_owned(),
+            self.mount_arg(&self.home_host, "/github/home"),
+            "-v".to_owned(),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".to_owned(),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            "-v".to_owned(),
+            self.mount_arg(&self.tools_host, "/__tool"),
+        ]);
+        args.env("HOME", "/github/home");
+        args.env("RUNNER_TOOL_CACHE", "/__tool");
+        args.env("AGENT_TOOLSDIRECTORY", "/__tool");
+        self.append_ownership_labels(args);
+        self.append_docker_socket_mount(args);
+        self.append_docker_cli_mounts(args);
+        self.append_rust_acceleration(args);
+        self.append_job_cgroup_parent(args);
+        if let Some(entrypoint) = entrypoint {
+            args.pair("--entrypoint", entrypoint.to_owned());
+        }
+        self.append_step_env(args, env);
+        let prepared = command
+            .image(&image)
+            .operands(command_args.iter().cloned())
+            .finish()?;
+        audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
     }
 
     pub fn remove_container_args(&self) -> Vec<String> {
-        vec!["rm".into(), "--force".into(), self.name.clone()]
+        let mut args = DockerArgv::new(["rm"]);
+        args.flag("--force");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn remove_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "rm".into(), self.network.clone()]
+        DockerArgv::new(["network", "rm"])
+            .operands()
+            .operand(self.network.clone())
+            .into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "disconnect".into(),
-            "--force".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "disconnect"]);
+        args.flag("--force");
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "connect".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        DockerArgv::new(["network", "connect"])
+            .operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn inspect_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "inspect".into(), self.network.clone()]
+        DockerArgv::new(["network", "inspect"])
+            .operands()
+            .operand(self.network.clone())
+            .into_argv()
     }
 
+    /// `getent hosts <alias>` inside the job container. The alias is a
+    /// workflow-controlled service key, so it stays an operand.
     pub fn service_dns_args(&self, alias: &str) -> Vec<String> {
-        vec![
-            "exec".into(),
-            self.name.clone(),
-            "getent".into(),
-            "hosts".into(),
-            alias.into(),
-        ]
+        DockerArgv::new(["exec"])
+            .operands()
+            .operand(self.name.clone())
+            .operands(["getent", "hosts", alias])
+            .into_argv()
     }
 
     pub fn resolver_state_args(&self) -> Vec<String> {
-        vec![
-            "exec".into(),
-            self.name.clone(),
-            "cat".into(),
-            "/etc/resolv.conf".into(),
-        ]
+        DockerArgv::new(["exec"])
+            .operands()
+            .operand(self.name.clone())
+            .operands(["cat", "/etc/resolv.conf"])
+            .into_argv()
     }
 
     pub fn guest_docker_socket_host(&self) -> PathBuf {
         crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
     }
 
-    fn append_docker_socket_mount(&self, args: &mut Vec<String>) {
+    fn append_docker_socket_mount(&self, args: &mut impl FlagSink) {
         if !self.mount_docker_socket {
             return;
         }
-        args.extend([
-            "-v".into(),
+        args.pair(
+            "-v",
             format!(
                 "{}:/var/run/docker.sock",
                 self.guest_docker_socket_host().display()
             ),
-        ]);
+        );
     }
 
-    fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
+    fn append_docker_cli_mounts(&self, args: &mut impl FlagSink) {
         if !self.mount_docker_socket {
             return;
         }
         if let Some(path) = &self.docker_cli_host_path {
-            args.extend([
-                "-v".into(),
-                format!("{}:/usr/local/bin/docker:ro", path.display()),
-            ]);
+            args.pair("-v", format!("{}:/usr/local/bin/docker:ro", path.display()));
         }
         if let Some(path) = &self.docker_cli_plugin_host_dir {
-            args.extend([
-                "-v".into(),
+            args.pair(
+                "-v",
                 format!("{}:/usr/local/lib/docker/cli-plugins:ro", path.display()),
-            ]);
+            );
         }
     }
 
@@ -786,7 +1006,7 @@ impl JobContainerSpec {
             |repository| {
                 cargo_executable_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -797,7 +1017,7 @@ impl JobContainerSpec {
         match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
             (Some(repository), Some(slot)) => mise_executable_store_host_for_scope(
                 &self.temp_host,
-                compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                store_trust_namespace(self.store_trust_class),
                 &repository,
             )
             .join("slots")
@@ -825,7 +1045,7 @@ impl JobContainerSpec {
             |repository| {
                 mise_binary_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -838,7 +1058,7 @@ impl JobContainerSpec {
             |repository| {
                 playwright_browser_store_host_for_scope(
                     &self.temp_host,
-                    compiler_cache_trust_namespace(self.compiler_cache_trust_class),
+                    store_trust_namespace(self.store_trust_class),
                     &repository,
                 )
             },
@@ -867,96 +1087,30 @@ impl JobContainerSpec {
         format!("velnor-{kind}-{}", self.name)
     }
 
-    fn append_ownership_labels(&self, args: &mut Vec<String>) {
-        args.extend([
-            "--label".into(),
-            format!("velnor.daemon-id={}", self.daemon_id),
-            "--label".into(),
-            format!("velnor.job-id={}", self.name),
-        ]);
+    fn append_ownership_labels(&self, args: &mut impl FlagSink) {
+        args.pair("--label", format!("velnor.daemon-id={}", self.daemon_id));
+        args.pair("--label", format!("velnor.job-id={}", self.name));
     }
 
-    fn append_job_cgroup_parent(&self, args: &mut Vec<String>) {
-        args.extend([
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-        ]);
+    fn append_job_cgroup_parent(&self, args: &mut impl FlagSink) {
+        args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
     }
 }
 
-#[derive(Debug)]
-pub struct PreparedDockerArgs {
-    pub args: Vec<String>,
-    env_files: Vec<ExecEnvFile>,
-    process_env: Vec<(String, String)>,
-}
-
-impl PreparedDockerArgs {
-    fn new(args: Vec<String>) -> Self {
-        Self {
-            args,
-            env_files: Vec::new(),
-            process_env: Vec::new(),
+/// Fail-closed audit: no finished Docker command line may contain a masked
+/// secret. The builder already makes environment-on-argv unconstructible;
+/// this catches a secret that reached argv through some other operand (an
+/// action argument, a mount path) before the process is spawned.
+fn audit_argv_for_secrets(args: &[String], secret_masks: &[String]) -> io::Result<()> {
+    for mask in secret_masks.iter().filter(|mask| mask.len() >= 3) {
+        if args.iter().any(|arg| arg.contains(mask.as_str())) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to run docker: a masked secret reached the command line",
+            ));
         }
     }
-
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    pub fn process_env(&self) -> &[(String, String)] {
-        &self.process_env
-    }
-}
-
-#[derive(Debug)]
-struct ExecEnvFile {
-    path: PathBuf,
-}
-
-impl ExecEnvFile {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ExecEnvFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn env_value_is_secret(value: &str, secret_masks: &[String]) -> bool {
-    !value.is_empty()
-        && secret_masks
-            .iter()
-            .filter(|mask| mask.len() >= 3)
-            .any(|mask| value.contains(mask))
-}
-
-fn env_name_is_secret(name: &str) -> bool {
-    let name = name.to_ascii_uppercase();
-    matches!(
-        name.as_str(),
-        "ACTIONS_RUNTIME_TOKEN" | "ACTIONS_ID_TOKEN_REQUEST_TOKEN" | "GITHUB_TOKEN"
-    ) || name.ends_with("_TOKEN")
-        || name.ends_with("_PASSWORD")
-        || name.ends_with("_SECRET")
-        || name.ends_with("_PRIVATE_KEY")
-}
-
-fn write_exec_env_file(temp_host: &Path, name: &str, value: &str) -> io::Result<ExecEnvFile> {
-    let dir = temp_host.join("_velnor").join("exec-env");
-    fs::create_dir_all(&dir)?;
-    let counter = EXEC_ENV_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("env-{}-{counter}", std::process::id()));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(&path)?;
-    writeln!(file, "{name}={value}")?;
-    Ok(ExecEnvFile { path })
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -971,82 +1125,85 @@ pub struct ServiceContainerSpec {
 }
 
 impl ServiceContainerSpec {
-    pub fn start_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "run".into(),
-            "--detach".into(),
-            "--name".into(),
+    /// `docker run` for a workflow service container.
+    ///
+    /// `env_dir` is the owning job's env-file directory: service environment
+    /// is workflow-controlled and routinely holds credentials (for example
+    /// `POSTGRES_PASSWORD`), so it is written to a mode-0600 file instead of
+    /// the world-readable command line.
+    ///
+    /// # Errors
+    /// The service image is not a valid OCI reference, or the env file could
+    /// not be created.
+    pub fn start_args(&self, env_dir: &Path) -> io::Result<PreparedDockerArgs> {
+        let image = ImageReference::parse(&self.image)?;
+        let mut command = DockerCommand::new(env_dir, ["run"]);
+        let args = &mut command;
+        args.flags([
+            "--detach".to_owned(),
+            "--name".to_owned(),
             self.name.clone(),
-        ];
+        ]);
         for (name, value) in &self.env {
-            args.extend(["-e".into(), format!("{name}={value}")]);
+            args.env(name.clone(), value.clone());
         }
         for port in &self.ports {
-            args.extend(["-p".into(), port.clone()]);
+            args.pair("-p", port.clone());
         }
-        args.extend(self.options.iter().cloned());
-        args.extend([
-            "--cgroup-parent".into(),
-            crate::docker_lease::JOB_CGROUP_PARENT.into(),
-        ]);
+        args.flags(self.options.iter().cloned());
+        args.pair("--cgroup-parent", crate::docker_lease::JOB_CGROUP_PARENT);
         // Runner-owned network policy must win over any network-shaped token
         // present in the expanded service options. Docker uses the final
         // occurrence, so append the per-job network and workflow service key
         // as its DNS alias after user options.
-        args.extend([
-            "--network".into(),
-            self.network.clone(),
-            "--network-alias".into(),
-            self.network_alias.clone(),
-        ]);
-        args.extend([self.image.clone()]);
-        args
+        args.pair("--network", self.network.clone());
+        args.pair("--network-alias", self.network_alias.clone());
+        command.image(&image).finish()
     }
 
     pub fn remove_args(&self) -> Vec<String> {
-        vec!["rm".into(), "--force".into(), self.name.clone()]
+        let mut args = DockerArgv::new(["rm"]);
+        args.flag("--force");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn disconnect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "disconnect".into(),
-            "--force".into(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "disconnect"]);
+        args.flag("--force");
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn connect_network_args(&self) -> Vec<String> {
-        vec![
-            "network".into(),
-            "connect".into(),
-            "--alias".into(),
-            self.network_alias.clone(),
-            self.network.clone(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["network", "connect"]);
+        args.pair("--alias", self.network_alias.clone());
+        args.operands()
+            .operand(self.network.clone())
+            .operand(self.name.clone())
+            .into_argv()
     }
 
     pub fn health_status_args(&self) -> Vec<String> {
-        vec![
-            "inspect".into(),
-            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"
-                .into(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["inspect"]);
+        args.flag(
+            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+        );
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn id_args(&self) -> Vec<String> {
-        vec![
-            "inspect".into(),
-            "--format={{.Id}}".into(),
-            self.name.clone(),
-        ]
+        let mut args = DockerArgv::new(["inspect"]);
+        args.flag("--format={{.Id}}");
+        args.operands().operand(self.name.clone()).into_argv()
     }
 
     pub fn mapped_ports_args(&self) -> Vec<String> {
-        vec!["port".into(), self.name.clone()]
+        DockerArgv::new(["port"])
+            .operands()
+            .operand(self.name.clone())
+            .into_argv()
     }
 }
 
@@ -1106,29 +1263,20 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-pub(crate) fn sccache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
+pub(crate) fn sccache_host(temp_host: &Path, trust_class: StoreTrustClass) -> PathBuf {
     crate::storage::cache_class_path_for_trust(
         &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
+        store_trust_namespace(trust_class),
         "compiler/sccache",
         "_velnor_sccache",
     )
 }
 
-pub(crate) fn kache_host(temp_host: &Path, trust_class: GuestCompilerCacheTrustClass) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
-        &daemon_store_root(temp_host),
-        compiler_cache_trust_namespace(trust_class),
-        "compiler/kache",
-        "_velnor_kache",
-    )
-}
-
-fn compiler_cache_trust_namespace(trust_class: GuestCompilerCacheTrustClass) -> &'static str {
+fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
     match trust_class {
-        GuestCompilerCacheTrustClass::Untrusted => "untrusted",
-        GuestCompilerCacheTrustClass::Trusted => "trusted",
-        GuestCompilerCacheTrustClass::Release => "release",
+        StoreTrustClass::Untrusted => "untrusted",
+        StoreTrustClass::Trusted => "trusted",
+        StoreTrustClass::Release => "release",
     }
 }
 
@@ -1271,7 +1419,7 @@ fn playwright_browser_store_host_for_scope(
 
 /// Resolve the daemon-shared store root from a job temp dir
 /// (`…/work/slot-N/<job>/temp` → `…/work`).
-fn daemon_store_root(temp_host: &Path) -> PathBuf {
+pub(crate) fn daemon_store_root(temp_host: &Path) -> PathBuf {
     let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
@@ -1364,17 +1512,53 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    /// Render a prepared command the way Docker will read it: every
+    /// `--env-file <path>` expanded in place into its `NAME=VALUE` lines. The
+    /// argv itself never contains those pairs, so ordering assertions are
+    /// written against this effective view.
+    fn rendered(prepared: &PreparedDockerArgs) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut args = prepared.args().iter();
+        while let Some(arg) = args.next() {
+            if arg == "--env-file" {
+                let path = args.next().expect("env file path follows --env-file");
+                for line in fs::read_to_string(path).unwrap().lines() {
+                    out.push(line.to_owned());
+                }
+            } else {
+                out.push(arg.clone());
+            }
+        }
+        out
+    }
+
+    fn service_env_dir() -> PathBuf {
+        container_test_temp("service").join("_velnor/exec-env")
+    }
+
+    fn has_mount(args: &[String], host: &Path, container: &str) -> bool {
+        args.contains(&mount(host, container))
+    }
+
+    fn has_read_only_mount(args: &[String], host: &Path, container: &str) -> bool {
+        args.contains(&format!("{}:ro", mount(host, container)))
+    }
+
     fn spec() -> JobContainerSpec {
+        let root = container_test_temp("spec");
+        let work = root.join("work");
+        let job = work.join("job-1");
         JobContainerSpec {
             name: "velnor-job-1".into(),
             image: "ubuntu:24.04".into(),
             network: "velnor-net-1".into(),
-            workspace_host: "/tmp/work".into(),
-            temp_host: "/tmp/temp".into(),
-            home_host: "/tmp/home".into(),
-            actions_host: "/tmp/actions".into(),
-            tools_host: "/tmp/tools".into(),
+            workspace_host: job.join("workspace"),
+            temp_host: job.join("temp"),
+            home_host: job.join("home"),
+            actions_host: job.join("actions"),
+            tools_host: job.join("tools"),
             mount_docker_socket: true,
+            slot_count: NonZeroU32::MIN,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             resource_options: vec!["--memory".into(), "8g".into()],
             options: vec!["--cpus".into(), "2".into()],
@@ -1387,11 +1571,19 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class: GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: StoreTrustClass::Trusted,
+            mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
+            sccache_store_host: None,
         }
+    }
+
+    #[test]
+    fn slot_budget_uses_authoritative_count_for_nonstandard_job_paths() {
+        let mut job = spec();
+        job.temp_host = PathBuf::from("/not-a-slot-layout/jobs/job/temp");
+        job.slot_count = NonZeroU32::new(2).unwrap();
+
+        assert_eq!(job.slot_budget().slots, job.slot_count);
     }
 
     #[test]
@@ -1405,20 +1597,276 @@ mod tests {
                 "velnor.daemon-id=test-daemon",
                 "--label",
                 "velnor.job-id=velnor-job-1",
+                "--",
                 "velnor-net-1",
             ]
         );
     }
 
+    #[test]
+    fn default_job_mounts_only_mbx_with_bounded_gc() {
+        let job = spec();
+        let mbx_store = job.mbx_store_host.clone().unwrap();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        assert!(args.contains(&format!("{}:/var/cache/mbx", mbx_store.display())));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
+        assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
+        assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
+        assert!(!args.contains(&"MBX_DISABLE=1".into()));
+    }
+
+    #[test]
+    fn daemon_acceleration_environment_follows_trusted_container_options() {
+        let mut job = spec();
+        job.options = vec!["-e".into(), "MBX_CACHE_DIR=/untrusted-override".into()];
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        let override_index = args
+            .iter()
+            .position(|arg| arg == "MBX_CACHE_DIR=/untrusted-override")
+            .unwrap();
+        let policy_index = args
+            .iter()
+            .position(|arg| arg == "MBX_CACHE_DIR=/var/cache/mbx")
+            .unwrap();
+        assert!(policy_index > override_index);
+    }
+
+    /// The budget the daemon derived for this job must reach the compilers
+    /// that would otherwise each size themselves to the whole machine.
+    #[test]
+    fn the_job_is_told_its_share_of_the_machine() {
+        let mut job = spec();
+        job.options.clear();
+        job.resource_options.clear();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        let jobs = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("CARGO_BUILD_JOBS="))
+            .expect("a derivable host budget must reach Cargo")
+            .to_owned();
+        assert!(args.contains(&format!("MAKEFLAGS=-j{jobs}")));
+        assert!(args.contains(&format!("MBX_SCHEDULER_CPUS={jobs}")));
+        // No declared limit, so the daemon pins the container to the share.
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
+        assert_eq!(args[cpus_index + 1], jobs);
+        if let Some(memory) = job.slot_budget().memory_bytes.value().copied() {
+            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
+            assert_eq!(args[memory_index + 1], memory.to_string());
+        } else {
+            assert!(!args.iter().any(|arg| arg == "--memory"));
+        }
+        assert!(args.iter().any(|arg| arg.starts_with("VELNOR_JOB_BUDGET=")));
+    }
+
+    /// A workflow cannot widen its own share of a host it cannot see, and the
+    /// override is named rather than applied silently.
+    #[test]
+    fn a_workflow_set_job_count_loses_to_the_daemon_budget_and_is_named() {
+        let mut job = spec();
+        job.env = vec![("CARGO_BUILD_JOBS".into(), "64".into())];
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        let workflow_index = args
+            .iter()
+            .position(|arg| arg == "CARGO_BUILD_JOBS=64")
+            .unwrap();
+        let policy_index = args
+            .iter()
+            .rposition(|arg| arg.starts_with("CARGO_BUILD_JOBS="))
+            .unwrap();
+        assert!(policy_index > workflow_index);
+        assert_ne!(args[policy_index], "CARGO_BUILD_JOBS=64");
+        let notice = args
+            .iter()
+            .find(|arg| arg.starts_with("VELNOR_JOB_BUDGET="))
+            .unwrap();
+        assert!(notice.contains("overrides workflow-set CARGO_BUILD_JOBS"));
+    }
+
+    /// A declared container limit is folded into the runner-owned cap and is
+    /// never joined by a second `--cpus`.
+    #[test]
+    fn a_declared_cpu_limit_narrows_the_share_and_stays_single() {
+        let mut job = spec();
+        job.options.clear();
+        job.resource_options = vec!["--cpus".into(), "1".into()];
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        assert!(args.contains(&"CARGO_BUILD_JOBS=1".to_owned()));
+        assert!(args.contains(&"MAKEFLAGS=-j1".to_owned()));
+    }
+
+    /// The tightest declared limit wins, whichever side declared it, while the
+    /// final argv contains one normalized runner-owned flag.
+    #[test]
+    fn the_tightest_declared_cpu_limit_sizes_the_job() {
+        let mut job = spec();
+        job.options = vec!["--cpus".into(), "2".into()];
+        job.resource_options = vec!["--cpus".into(), "1".into()];
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        assert!(args.contains(&"CARGO_BUILD_JOBS=1".to_owned()));
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        let cpus_index = args.iter().position(|arg| arg == "--cpus").unwrap();
+        assert_eq!(args[cpus_index + 1], "1");
+    }
+
+    #[test]
+    fn normalized_cpu_limit_preserves_other_workflow_and_daemon_flags() {
+        let mut job = spec();
+        job.options = vec!["--cpus=64".into(), "--label".into(), "workflow".into()];
+        job.resource_options = vec!["--memory".into(), "8g".into(), "--cpus".into(), "4".into()];
+        let expected = job
+            .slot_budget()
+            .docker_cpu_option()
+            .expect("the test host exposes a CPU budget");
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+
+        assert_eq!(args.iter().filter(|arg| *arg == "--cpus").count(), 1);
+        assert!(args.windows(2).any(|pair| pair == expected.as_slice()));
+        assert!(!args.iter().any(|arg| arg == "--cpus=64"));
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected_memory = derived_memory
+                .min(parse_docker_memory_bytes("8g").unwrap())
+                .to_string();
+            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "--memory" && pair[1] == expected_memory));
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        }
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--label" && pair[1] == "workflow"));
+    }
+
+    #[test]
+    fn a_declared_memory_limit_narrows_the_share() {
+        let mut job = spec();
+        job.options = vec!["--memory=1m".into()];
+        job.resource_options.clear();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected = derived_memory.min(1 << 20).to_string();
+            assert_eq!(args.iter().filter(|arg| *arg == "--memory").count(), 1);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "--memory" && pair[1] == expected));
+        } else {
+            assert!(args.iter().any(|arg| arg == "--memory=1m"));
+        }
+    }
+
+    #[test]
+    fn a_large_declared_memory_limit_cannot_widen_the_share() {
+        let mut job = spec();
+        job.options = vec!["--memory".into(), "64t".into()];
+        job.resource_options.clear();
+        let expected = job.slot_budget().memory_bytes.value().copied();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        if let Some(expected) = expected {
+            let memory_index = args.iter().position(|arg| arg == "--memory").unwrap();
+            assert_eq!(args[memory_index + 1], expected.to_string());
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "64t"]));
+        }
+    }
+
+    #[test]
+    fn invalid_declared_memory_limit_fails_closed() {
+        let mut job = spec();
+        job.options = vec!["--memory".into(), "not-a-size".into()];
+        job.resource_options.clear();
+        let error = job.start_args().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn docker_memory_units_normalize_before_comparison() {
+        assert_eq!(parse_docker_memory_bytes("123"), Some(123));
+        assert_eq!(parse_docker_memory_bytes("1.5g"), Some(1_610_612_736));
+        assert_eq!(parse_docker_memory_bytes("512MiB"), Some(536_870_912));
+        assert_eq!(parse_docker_memory_bytes("0"), None);
+        assert_eq!(parse_docker_memory_bytes("-1g"), None);
+        assert_eq!(parse_docker_memory_bytes("garbage"), None);
+    }
+
+    #[test]
+    fn explicit_sccache_is_mutually_exclusive_with_mbx() {
+        let mut job = spec();
+        job.mbx_store_host = None;
+        let sccache_store = job.temp_host.join("_velnor_sccache/trusted");
+        job.sccache_store_host = Some(sccache_store.clone());
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
+        assert!(args.contains(&format!("{}:/var/cache/sccache", sccache_store.display())));
+        assert!(args.contains(&"RUSTC_WRAPPER=sccache".into()));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+        assert!(args.contains(&"SCCACHE_GHA_ENABLED=false".into()));
+        assert!(args.contains(&"MBX_DISABLE=1".into()));
+        assert!(!args.iter().any(|arg| arg.contains("/var/cache/mbx")));
+    }
+
     fn container_test_temp(name: &str) -> PathBuf {
-        let counter = EXEC_ENV_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "velnor-container-{name}-{}-{counter}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
+        std::env::temp_dir().join(format!(
+            "velnor-container-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn concurrent_container_commands_use_disjoint_test_roots() {
+        let commands = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    let job = spec();
+                    let env_dir = job.env_dir();
+                    let rendered = rendered(&job.start_args().unwrap());
+                    (env_dir, rendered)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let commands = commands
+            .into_iter()
+            .map(|command| command.join().unwrap())
+            .collect::<Vec<_>>();
+        for (index, (env_dir, args)) in commands.iter().enumerate() {
+            assert!(
+                args.iter()
+                    .any(|arg| arg == "NODE_OPTIONS=--max-old-space-size=4096"),
+                "command {index} did not materialize its environment"
+            );
+            assert!(
+                commands
+                    .iter()
+                    .skip(index + 1)
+                    .all(|(other_env_dir, _)| other_env_dir != env_dir),
+                "command {index} reused another test's env directory"
+            );
+        }
+    }
+
+    #[test]
+    fn container_test_specs_and_service_env_dirs_are_disjoint() {
+        let first = spec();
+        let second = spec();
+        assert_ne!(first.temp_host, second.temp_host);
+        assert_ne!(first.env_dir(), second.env_dir());
+        assert_ne!(first.mbx_store_host, second.mbx_store_host);
+
+        let first_service = service_env_dir();
+        let second_service = service_env_dir();
+        assert_ne!(first_service, second_service);
     }
 
     #[test]
@@ -1435,57 +1883,6 @@ mod tests {
         assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 0);
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn compiler_cache_mounts_are_mutually_exclusive() {
-        let mut job = spec();
-        let sccache = job.start_args().join(" ");
-        assert!(sccache.contains("/var/cache/sccache"));
-        assert!(!sccache.contains("/var/cache/kache"));
-
-        job.compiler_cache_backend = CompilerCacheBackend::Kache;
-        let kache = job.start_args().join(" ");
-        assert!(kache.contains("/var/cache/kache"));
-        assert!(!kache.contains("/var/cache/sccache"));
-        assert!(kache.contains("RUSTC_WRAPPER=kache"));
-
-        job.compiler_cache_backend = CompilerCacheBackend::Off;
-        let off = job.start_args().join(" ");
-        assert!(!off.contains("/var/cache/sccache"));
-        assert!(!off.contains("/var/cache/kache"));
-    }
-
-    #[test]
-    fn compiler_cache_stores_have_distinct_canonical_classes() {
-        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        assert_eq!(
-            sccache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
-        );
-        assert_eq!(
-            kache_host(temp, GuestCompilerCacheTrustClass::Trusted),
-            PathBuf::from("/var/lib/velnor/work/_velnor_kache/trusted")
-        );
-    }
-
-    #[test]
-    fn compiler_cache_hosts_use_each_typed_trust_namespace() {
-        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
-        for (trust_class, namespace) in [
-            (GuestCompilerCacheTrustClass::Untrusted, "untrusted"),
-            (GuestCompilerCacheTrustClass::Trusted, "trusted"),
-            (GuestCompilerCacheTrustClass::Release, "release"),
-        ] {
-            assert_eq!(
-                sccache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_sccache/{namespace}"))
-            );
-            assert_eq!(
-                kache_host(temp, trust_class),
-                PathBuf::from(format!("/var/lib/velnor/work/_velnor_kache/{namespace}"))
-            );
-        }
     }
 
     #[test]
@@ -1589,14 +1986,14 @@ mod tests {
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
+                StoreTrustClass::Trusted,
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                GuestCompilerCacheTrustClass::Trusted,
+                StoreTrustClass::Trusted,
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
@@ -1604,7 +2001,9 @@ mod tests {
 
     #[test]
     fn builds_start_container_args_with_mounts() {
-        let args = spec().start_args();
+        let job = spec();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
 
         assert!(args
             .windows(2)
@@ -1614,40 +2013,70 @@ mod tests {
                 .any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]),
             "job containers must map the standard host alias for daemon services"
         );
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(
-            &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
-                .into()
+        assert!(has_mount(&args, &job.workspace_host, "/__w"));
+        assert!(has_mount(&args, &job.temp_host, "/tmp"));
+        assert!(has_mount(
+            &args,
+            job.mbx_store_host.as_ref().unwrap(),
+            "/var/cache/mbx"
         ));
-        assert!(args
-            .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
-        assert!(
-            args.contains(&"/tmp/temp/_velnor/ephemeral/mise-installs:/opt/mise/installs".into())
-        );
-        assert!(args.contains(
-            &"/tmp/_velnor_mise/binaries/trusted/acme_repo:/opt/velnor/mise-binaries".into()
+        assert!(has_mount(&args, &job.home_host, "/github/home"));
+        assert!(has_mount(
+            &args,
+            &job.playwright_browser_store_host(),
+            "/github/home/.cache/ms-playwright"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.cargo_executable_store_host(),
+            "/github/home/.cargo/bin"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.mise_executable_store_host(),
+            "/opt/mise/installs"
+        ));
+        assert!(has_mount(
+            &args,
+            &job.mise_binary_store_host(),
+            "/opt/velnor/mise-binaries"
         ));
         assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
-        assert!(args.contains(
-            &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()
+        assert!(has_mount(
+            &args,
+            &cargo_store_host(&job.temp_host).join("registry/cache"),
+            "/github/home/.cargo/registry/cache"
         ));
-        assert!(args.contains(
-            &"/tmp/_velnor_cargo/registry/index:/github/home/.cargo/registry/index".into()
+        assert!(has_mount(
+            &args,
+            &cargo_store_host(&job.temp_host).join("registry/index"),
+            "/github/home/.cargo/registry/index"
         ));
-        assert!(args.contains(&"/tmp/_velnor_cargo/git/db:/github/home/.cargo/git/db".into()));
+        assert!(has_mount(
+            &args,
+            &cargo_store_host(&job.temp_host).join("git/db"),
+            "/github/home/.cargo/git/db"
+        ));
         assert!(!args
             .iter()
             .any(|arg| arg.ends_with(":/github/home/.cargo/registry/src")));
         assert!(!args
             .iter()
             .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
-        assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert!(has_mount(
+            &args,
+            &mise_store_host(&job.temp_host).join("cache"),
+            "/opt/mise/cache"
+        ));
+        assert!(has_mount(
+            &args,
+            &workflow_host(&job.temp_host),
+            "/github/workflow"
+        ));
+        assert!(has_read_only_mount(&args, &job.actions_host, "/__a"));
+        assert!(!has_mount(&args, &job.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
-        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
+        assert!(args.contains(&"MBX_CACHE_DIR=/var/cache/mbx".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
@@ -1661,13 +2090,17 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
-        assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
-        let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
-        let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
-        assert!(cpus_pos < memory_pos);
+        if let Some(derived_memory) = job.slot_budget().memory_bytes.value().copied() {
+            let expected_memory = derived_memory.min(parse_docker_memory_bytes("8g").unwrap());
+            assert!(args
+                .windows(2)
+                .any(|pair| { pair[0] == "--memory" && pair[1] == expected_memory.to_string() }));
+        } else {
+            assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        }
         let lease_mount = format!(
             "{}:/var/run/docker.sock",
-            spec().guest_docker_socket_host().display()
+            job.guest_docker_socket_host().display()
         );
         assert!(
             args.contains(&lease_mount),
@@ -1688,12 +2121,22 @@ mod tests {
 
     #[test]
     fn mise_seed_keeps_rustup_isolated_in_the_job_image() {
-        let args = spec().seed_mise_store_args();
+        let job = spec();
+        let args = job.seed_mise_store_args().unwrap();
 
         assert!(!args.iter().any(|arg| arg.contains("/__velnor_seed/rustup")));
         assert!(!args
             .last()
             .is_some_and(|script| script.contains("/root/.rustup")));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--label", "velnor.job-id=velnor-job-1"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--name", "velnor-mise-seed-velnor-job-1"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--cgroup-parent", "velnor-jobs.slice"]));
@@ -1713,10 +2156,16 @@ mod tests {
         );
         assert_eq!(first.mise_executable_store_host(), expected);
         assert_eq!(same_slot.mise_executable_store_host(), expected);
-        assert!(first.start_args().contains(
-            &"/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3:/opt/mise/installs"
-                .into()
-        ));
+        // Materializing the command writes an env file, so root this half of
+        // the assertion in a real directory and derive the expectation.
+        let root = container_test_temp("mise-slot");
+        let mut warm = spec();
+        warm.temp_host = root.join("work/slot-3/job-a/temp");
+        let expected_mount = format!(
+            "{}:/opt/mise/installs",
+            warm.mise_executable_store_host().display()
+        );
+        assert!(rendered(&warm.start_args().unwrap()).contains(&expected_mount));
         assert_eq!(
             other_slot.mise_executable_store_host(),
             PathBuf::from(
@@ -1731,24 +2180,30 @@ mod tests {
 
     #[test]
     fn maps_job_paths_to_docker_host_work_dir() {
+        // The mapping only depends on the relative path below the work root,
+        // so a real temp root keeps the expected daemon-side paths identical
+        // while letting the command materialize its env file.
+        let root = container_test_temp("host-work-dir");
         let mut spec = spec();
-        spec.workspace_host = "/runner/work/job-1/workspace".into();
-        spec.temp_host = "/runner/work/job-1/temp".into();
-        spec.home_host = "/runner/work/job-1/home".into();
-        spec.actions_host = "/runner/work/job-1/actions".into();
-        spec.tools_host = "/runner/work/job-1/tools".into();
+        spec.workspace_host = root.join("runner/work/job-1/workspace");
+        spec.temp_host = root.join("runner/work/job-1/temp");
+        spec.home_host = root.join("runner/work/job-1/home");
+        spec.actions_host = root.join("runner/work/job-1/actions");
+        spec.tools_host = root.join("runner/work/job-1/tools");
+        spec.mbx_store_host = Some(root.join("runner/work/_velnor_mbx/trusted"));
         spec.docker_host_work_dir = Some("/daemon/work".into());
 
-        let args = spec.start_args();
+        let prepared = spec.start_args().unwrap();
+        let args = rendered(&prepared);
 
         assert!(args.contains(&"/daemon/work/job-1/workspace:/__w".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
-        assert!(args.contains(&"/daemon/work/_velnor_sccache/trusted:/var/cache/sccache".into()));
+        assert!(args.contains(&"/daemon/work/_velnor_mbx/trusted:/var/cache/mbx".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
-        assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
+        assert!(args.contains(&"/daemon/work/job-1/actions:/__a:ro".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
         assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
@@ -1756,35 +2211,37 @@ mod tests {
 
     #[test]
     fn builds_bash_exec_args() {
-        let args = spec().exec_script_args(
-            "/__t/step.sh",
-            Shell::Bash,
-            "/__w/repo",
-            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+        let spec = spec();
+        let prepared = spec
+            .prepare_exec_script_args(
+                "/__t/step.sh",
+                Shell::Bash,
+                "/__w/repo",
+                &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+                &[],
+            )
+            .unwrap();
+        let temp_env = format!("VELNOR_DOCKER_HOST_TEMP={}", spec.temp_host.display());
+        let workspace_env = format!(
+            "VELNOR_DOCKER_HOST_WORKSPACE={}",
+            spec.workspace_host.display()
         );
 
         assert_eq!(
-            args,
+            rendered(&prepared),
             vec![
                 "exec",
                 "--workdir",
                 "/__w/repo",
-                "-e",
                 "HOME=/github/home",
-                "-e",
                 "DOCKER_HOST=unix:///var/run/docker.sock",
-                "-e",
                 "RUSTUP_HOME=/root/.rustup",
-                "-e",
                 "CARGO_HOME=/github/home/.cargo",
-                "-e",
                 "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "-e",
-                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
-                "-e",
-                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
-                "-e",
+                temp_env.as_str(),
+                workspace_env.as_str(),
                 "GITHUB_OUTPUT=/__t/out",
+                "--",
                 "velnor-job-1",
                 "bash",
                 "--noprofile",
@@ -1799,34 +2256,36 @@ mod tests {
 
     #[test]
     fn builds_process_exec_args() {
-        let args = spec().exec_process_args(
-            "/__w/repo",
-            &[("INPUT_NAME".into(), "value".into())],
-            &["node".into(), "/__a/action/dist/index.js".into()],
+        let spec = spec();
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w/repo",
+                &[("INPUT_NAME".into(), "value".into())],
+                &[],
+                &["node".into(), "/__a/action/dist/index.js".into()],
+            )
+            .unwrap();
+        let temp_env = format!("VELNOR_DOCKER_HOST_TEMP={}", spec.temp_host.display());
+        let workspace_env = format!(
+            "VELNOR_DOCKER_HOST_WORKSPACE={}",
+            spec.workspace_host.display()
         );
 
         assert_eq!(
-            args,
+            rendered(&prepared),
             vec![
                 "exec",
                 "--workdir",
                 "/__w/repo",
-                "-e",
                 "HOME=/github/home",
-                "-e",
                 "DOCKER_HOST=unix:///var/run/docker.sock",
-                "-e",
                 "RUSTUP_HOME=/root/.rustup",
-                "-e",
                 "CARGO_HOME=/github/home/.cargo",
-                "-e",
                 "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "-e",
-                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
-                "-e",
-                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
-                "-e",
+                temp_env.as_str(),
+                workspace_env.as_str(),
                 "INPUT_NAME=value",
+                "--",
                 "velnor-job-1",
                 "node",
                 "/__a/action/dist/index.js"
@@ -1843,7 +2302,8 @@ mod tests {
             ("DOCKER_CONFIG".into(), "/tmp/attacker".into()),
             ("SAFE_ENV".into(), "kept".into()),
         ];
-        let start = spec.start_args();
+        let start_prepared = spec.start_args().unwrap();
+        let start = rendered(&start_prepared);
         assert!(start.contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
         assert!(start.contains(&"SAFE_ENV=kept".into()));
         assert!(!start.iter().any(|arg| arg.contains("attacker.example")));
@@ -1862,10 +2322,10 @@ mod tests {
                 &["docker".into(), "version".into()],
             )
             .unwrap();
-        assert!(prepared
-            .args()
-            .contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
-        assert!(!prepared.args().iter().any(|arg| arg.contains("attacker")));
+        assert!(rendered(&prepared).contains(&"DOCKER_HOST=unix:///var/run/docker.sock".into()));
+        assert!(!rendered(&prepared)
+            .iter()
+            .any(|arg| arg.contains("attacker")));
     }
 
     #[test]
@@ -1887,7 +2347,8 @@ mod tests {
         let joined = prepared.args().join("\0");
         assert!(prepared.args().contains(&"--env-file".into()));
         assert!(!joined.contains("PLACEHOLDER_SECRET"));
-        assert!(joined.contains("PLAIN=visible"));
+        assert!(!joined.contains("PLAIN=visible"));
+        assert!(rendered(&prepared).contains(&"PLAIN=visible".into()));
     }
 
     #[test]
@@ -1958,9 +2419,14 @@ mod tests {
         }
     }
 
+    /// Environment classification is gone: `/proc` is world-readable, so no
+    /// variable is "safe enough" for argv. Every single-line variable goes to
+    /// the mode-0600 env file, secret or not.
     #[test]
-    fn nonsecret_env_stays_inline() {
-        let prepared = spec()
+    fn no_environment_pair_reaches_argv() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("no-argv-env");
+        let prepared = spec
             .prepare_exec_process_args(
                 "/__w",
                 &[("PLAIN".into(), "visible".into())],
@@ -1969,9 +2435,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(prepared.args().contains(&"-e".into()));
-        assert!(prepared.args().contains(&"PLAIN=visible".into()));
-        assert!(!prepared.args().contains(&"--env-file".into()));
+        assert!(prepared.args().contains(&"--env-file".into()));
+        assert!(!prepared.args().iter().any(|arg| arg.contains('=')));
+        assert!(rendered(&prepared).contains(&"PLAIN=visible".into()));
     }
 
     #[test]
@@ -1990,17 +2456,17 @@ mod tests {
             )
             .unwrap();
 
-        let env_file_pos = prepared
-            .args()
+        let effective = rendered(&prepared);
+        let secret_pos = effective
             .iter()
-            .position(|arg| arg == "--env-file")
+            .position(|arg| arg == "HOME=PLACEHOLDER_SECRET")
             .unwrap();
-        let override_pos = prepared
-            .args()
-            .windows(2)
-            .position(|pair| pair == ["-e", "HOME=/override"])
+        let override_pos = effective
+            .iter()
+            .position(|arg| arg == "HOME=/override")
             .unwrap();
-        assert!(env_file_pos < override_pos);
+        assert!(secret_pos < override_pos, "docker applies the last value");
+        assert!(!prepared.args().iter().any(|arg| arg.contains("/override")));
     }
 
     #[test]
@@ -2022,10 +2488,9 @@ mod tests {
             .unwrap();
         let env_file = PathBuf::from(&prepared.args()[env_file_pos + 1]);
 
-        assert_eq!(
-            fs::read_to_string(&env_file).unwrap(),
-            "TOKEN=PLACEHOLDER_SECRET\n"
-        );
+        assert!(fs::read_to_string(&env_file)
+            .unwrap()
+            .contains("TOKEN=PLACEHOLDER_SECRET\n"));
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
@@ -2037,13 +2502,18 @@ mod tests {
 
     #[test]
     fn builds_node_action_run_args() {
-        let args = spec().run_node_action_args(
-            "/__w",
-            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
-            &[],
-            "node:20-bookworm",
-            "/__a/action/dist/index.js",
-        );
+        let spec = spec();
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+                &[],
+                &[],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
 
         assert!(args
             .windows(2)
@@ -2052,14 +2522,24 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.windows(2).any(|pair| pair == ["--workdir", "/__w"]));
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/work:/github/workspace".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
-        assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
-        assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert!(has_mount(&args, &spec.workspace_host, "/__w"));
+        assert!(has_mount(&args, &spec.workspace_host, "/github/workspace"));
+        assert!(has_mount(&args, &spec.temp_host, "/tmp"));
+        assert!(has_mount(
+            &args,
+            spec.mbx_store_host.as_ref().unwrap(),
+            "/var/cache/mbx"
+        ));
+        assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
+        assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));
+        assert!(has_mount(&args, &spec.home_host, "/github/home"));
+        assert!(has_mount(
+            &args,
+            &workflow_host(&spec.temp_host),
+            "/github/workflow"
+        ));
+        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -2082,13 +2562,17 @@ mod tests {
 
     #[test]
     fn builds_node_action_run_args_with_path_prelude() {
-        let args = spec().run_node_action_args(
-            "/__w",
-            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
-            &["/github/home/.cargo/bin".into(), "/path/with'quote".into()],
-            "node:20-bookworm",
-            "/__a/action/dist/index.js",
-        );
+        let prepared = spec()
+            .prepare_run_node_action_args(
+                "/__w",
+                &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+                &[],
+                &["/github/home/.cargo/bin".into(), "/path/with'quote".into()],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
 
         assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
         assert!(args.contains(&"PATH=/github/home/.cargo/bin:/path/with'quote:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
@@ -2104,25 +2588,33 @@ mod tests {
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
 
-        let start_args = spec.start_args();
+        let start_prepared = spec.start_args().unwrap();
+        let start_args = rendered(&start_prepared);
         assert!(start_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(start_args.contains(
             &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
         ));
 
-        let node_args = spec.run_node_action_args(
-            "/__w",
-            &[],
-            &[],
-            "node:24-bookworm",
-            "/__a/action/dist/index.js",
-        );
+        let node_prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[],
+                "node:24-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let node_args = rendered(&node_prepared);
         assert!(node_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(node_args.contains(
             &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
         ));
 
-        let docker_action_args = spec.run_docker_action_args("/__w", &[], "alpine:3.20", None, &[]);
+        let docker_action_prepared = spec
+            .prepare_run_docker_action_args("/__w", &[], &[], "alpine:3.20", None, &[])
+            .unwrap();
+        let docker_action_args = rendered(&docker_action_prepared);
         assert!(docker_action_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(docker_action_args.contains(
             &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
@@ -2136,27 +2628,35 @@ mod tests {
         spec.docker_cli_host_path = Some("/usr/bin/docker".into());
         spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
 
-        let start_args = spec.start_args();
+        let start_prepared = spec.start_args().unwrap();
+        let start_args = rendered(&start_prepared);
         assert!(!start_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(!start_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(!start_args.contains(
             &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
         ));
 
-        let node_args = spec.run_node_action_args(
-            "/__w",
-            &[],
-            &[],
-            "node:24-bookworm",
-            "/__a/action/dist/index.js",
-        );
+        let node_prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[],
+                "node:24-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let node_args = rendered(&node_prepared);
         assert!(!node_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(!node_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(!node_args.contains(
             &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
         ));
 
-        let docker_action_args = spec.run_docker_action_args("/__w", &[], "alpine:3.20", None, &[]);
+        let docker_action_prepared = spec
+            .prepare_run_docker_action_args("/__w", &[], &[], "alpine:3.20", None, &[])
+            .unwrap();
+        let docker_action_args = rendered(&docker_action_prepared);
         assert!(!docker_action_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(!docker_action_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(!docker_action_args.contains(
@@ -2167,13 +2667,18 @@ mod tests {
     #[test]
     fn builds_docker_action_args() {
         let spec = spec();
+        let dockerfile = spec.actions_host.join("action/Dockerfile");
+        let context = spec.actions_host.join("action");
+        let dockerfile_string = dockerfile.display().to_string();
+        let context_string = context.display().to_string();
 
         assert_eq!(
             spec.build_docker_action_args(
                 "velnor-action-owner-repo-v1-root",
-                Path::new("/tmp/actions/action/Dockerfile"),
-                Path::new("/tmp/actions/action"),
-            ),
+                &dockerfile,
+                &context,
+            )
+            .unwrap(),
             vec![
                 "build",
                 "--cgroup-parent",
@@ -2181,18 +2686,23 @@ mod tests {
                 "--tag",
                 "velnor-action-owner-repo-v1-root",
                 "--file",
-                "/tmp/actions/action/Dockerfile",
-                "/tmp/actions/action"
+                dockerfile_string.as_str(),
+                "--",
+                context_string.as_str()
             ]
         );
 
-        let args = spec.run_docker_action_args(
-            "/__w",
-            &[("INPUT_NAME".into(), "value".into())],
-            "alpine:3.20",
-            Some("/entrypoint.sh"),
-            &["arg1".into()],
-        );
+        let prepared = spec
+            .prepare_run_docker_action_args(
+                "/__w",
+                &[("INPUT_NAME".into(), "value".into())],
+                &[],
+                "alpine:3.20",
+                Some("/entrypoint.sh"),
+                &["arg1".into()],
+            )
+            .unwrap();
+        let args = rendered(&prepared);
 
         assert!(args
             .windows(2)
@@ -2200,14 +2710,24 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
-        assert!(args.contains(&"/tmp/work:/__w".into()));
-        assert!(args.contains(&"/tmp/work:/github/workspace".into()));
-        assert!(args.contains(&"/tmp/temp:/tmp".into()));
-        assert!(args.contains(&"/tmp/_velnor_sccache/trusted:/var/cache/sccache".into()));
-        assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
-        assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
-        assert!(args.contains(&"/tmp/home:/github/home".into()));
-        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
+        assert!(has_mount(&args, &spec.workspace_host, "/__w"));
+        assert!(has_mount(&args, &spec.workspace_host, "/github/workspace"));
+        assert!(has_mount(&args, &spec.temp_host, "/tmp"));
+        assert!(has_mount(
+            &args,
+            spec.mbx_store_host.as_ref().unwrap(),
+            "/var/cache/mbx"
+        ));
+        assert!(has_mount(&args, &spec.temp_host, "/github/runner_temp"));
+        assert!(has_mount(&args, &spec.temp_host, "/github/file_commands"));
+        assert!(has_mount(&args, &spec.home_host, "/github/home"));
+        assert!(has_mount(
+            &args,
+            &workflow_host(&spec.temp_host),
+            "/github/workflow"
+        ));
+        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(!has_mount(&args, &spec.actions_host, "/__a"));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -2239,14 +2759,14 @@ mod tests {
             options: vec!["--health-cmd".into(), "pg_isready".into()],
         };
 
+        let prepared = service.start_args(&service_env_dir()).unwrap();
         assert_eq!(
-            service.start_args(),
+            rendered(&prepared),
             vec![
                 "run",
                 "--detach",
                 "--name",
                 "velnor-service-postgres",
-                "-e",
                 "POSTGRES_PASSWORD=postgres",
                 "-p",
                 "5432:5432",
@@ -2258,18 +2778,25 @@ mod tests {
                 "velnor-net-1",
                 "--network-alias",
                 "postgres",
+                "--",
                 "postgres:16"
             ]
         );
+        // The service password is workflow input and must never be argv.
+        assert!(!prepared
+            .args()
+            .iter()
+            .any(|arg| arg.contains("POSTGRES_PASSWORD")));
         assert_eq!(
             service.remove_args(),
-            vec!["rm", "--force", "velnor-service-postgres"]
+            vec!["rm", "--force", "--", "velnor-service-postgres"]
         );
         assert_eq!(
             service.health_status_args(),
             vec![
                 "inspect",
                 "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+                "--",
                 "velnor-service-postgres"
             ]
         );
@@ -2286,14 +2813,16 @@ mod tests {
             ports: Vec::new(),
             options: vec!["--network".into(), "unexpected".into()],
         };
-        let args = service.start_args();
+        let prepared = service.start_args(&service_env_dir()).unwrap();
+        let args = rendered(&prepared);
         assert_eq!(
-            &args[args.len() - 5..],
+            &args[args.len() - 6..],
             [
                 "--network",
                 "velnor-net-owned",
                 "--network-alias",
                 "postgres",
+                "--",
                 "postgres:16"
             ]
         );
@@ -2303,7 +2832,8 @@ mod tests {
     fn job_runner_network_overrides_expanded_options() {
         let mut job = spec();
         job.options = vec!["--network".into(), "unexpected".into()];
-        let args = job.start_args();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
         let network_pairs = args
             .windows(2)
             .filter(|pair| pair[0] == "--network")
@@ -2315,7 +2845,8 @@ mod tests {
     fn job_runner_cgroup_parent_overrides_expanded_options() {
         let mut job = spec();
         job.options = vec!["--cgroup-parent".into(), "unexpected.slice".into()];
-        let args = job.start_args();
+        let prepared = job.start_args().unwrap();
+        let args = rendered(&prepared);
         let cgroup_pairs = args
             .windows(2)
             .filter(|pair| pair[0] == "--cgroup-parent")
@@ -2334,7 +2865,8 @@ mod tests {
             ports: Vec::new(),
             options: vec!["--cgroup-parent".into(), "unexpected.slice".into()],
         };
-        let args = service.start_args();
+        let prepared = service.start_args(&service_env_dir()).unwrap();
+        let args = rendered(&prepared);
         let cgroup_pairs = args
             .windows(2)
             .filter(|pair| pair[0] == "--cgroup-parent")
@@ -2354,8 +2886,10 @@ mod tests {
             ports: vec!["5432".into()],
             options: Vec::new(),
         };
-        let job_args = job.start_args();
-        let service_args = service.start_args();
+        let job_prepared = job.start_args().unwrap();
+        let job_args = rendered(&job_prepared);
+        let service_prepared = service.start_args(&service_env_dir()).unwrap();
+        let service_args = rendered(&service_prepared);
         assert!(job_args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
@@ -2365,6 +2899,115 @@ mod tests {
         assert!(service_args
             .windows(2)
             .any(|pair| pair == ["--network-alias", "postgres"]));
+    }
+
+    /// `runs.args` are repository content. Before the end-of-flags separator
+    /// existed they were appended straight onto `docker run`, so
+    /// `args: ["--privileged", "-v", "/:/host"]` was a host escape.
+    #[test]
+    fn docker_action_arguments_cannot_become_docker_flags() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("action-args");
+        let prepared = spec
+            .prepare_run_docker_action_args(
+                "/__w",
+                &[],
+                &[],
+                "alpine:3.20",
+                None,
+                &[
+                    "--privileged".into(),
+                    "-v".into(),
+                    "/:/host".into(),
+                    "--user=0:0".into(),
+                ],
+            )
+            .unwrap();
+        let args = prepared.args();
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        for flagged in ["--privileged", "/:/host", "--user=0:0"] {
+            let position = args.iter().position(|arg| arg == flagged).unwrap();
+            assert!(
+                position > separator,
+                "{flagged} must sit after the end-of-flags separator"
+            );
+        }
+        // `-v` is also a legitimate mount flag; the action's copy is the last.
+        assert!(args.iter().rposition(|arg| arg == "-v").unwrap() > separator);
+        assert_eq!(args[separator + 1], "alpine:3.20");
+    }
+
+    /// An image that Docker would read as a flag never reaches a command line.
+    #[test]
+    fn flag_shaped_images_are_refused_everywhere_a_command_is_built() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("flag-image");
+        spec.image = "--privileged".into();
+        assert!(spec.start_args().is_err());
+        assert!(spec.seed_mise_store_args().is_err());
+        assert!(spec
+            .prepare_run_docker_action_args("/__w", &[], &[], "--privileged", None, &[])
+            .is_err());
+        assert!(spec
+            .prepare_run_node_action_args("/__w", &[], &[], &[], "-v/:/host", "/__a/index.js")
+            .is_err());
+        assert!(spec
+            .build_docker_action_args(
+                "--tag=evil",
+                &spec.actions_host.join("Dockerfile"),
+                &spec.actions_host,
+            )
+            .is_err());
+
+        let service = ServiceContainerSpec {
+            name: "velnor-service-evil".into(),
+            image: "--privileged".into(),
+            network_alias: "evil".into(),
+            network: "velnor-net-1".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        };
+        assert!(service.start_args(&service_env_dir()).is_err());
+    }
+
+    /// Job and service environment are the workflow's secrets. Neither may
+    /// appear on a command line that `/proc` publishes to every co-tenant.
+    #[test]
+    fn job_and_service_environment_never_reach_argv() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("job-env-argv");
+        spec.env = vec![
+            ("GITHUB_TOKEN".into(), "PLACEHOLDER_SECRET".into()),
+            ("PLAIN".into(), "visible".into()),
+        ];
+        let prepared = spec.start_args().unwrap();
+        assert!(!prepared
+            .args()
+            .iter()
+            .any(|arg| arg.contains("PLACEHOLDER_SECRET")));
+        assert!(!prepared.args().iter().any(|arg| arg == "PLAIN=visible"));
+        assert!(!prepared
+            .args()
+            .iter()
+            .any(|arg| arg.starts_with("NODE_OPTIONS=")));
+        assert!(rendered(&prepared).contains(&"GITHUB_TOKEN=PLACEHOLDER_SECRET".into()));
+
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: vec![("POSTGRES_PASSWORD".into(), "PLACEHOLDER_SECRET".into())],
+            ports: Vec::new(),
+            options: Vec::new(),
+        };
+        let prepared = service.start_args(&spec.env_dir()).unwrap();
+        assert!(!prepared
+            .args()
+            .iter()
+            .any(|arg| arg.contains("PLACEHOLDER_SECRET")));
+        assert!(rendered(&prepared).contains(&"POSTGRES_PASSWORD=PLACEHOLDER_SECRET".into()));
     }
 
     #[test]

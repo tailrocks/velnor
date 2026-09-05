@@ -117,9 +117,10 @@ available. There is no backend fallback.
   is separate from per-job GitHub credentials.
 - `VELNOR_SLOTS` controls local concurrency, not GitHub scheduling.
 - MicroVM supports a narrower action and cache surface than Docker.
-- Query, log, and storage projections may be empty after reopening because
-  those operational projections are not fully rehydrated, even though durable
-  event state survives.
+- In production, query, log, and storage projections fail closed with
+  `Unsupported` / HTTP 501 until durable adapters are wired. The in-memory
+  test service may still return successful empty projections after reopening;
+  that behavior is test-only and is not a production recovery guarantee.
 - Control/admin mutation routes, diagnostics bundles, and storage maintenance
   operations are currently unavailable to operators.
 - No APT signing-key bootstrap URL or APT repository setup metadata is included

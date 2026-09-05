@@ -252,6 +252,12 @@ impl UnixControlClient {
         scale_to: Option<u32>,
     ) -> Result<MutationResponse, ClientError> {
         crate::unix::UnixEndpoint::from_instance(instance).map_err(ClientError::Endpoint)?;
+        if self.endpoint.instance() != instance {
+            return Err(ClientError::Invalid {
+                field: "instance".to_owned(),
+                message: "target instance does not match endpoint instance".to_owned(),
+            });
+        }
         validate_segment(operation, "operation")?;
         if reason.trim().is_empty() {
             return Err(ClientError::Invalid {
@@ -566,7 +572,9 @@ fn validate_info(info: &Info, mutations: bool) -> Result<(), ClientError> {
         });
     }
     if mutations && !info.mutations {
-        return Err(ClientError::Authorization);
+        return Err(ClientError::Unsupported {
+            operation: "lifecycle mutations".to_owned(),
+        });
     }
     Ok(())
 }
@@ -675,6 +683,8 @@ pub enum ClientError {
         api_version: String,
         schema_version: u32,
     },
+    /// The daemon knows the API but does not implement the requested operation.
+    Unsupported { operation: String },
     /// Peer authorization rejected the operation.
     Authorization,
     /// Request deadline elapsed.
@@ -700,6 +710,9 @@ impl fmt::Display for ClientError {
                 formatter,
                 "unsupported control API {api_version} schema {schema_version}"
             ),
+            Self::Unsupported { operation } => {
+                write!(formatter, "unsupported control API operation: {operation}")
+            }
             Self::Authorization => formatter.write_str("control API authorization denied"),
             Self::Timeout => formatter.write_str("control API request timed out"),
             Self::Io { message, .. } => formatter.write_str(message),
@@ -726,6 +739,7 @@ impl ClientError {
                 ExitClass::from_code(envelope.code).unwrap_or(ExitClass::Transport)
             }
             Self::UnsupportedApi { .. } | Self::Io { .. } => ExitClass::Transport,
+            Self::Unsupported { .. } => ExitClass::Operation,
             Self::Authorization => ExitClass::Authorization,
             Self::Timeout => ExitClass::Timeout,
         }
@@ -761,6 +775,44 @@ mod tests {
             endpoint.socket_path(SocketKind::Control),
             endpoint.socket_path(SocketKind::Admin)
         );
+    }
+
+    #[tokio::test]
+    async fn mutation_rejects_foreign_instance_before_connecting() {
+        let endpoint = UnixEndpoint::from_instance("primary").expect("endpoint");
+        let client = UnixControlClient::new(endpoint);
+        let error = client
+            .mutate_instance(
+                "secondary",
+                "cordon",
+                "maintenance",
+                "request-1",
+                None,
+                None,
+            )
+            .await
+            .expect_err("foreign instance must be rejected before transport");
+
+        assert!(matches!(
+            error,
+            ClientError::Invalid { field, message }
+                if field == "instance" && message == "target instance does not match endpoint instance"
+        ));
+    }
+
+    #[test]
+    fn disabled_mutation_capability_is_not_reported_as_authorization() {
+        let error = validate_info(
+            &Info {
+                api_version: API_VERSION.to_owned(),
+                schema_version: SCHEMA_VERSION,
+                mutations: false,
+            },
+            true,
+        )
+        .expect_err("disabled mutation capability must fail closed");
+        assert!(matches!(error, ClientError::Unsupported { .. }));
+        assert_eq!(error.exit_class(), ExitClass::Operation);
     }
 
     #[tokio::test]

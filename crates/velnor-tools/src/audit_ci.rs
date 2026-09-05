@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
 
@@ -659,26 +659,15 @@ fn checkout_remote_default(
     // verified index blob below, so sparse omission cannot become a false
     // negative or a hard failure.
     let sparse_input = b"/*\n!/*/\n/.github/\n/docs/\n/scripts/\n/operational/\n/fleet/\n";
-    let mut sparse = Command::new("git")
+    let sparse = Command::new("git")
         .current_dir(&path)
         .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
         .stdin(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("configure sparse checkout for {repository}"))?;
-    use std::io::Write as _;
-    sparse
-        .stdin
-        .as_mut()
-        .context("git sparse-checkout stdin unavailable")?
-        .write_all(sparse_input)
-        .context("write sparse-checkout patterns")?;
-    if !sparse
-        .wait()
-        .context("wait for git sparse-checkout")?
-        .success()
-    {
+    if let Err(error) = configure_sparse_checkout(sparse, repository, sparse_input) {
         let _ = fs::remove_dir_all(&path);
-        bail!("configure sparse checkout for {repository}");
+        return Err(error);
     }
     let checkout = Command::new("git")
         .current_dir(&path)
@@ -691,6 +680,43 @@ fn checkout_remote_default(
     }
     verify_checkout_identity(&path, repository, default_branch, head_sha, false)?;
     Ok(RemoteCheckout { path })
+}
+
+fn configure_sparse_checkout(
+    mut sparse: Child,
+    repository: &str,
+    sparse_input: &[u8],
+) -> Result<()> {
+    let mut reaped = false;
+    let result = (|| {
+        use std::io::Write as _;
+
+        sparse
+            .stdin
+            .as_mut()
+            .context("git sparse-checkout stdin unavailable")?
+            .write_all(sparse_input)
+            .context("write sparse-checkout patterns")?;
+        // Close stdin before waiting so git receives EOF even on platforms
+        // where Child::wait does not close the pipe early enough.
+        sparse.stdin.take();
+        let status = sparse.wait().context("wait for git sparse-checkout")?;
+        reaped = true;
+        if !status.success() {
+            bail!("configure sparse checkout for {repository}");
+        }
+        Ok(())
+    })();
+
+    if result.is_err() && !reaped {
+        kill_and_reap(&mut sparse);
+    }
+    result
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn verify_local_default(
@@ -2591,7 +2617,6 @@ fn audit_steps(
     latest: &mut BTreeMap<String, Option<String>>,
     findings: &mut Vec<Finding>,
 ) {
-    let mut compile = false;
     let mut sccache = false;
     let mut swatinem = false;
     let mut target_cache = false;
@@ -2634,7 +2659,6 @@ fn audit_steps(
                 .iter()
                 .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
             });
-        compile |= step_compiles;
         if step_compiles {
             first_compile_step.get_or_insert(index);
         }
@@ -2659,7 +2683,7 @@ fn audit_steps(
                 ));
             }
         }
-        if run.contains("sccache --show-stats") || run.contains("kache --show-stats") {
+        if run.contains("sccache --show-stats") {
             findings.push(Finding::error(
                 "cache-reporting",
                 file,
@@ -2805,39 +2829,12 @@ fn audit_steps(
             ));
         }
     }
-    let pre_execution_rejection = Path::new(file).file_name().and_then(|name| name.to_str())
-        == Some("l2-negative.yml")
-        && job_id.starts_with("velnor-");
-    if compile
-        && !sccache
-        && !matches!(job_id, "cache-off" | "cache-kache")
-        && !pre_execution_rejection
-    {
-        findings.push(Finding::error(
-            "compile-cache",
-            file,
-            job_path,
-            "compile job must set up the pinned sccache action",
-        ));
-    }
     if swatinem && sccache {
         findings.push(Finding::error(
             "double-cache",
             file,
             job_path,
             "remove Swatinem/rust-cache from the sccache job",
-        ));
-    }
-    if compile
-        && !target_cache
-        && !matches!(job_id, "cache-off" | "cache-kache")
-        && !pre_execution_rejection
-    {
-        findings.push(Finding::error(
-            "target-cache",
-            file,
-            job_path,
-            "compile job must persist the Cargo target through actions/cache",
         ));
     }
     if target_cache && !target_cache_generation {
@@ -3239,6 +3236,24 @@ mod tests {
         findings.iter().any(|finding| finding.rule == rule)
     }
 
+    #[test]
+    fn sparse_checkout_early_error_reaps_child_and_preserves_error() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let child = command.spawn().unwrap();
+        let started = std::time::Instant::now();
+
+        let error = configure_sparse_checkout(child, "test-repository", b"patterns").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("git sparse-checkout stdin unavailable"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
     const BASE: &str = r#"
 on:
   push:
@@ -3448,34 +3463,6 @@ jobs:
             "      - uses: jdx/mise-action@0123456789012345678901234567890123456789\n        with:\n          install_args: rust cargo:cargo-nextest\n      - run: cargo nextest run --workspace --locked",
         );
         assert!(has_rule(&audit(&yaml), "prebuilt-tool"));
-    }
-
-    #[test]
-    fn cross_compile_job_requires_target_cache() {
-        let yaml = BASE
-            .replace(
-                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
-                "",
-            )
-            .replace(
-                "cargo nextest run --workspace --locked",
-                "cargo zigbuild --target x86_64-unknown-linux-musl",
-            );
-        assert!(has_rule(&audit(&yaml), "target-cache"));
-    }
-
-    #[test]
-    fn xtask_job_requires_target_cache() {
-        let yaml = BASE
-            .replace(
-                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
-                "",
-            )
-            .replace(
-                "cargo nextest run --workspace --locked",
-                "cargo xtask policy --output github",
-            );
-        assert!(has_rule(&audit(&yaml), "target-cache"));
     }
 
     #[test]
@@ -3757,31 +3744,26 @@ jobs:
     }
 
     #[test]
-    fn compile_job_requires_sccache() {
+    fn plain_cargo_needs_no_explicit_compiler_or_target_cache() {
         let yaml = BASE
             .lines()
             .filter(|line| {
-                !line.contains("mozilla-actions/sccache-action") && !line.contains("env: {SCCACHE")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(has_rule(&audit(&yaml), "compile-cache"));
-    }
-
-    #[test]
-    fn compile_job_requires_updatable_ref_independent_target_cache() {
-        let missing = BASE
-            .lines()
-            .filter(|line| {
-                !line.contains("actions/cache@")
+                !line.contains("mozilla-actions/sccache-action")
+                    && !line.contains("env: {SCCACHE")
+                    && !line.contains("actions/cache@")
                     && !line.trim_start().starts_with("path: target")
                     && !line.trim_start().starts_with("key: rust-build-")
                     && !line.trim_start().starts_with("restore-keys: rust-build-")
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(has_rule(&audit(&missing), "target-cache"));
+        let findings = audit(&yaml);
+        assert!(!has_rule(&findings, "compile-cache"), "{findings:?}");
+        assert!(!has_rule(&findings, "target-cache"), "{findings:?}");
+    }
 
+    #[test]
+    fn explicit_target_cache_remains_ref_independent() {
         let ref_scoped = BASE.replace("${{ github.sha }}", "${{ github.ref }}");
         assert!(has_rule(&audit(&ref_scoped), "target-cache-key"));
     }

@@ -410,6 +410,9 @@ impl From<velnor_client::ClientError> for CommandError {
             velnor_client::ClientError::UnsupportedApi { .. } => {
                 ("api.version_unsupported".to_owned(), error.to_string())
             }
+            velnor_client::ClientError::Unsupported { .. } => {
+                ("operation.unsupported".to_owned(), error.to_string())
+            }
             velnor_client::ClientError::Authorization => {
                 ("authorization.denied".to_owned(), error.to_string())
             }
@@ -511,6 +514,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
         }
         Command::Remove(args) => {
+            validate_remove_target_selectors(&globals)?;
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
@@ -566,32 +570,80 @@ fn control_api_unavailable(command: &str) -> CommandError {
     )
 }
 
+fn validate_remove_target_selectors(globals: &GlobalArgs) -> Result<(), CommandError> {
+    if globals.instance.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "remove.instance_selector_unsupported",
+            "remove does not support global --instance; use --config-dir or VELNOR_INSTANCE",
+        ));
+    }
+    if globals.repo.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "remove.repo_selector_unsupported",
+            "remove does not support global --repo; remove targets local configuration only",
+        ));
+    }
+    Ok(())
+}
+
 fn client_for(globals: &GlobalArgs) -> Result<velnor_client::UnixControlClient, CommandError> {
     use velnor_control::config::ContextStore;
 
+    if globals.repo.is_some() {
+        return Err(CommandError::new(
+            ExitClass::Usage,
+            "repo.selector_unsupported",
+            "global --repo is not supported by the v1 query API",
+        ));
+    }
+
     let contexts = context_store()?.list()?;
-    let endpoint = if let Some(context_name) = &globals.context {
+    let (endpoint, context_selected) = if let Some(context_name) = &globals.context {
         let context = contexts
             .iter()
             .find(|context| context.name == *context_name)
             .ok_or_else(|| CommandError::unavailable("named context was not found"))?;
-        context.endpoint.as_str().to_owned()
+        (context.endpoint.as_str().to_owned(), true)
     } else if let Some(context) = contexts.iter().find(|context| context.current) {
-        context.endpoint.as_str().to_owned()
+        (context.endpoint.as_str().to_owned(), true)
     } else {
         let instance = globals
             .instance
             .clone()
             .or_else(|| std::env::var("VELNOR_INSTANCE").ok());
-        format!(
-            "unix:///run/velnor/{}",
-            instance.as_deref().unwrap_or("default")
+        (
+            format!(
+                "unix:///run/velnor/{}",
+                instance.as_deref().unwrap_or("default")
+            ),
+            false,
         )
     };
     let endpoint = velnor_client::UnixEndpoint::parse(&endpoint).map_err(|error| {
         CommandError::new(ExitClass::Usage, "endpoint.invalid", error.to_string())
     })?;
+    if context_selected {
+        validate_context_instance(&endpoint, globals.instance.as_deref())?;
+    }
     Ok(velnor_client::UnixControlClient::new(endpoint))
+}
+
+fn validate_context_instance(
+    endpoint: &velnor_client::UnixEndpoint,
+    requested_instance: Option<&str>,
+) -> Result<(), CommandError> {
+    if let Some(requested_instance) = requested_instance
+        && endpoint.instance() != requested_instance
+    {
+        return Err(CommandError::new(
+            ExitClass::Conflict,
+            "instance.context_mismatch",
+            "requested instance does not match the selected context",
+        ));
+    }
+    Ok(())
 }
 
 fn client_query(args: &commands::ResourceQueryArgs) -> velnor_client::ResourceQuery {
@@ -1371,4 +1423,72 @@ fn flag_metadata<'a>(args: impl Iterator<Item = &'a clap::Arg>, global: bool) ->
         global,
     })
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn globals_with_repo(repo: Option<&str>) -> GlobalArgs {
+        GlobalArgs {
+            context: None,
+            output: OutputArg::Table,
+            instance: None,
+            repo: repo.map(str::to_owned),
+            selector: None,
+            field_selector: None,
+            since: None,
+            timeout: None,
+            no_color: false,
+            verbose: 0,
+        }
+    }
+
+    #[test]
+    fn explicit_instance_rejects_a_different_context_endpoint() {
+        let endpoint = velnor_client::UnixEndpoint::parse("unix:///run/velnor/primary")
+            .expect("valid context endpoint");
+
+        let error = validate_context_instance(&endpoint, Some("secondary"))
+            .expect_err("different explicit instance must fail closed");
+
+        assert_eq!(error.class, ExitClass::Conflict);
+        assert_eq!(error.reason, "instance.context_mismatch");
+    }
+
+    #[test]
+    fn global_repo_selector_fails_before_context_or_query_access() {
+        let error = client_for(&globals_with_repo(Some("owner/repo")))
+            .expect_err("unsupported repository scope must fail closed");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "repo.selector_unsupported");
+    }
+
+    #[test]
+    fn remove_rejects_global_instance_selector_before_mutation() {
+        let mut globals = globals_with_repo(None);
+        globals.instance = Some("secondary".to_owned());
+
+        let error = validate_remove_target_selectors(&globals)
+            .expect_err("remove must reject a selector it cannot carry to the runner");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "remove.instance_selector_unsupported");
+    }
+
+    #[test]
+    fn remove_rejects_global_repo_selector_before_mutation() {
+        let error = validate_remove_target_selectors(&globals_with_repo(Some("owner/repo")))
+            .expect_err("remove must reject a selector it cannot carry to the runner");
+
+        assert_eq!(error.class, ExitClass::Usage);
+        assert_eq!(error.reason, "remove.repo_selector_unsupported");
+    }
+
+    #[test]
+    fn remove_without_target_selector_remains_valid() {
+        validate_remove_target_selectors(&globals_with_repo(None))
+            .expect("valid remove behavior must remain available");
+    }
 }

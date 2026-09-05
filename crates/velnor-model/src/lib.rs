@@ -23,6 +23,7 @@ pub mod lifecycle;
 pub mod microvm;
 pub mod node;
 pub mod phase;
+pub mod redaction;
 pub mod resources;
 pub mod sanitized;
 pub mod scheduler;

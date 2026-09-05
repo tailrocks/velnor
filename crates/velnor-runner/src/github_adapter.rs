@@ -10,8 +10,7 @@ use crate::{
     },
 };
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf};
-use velnor_cache_service::CacheAdmissionError;
+use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
 
 /// Bump whenever target mounting or compiler-visible path semantics change.
 /// Old generations remain inactive, owned cache data and are reclaimed by GC.
@@ -32,23 +31,15 @@ pub fn github_job_container_spec(
     paths: GitHubJobContainerPaths,
     docker_image: &str,
     resource_options: Vec<String>,
+    slot_count: NonZeroU32,
     node_action_image: &str,
     daemon_id: String,
     trust_scope: &str,
-) -> Result<JobContainerSpec, CacheAdmissionError> {
-    let compiler_cache_service = paths.execution_backend
-        == velnor_model::ExecutionBackendKind::Docker
-        && std::env::var("VELNOR_COMPILER_CACHE_SERVICE").is_ok_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        });
-    let compiler_cache_service_root = compiler_cache_service.then(|| {
-        crate::storage::StorageLayout::resolve()
-            .map(|layout| layout.cache_root.join("compiler-service"))
-            .unwrap_or_else(|| paths.temp_host.join("_velnor/ephemeral/compiler-service"))
-    });
+) -> anyhow::Result<JobContainerSpec> {
+    if paths.execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
+        crate::manifest::validate_microvm_compiler_cache(job)?;
+    }
+    let explicit_sccache = crate::manifest::declares_sccache(job);
     // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
@@ -66,12 +57,13 @@ pub fn github_job_container_spec(
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: job_network_name(job),
         workspace_host: paths.workspace_host,
-        temp_host: paths.temp_host,
+        temp_host: paths.temp_host.clone(),
         home_host: paths.home_host,
         actions_host: paths.actions_host,
         tools_host: paths.tools_host,
         mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
             && paths.execution_backend.uses_host_docker_socket(),
+        slot_count,
         env: backend_advertising_env(job_container_env(job), paths.execution_backend),
         resource_options,
         options: job_container_options(job, trust_scope),
@@ -84,19 +76,64 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        compiler_cache_backend: match paths.execution_backend {
-            velnor_model::ExecutionBackendKind::Docker => {
-                crate::manifest::compiler_cache_backend(job)?
-            }
-            velnor_model::ExecutionBackendKind::MicroVm => {
-                crate::manifest::validate_microvm_compiler_cache(job)?;
-                velnor_cache_service::CompilerCacheBackend::Off
-            }
-        },
-        compiler_cache_trust_class: compiler_cache_trust_class(trust_scope),
-        compiler_cache_service,
-        compiler_cache_service_root,
+        store_trust_class: store_trust_class(trust_scope),
+        sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
+            && explicit_sccache)
+            .then(|| github_sccache_store_host(job, &paths.temp_host, trust_scope)),
+        mbx_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
+            && { !crate::manifest::declares_sccache(job) })
+        .then(|| github_mbx_store_host(job, &paths.temp_host, trust_scope)),
     })
+}
+
+pub(crate) fn github_mbx_store_host(
+    job: &AgentJobRequestMessage,
+    temp_host: &std::path::Path,
+    trust_scope: &str,
+) -> PathBuf {
+    github_rust_store_host(job, temp_host, trust_scope, "mbx")
+}
+
+fn github_sccache_store_host(
+    job: &AgentJobRequestMessage,
+    temp_host: &std::path::Path,
+    trust_scope: &str,
+) -> PathBuf {
+    github_rust_store_host(job, temp_host, trust_scope, "sccache")
+}
+
+fn github_rust_store_host(
+    job: &AgentJobRequestMessage,
+    temp_host: &std::path::Path,
+    trust_scope: &str,
+    store: &str,
+) -> PathBuf {
+    let ephemeral = || {
+        temp_host
+            .join("_velnor/ephemeral")
+            .join(store)
+            .join(crate::container::sanitize_store_key(&job.job_id))
+    };
+    let Some(repository_id) = job_variable(job, "github.repository_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|id| *id != 0)
+    else {
+        eprintln!(
+            "forensics.lifecycle: persistent {store} store refused: missing or invalid github.repository_id"
+        );
+        return ephemeral();
+    };
+    crate::storage::cache_class_path_for_trust(
+        &crate::container::daemon_store_root(temp_host),
+        match store_trust_class(trust_scope) {
+            crate::container::StoreTrustClass::Trusted => "trusted",
+            crate::container::StoreTrustClass::Release => "release",
+            crate::container::StoreTrustClass::Untrusted => "untrusted",
+        },
+        &format!("compiler/{store}"),
+        &format!("_velnor_{store}"),
+    )
+    .join(repository_id.to_string())
 }
 
 pub(crate) fn github_cargo_target_store_host(
@@ -140,7 +177,7 @@ pub(crate) fn github_cargo_target_store_host(
     };
     crate::storage::append_legacy_trust(
         crate::container::cargo_target_store_host(temp_host),
-        &cargo_target_trust_scope_from(Some(trust_scope)),
+        crate::trust_scope::resolve(trust_scope).as_str(),
     )
     .join(CARGO_TARGET_GENERATION)
     .join(repository)
@@ -173,31 +210,29 @@ fn target_path_component(value: &str) -> Option<String> {
     Some(key)
 }
 
+/// The pool trust boundary this process resolved at startup.
+///
+/// There is no ambient read here any more: [`crate::trust_scope`] owns the
+/// `VELNOR_TRUST_SCOPE` variable through clap, resolves it against the command
+/// line exactly once, and hands the same answer to the capability gates and to
+/// every trust-scoped store path.
 pub(crate) fn cargo_target_trust_scope() -> String {
-    cargo_target_trust_scope_from(std::env::var("VELNOR_TRUST_SCOPE").ok().as_deref())
-}
-
-fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("untrusted")
-        .to_string()
+    crate::trust_scope::current()
 }
 
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
-    trust_scope.trim().eq_ignore_ascii_case("trusted")
+    trust_scope
+        .trim()
+        .eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
 }
 
-pub(crate) fn compiler_cache_trust_class(
-    trust_scope: &str,
-) -> velnor_model::guest_plan::GuestCompilerCacheTrustClass {
+pub(crate) fn store_trust_class(trust_scope: &str) -> crate::container::StoreTrustClass {
     if trust_scope.trim().eq_ignore_ascii_case("trusted") {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+        crate::container::StoreTrustClass::Trusted
     } else if trust_scope.trim().eq_ignore_ascii_case("release") {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+        crate::container::StoreTrustClass::Release
     } else {
-        velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
+        crate::container::StoreTrustClass::Untrusted
     }
 }
 
@@ -978,30 +1013,6 @@ mod tests {
         .unwrap()
     }
 
-    fn compiler_cache_backend(
-        job: &AgentJobRequestMessage,
-        execution_backend: velnor_model::ExecutionBackendKind,
-    ) -> std::result::Result<velnor_cache_service::CompilerCacheBackend, CacheAdmissionError> {
-        github_job_container_spec(
-            job,
-            GitHubJobContainerPaths {
-                workspace_host: "/tmp/workspace".into(),
-                temp_host: "/tmp/temp".into(),
-                home_host: "/tmp/home".into(),
-                actions_host: "/tmp/actions".into(),
-                tools_host: "/tmp/tools".into(),
-                docker_host_work_dir: None,
-                execution_backend,
-            },
-            "ubuntu:24.04",
-            Vec::new(),
-            "",
-            "daemon".into(),
-            "trusted",
-        )
-        .map(|spec| spec.compiler_cache_backend)
-    }
-
     #[test]
     fn github_adapter_builds_normalized_plan_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
@@ -1045,6 +1056,7 @@ mod tests {
             actions_host: root.join("actions"),
             tools_host: root.join("tools"),
             mount_docker_socket: true,
+            slot_count: NonZeroU32::MIN,
             env: Vec::new(),
             resource_options: Vec::new(),
             options: Vec::new(),
@@ -1057,11 +1069,9 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            compiler_cache_backend: velnor_cache_service::CompilerCacheBackend::Sccache,
-            compiler_cache_trust_class:
-                velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted,
-            compiler_cache_service: false,
-            compiler_cache_service_root: None,
+            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            mbx_store_host: None,
+            sccache_store_host: None,
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -1187,14 +1197,152 @@ mod tests {
         );
     }
 
+    /// The split brain this test exists to keep closed: `VELNOR_TRUST_SCOPE`
+    /// says `trusted` (the value the shipped systemd unit sets) while the
+    /// operator hardens the pool with `--trust-scope public`. Before the fix
+    /// the capability gates read the command line and the store paths read the
+    /// variable, so a fork pull request ran without the Docker socket but wrote
+    /// into the *trusted* cargo/mise stores that the next job mounts read-write
+    /// onto its `PATH`. Every consumer must now observe `public`.
     #[test]
-    fn cargo_target_trust_scope_defaults_and_trims() {
-        assert_eq!(cargo_target_trust_scope_from(None), "untrusted");
-        assert_eq!(cargo_target_trust_scope_from(Some("   ")), "untrusted");
+    fn every_consumer_observes_one_resolved_trust_scope() {
+        let _serial = crate::trust_scope::test_support::serialized();
+
+        let previous_scope = std::env::var_os("VELNOR_TRUST_SCOPE");
+        // SAFETY: this synchronous test owns the process environment for the
+        // body below (the trust-scope test guard serializes it against the
+        // other tests that touch it) and restores the value before returning.
+        // Nothing outside clap reads this variable any more, which is the whole
+        // point of the change under test.
+        unsafe {
+            std::env::set_var("VELNOR_TRUST_SCOPE", "trusted");
+        }
+
+        // One parse, one resolution: clap owns the variable and the command
+        // line beats it.
+        let arg = crate::trust_scope::test_support::parse(&["--trust-scope", "public"]);
+        assert_eq!(arg.trust_scope, "public");
+        let resolved = arg.resolve();
+        assert_eq!(resolved.as_str(), "public");
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42,
+            "jobContainer": { "image": "ubuntu:24.04", "options": "--privileged" },
+            "jobServiceContainers": {
+                "redis": {
+                    "image": "redis:7",
+                    "ports": ["6379:6379"],
+                    "options": "--privileged"
+                }
+            },
+            "variables": {
+                "github.workflow": { "value": "CI", "isSecret": false },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false },
+                "github.repository_id": { "value": "42", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let temp = std::path::Path::new("/velnor/work/job/temp");
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/velnor/work/job/workspace".into(),
+                temp_host: temp.into(),
+                home_host: "/velnor/work/job/home".into(),
+                actions_host: "/velnor/work/job/actions".into(),
+                tools_host: "/velnor/work/job/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            NonZeroU32::MIN,
+            "",
+            "daemon".into(),
+            resolved.as_str(),
+        )
+        .unwrap();
+
+        // The socket gate.
+        assert!(!github_trust_scope_allows_host_docker(resolved.as_str()));
+        assert!(!spec.mount_docker_socket);
+        // Job container options.
+        assert!(!spec.options.iter().any(|option| option == "--privileged"));
+        // Service container privilege and host port publishing.
+        let service = spec.services.first().expect("one service container");
+        assert!(!service
+            .options
+            .iter()
+            .any(|option| option == "--privileged"));
+        assert!(service.ports.is_empty());
+        // Store trust class.
         assert_eq!(
-            cargo_target_trust_scope_from(Some(" public-forks ")),
-            "public-forks"
+            spec.store_trust_class,
+            crate::container::StoreTrustClass::Untrusted
         );
+
+        // Every trust-scoped store path, including the six that used to read
+        // the environment variable behind the gate's back. Stores named by the
+        // raw scope carry a `public` component; stores named by the derived
+        // trust class carry `untrusted`. Neither may ever carry `trusted`.
+        assert_eq!(cargo_target_trust_scope(), "public");
+        let scoped_by_raw_value = [
+            github_cargo_target_store_host(&job, temp, resolved.as_str()),
+            crate::container::cargo_executable_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::mise_executable_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::mise_binary_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::playwright_browser_store_host(temp, "ChainArgos/java-monorepo"),
+            // The persistent actions cache, exactly as `executor.rs` composes it.
+            crate::storage::append_legacy_trust(
+                crate::storage::cache_class_path(temp, "caches", "_velnor_caches"),
+                &cargo_target_trust_scope(),
+            ),
+        ];
+        let scoped_by_trust_class = [spec.mbx_store_host.clone().expect("mbx store")];
+
+        let has_component = |store: &std::path::Path, wanted: &str| {
+            store
+                .components()
+                .any(|component| component.as_os_str() == wanted)
+        };
+        for store in scoped_by_raw_value
+            .iter()
+            .chain(scoped_by_trust_class.iter())
+        {
+            assert!(
+                !has_component(store, "trusted"),
+                "store path leaked the ambient VELNOR_TRUST_SCOPE value: {}",
+                store.display()
+            );
+        }
+        for store in &scoped_by_raw_value {
+            assert!(
+                has_component(store, "public"),
+                "store path is not scoped to the resolved trust scope: {}",
+                store.display()
+            );
+        }
+        for store in &scoped_by_trust_class {
+            assert!(
+                has_component(store, "untrusted"),
+                "store path is not scoped to the resolved trust class: {}",
+                store.display()
+            );
+        }
+
+        // SAFETY: restore the value owned by this synchronous test.
+        unsafe {
+            match previous_scope {
+                Some(value) => std::env::set_var("VELNOR_TRUST_SCOPE", value),
+                None => std::env::remove_var("VELNOR_TRUST_SCOPE"),
+            }
+        }
     }
 
     #[test]
@@ -1207,32 +1355,71 @@ mod tests {
     }
 
     #[test]
-    fn compiler_cache_trust_class_mapping_is_explicit_and_fail_closed() {
+    fn store_trust_class_mapping_is_explicit_and_fail_closed() {
         assert_eq!(
-            compiler_cache_trust_class("trusted"),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Trusted
+            store_trust_class("trusted"),
+            crate::container::StoreTrustClass::Trusted
         );
         assert_eq!(
-            compiler_cache_trust_class(" release "),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Release
+            store_trust_class(" release "),
+            crate::container::StoreTrustClass::Release
         );
         assert_eq!(
-            compiler_cache_trust_class("public-forks"),
-            velnor_model::guest_plan::GuestCompilerCacheTrustClass::Untrusted
+            store_trust_class("public-forks"),
+            crate::container::StoreTrustClass::Untrusted
         );
     }
 
     #[test]
-    fn non_trusted_scope_disables_host_docker_socket() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Public fork check",
-            "requestId": 1
-        }))
-        .unwrap();
+    fn rust_stores_partition_by_repository_id() {
+        let job = |repository_id: u64| {
+            serde_json::from_value(serde_json::json!({
+                "messageType": "RunnerJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Rust",
+                "requestId": 1,
+                "variables": {
+                    "github.repository_id": { "value": repository_id.to_string() }
+                }
+            }))
+            .unwrap()
+        };
+        let temp = std::path::Path::new("/var/lib/velnor/work/slot-1/job/temp");
+
+        assert_eq!(
+            github_mbx_store_host(&job(41), temp, "trusted"),
+            std::path::Path::new("/var/lib/velnor/work/_velnor_mbx/trusted/41")
+        );
+        assert_eq!(
+            github_sccache_store_host(&job(42), temp, "trusted"),
+            std::path::Path::new("/var/lib/velnor/work/_velnor_sccache/trusted/42")
+        );
+        assert_ne!(
+            github_sccache_store_host(&job(41), temp, "trusted"),
+            github_sccache_store_host(&job(42), temp, "trusted")
+        );
+    }
+
+    #[test]
+    fn rust_stores_are_ephemeral_without_valid_repository_id() {
+        let job = microvm_job();
+        let temp = std::path::Path::new("/velnor/work/job/temp");
+
+        assert_eq!(
+            github_mbx_store_host(&job, temp, "trusted"),
+            temp.join("_velnor/ephemeral/mbx/job")
+        );
+        assert_eq!(
+            github_sccache_store_host(&job, temp, "trusted"),
+            temp.join("_velnor/ephemeral/sccache/job")
+        );
+    }
+
+    #[test]
+    fn untrusted_docker_job_gets_only_its_partition_and_no_host_docker() {
+        let job = microvm_job();
         let spec = github_job_container_spec(
             &job,
             GitHubJobContainerPaths {
@@ -1246,6 +1433,7 @@ mod tests {
             },
             "ubuntu:24.04",
             Vec::new(),
+            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "public-forks",
@@ -1254,22 +1442,16 @@ mod tests {
 
         assert!(!spec.mount_docker_socket);
         assert_eq!(
-            spec.compiler_cache_backend,
-            velnor_cache_service::CompilerCacheBackend::Kache
+            spec.store_trust_class,
+            crate::container::StoreTrustClass::Untrusted
         );
+        assert!(spec.mbx_store_host.is_some());
+        assert!(spec.sccache_store_host.is_none());
     }
 
     #[test]
-    fn microvm_backend_never_mounts_host_docker_socket() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Trusted",
-            "requestId": 1
-        }))
-        .unwrap();
+    fn microvm_gets_no_host_acceleration_mounts() {
+        let job = microvm_job();
         let spec = github_job_container_spec(
             &job,
             GitHubJobContainerPaths {
@@ -1283,21 +1465,16 @@ mod tests {
             },
             "ubuntu:24.04",
             Vec::new(),
+            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",
         )
         .unwrap();
+
         assert!(!spec.mount_docker_socket);
-        assert_eq!(
-            spec.compiler_cache_backend,
-            velnor_cache_service::CompilerCacheBackend::Off
-        );
-        assert!(spec
-            .compiler_cache_runtime()
-            .environment()
-            .variables
-            .is_empty());
+        assert!(spec.mbx_store_host.is_none());
+        assert!(spec.sccache_store_host.is_none());
     }
 
     #[test]
@@ -1313,141 +1490,26 @@ mod tests {
         }))
         .unwrap()];
 
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmTransportUnavailable {
-                declared: velnor_cache_service::CompilerCacheBackend::Sccache
-            })
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_explicit_kache_action() {
-        let mut job = microvm_job();
-        job.steps = vec![serde_json::from_value(serde_json::json!({
-            "type": "Action",
-            "reference": {
-                "type": "Repository",
-                "name": "kunobi-ninja/kache-action",
-                "ref": "49398d37113c616fdb61be434cb497e3c2c8f3e6"
-            }
-        }))
-        .unwrap()];
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmTransportUnavailable {
-                declared: velnor_cache_service::CompilerCacheBackend::Kache
-            })
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_mixed_compiler_cache_actions() {
-        let mut job = microvm_job();
-        job.steps = serde_json::from_value(serde_json::json!([
-            {
-                "type": "Action",
-                "reference": { "name": "mozilla-actions/sccache-action" }
+        let error = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
             },
-            {
-                "type": "Action",
-                "reference": { "name": "kunobi-ninja/kache-action" }
-            }
-        ]))
-        .unwrap();
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::ConflictingWrappers)
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_compiler_wrapper_in_job_environment() {
-        let mut job = microvm_job();
-        job.environment_variables = vec![serde_json::json!({
-            "map": [{
-                "Key": "RUSTC_WRAPPER",
-                "Value": "sccache"
-            }]
-        })];
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
-                name: "RUSTC_WRAPPER".into()
-            })
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_sccache_environment_in_job_container() {
-        let mut job = microvm_job();
-        job.job_container = Some(serde_json::json!({
-            "environmentVariables": { "SCCACHE_ENDPOINT": "https://cache.example" }
-        }));
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
-                name: "SCCACHE_ENDPOINT".into()
-            })
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_kache_environment_in_variables() {
-        let mut job = microvm_job();
-        job.variables.insert(
-            "KACHE_REMOTE_URL".into(),
-            crate::job_message::VariableValue {
-                value: Some("https://cache.example".into()),
-                is_secret: false,
-            },
-        );
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
-                name: "KACHE_REMOTE_URL".into()
-            })
-        );
-    }
-
-    #[test]
-    fn microvm_rejects_compiler_wrapper_in_step_environment() {
-        let mut job = microvm_job();
-        job.steps = vec![serde_json::from_value(serde_json::json!({
-            "environment": { "RUSTC_WRAPPER": "kache" }
-        }))
-        .unwrap()];
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::MicroVm),
-            Err(CacheAdmissionError::MicroVmEnvironmentUnsupported {
-                name: "RUSTC_WRAPPER".into()
-            })
-        );
-    }
-
-    #[test]
-    fn docker_preserves_explicit_compiler_cache_wrapper() {
-        let mut job = microvm_job();
-        job.steps = vec![serde_json::from_value(serde_json::json!({
-            "type": "Action",
-            "reference": {
-                "type": "Repository",
-                "name": "mozilla-actions/sccache-action",
-                "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
-            }
-        }))
-        .unwrap()];
-
-        assert_eq!(
-            compiler_cache_backend(&job, velnor_model::ExecutionBackendKind::Docker),
-            Ok(velnor_cache_service::CompilerCacheBackend::Sccache)
-        );
+            "ubuntu:24.04",
+            Vec::new(),
+            NonZeroU32::MIN,
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not support explicit"));
     }
 
     #[test]
@@ -1470,6 +1532,7 @@ mod tests {
             },
             "ubuntu:24.04",
             Vec::new(),
+            NonZeroU32::MIN,
             "",
             "daemon".into(),
             "trusted",

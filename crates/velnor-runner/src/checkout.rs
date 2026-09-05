@@ -7,12 +7,14 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rustix::fs::{flock, FlockOperation};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 use url::Url;
 
@@ -88,7 +90,12 @@ pub(crate) fn checkout_plan(
 ) -> Result<CheckoutPlan> {
     let self_repository = self_repository(job)?;
     let checkout_repository = checkout_repository(step);
-    let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
+    let server_url = checkout_server_url(job, &self_repository);
+    let clone_url = checkout_clone_url(
+        checkout_repository.as_deref(),
+        &self_repository,
+        &server_url,
+    )?;
     let destination = workspace_host.join(checkout_path(step)?);
     let reference_name = step
         .reference
@@ -162,23 +169,33 @@ pub fn execute_checkout_with_mirror<R>(
 where
     R: CommandRunner,
 {
-    let mirror = mirror_store.and_then(|store| {
-        match crate::git_mirror::ensure_mirror(
+    // Any credential an aborted job left on this host is unowned once its
+    // process is gone; take it out before adding another one.
+    reap_stale_checkout_credentials().context("reap stale checkout credentials")?;
+    let mirror = match mirror_store {
+        // A mirror failure used to warn and fall back to a direct checkout,
+        // which turned one broken mirror into a permanent, silent slowdown for
+        // every later job. `ensure_mirror` repairs what it can; what is left is
+        // a real failure and fails the checkout.
+        Some(store) => match crate::git_mirror::ensure_mirror(
             runner,
             store,
             &plan.clone_url,
             plan.token.as_deref(),
+            &mirror_want(plan),
         ) {
             Ok(mirror) => Some(mirror),
             Err(error) => {
-                eprintln!(
-                    "Warning: git mirror refresh failed for {}; using direct checkout: {error:#}",
-                    plan.clone_url
-                );
-                None
+                // The mirror is part of this step, so its git output belongs in
+                // the step log and its exit code in the step result.
+                for line in format!("{error:#}").lines() {
+                    log.push(line.to_string());
+                }
+                return Err(error.context(format!("prepare git mirror for {}", plan.clone_url)));
             }
-        }
-    });
+        },
+        None => None,
+    };
     fetch_git_ref(
         runner,
         &plan.clone_url,
@@ -190,11 +207,19 @@ where
         plan.persist_credentials,
         plan.clean,
         plan.lfs,
-        mirror.as_deref(),
+        mirror,
         log,
     )?;
     normalize_checkout_mtimes(runner, &plan.destination, log);
     Ok(())
+}
+
+fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
+    crate::git_mirror::MirrorWant {
+        git_ref: plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),
+        full_history: plan.fetch_depth.is_none(),
+        tags: plan.fetch_tags,
+    }
 }
 
 /// Pin every checked-out file's mtime to the commit timestamp, so two jobs
@@ -207,6 +232,11 @@ fn normalize_checkout_mtimes<R>(runner: &mut R, destination: &Path, log: &mut Ve
 where
     R: CommandRunner,
 {
+    let _span = tracing::info_span!(
+        "checkout.workspace.mtime_normalize",
+        phase = "mtime-normalization",
+    )
+    .entered();
     let args = [
         "-C".to_string(),
         path_arg(destination),
@@ -293,10 +323,19 @@ fn cleanup_checkout_credential<R>(
 where
     R: CommandRunner,
 {
-    if !plan.persist_credentials || plan.token.is_none() || !plan.destination.join(".git").exists()
-    {
+    // Retire the crash journal entries for this workspace first: from here on
+    // this function owns removing the credential, and a stale entry would let a
+    // later reaper scrub a workspace that has already been handed back.
+    let registered = release_registered_credentials(&plan.destination);
+    let git_dir = plan.destination.join(".git");
+    if !git_dir.exists() {
         return Ok(());
     }
+    let config_path = git_dir.join("config");
+    // Cleanup is unconditional. Keying it off `persist_credentials` assumed the
+    // only writer of the credential was the persist path, which left every
+    // other write (an interrupted run, an lfs checkout, a reused workspace)
+    // permanently on disk.
     let args = [
         "-C".to_string(),
         path_arg(&plan.destination),
@@ -313,14 +352,317 @@ where
             log.push(trimmed.to_string());
         }
     }
-    if result.code != 0 {
-        eprintln!(
-            "Failed to cleanup checkout credentials in {}: {}",
+    // Exit 5 is "the key was not set", the expected state for a checkout that
+    // never persisted anything. Anything else is a real failure and must fail
+    // the job: a warning on stderr let a credentialed workspace survive.
+    if result.code != 0 && result.code != GIT_CONFIG_KEY_NOT_FOUND {
+        bail!(
+            "cleanup of checkout credentials in {} failed with code {}: {}",
             plan.destination.display(),
+            result.code,
             result.stderr.trim()
         );
     }
+    // Verify rather than trust. `git config --unset-all` removes one key; the
+    // invariant this function has to hold is that no credential of any scope
+    // survives in the workspace at all.
+    if scrub_config_credentials(&config_path)? {
+        log.push(format!(
+            "Removed a residual credential from {}",
+            config_path.display()
+        ));
+    }
+    if config_has_credential(&config_path) {
+        bail!(
+            "checkout credential still present in {} after cleanup",
+            config_path.display()
+        );
+    }
+    if registered > 0 {
+        log.push(format!(
+            "Released {registered} tracked checkout credential(s)"
+        ));
+    }
     Ok(())
+}
+
+/// `git config --unset-all` exit code for "the key does not exist".
+const GIT_CONFIG_KEY_NOT_FOUND: i32 = 5;
+
+/// One persisted credential, tracked for as long as it exists on disk.
+///
+/// The journal file is held under an exclusive `flock` for the whole lifetime
+/// of the credential. The kernel drops that lock when the owning process dies,
+/// however it dies, so a later reaper can tell a live credential from one an
+/// aborted runner left behind without pid liveness guesswork.
+struct CredentialRegistration {
+    destination: PathBuf,
+    journal_path: PathBuf,
+    _journal: File,
+}
+
+fn active_credentials() -> &'static Mutex<Vec<CredentialRegistration>> {
+    static ACTIVE: OnceLock<Mutex<Vec<CredentialRegistration>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test journal directory, so tests never share the host's.
+    static TEST_JOURNAL_DIR: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn credential_journal_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_JOURNAL_DIR.with(|dir| dir.borrow().clone()) {
+        return dir;
+    }
+    crate::storage::StorageLayout::resolve()
+        .or_else(|| crate::storage::StorageLayout::user_cli().ok())
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| std::env::temp_dir().join("velnor"))
+        .join("checkout-credentials")
+}
+
+/// Record that `destination` is about to hold a credential, before it does.
+fn register_credential(destination: &Path) -> Result<()> {
+    register_credential_in(&credential_journal_dir(), destination)
+}
+
+fn register_credential_in(dir: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("create checkout credential journal {}", dir.display()))?;
+    // Keep a new record invisible to the reaper until its lock and contents
+    // are ready. Publishing the `.json` path first lets a concurrent reaper
+    // claim and remove the empty file between `open` and `flock`, leaving the
+    // credential write untracked.
+    let id = uuid::Uuid::new_v4().to_string();
+    let journal_path = dir.join(format!("{id}.json"));
+    let pending_path = dir.join(format!(".{id}.pending"));
+    let mut journal = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(&pending_path)
+        .with_context(|| format!("open checkout credential journal {pending_path:?}"))?;
+    if let Err(error) = flock(&journal, FlockOperation::NonBlockingLockExclusive)
+        .with_context(|| format!("lock checkout credential journal {pending_path:?}"))
+    {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
+    let record = serde_json::json!({
+        "config": destination.join(".git/config").display().to_string(),
+        "workspace": destination.display().to_string(),
+        "pid": std::process::id(),
+    });
+    let publish = (|| -> Result<()> {
+        journal
+            .write_all(record.to_string().as_bytes())
+            .and_then(|()| journal.sync_all())
+            .with_context(|| format!("write checkout credential journal {pending_path:?}"))?;
+        fs::rename(&pending_path, &journal_path)
+            .with_context(|| format!("publish checkout credential journal {journal_path:?}"))?;
+        Ok(())
+    })();
+    if let Err(error) = publish {
+        fs::remove_file(&pending_path).ok();
+        return Err(error);
+    }
+    let mut active = match active_credentials()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("checkout credential registry poisoned"))
+    {
+        Ok(active) => active,
+        Err(error) => {
+            fs::remove_file(&journal_path).ok();
+            return Err(error);
+        }
+    };
+    active.push(CredentialRegistration {
+        destination: destination.to_path_buf(),
+        journal_path,
+        _journal: journal,
+    });
+    Ok(())
+}
+
+/// Drop the journal entries for a workspace whose credential has been removed.
+fn release_registered_credentials(destination: &Path) -> usize {
+    let Ok(mut active) = active_credentials().lock() else {
+        return 0;
+    };
+    let mut released = 0;
+    active.retain(|registration| {
+        if registration.destination != destination {
+            return true;
+        }
+        fs::remove_file(&registration.journal_path).ok();
+        released += 1;
+        false
+    });
+    released
+}
+
+/// Scrub every credential an aborted runner left behind.
+///
+/// A journal entry whose exclusive lock can be taken has no live owner, so the
+/// credential it names is unowned and is removed. Entries of running jobs — in
+/// this process or any other on the host — stay locked and are left alone.
+///
+/// # Errors
+/// The journal directory exists but cannot be read.
+pub fn reap_stale_checkout_credentials() -> Result<usize> {
+    reap_stale_credentials_in(&credential_journal_dir())
+}
+
+fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read checkout credential journal {}", dir.display()))
+        }
+    };
+    let mut reaped = 0;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "read checkout credential journal entry in {}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let mut file = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("open checkout credential journal {}", path.display())
+                })
+            }
+        };
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {}
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                // A live job owns this credential.
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("lock checkout credential journal {}", path.display())
+                })
+            }
+        }
+        let mut content = String::new();
+        file.read_to_string(&mut content)
+            .with_context(|| format!("read checkout credential journal {}", path.display()))?;
+        let record = serde_json::from_str::<Value>(&content)
+            .with_context(|| format!("parse checkout credential journal {}", path.display()))?;
+        let config = record
+            .get("config")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "checkout credential journal {} has no config path",
+                    path.display()
+                )
+            })?;
+        if scrub_config_credentials(&config)? {
+            eprintln!(
+                "Removed a checkout credential left behind by an aborted job: {}",
+                config.display()
+            );
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("remove checkout credential journal {}", path.display())
+                })
+            }
+        }
+        reaped += 1;
+    }
+    Ok(reaped)
+}
+
+/// Remove every `extraheader` entry from a git config file, returning whether
+/// anything was removed. Velnor is the only writer of `http.*.extraheader` in a
+/// checkout, and every value it writes is a bearer credential.
+fn scrub_config_credentials(config_path: &Path) -> Result<bool> {
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read git config {}", config_path.display()))
+        }
+    };
+    let (scrubbed, changed) = strip_extraheaders(&content);
+    if !changed {
+        return Ok(false);
+    }
+    let temporary = config_path.with_extension(format!("velnor-scrub-{}", std::process::id()));
+    fs::write(&temporary, scrubbed)
+        .with_context(|| format!("write scrubbed git config {}", temporary.display()))?;
+    fs::rename(&temporary, config_path)
+        .with_context(|| format!("replace git config {}", config_path.display()))?;
+    Ok(true)
+}
+
+fn config_has_credential(config_path: &Path) -> bool {
+    fs::read_to_string(config_path).is_ok_and(|content| {
+        content.lines().any(|line| {
+            line.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("extraheader")
+        })
+    })
+}
+
+/// Drop `extraheader` keys, and any `[http …]` section left empty by that.
+fn strip_extraheaders(content: &str) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending_http_section: Option<&str> = None;
+    let mut in_http_section = false;
+    let mut changed = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if let Some(header) = pending_http_section.take() {
+                lines.push(header.to_string());
+            }
+            in_http_section = trimmed.to_ascii_lowercase().starts_with("[http");
+            if in_http_section {
+                pending_http_section = Some(line);
+            } else {
+                lines.push(line.to_string());
+            }
+            continue;
+        }
+        if in_http_section && trimmed.to_ascii_lowercase().starts_with("extraheader") {
+            changed = true;
+            continue;
+        }
+        if !trimmed.is_empty()
+            && let Some(header) = pending_http_section.take()
+        {
+            lines.push(header.to_string());
+        }
+        lines.push(line.to_string());
+    }
+    let mut scrubbed = lines.join("\n");
+    if !scrubbed.is_empty() {
+        scrubbed.push('\n');
+    }
+    (scrubbed, changed)
 }
 
 pub fn configure_safe_directory(
@@ -368,7 +710,7 @@ pub fn fetch_git_ref<R>(
     persist_credentials: bool,
     clean: bool,
     lfs: bool,
-    mirror: Option<&Path>,
+    mirror: Option<crate::git_mirror::MirrorCheckout>,
     log: &mut Vec<String>,
 ) -> Result<()>
 where
@@ -423,6 +765,111 @@ where
         log,
     )?;
 
+    let fetch_env = git_auth_env(clone_url, token);
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.fetch", phase = "workspace-fetch",).entered();
+        if let Some(mirror) = mirror {
+            hydrate_from_mirror(
+                runner,
+                &mirror,
+                destination,
+                clone_url,
+                git_ref,
+                fetch_depth.is_none(),
+                fetch_tags,
+                log,
+            )?;
+            // Hydration has linked or copied every object and wrote the refs and
+            // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
+            // only the workspace, so do not hold the mirror reader lease for it.
+            drop(mirror);
+        } else {
+            run_network_fetch(
+                runner,
+                destination,
+                git_ref,
+                fetch_depth,
+                fetch_tags,
+                &fetch_env,
+                log,
+            )?;
+        }
+    }
+
+    {
+        let _span =
+            tracing::info_span!("checkout.workspace.checkout", phase = "workspace-checkout",)
+                .entered();
+        // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
+        // LFS blobs. It authenticates through the same header the fetch used, which
+        // is passed per command rather than written into the workspace config, so
+        // no credential outlives the checkout unless the job asked for one.
+        let mut checkout = vec!["-C".to_string(), path_arg(destination)];
+        if !lfs {
+            checkout.extend(lfs_skip_smudge_args());
+        }
+        checkout.extend([
+            "checkout".to_string(),
+            "--force".to_string(),
+            "FETCH_HEAD".to_string(),
+        ]);
+        if lfs {
+            run_git_with_env_and_display(runner, &checkout, &checkout, &fetch_env, log)?;
+        } else {
+            run_git(runner, &checkout, log)?;
+        }
+
+        if clean {
+            let mut reset = vec!["-C".to_string(), path_arg(destination)];
+            if !lfs {
+                reset.extend(lfs_skip_smudge_args());
+            }
+            reset.extend([
+                "reset".to_string(),
+                "--hard".to_string(),
+                "HEAD".to_string(),
+            ]);
+            if lfs {
+                run_git_with_env_and_display(runner, &reset, &reset, &fetch_env, log)?;
+            } else {
+                run_git(runner, &reset, log)?;
+            }
+            let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
+                .ok()
+                .is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                });
+            run_git(
+                runner,
+                &checkout_clean_args(destination, preserve_workspace_target),
+                log,
+            )?;
+        }
+    }
+
+    if persist_credentials && let Some(token) = token {
+        persist_git_credentials(runner, destination, clone_url, token, log)?;
+    }
+
+    Ok(())
+}
+
+fn run_network_fetch<R>(
+    runner: &mut R,
+    destination: &Path,
+    git_ref: &str,
+    fetch_depth: Option<u32>,
+    fetch_tags: bool,
+    fetch_env: &[(String, String)],
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
     let mut fetch = vec![
         "-C".to_string(),
         path_arg(destination),
@@ -455,70 +902,180 @@ where
             ]);
         }
     }
-    let fetch_env = git_auth_env(clone_url, token);
-    if let Some(mirror) = mirror {
-        let mut accelerated = fetch.clone();
-        if let Some(origin) = accelerated
-            .iter_mut()
-            .find(|value| value.as_str() == "origin")
-        {
-            *origin = path_arg(mirror);
+    run_git_with_env_and_display(runner, &fetch, &fetch, fetch_env, log)
+}
+
+/// Make the mirror's objects available to the workspace without copying them.
+///
+/// Object files are hard-linked out of the mirror. Git object files are
+/// immutable and are only ever added to a repository, so a link is a complete,
+/// self-contained copy of the byte content for zero bytes written:
+///
+/// * A concurrent mirror fetch only adds new object files; it never rewrites
+///   the ones already linked here, and files still being written carry a
+///   `tmp_` name and are skipped.
+/// * `git gc` in the mirror cannot take the bytes away — a hard link keeps the
+///   inode alive after the mirror unlinks its own name — and cannot even reach
+///   the wanted objects, which the mirror pins under `refs/velnor/*` and never
+///   deletes. Auto gc is disabled there regardless.
+/// * Deleting the workspace unlinks names only; the mirror is untouched.
+/// * The workspace ends up self-contained, unlike `objects/info/alternates`,
+///   which would break the moment the container (which does not mount the
+///   mirror store) or a rebuild of a corrupt mirror removed the pointee.
+#[allow(clippy::too_many_arguments)]
+fn hydrate_from_mirror<R>(
+    runner: &mut R,
+    mirror: &crate::git_mirror::MirrorCheckout,
+    destination: &Path,
+    clone_url: &str,
+    git_ref: &str,
+    full_history: bool,
+    tags: bool,
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let git_dir = destination.join(".git");
+    fs::create_dir_all(&git_dir)
+        .with_context(|| format!("create git directory {}", git_dir.display()))?;
+    let (linked, bytes) =
+        link_object_store(&mirror.path.join("objects"), &git_dir.join("objects"))?;
+
+    let mut refs = 0usize;
+    if full_history || tags {
+        for (refname, object) in crate::git_mirror::mirror_refs(runner, &mirror.path)? {
+            let Some(local) = workspace_ref_name(&refname, full_history, tags) else {
+                continue;
+            };
+            write_loose_ref(&git_dir, &local, &object)?;
+            refs += 1;
         }
-        run_git_with_env_and_display(runner, &accelerated, &fetch, &fetch_env, log)?;
-    } else {
-        run_git_with_env_and_display(runner, &fetch, &fetch, &fetch_env, log)?;
     }
 
-    // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
-    // LFS blobs — it authenticates via the persisted http.<host>.extraheader, so
-    // set credentials up BEFORE checkout. For lfs:false (default) we instead skip
-    // the smudge entirely (no LFS fetch, no creds needed) via lfs_skip_smudge_args.
-    if lfs && let Some(token) = token {
-        persist_git_credentials(runner, destination, clone_url, token, log)?;
-    }
+    // `checkout FETCH_HEAD` stays the checkout command on both paths, so the
+    // step log and the resulting worktree do not depend on which path ran.
+    write_fetch_head(&git_dir, &mirror.sha, git_ref, clone_url)?;
 
-    let mut checkout = vec!["-C".to_string(), path_arg(destination)];
-    if !lfs {
-        checkout.extend(lfs_skip_smudge_args());
-    }
-    checkout.extend([
-        "checkout".to_string(),
-        "--force".to_string(),
-        "FETCH_HEAD".to_string(),
-    ]);
-    run_git(runner, &checkout, log)?;
-
-    if clean {
-        let mut reset = vec!["-C".to_string(), path_arg(destination)];
-        if !lfs {
-            reset.extend(lfs_skip_smudge_args());
-        }
-        reset.extend([
-            "reset".to_string(),
-            "--hard".to_string(),
-            "HEAD".to_string(),
-        ]);
-        run_git(runner, &reset, log)?;
-        let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
-        run_git(
-            runner,
-            &checkout_clean_args(destination, preserve_workspace_target),
-            log,
-        )?;
-    }
-
-    if persist_credentials && let Some(token) = token {
-        persist_git_credentials(runner, destination, clone_url, token, log)?;
-    }
-
+    log.push(format!(
+        "Linked {linked} object file(s) ({bytes} bytes) and {refs} ref(s) from the shared mirror; no objects were copied and no network fetch was needed"
+    ));
     Ok(())
+}
+
+fn link_object_store(source: &Path, destination: &Path) -> Result<(usize, u64)> {
+    let mut linked = 0usize;
+    let mut bytes = 0u64;
+    let mut pending = vec![PathBuf::new()];
+    while let Some(relative) = pending.pop() {
+        let directory = source.join(&relative);
+        let entries = fs::read_dir(&directory)
+            .with_context(|| format!("read Git object directory {}", directory.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("read Git object entry in {}", directory.display()))?;
+            let name = entry.file_name();
+            let file_type = entry.file_type().with_context(|| {
+                format!("read Git object entry type for {}", entry.path().display())
+            })?;
+            let child = relative.join(&name);
+            if file_type.is_dir() {
+                // `info/` holds regenerable caches, and an `alternates` file
+                // there would point outside this store.
+                if name == "info" {
+                    continue;
+                }
+                pending.push(child);
+                continue;
+            }
+            if !file_type.is_file() || name.to_string_lossy().starts_with("tmp_") {
+                continue;
+            }
+            let target = destination.join(&child);
+            if target.exists() {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create object directory {}", parent.display()))?;
+            }
+            let origin = source.join(&child);
+            match fs::hard_link(&origin, &target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                // A different filesystem (or a filesystem without links) is the
+                // only case that still pays for the bytes.
+                Err(_) => {
+                    fs::copy(&origin, &target).with_context(|| {
+                        format!(
+                            "copy git object {} to {}",
+                            origin.display(),
+                            target.display()
+                        )
+                    })?;
+                }
+            }
+            linked += 1;
+            bytes = bytes.saturating_add(
+                entry
+                    .metadata()
+                    .with_context(|| format!("read Git object metadata for {}", origin.display()))?
+                    .len(),
+            );
+        }
+    }
+    Ok((linked, bytes))
+}
+
+fn workspace_ref_name(refname: &str, full_history: bool, tags: bool) -> Option<String> {
+    if let Some(branch) = refname.strip_prefix("refs/heads/") {
+        return full_history.then(|| format!("refs/remotes/origin/{branch}"));
+    }
+    if refname.starts_with("refs/tags/") {
+        return (full_history || tags).then(|| refname.to_string());
+    }
+    None
+}
+
+fn write_loose_ref(git_dir: &Path, refname: &str, object: &str) -> Result<()> {
+    if !is_safe_ref_name(refname) || !object.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("refusing to write unsafe ref '{refname}'")
+    }
+    let path = git_dir.join(refname);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create ref directory {}", parent.display()))?;
+    }
+    fs::write(&path, format!("{object}\n")).with_context(|| format!("write ref {}", path.display()))
+}
+
+/// Ref names are mirror data, and they become path components here.
+fn is_safe_ref_name(refname: &str) -> bool {
+    refname.starts_with("refs/")
+        && !refname.ends_with('/')
+        && refname.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && component.chars().all(|character| {
+                    !character.is_control()
+                        && !matches!(character, '\\' | ':' | '?' | '*' | '[' | '~' | '^' | ' ')
+                })
+        })
+}
+
+fn write_fetch_head(git_dir: &Path, sha: &str, git_ref: &str, clone_url: &str) -> Result<()> {
+    let kind = if git_ref.len() == 40 && git_ref.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        "commit"
+    } else {
+        "branch"
+    };
+    let path = git_dir.join("FETCH_HEAD");
+    fs::write(
+        &path,
+        format!("{sha}\t\t{kind} '{git_ref}' of {clone_url}\n"),
+    )
+    .with_context(|| format!("write {}", path.display()))
 }
 
 fn checkout_clean_args(destination: &Path, preserve_workspace_target: bool) -> Vec<String> {
@@ -595,6 +1152,10 @@ where
         fs::create_dir_all(parent)
             .with_context(|| format!("create checkout config dir {}", parent.display()))?;
     }
+    // Register before the write, never after: an entry that names a credential
+    // which was never written scrubs nothing, while a credential written before
+    // its entry exists is untracked if the process dies in between.
+    register_credential(destination)?;
     let mut config = OpenOptions::new()
         .create(true)
         .append(true)
@@ -821,6 +1382,7 @@ fn checkout_repository(step: &ActionStep) -> Option<String> {
 fn checkout_clone_url(
     requested_repository: Option<&str>,
     self_repository: &RepositoryResource,
+    server_url: &str,
 ) -> Result<String> {
     match requested_repository {
         Some(repository) if !is_repository_name(repository) => {
@@ -834,9 +1396,35 @@ fn checkout_clone_url(
         {
             self_clone_url(self_repository)
         }
-        Some(repository) => Ok(format!("https://github.com/{repository}.git")),
+        // The server was hardcoded to github.com, so an external-repository
+        // checkout on a GHES instance silently fetched a different repository
+        // from the public site. The host comes from the job's own repository.
+        Some(repository) => Ok(format!(
+            "{}/{repository}.git",
+            server_url.trim_end_matches('/')
+        )),
         None => self_clone_url(self_repository),
     }
+}
+
+/// The git server this job belongs to: the origin of the self repository's
+/// clone URL, falling back to the `github.server_url` context.
+fn checkout_server_url(
+    job: &AgentJobRequestMessage,
+    self_repository: &RepositoryResource,
+) -> String {
+    self_clone_url(self_repository)
+        .ok()
+        .and_then(|url| {
+            let parsed = Url::parse(&url).ok()?;
+            let host = parsed.host_str()?;
+            Some(match parsed.port() {
+                Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+                None => format!("{}://{host}", parsed.scheme()),
+            })
+        })
+        .or_else(|| job_string(job, "github.server_url").map(ToOwned::to_owned))
+        .unwrap_or_else(|| "https://github.com".to_string())
 }
 
 fn self_clone_url(repository: &RepositoryResource) -> Result<String> {
@@ -1291,62 +1879,646 @@ mod tests {
     }
 
     #[test]
-    fn checkout_uses_refreshed_mirror_without_changing_command_trace() {
-        let root = std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
-        let mirror_store = root.join("mirrors");
-        let plan = test_checkout_plan(root.join("workspace"));
-        let mut runner = RecordingRunner::default();
-        let mut log = Vec::new();
+    fn an_external_repository_is_cloned_from_the_job_own_server() {
+        let mut properties = BTreeMap::new();
+        properties.insert(
+            "cloneUrl".to_string(),
+            "https://ghe.acme.test/acme/repo.git".to_string(),
+        );
+        let self_repository = RepositoryResource {
+            alias: Some("self".to_string()),
+            name: Some("acme/repo".to_string()),
+            git_ref: None,
+            version: None,
+            url: None,
+            properties,
+        };
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Build",
+            "requestId": 1,
+            "variables": {},
+            "resources": { "repositories": [] },
+            "steps": []
+        }))
+        .unwrap();
+        let server = checkout_server_url(&job, &self_repository);
+        assert_eq!(server, "https://ghe.acme.test");
+        // Hardcoding github.com here made a GHES job fetch a public repository
+        // of the same name instead of its own server's.
+        assert_eq!(
+            checkout_clone_url(Some("other/tool"), &self_repository, &server).unwrap(),
+            "https://ghe.acme.test/other/tool.git"
+        );
+    }
 
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&mirror_store)).unwrap();
+    fn write_credentialed_config(destination: &Path) -> PathBuf {
+        let git_dir = destination.join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        let config = git_dir.join("config");
+        std::fs::write(
+            &config,
+            "[core]\n\trepositoryformatversion = 0\n[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        config
+    }
 
-        let mirror = mirror_store.join("acme__repo.git");
-        assert!(runner.calls.iter().any(|(_, args)| {
-            args.contains(&"fetch".to_string()) && args.contains(&path_arg(&mirror))
-        }));
-        assert!(log.iter().any(|line| {
-            line.contains("git -C") && line.contains("fetch") && line.contains("origin abc123")
-        }));
-        assert!(!log.iter().any(|line| line.contains(&path_arg(&mirror))));
+    #[test]
+    fn an_aborted_job_leaves_no_credential_behind() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let live = root.join("live");
+        let abandoned = root.join("abandoned");
+        let live_config = write_credentialed_config(&live);
+        let abandoned_config = write_credentialed_config(&abandoned);
+
+        // A credential whose owner is still running is never touched: its
+        // journal entry stays locked for as long as the process lives.
+        register_credential_in(&journal, &live).unwrap();
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
+        assert!(config_has_credential(&live_config));
+
+        // A runner that died between its last step and cleanup leaves an
+        // unlocked entry behind — the kernel released the lock with the
+        // process. Nothing used to remove that credential, ever.
+        std::fs::write(
+            journal.join(format!("{}.json", uuid::Uuid::new_v4())),
+            serde_json::json!({
+                "config": abandoned_config.display().to_string(),
+                "workspace": abandoned.display().to_string(),
+                "pid": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 1);
+        assert!(!config_has_credential(&abandoned_config));
+        let scrubbed = std::fs::read_to_string(&abandoned_config).unwrap();
+        assert!(!scrubbed.contains("basic"), "{scrubbed}");
+        assert!(scrubbed.contains("repositoryformatversion"), "{scrubbed}");
+        // The live job kept its own credential throughout.
+        assert!(config_has_credential(&live_config));
+
+        release_registered_credentials(&live);
         std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
-    fn checkout_falls_back_to_origin_when_mirror_refresh_fails() {
-        #[derive(Default)]
-        struct MirrorFailRunner(RecordingRunner);
-        impl CommandRunner for MirrorFailRunner {
-            fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
-                self.0.calls.push((program.to_string(), args.to_vec()));
-                let mirror_fetch = args.iter().any(|arg| arg == "+refs/*:refs/*");
+    fn an_unpublished_credential_journal_is_invisible_to_the_reaper() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        std::fs::write(
+            journal.join(".new-credential.pending"),
+            serde_json::json!({
+                "config": config.display().to_string(),
+                "workspace": workspace.display().to_string(),
+                "pid": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 0);
+        assert!(config_has_credential(&config));
+        assert!(journal.join(".new-credential.pending").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_malformed_credential_journal_is_not_removed() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        std::fs::create_dir_all(&journal).unwrap();
+        let record = journal.join("malformed.json");
+        std::fs::write(&record, "not json").unwrap();
+
+        let error = reap_stale_credentials_in(&journal)
+            .expect_err("malformed journal records must fail closed");
+        assert!(
+            format!("{error:#}").contains("parse checkout credential journal"),
+            "unexpected error: {error:#}"
+        );
+        assert!(record.exists(), "malformed record was removed");
+        assert!(config_has_credential(&config));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkout_fails_closed_when_the_credential_journal_cannot_be_read() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&journal, "not a directory").unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(journal));
+
+        let mut runner = RecordingRunner::default();
+        let error = execute_checkout(
+            &mut runner,
+            &test_checkout_plan(root.join("workspace")),
+            &mut Vec::new(),
+        )
+        .expect_err("checkout must stop when stale credentials cannot be inspected");
+
+        assert!(
+            format!("{error:#}").contains("reap stale checkout credentials"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "checkout ran Git after credential reaper failure"
+        );
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cleanup_fails_the_job_when_the_credential_cannot_be_removed() {
+        struct RefusingRunner;
+        impl CommandRunner for RefusingRunner {
+            fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
                 Ok(CommandResult {
-                    code: i32::from(mirror_fetch),
+                    code: 1,
                     stdout: String::new(),
-                    stderr: if mirror_fetch {
-                        "simulated mirror failure".into()
-                    } else {
-                        String::new()
-                    },
+                    stderr: "error: could not lock config file".into(),
                 })
             }
         }
 
-        let root = std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
-        let plan = test_checkout_plan(root.join("workspace"));
-        let mut runner = MirrorFailRunner::default();
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        write_credentialed_config(&workspace);
+        let mut plan = test_checkout_plan(workspace);
+        plan.token = Some("token".into());
+        plan.persist_credentials = true;
 
-        execute_checkout_with_mirror(
+        // This used to print a warning to stderr and report success, leaving a
+        // credentialed workspace on the host.
+        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan]).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("cleanup of checkout credentials"),
+            "{error:#}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn cleanup_removes_a_credential_even_when_persistence_was_disabled() {
+        struct MissingKeyRunner;
+        impl CommandRunner for MissingKeyRunner {
+            fn run(&mut self, _program: &str, _args: &[String]) -> Result<CommandResult> {
+                // `git config --unset-all` on an absent key.
+                Ok(CommandResult {
+                    code: GIT_CONFIG_KEY_NOT_FOUND,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let config = write_credentialed_config(&workspace);
+        let mut plan = test_checkout_plan(workspace);
+        plan.persist_credentials = false;
+
+        // Cleanup used to return early whenever the plan said it had not
+        // persisted anything, so a credential written by any other path stayed.
+        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan]).unwrap();
+        assert!(!config_has_credential(&config));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_persisted_credential_is_registered_before_it_reaches_disk() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        let mut runner = RecordingRunner::default();
+
+        persist_git_credentials(
             &mut runner,
-            &plan,
+            &workspace,
+            "https://github.com/acme/repo.git",
+            "token",
             &mut Vec::new(),
-            Some(&root.join("mirrors")),
         )
         .unwrap();
 
-        assert!(runner.0.calls.iter().any(|(_, args)| {
-            args.contains(&"fetch".to_string()) && args.contains(&"origin".to_string())
-        }));
+        let tracked = active_credentials()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.destination == workspace);
+        assert!(tracked, "the persisted credential is untracked");
+        assert!(config_has_credential(&workspace.join(".git/config")));
+
+        cleanup_checkout_credentials(
+            &mut runner,
+            &[{
+                let mut plan = test_checkout_plan(workspace.clone());
+                plan.token = Some("token".into());
+                plan.persist_credentials = true;
+                plan
+            }],
+        )
+        .unwrap();
+        assert!(!config_has_credential(&workspace.join(".git/config")));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn an_lfs_checkout_does_not_write_the_token_into_the_workspace() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let workspace = root.join("workspace");
+        let mut runner = RecordingRunner::default();
+
+        // lfs used to persist the credential unconditionally, before the
+        // checkout, so `persist-credentials: false` still left one on disk.
+        fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            false,
+            false,
+            true,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert!(!config_has_credential(&workspace.join(".git/config")));
+        assert!(runner
+            .env_calls
+            .iter()
+            .any(|env| env.iter().any(|(name, _)| name == "GIT_CONFIG_KEY_0")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A real repository served over `file://`, so the mirror and the workspace
+    /// hydration run the actual git commands rather than a mock.
+    struct RepoFixture {
+        root: PathBuf,
+        origin: PathBuf,
+        sha: String,
+    }
+
+    impl RepoFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
+            let origin = root.join("origin/repo.git");
+            let work = root.join("seed");
+            std::fs::create_dir_all(origin.parent().unwrap()).unwrap();
+            let mut runner = ProcessCommandRunner;
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
+            git(vec!["init".into(), "--bare".into(), path_arg(&origin)]);
+            git(vec![
+                "-C".into(),
+                path_arg(&origin),
+                "config".into(),
+                "uploadpack.allowAnySHA1InWant".into(),
+                "true".into(),
+            ]);
+            git(vec!["init".into(), path_arg(&work)]);
+            for (key, value) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+                git(vec![
+                    "-C".into(),
+                    path_arg(&work),
+                    "config".into(),
+                    key.into(),
+                    value.into(),
+                ]);
+            }
+            std::fs::write(work.join("value"), "one").unwrap();
+            git(vec!["-C".into(), path_arg(&work), "add".into(), ".".into()]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "commit".into(),
+                "-m".into(),
+                "one".into(),
+            ]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "push".into(),
+                path_arg(&origin),
+                "HEAD:master".into(),
+            ]);
+            let sha = git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "rev-parse".into(),
+                "HEAD".into(),
+            ]);
+            Self { root, origin, sha }
+        }
+
+        fn plan(&self, destination: PathBuf) -> CheckoutPlan {
+            CheckoutPlan {
+                step_id: "checkout".into(),
+                display_name: "Checkout".into(),
+                clone_url: format!("file://{}", self.origin.display()),
+                version: Some(self.sha.clone()),
+                destination,
+                token: None,
+                fetch_depth: Some(1),
+                fetch_tags: false,
+                persist_credentials: false,
+                clean: false,
+                lfs: false,
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }
+        }
+
+        fn store(&self) -> PathBuf {
+            self.root.join("mirrors")
+        }
+    }
+
+    impl Drop for RepoFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    #[test]
+    fn checkout_hydrates_the_workspace_without_copying_object_bytes() {
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store())).unwrap();
+
+        let head = runner
+            .run(
+                "git",
+                &[
+                    "-C".into(),
+                    path_arg(&workspace),
+                    "rev-parse".into(),
+                    "HEAD".into(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(head.stdout.trim(), fixture.sha);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("value")).unwrap(),
+            "one"
+        );
+
+        // Every object in the workspace is a hard link to the mirror's copy:
+        // more than one link, and the same inode.
+        use std::os::unix::fs::MetadataExt;
+        let mirror = fixture
+            .store()
+            .join(format!("{}__origin__repo.git", "localhost"));
+        let mirror = if mirror.exists() {
+            mirror
+        } else {
+            std::fs::read_dir(fixture.store())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "git"))
+                .expect("mirror directory")
+        };
+        let mut checked = 0;
+        let mut pending = vec![workspace.join(".git/objects")];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let workspace_object = std::fs::metadata(&path).unwrap();
+                let relative = path.strip_prefix(workspace.join(".git/objects")).unwrap();
+                let mirrored = std::fs::metadata(mirror.join("objects").join(relative)).unwrap();
+                assert_eq!(
+                    workspace_object.ino(),
+                    mirrored.ino(),
+                    "{} was copied out of the mirror instead of linked",
+                    relative.display()
+                );
+                assert!(workspace_object.nlink() >= 2);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "workspace has no objects from the mirror");
+    }
+
+    #[test]
+    fn checkout_hydration_fails_closed_when_object_directory_is_missing() {
+        let fixture = RepoFixture::new();
+        let error = link_object_store(
+            &fixture.root.join("missing-objects"),
+            &fixture.root.join("workspace-objects"),
+        )
+        .expect_err("missing mirror objects must fail closed");
+        assert!(
+            format!("{error:#}").contains("read Git object directory"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn checkout_releases_mirror_reader_lease_after_hydration() {
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let mut setup = ProcessCommandRunner;
+        let mirror = crate::git_mirror::ensure_mirror(
+            &mut setup,
+            &fixture.store(),
+            &plan.clone_url,
+            None,
+            &mirror_want(&plan),
+        )
+        .unwrap();
+        let lock_path = std::fs::read_dir(fixture.store())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "lock")
+            })
+            .expect("mirror lock");
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        assert!(matches!(
+            flock(&contender, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        ));
+        drop(mirror);
+        drop(contender);
+        let mut runner = LeaseProbeRunner {
+            inner: ProcessCommandRunner,
+            lock_path,
+            checkout_lock_available: None,
+            initial_lock_available: None,
+        };
+
+        execute_checkout_with_mirror(&mut runner, &plan, &mut Vec::new(), Some(&fixture.store()))
+            .unwrap();
+
+        assert_eq!(
+            runner.checkout_lock_available,
+            Some(true),
+            "workspace checkout must not keep the mirror reader lease"
+        );
+        assert_eq!(runner.initial_lock_available, Some(false));
+    }
+
+    struct LeaseProbeRunner {
+        inner: ProcessCommandRunner,
+        lock_path: PathBuf,
+        checkout_lock_available: Option<bool>,
+        initial_lock_available: Option<bool>,
+    }
+
+    impl CommandRunner for LeaseProbeRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if program == "git" && args.iter().any(|arg| arg == "checkout") {
+                let contender = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_path)?;
+                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                self.checkout_lock_available = Some(available);
+            }
+            if program == "git"
+                && self.initial_lock_available.is_none()
+                && args.iter().any(|arg| arg == "init")
+            {
+                let contender = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.lock_path)?;
+                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                self.initial_lock_available = Some(available);
+            }
+            self.inner.run(program, args)
+        }
+    }
+
+    #[test]
+    fn checkout_fails_when_the_mirror_cannot_be_prepared() {
+        let fixture = RepoFixture::new();
+        let mut plan = fixture.plan(fixture.root.join("workspace"));
+        plan.clone_url = format!("file://{}", fixture.root.join("gone.git").display());
+        let mut runner = ProcessCommandRunner;
+
+        // A mirror that cannot serve the job used to warn and fall through to a
+        // direct fetch, hiding the failure and every later degradation with it.
+        let error = execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut Vec::new(),
+            Some(&fixture.store()),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("git mirror"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn concurrent_checkouts_of_one_commit_fetch_the_mirror_once() {
+        #[derive(Default)]
+        struct CountingRunner {
+            network_fetches: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl CommandRunner for CountingRunner {
+            fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+                ProcessCommandRunner.run(program, args)
+            }
+            fn run_with_env(
+                &mut self,
+                program: &str,
+                args: &[String],
+                env: &[(String, String)],
+            ) -> Result<CommandResult> {
+                if args.iter().any(|arg| arg.starts_with("file://")) {
+                    self.network_fetches
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                ProcessCommandRunner.run_with_env(program, args, env)
+            }
+        }
+
+        let fixture = RepoFixture::new();
+        let store = fixture.store();
+        let fetches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The first leg of a matrix warms the mirror.
+        execute_checkout_with_mirror(
+            &mut CountingRunner {
+                network_fetches: std::sync::Arc::clone(&fetches),
+            },
+            &fixture.plan(fixture.root.join("warm")),
+            &mut Vec::new(),
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(fetches.swap(0, std::sync::atomic::Ordering::SeqCst), 1);
+        std::thread::scope(|scope| {
+            for index in 0..6 {
+                let plan = fixture.plan(fixture.root.join(format!("matrix-{index}")));
+                let store = store.clone();
+                let fetches = std::sync::Arc::clone(&fetches);
+                scope.spawn(move || {
+                    let mut runner = CountingRunner {
+                        network_fetches: fetches,
+                    };
+                    execute_checkout_with_mirror(&mut runner, &plan, &mut Vec::new(), Some(&store))
+                        .unwrap();
+                });
+            }
+        });
+
+        // Every remaining leg wants the same commit, and the mirror already has
+        // it: no lock upgrade, no fetch, no origin traffic. This used to be six
+        // full `+refs/*:refs/*` fetches serialized behind one exclusive lock.
+        let observed = fetches.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            observed, 0,
+            "a mirrored commit still cost {observed} fetch(es)"
+        );
+        for index in 0..6 {
+            let workspace = fixture.root.join(format!("matrix-{index}"));
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("value")).unwrap(),
+                "one"
+            );
+        }
     }
 
     fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
@@ -2240,7 +3412,8 @@ mod tests {
             properties: Default::default(),
         };
 
-        let error = checkout_clone_url(Some("../bad"), &repository).unwrap_err();
+        let error =
+            checkout_clone_url(Some("../bad"), &repository, "https://github.com").unwrap_err();
 
         assert!(error
             .to_string()

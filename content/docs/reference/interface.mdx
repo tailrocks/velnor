@@ -17,6 +17,7 @@ velnorctl get runs
 velnorctl events
 velnorctl logs SUBJECT
 velnorctl telemetry
+velnor-tools workflow-monitor --repo OWNER/REPO --run-id RUN_ID
 ```
 
 Use `velnorctl --help` for the installed binary's complete parser metadata.
@@ -63,23 +64,59 @@ Global options:
 
 `cache du` and `cache gc` operate on the local cache when their required local paths are available. Storage commands such as `storage du`, `storage gc`, `storage history`, `storage reservations`, `storage leases`, and `storage explain-pressure` currently return unavailable.
 
+### Workflow generation and monitoring
+
+`velnor-workflow` is the Velnor-owned static generator and runtime used by
+generated GitHub Actions jobs. It writes only its owned files and keeps the
+declarative execution contract in `.github/ci/project.toml`:
+
+```sh
+velnor-workflow REPOSITORY --runners both
+velnor-workflow plan --config .github/ci/project.toml
+velnor-workflow run --scope affected
+velnor-workflow policy --workflow-root .
+velnor-workflow release verify-tag
+```
+
+`velnor-tools workflow-monitor` joins authoritative GitHub run state with
+read-only local Velnor observations. GitHub remains authoritative for the
+terminal result; local readiness, runner, slot, job, event, log, and outbox
+observations are evidence only:
+
+```sh
+velnor-tools workflow-monitor \
+  --repo OWNER/REPO \
+  --run-id RUN_ID \
+  --instance primary \
+  --timeout 30m \
+  --poll 2s \
+  --evidence-dir .velnor/evidence
+```
+
+The monitor never mutates the Velnor control plane and never treats local
+completion as proof of GitHub completion. GitHub credentials remain in the
+environment, not command arguments.
+
 ### Registration and local setup commands
 
 ```sh
+export GITHUB_TOKEN=replace-with-a-token
+
 velnorctl configure \
   --url https://github.com/OWNER/REPO \
-  --pat "$GITHUB_TOKEN" \
   --name velnor \
   --labels velnor,velnor-target-mvp \
   --config-dir /var/lib/velnor/config
 ```
 
-`configure` supports repository, organization, and enterprise URLs. Relevant options are:
+`configure` supports repository, organization, and enterprise URLs. It reads the
+registration credential from the `GITHUB_TOKEN` environment variable; the CLI
+does not accept a command-line credential argument. Relevant options are:
 
 | Option | Meaning |
 | --- | --- |
 | `--url` | GitHub repository, organization, or enterprise URL. |
-| `--pat` | Registration credential; may come from `GITHUB_TOKEN`. Never put it in a shared command history. |
+| `GITHUB_TOKEN` | Environment-only registration credential. Keep it out of command arguments and shared command history. |
 | `--name` | Runner name. |
 | `--labels` | Comma-separated labels. Empty labels become `self-hosted,velnor`. |
 | `--target-mvp-labels` | Add the target MVP Linux label set. |
@@ -162,11 +199,13 @@ Admission validates trust policy, the compiled capability manifest, and the comp
 
 Ordinary action references must be full 40-character commit SHAs unless explicitly allowed by the compiled manifest. The manifest includes approved native checkout/cache behavior and a finite allowlist of actions; it is the authority for a particular build. Inspect it with `capabilities export` and test a job message with `capabilities check`.
 
+The allowlist is closed. A JavaScript, Docker, or composite action that is not on it is rejected at planning, and there is no generic JavaScript action runtime open to workflows. See [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
+
 ## Credential boundaries
 
 The operator PAT is used for registration, runner/group lookup, and runner cleanup. It is not a job credential.
 
-GitHub supplies job-scoped credentials in the acquired job payload. Velnor injects them only after admission, including the job token, Actions runtime token, OIDC material, and cache/results credentials. Non-trusted jobs that carry user secrets are rejected where the selected trust policy requires it. MicroVM guests must be credential-free at readiness; credentials are delivered only for the job session.
+GitHub supplies job-scoped credentials in the acquired job payload. Velnor injects them only after admission, including the job token, Actions runtime token, OIDC material, and cache/results credentials. A job carrying GitHub user secrets is rejected outright unless the operator set `VELNOR_TRUST_SCOPE=trusted`, which is not the default; see [Trust scope](/reference/trust-scope). MicroVM guests must be credential-free at readiness; credentials are delivered only for the job session.
 
 Packaged installations keep the operator token in `/etc/velnor/secrets.env` with mode `0600`; it is not passed in process arguments.
 
