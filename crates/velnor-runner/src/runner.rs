@@ -991,6 +991,56 @@ pub(crate) async fn complete_recorded_in_flight_job(
     .await
 }
 
+/// Reconstruct the smallest valid completion when a worker crashed after the
+/// terminal conclusion was committed but before the payload/outbox existed.
+/// The durable conclusion is authoritative; recovery must not replace a
+/// successful job with the generic synthetic failure used for an unknown
+/// worker outcome.
+pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    terminal_conclusion: &str,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let conclusion = parse_recorded_terminal_conclusion(terminal_conclusion)?;
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
+    let ctx = RunServiceJobContext {
+        client,
+        run_service_url: record.run_service_url,
+        billing_owner_id: record.billing_owner_id,
+        journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
+        journal_dir,
+    };
+    let identity = AcquiredJobIdentity {
+        plan_id: record.plan_id,
+        job_id: record.job_id.clone(),
+    };
+    let completion =
+        recovered_terminal_completion(&identity, ctx.billing_owner_id.clone(), conclusion);
+    establish_durable_completion_ownership(&ctx, &identity)
+        .await
+        .context("establish durable ownership before recovered terminal completion")?;
+    send_guarded_run_service_complete(
+        &ctx.client,
+        &ctx.run_service_url,
+        completion,
+        &ctx.journal_dir,
+    )
+    .await
+    .context("send recovered terminal completion")?;
+    cleanup_recorded_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
+fn parse_recorded_terminal_conclusion(value: &str) -> Result<TaskResult> {
+    serde_json::from_value(Value::String(value.to_owned()))
+        .with_context(|| format!("unsupported durable terminal conclusion {value:?}"))
+}
+
 pub(crate) async fn complete_recorded_in_flight_job_after_journal_acceptance(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
@@ -11910,6 +11960,40 @@ fn terminal_acquired_job_completion(
     }
 }
 
+/// Build a minimal payload for the crash window where only the terminal
+/// conclusion survived. This is not a pre-execution rejection: preserving a
+/// recorded success must bypass the pre-execution success guard, while the
+/// synthetic step keeps the Run Service payload structurally complete.
+fn recovered_terminal_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    conclusion: TaskResult,
+) -> RunServiceCompleteJob {
+    let now = unix_now_iso8601();
+    RunServiceCompleteJob {
+        plan_id: identity.plan_id.clone(),
+        job_id: identity.job_id.clone(),
+        conclusion,
+        outputs: BTreeMap::new(),
+        step_results: vec![RunServiceStepResult {
+            external_id: Some("velnor-recovered-terminal".to_owned()),
+            number: Some(1),
+            name: "Velnor recovered durable terminal result".to_owned(),
+            status: TimelineRecordState::Completed,
+            conclusion,
+            started_at: Some(now.clone()),
+            completed_at: Some(now),
+            completed_log_lines: 0,
+            annotations: Vec::new(),
+        }],
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        environment_url: None,
+        billing_owner_id,
+        infrastructure_failure_category: None,
+    }
+}
+
 fn rejection_log_lines(category: &str, reason: &str) -> Vec<String> {
     let mut lines = vec![
         "##[error]Velnor rejected this job before workflow execution.".to_string(),
@@ -17572,6 +17656,24 @@ jobs:
             empty_error.to_string().contains("empty step_results"),
             "{empty_error:#}"
         );
+    }
+
+    #[test]
+    fn recovered_terminal_completion_preserves_durable_conclusion() {
+        let completion = recovered_terminal_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            None,
+            parse_recorded_terminal_conclusion("succeeded").unwrap(),
+        );
+
+        assert_eq!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(completion.step_results[0].conclusion, TaskResult::Succeeded);
+        assert!(completion.annotations.is_empty());
+        assert!(parse_recorded_terminal_conclusion("success").is_err());
     }
 
     #[test]

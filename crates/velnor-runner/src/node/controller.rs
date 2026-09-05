@@ -1597,12 +1597,24 @@ async fn reclaim_orphaned_jobs(
                         }
                     }
                 } else {
-                    defer_remote_recovery_on_timeout(
-                        remaining_remote_budget(remote_deadline),
-                        crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
-                        "complete recorded in-flight job during orphan recovery",
-                    )
-                    .await?
+                    let recovery = if let Some(conclusion) = job.terminal_conclusion.as_deref() {
+                        defer_remote_recovery_on_timeout(
+                            remaining_remote_budget(remote_deadline),
+                            crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
+                                &slot_dir, &stored, conclusion,
+                            ),
+                            "complete recorded terminal conclusion during orphan recovery",
+                        )
+                        .await?
+                    } else {
+                        defer_remote_recovery_on_timeout(
+                            remaining_remote_budget(remote_deadline),
+                            crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+                            "complete recorded in-flight job during orphan recovery",
+                        )
+                        .await?
+                    };
+                    recovery
                 };
                 let Some(cleanup) = cleanup else {
                     continue;
