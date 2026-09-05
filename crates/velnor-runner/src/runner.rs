@@ -8305,6 +8305,7 @@ impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDocker
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],

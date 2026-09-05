@@ -7,18 +7,26 @@
 //! from — embedded here at compile time so a running binary can prove its own
 //! provenance without trusting a mutable label.
 //!
-//! Two modes, selected by the `release-build` cargo feature:
+//! Two modes, selected by the `release-build` cargo feature plus the
+//! `VELNOR_RELEASE_BUILD=1` environment, which only the release workflow
+//! exports:
 //!
 //! * **default (development)** — no git introspection. The binary is stamped
 //!   `development`/`development`/`development` and `release::embedded()` reports a
 //!   development build that *cannot* emit a publishable record. This is the only
 //!   path exercised by the normal build/test pipeline, so it must stay cheap and
 //!   never fail.
-//! * **`release-build`** — the exact 40-hex `HEAD` commit and the single `v*` tag
-//!   pointing at `HEAD` are derived from git. The build FAILS (panics) unless the
-//!   tree is clean, exactly one release tag points at `HEAD`, and
-//!   `tag == v<crate version> == Cargo.lock version`. This is the empty-slack gate
-//!   that makes a mismatched package/manifest structurally impossible to ship.
+//! * **feature on, environment unset (inert)** — the scanner-driven CI enables
+//!   `--all-features`, which turns this feature on outside any release. Without
+//!   `VELNOR_RELEASE_BUILD=1` the feature is inert (development stamp plus a
+//!   build warning) so normal `--all-features` builds stay green. A binary
+//!   built this way still cannot emit a publishable record.
+//! * **`release-build`** — with `VELNOR_RELEASE_BUILD=1`, the exact 40-hex
+//!   `HEAD` commit and the single `v*` tag pointing at `HEAD` are derived from
+//!   git. The build FAILS (panics) unless the tree is clean, exactly one
+//!   release tag points at `HEAD`, and `tag == v<crate version> == Cargo.lock
+//!   version`. This is the empty-slack gate that makes a mismatched
+//!   package/manifest structurally impossible to ship.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,9 +36,20 @@ fn main() {
     // changes — all three feed the release-build coherence gate.
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RELEASE_BUILD");
+    println!("cargo:rerun-if-env-changed=VELNOR_RELEASE_BUILD");
     let crate_version = env("CARGO_PKG_VERSION");
 
     if std::env::var_os("CARGO_FEATURE_RELEASE_BUILD").is_none() {
+        emit("VELNOR_SOURCE_SHA", "development");
+        emit("VELNOR_SOURCE_TAG", "development");
+        emit("VELNOR_BUILD_KIND", "development");
+        return;
+    }
+    if std::env::var("VELNOR_RELEASE_BUILD").as_deref() != Ok("1") {
+        println!(
+            "cargo:warning=release-build feature is inert without VELNOR_RELEASE_BUILD=1; \
+             embedding development identity"
+        );
         emit("VELNOR_SOURCE_SHA", "development");
         emit("VELNOR_SOURCE_TAG", "development");
         emit("VELNOR_BUILD_KIND", "development");
