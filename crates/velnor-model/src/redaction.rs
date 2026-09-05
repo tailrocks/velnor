@@ -246,7 +246,10 @@ fn json_string_escape(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             '\u{08}' => escaped.push_str("\\b"),
             '\u{0c}' => escaped.push_str("\\f"),
-            character if (character as u32) < 0x20 => {
+            character
+                if (character as u32) < 0x20
+                    || matches!(character, '\u{85}' | '\u{2028}' | '\u{2029}') =>
+            {
                 escaped.push_str(&format!("\\u{:04x}", character as u32));
             }
             character => escaped.push(character),
@@ -424,6 +427,14 @@ mod tests {
         assert_eq!(masker.mask("short"), "short");
         assert_eq!(masker.mask("abc&+"), "abc&+");
         assert_eq!(masker.mask("def"), "def");
+    }
+
+    #[test]
+    fn json_encoder_uses_runner_control_character_escapes() {
+        assert_eq!(
+            json_string_escape("a\u{85}\u{2028}\u{2029}b"),
+            "a\\u0085\\u2028\\u2029b"
+        );
     }
 
     #[test]
