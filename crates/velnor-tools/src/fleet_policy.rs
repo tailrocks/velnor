@@ -1950,6 +1950,8 @@ fn regular_policy_file_identity_from_stat(stat: &libc::stat) -> io::Result<Polic
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
+    // libc exposes st_nlink as u32 on some targets and u64 on others.
+    #[allow(clippy::useless_conversion)]
     let nlink = u64::from(stat.st_nlink);
     Ok((stat.st_dev as _, stat.st_ino, stat.st_mode as u64, nlink))
 }
