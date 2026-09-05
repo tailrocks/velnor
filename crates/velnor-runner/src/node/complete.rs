@@ -292,23 +292,30 @@ pub fn abandon_unresolvable_completion(
     Ok(true)
 }
 
-/// Return the generation that already owns `job_id`. Never creates ownership.
+/// Return the generation that already owns `job_id`. Never creates ownership or
+/// treats a provisional acquisition intent as ownership.
 ///
 /// # Errors
 /// Job is missing from the journal.
 pub fn ensure_owned(journal: &mut Journal, job_id: &JobId) -> anyhow::Result<Generation> {
     let state = journal.materialized_state()?;
-    state
+    let job = state
         .jobs
         .iter()
         .find(|job| job.job_id == *job_id)
-        .map(|job| job.generation)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "job {} is not owned; completion cannot attach a permit at send time",
                 job_id.0
             )
-        })
+        })?;
+    if job.provisional {
+        anyhow::bail!(
+            "job {} has only provisional acquisition evidence; completion cannot send",
+            job_id.0
+        );
+    }
+    Ok(job.generation)
 }
 
 /// Bind `job_id` to the slot that accepted it, from a slot that is still Ready.
@@ -1254,6 +1261,22 @@ mod tests {
         assert!(journal.pending_outbox().unwrap().is_empty());
         assert!(journal.materialized_state().unwrap().jobs.is_empty());
         assert!(!cleanup::outbox_path(&dir, &job_id.0, 1).exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn provisional_acquisition_cannot_enter_completion_guard() {
+        let dir = tmp("provisional-completion-guard");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot, _) = prime_ready_slot(&mut journal);
+        let job_id = JobId("job-1".into());
+        intend_and_retarget(&mut journal, &slot, "message-1", &job_id);
+
+        let error = ensure_owned(&mut journal, &job_id).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("provisional acquisition evidence"));
+        assert!(journal.pending_outbox().unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }
 

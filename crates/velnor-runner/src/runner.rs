@@ -352,9 +352,17 @@ enum V2MessageAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RunServiceJobJournalState {
     /// The run-service job was acquired, but local admission is not durable.
-    /// Only a terminal failure may use the direct completion path in this state.
+    /// The current acquisition response is the proof needed to promote the
+    /// exact provisional row before a terminal completion is sent.
     Acquired,
     Accepted,
+    /// Recovery found the durable acquisition intent, but the crashed worker's
+    /// acquire response is not proof available to this process. `renewjob`
+    /// must prove ownership before promotion.
+    Provisional,
+    /// The marker has no durable ownership proof. Completion must stop before
+    /// transport and leave the marker for a later reconciliation.
+    Unproven,
 }
 
 #[derive(Clone)]
@@ -881,15 +889,15 @@ fn clear_in_flight_job_if_matches(config_dir: &Path, job_id: &str) -> Result<boo
 
 fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJobJournalState {
     let Ok(journal) = velnor_control::journal::Journal::open(journal_dir.join("journal.db")) else {
-        return RunServiceJobJournalState::Accepted;
+        return RunServiceJobJournalState::Unproven;
     };
     let Ok(state) = journal.materialized_state() else {
-        return RunServiceJobJournalState::Accepted;
+        return RunServiceJobJournalState::Unproven;
     };
-    if state.jobs.iter().any(|job| job.job_id.0 == job_id) {
-        RunServiceJobJournalState::Accepted
-    } else {
-        RunServiceJobJournalState::Acquired
+    match state.jobs.iter().find(|job| job.job_id.0 == job_id) {
+        Some(job) if job.provisional => RunServiceJobJournalState::Provisional,
+        Some(_) => RunServiceJobJournalState::Accepted,
+        None => RunServiceJobJournalState::Unproven,
     }
 }
 
@@ -11843,6 +11851,152 @@ async fn complete_acquired_job_failure(
     .await
 }
 
+fn load_acquisition_row_for_completion(
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<(
+    velnor_control::journal::Journal,
+    velnor_control::journal::JobRecord,
+)> {
+    if identity.plan_id.trim().is_empty() || identity.job_id.trim().is_empty() {
+        bail!(
+            "acquired job completion has an incomplete identity (plan_id={}, job_id={})",
+            identity.plan_id,
+            identity.job_id
+        );
+    }
+    let journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let row = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .into_iter()
+        .find(|job| job.job_id.0 == identity.job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no durable acquisition row exists for acquired job {}",
+                identity.job_id
+            )
+        })?;
+    if row.plan_id != identity.plan_id {
+        bail!(
+            "durable acquisition row for job {} names plan {}, not {}",
+            identity.job_id,
+            row.plan_id,
+            identity.plan_id
+        );
+    }
+    Ok((journal, row))
+}
+
+/// Promote the row created by this process's successful acquire response.
+///
+/// The response is the ownership proof here, but the `JobOwned` event is still
+/// required before `CompletionIntended` can create an outbox. Missing or
+/// mismatched rows fail closed; this function never creates a replacement row.
+fn promote_acquired_job_for_completion(
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let (mut journal, row) = load_acquisition_row_for_completion(journal_dir, identity)?;
+    if !row.provisional {
+        return Ok(());
+    }
+    crate::node::complete::confirm_acquisition(
+        &mut journal,
+        &row.job_id,
+        &row.slot_id,
+        row.generation,
+    )
+    .context("promote acquired job to durable ownership")
+}
+
+/// Prove a provisional row left by a crashed worker before allowing recovery
+/// to publish a terminal completion. The marker and intent are only evidence;
+/// `renewjob` is the authority that distinguishes this runner from another.
+async fn prove_and_promote_recovered_acquisition(
+    client: &RunServiceClient,
+    journal_dir: &Path,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    let (mut journal, row) = load_acquisition_row_for_completion(journal_dir, identity)?;
+    if !row.provisional {
+        return Ok(());
+    }
+    match probe_provisional_acquisition(client, &row).await {
+        crate::node::complete::AcquisitionVerdict::Owned => {}
+        crate::node::complete::AcquisitionVerdict::NotOurs => {
+            bail!(
+                "renewjob did not prove ownership of recovered job {}; completion withheld",
+                identity.job_id
+            )
+        }
+        crate::node::complete::AcquisitionVerdict::Indeterminate => {
+            bail!(
+                "renewjob could not prove ownership of recovered job {}; completion withheld",
+                identity.job_id
+            )
+        }
+    }
+
+    // Re-read after the network proof. A concurrent recovery may have already
+    // promoted the row; never apply JobOwned against a changed generation or
+    // identity.
+    let current = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+        .jobs
+        .into_iter()
+        .find(|job| job.job_id.0 == identity.job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "acquisition row for recovered job {} disappeared during ownership proof",
+                identity.job_id
+            )
+        })?;
+    if current.plan_id != identity.plan_id {
+        bail!(
+            "acquisition row for recovered job {} changed plans during ownership proof",
+            identity.job_id
+        );
+    }
+    if current.provisional {
+        crate::node::complete::confirm_acquisition(
+            &mut journal,
+            &current.job_id,
+            &current.slot_id,
+            current.generation,
+        )
+        .context("promote recovered acquisition to durable ownership")?;
+    }
+    Ok(())
+}
+
+async fn establish_durable_completion_ownership(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+) -> Result<()> {
+    match run_service_job.journal_state {
+        RunServiceJobJournalState::Accepted => Ok(()),
+        RunServiceJobJournalState::Acquired => {
+            promote_acquired_job_for_completion(&run_service_job.journal_dir, identity)
+        }
+        RunServiceJobJournalState::Provisional => {
+            prove_and_promote_recovered_acquisition(
+                &run_service_job.client,
+                &run_service_job.journal_dir,
+                identity,
+            )
+            .await
+        }
+        RunServiceJobJournalState::Unproven => bail!(
+            "no durable ownership proof exists for recovered job {}; completion withheld",
+            identity.job_id
+        ),
+    }
+}
+
 async fn fail_closed_after_journal_acceptance_error(
     config_dir: &Path,
     run_service_job: &RunServiceJobContext,
@@ -12038,23 +12192,17 @@ async fn complete_acquired_job_outcome(
         infrastructure_failure_category,
         &masked_reason,
     ))?;
-    match run_service_job.journal_state {
-        RunServiceJobJournalState::Accepted => send_guarded_run_service_complete(
-            &run_service_job.client,
-            &run_service_job.run_service_url,
-            completion,
-            &run_service_job.journal_dir,
-        )
+    establish_durable_completion_ownership(run_service_job, identity)
         .await
-        .context("complete acquired run-service job after infrastructure failure"),
-        RunServiceJobJournalState::Acquired => run_service_job
-            .client
-            .complete_job(&run_service_job.run_service_url, completion)
-            .await
-            .context(
-                "complete acquired unjournaled run-service job after journal acceptance failure",
-            ),
-    }
+        .context("establish durable ownership before acquired-job completion")?;
+    send_guarded_run_service_complete(
+        &run_service_job.client,
+        &run_service_job.run_service_url,
+        completion,
+        &run_service_job.journal_dir,
+    )
+    .await
+    .context("complete acquired run-service job after infrastructure failure")
 }
 
 /// Guard the pre-execution complete_job payload.
@@ -16705,7 +16853,9 @@ jobs:
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn journal_acceptance_failure_completes_once_and_clears_in_flight() {
+    async fn acquired_completion_promotes_before_guarded_send() {
+        use velnor_control::journal::Journal;
+        use velnor_model::JobId;
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -16714,6 +16864,168 @@ jobs:
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = unique_temp_dir("acquired-completion-promotion");
+        fs::create_dir_all(&dir).unwrap();
+        let run_service_url = format!("{}/jobs/1", server.uri());
+        let job_id = JobId("job".to_owned());
+        let provisional_id = JobId("request-1".to_owned());
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan".to_owned(),
+            job_id: job_id.0.clone(),
+        };
+        let (mut journal, slot) = ready_slot_journal(&dir);
+        let generation = journal.materialized_state().unwrap().slots[0].generation;
+        crate::node::complete::intend_acquisition(
+            &mut journal,
+            &provisional_id,
+            &slot,
+            "message-1",
+            &run_service_url,
+            1_000,
+        )
+        .unwrap();
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &provisional_id,
+            &job_id,
+            &identity.plan_id,
+            generation,
+        )
+        .unwrap();
+        drop(journal);
+
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url,
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: RunServiceJobJournalState::Acquired,
+        };
+        complete_acquired_job_failure(
+            &context,
+            &identity,
+            None,
+            Some("promotion_test".to_owned()),
+            "durable promotion test",
+        )
+        .await
+        .unwrap();
+
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        server.verify().await;
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn provisional_recovery_with_indeterminate_proof_sends_nothing_and_retains_marker() {
+        use velnor_control::journal::Journal;
+        use velnor_model::JobId;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/jobs/1/renewjob"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(
+                r#"{"source":"actions-run-service","statusCode":500,"errorMessage":"temporary"}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/jobs/1/completejob"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let dir = unique_temp_dir("provisional-recovery-no-send");
+        fs::create_dir_all(&dir).unwrap();
+        let run_service_url = format!("{}/jobs/1", server.uri());
+        let job = minimal_job_with_variables(serde_json::json!({}));
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let (mut journal, slot) = ready_slot_journal(&dir);
+        let generation = journal.materialized_state().unwrap().slots[0].generation;
+        let provisional_id = JobId("request-1".to_owned());
+        crate::node::complete::intend_acquisition(
+            &mut journal,
+            &provisional_id,
+            &slot,
+            "message-1",
+            &run_service_url,
+            1_000,
+        )
+        .unwrap();
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &provisional_id,
+            &JobId(identity.job_id.clone()),
+            &identity.plan_id,
+            generation,
+        )
+        .unwrap();
+        drop(journal);
+
+        let context = RunServiceJobContext {
+            client: RunServiceClient::new("token").unwrap(),
+            run_service_url,
+            billing_owner_id: None,
+            journal_dir: dir.clone(),
+            journal_state: recorded_job_journal_state(&dir, &identity.job_id),
+        };
+        assert_eq!(
+            context.journal_state,
+            RunServiceJobJournalState::Provisional
+        );
+        persist_in_flight_job(&dir, &context, &job).unwrap();
+
+        let error = complete_acquired_job_failure(
+            &context,
+            &identity,
+            None,
+            Some("recovery_test".to_owned()),
+            "ownership proof unavailable",
+        )
+        .await
+        .unwrap_err();
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("could not prove ownership"), "{rendered}");
+        assert!(in_flight_job_path(&dir).exists());
+        let journal = Journal::open(dir.join("journal.db")).unwrap();
+        let row = journal
+            .materialized_state()
+            .unwrap()
+            .jobs
+            .into_iter()
+            .find(|row| row.job_id.0 == identity.job_id)
+            .unwrap();
+        assert!(row.provisional);
+        assert!(journal.pending_outbox().unwrap().is_empty());
+        server.verify().await;
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn marker_only_journal_acceptance_failure_sends_nothing_and_retains_in_flight() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
             .mount(&server)
             .await;
 
@@ -16740,8 +17052,12 @@ jobs:
         .await
         .unwrap_err();
 
-        assert!(error.to_string().contains("Assigned rejected"));
-        assert!(!in_flight_job_path(&config_dir).exists());
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("Assigned rejected"), "{rendered}");
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("no durable acquisition row")));
+        assert!(in_flight_job_path(&config_dir).exists());
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -16999,7 +17315,7 @@ jobs:
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(400))
-            .expect(1)
+            .expect(0)
             .mount(&server)
             .await;
 
