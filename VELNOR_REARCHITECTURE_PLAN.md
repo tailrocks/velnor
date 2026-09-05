@@ -4296,3 +4296,49 @@ incremental commits, and `git commit -s` including
 `Co-authored-by: Codex <codex@openai.com>`. Re-check remote parity before every
 push. The complete task specification remains at
 `/Users/donbeave/.codex-chainargos/attachments/c421e50d-ded9-4c83-8080-b938af6484fa/pasted-text-1.txt`.
+
+## 94. Second restart handoff — main advanced after §93 — 2026-09-05
+
+The next continuation must begin with the current authoritative state:
+
+- Canonical Velnor remains clean at
+  `perf/docker-rust-mbx@f5f28ca1e75ae9a4a9c71c94229163294f6ef58b`, equal to
+  `origin/perf/docker-rust-mbx`.
+- `origin/main` advanced to
+  `008be2bd9143c9e10afadfa128fb04a389f26133` after §93. It is not merged into
+  the canonical branch.
+- An isolated merge was started at
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current`
+  on `codex/merge-main-20260905`, based on `f5f28ca`. Its merge of
+  `origin/main` is intentionally left unresolved and uncommitted. It contains
+  generated-workflow add/add conflicts plus staged main-side changes. Preserve
+  this worktree as evidence; do not abort, reset, stash, or delete it until a
+  fresh merge review decides whether to continue or recreate it safely.
+- The new main snapshot adds the setup action and changes generated CI,
+  workflow scanning, source-build identity handling, and several Rust paths.
+  It also removes fixture workflow units and carries a stale runtime revision
+  (`05ff9b8`). Do not accept it wholesale: re-audit each hunk against the
+  canonical MBX, verifier, cache, redaction, lifecycle, and CI contracts, then
+  regenerate generated workflows from the final generator source.
+- All six merge/audit workers were halted at this pause. No Docker cancellation
+  implementation was applied. Full architecture completion remains unproven.
+
+Safe restart sequence:
+
+```bash
+cd /Users/donbeave/Projects/tailrocks/velnor-project/velnor
+git switch perf/docker-rust-mbx
+git fetch origin main perf/docker-rust-mbx
+git status --short --branch
+git rev-parse HEAD origin/perf/docker-rust-mbx origin/main
+cd /Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current
+git status --short
+```
+
+Resume main integration first. Use one Luna-max worker per disjoint conflict
+surface and an independent review before committing the merge. The verifier
+worktree remains clean at
+`codex/verifier-completion-fixes@9d0363953cb37e95430dff51bf97bff41badbe68`.
+Keep the dirty checkout-hydration worktree named in §93 untouched. Commit
+small, sign with `git commit -s`, include the Codex co-author trailer, and push
+only after checking `HEAD...origin/perf/docker-rust-mbx` parity.
