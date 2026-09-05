@@ -7403,6 +7403,13 @@ fn native_upload_artifact(
     sources.dedup();
 
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
+    let artifact_run_dir = artifact_dir
+        .parent()
+        .context("artifact directory has no run bucket")?;
+    // GC removes one complete run bucket at a time. Lock that same bucket
+    // across staging, hashing, and Results Service streaming so the collector
+    // cannot delete the source between any of those phases.
+    let _artifact_lock = CacheEntryLock::exclusive(artifact_run_dir)?;
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
         // and the latest run's content is what compare-results should see.
@@ -7631,6 +7638,10 @@ fn native_download_artifact(
         // Unit/offline fallback. Product jobs always carry Results Service
         // credentials and therefore use the host-independent v4 path above.
         let store = artifact_store_dir(state)?;
+        // The GC candidate is the whole run bucket, not one artifact child.
+        // Hold the bucket lock before listing or opening any child so a
+        // concurrent reclaim either waits for this read or wins before it.
+        let _artifact_lock = CacheEntryLock::shared(&store)?;
         let artifacts = matching_artifacts(&store, &name, &pattern)?;
         for (artifact_name, artifact_dir) in &artifacts {
             let target_relative = if merge_multiple || !name.is_empty() {

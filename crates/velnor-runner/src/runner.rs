@@ -6134,11 +6134,24 @@ async fn handle_job_request(
                 } else {
                     repository_key
                 };
+                // Artifact GC evicts one complete workflow-run bucket. Keep
+                // that exact catalog scope live from acquisition through
+                // teardown, including the gaps between upload actions.
+                let artifact_run_scope = crate::container::sanitize_store_key(&format!(
+                    "{}-{}",
+                    crate::github_adapter::job_variable(&job, "github.run_id")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("local"),
+                    crate::github_adapter::job_variable(&job, "github.run_attempt")
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("1")
+                ));
                 let stale_after = Duration::from_secs(24 * 3600);
                 let lease_holder = crate::container::sanitize_store_key(&job.job_id);
                 [
                     ("targets", target_scope),
                     ("actions-cache", actions_cache_scope),
+                    ("artifacts", artifact_run_scope),
                     ("cargo", "registry".into()),
                     ("cargo", "git".into()),
                     ("cargo", cargo_bin_scope),
