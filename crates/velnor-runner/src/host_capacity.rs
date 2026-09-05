@@ -48,8 +48,12 @@ pub struct HostCapacity {
 
 impl HostCapacity {
     /// Probe the filesystem holding `path` (or its nearest existing ancestor).
+    ///
+    /// Admission uses only the bounded `statvfs` primitive. Docker usage stays
+    /// unknown unless a caller supplies an independently bounded measurement
+    /// through [`Self::probe_with_docker`].
     pub fn probe(path: &Path) -> Result<Self> {
-        Self::probe_with_docker(path, docker_usage_bytes())
+        Self::probe_with_docker(path, None)
     }
 
     pub fn probe_with_docker(path: &Path, docker_bytes: Option<u64>) -> Result<Self> {
@@ -106,19 +110,20 @@ fn existing_ancestor(path: &Path) -> Option<&Path> {
     None
 }
 
-/// Bytes Docker's storage occupies, from `docker system df`.
+/// Measure Docker's storage for reporting paths such as `cache du`.
 ///
-/// Never a prune: the point is to account for Docker, not to reclaim it. A
-/// missing or failing Docker is `None` (unknown), never `Some(0)`.
+/// Admission deliberately calls [`HostCapacity::probe`] and does not wait on
+/// Docker. Reporting may include this optional figure, but it must use the
+/// same bounded host-Docker runner as every other maintenance operation.
 pub fn docker_usage_bytes() -> Option<u64> {
-    let output = std::process::Command::new("docker")
-        .args(["system", "df", "--format", "{{json .}}"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    docker_usage_bytes_from_df(&String::from_utf8_lossy(&output.stdout))
+    let args = vec![
+        "system".to_string(),
+        "df".to_string(),
+        "--format".to_string(),
+        "{{json .}}".to_string(),
+    ];
+    let output = crate::docker_lease::run_host_docker(&args).ok()?;
+    docker_usage_bytes_from_df(&output)
 }
 
 /// Parse the `Size` fields of `docker system df --format '{{json .}}'`.
@@ -317,12 +322,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn statvfs_reports_a_real_filesystem_budget_not_summed_constants() {
-        let capacity = HostCapacity::probe_with_docker(&std::env::temp_dir(), None).unwrap();
+    fn admission_probe_uses_statvfs_without_a_docker_subprocess() {
+        let capacity = HostCapacity::probe(&std::env::temp_dir()).unwrap();
         assert!(capacity.total_bytes > 0, "statvfs reported no capacity");
         assert!(capacity.available_bytes <= capacity.total_bytes);
         assert!(capacity.used_percent() <= 100);
-        // Docker unmeasured must not read as "Docker uses nothing".
+        // Docker is intentionally unmeasured on the admission path.
         assert_eq!(capacity.docker_bytes, None);
         assert_eq!(
             capacity.promisable_bytes(u64::MAX),
