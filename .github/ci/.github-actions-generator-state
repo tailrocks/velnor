@@ -1,17 +1,13 @@
 # Generated ownership state; do not edit.
 schema = 1
-.github/ci/project.toml	5882353a1148885f
+.github/ci/project.toml	075eddf850fffefb
 .github/workflows/ci-bun-velnor.yml	cfda7a639d31cce0
-.github/workflows/ci-docker-crates-velnor-workflow-tests-fixtures-polyglot.yml	fb3447f02b764b46
 .github/workflows/ci-docker-docker.yml	1f7daa279b93f220
 .github/workflows/ci-docs-docs.yml	69a0d1841f1ed40d
-.github/workflows/ci-gradle-crates-velnor-workflow-tests-fixtures-polyglot.yml	a1714ad31a0c6141
-.github/workflows/ci-main.yml	385e8a0b0a352e18
-.github/workflows/ci-node-fixture.yml	8a5c3baad845ea5d
+.github/workflows/ci-main.yml	cef4aaac3dd73099
 .github/workflows/ci-opentofu-opentofu.yml	15cc68841b85b95d
 .github/workflows/ci-policy.yml	9601034eadebef14
-.github/workflows/ci-pr.yml	061679a27662555d
-.github/workflows/ci-rust-fixture.yml	0d49c47ffe515f34
+.github/workflows/ci-pr.yml	e79040b64b32f996
 .github/workflows/ci-rust-policy.yml	c0f75158fb2fdf37
 .github/workflows/ci-rust-unit-collector.yml	10ca64068ee90f3a
 .github/workflows/ci-rust-velnor-bench.yml	56da951cfbe6e183
@@ -24,4 +20,4 @@ schema = 1
 .github/workflows/ci-rust-velnor-workflow.yml	5b3737586a47840d
 .github/workflows/ci-rust-velnorctl.yml	b4d91ce95ef6a6f1
 .github/workflows/maintenance.yml	b105b861d892fbd7
-.github/workflows/nightly.yml	805eafb36af91764
+.github/workflows/nightly.yml	2c082a7a86f9b7b1

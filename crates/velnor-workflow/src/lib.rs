@@ -664,6 +664,11 @@ fn scan_repository_with_default_branch(
             "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.".to_owned(),
         ],
     };
+    if files.iter().any(|file| is_ignored_test_manifest(file)) {
+        analysis.limitations.push(
+            "Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.".to_owned(),
+        );
+    }
 
     let cargo_manifests = files_named(&files, "Cargo.toml");
     if !cargo_manifests.is_empty() {
@@ -909,9 +914,11 @@ fn scan_repository_with_default_branch(
 
     let mut dockerfiles_by_root: BTreeMap<String, Vec<&String>> = BTreeMap::new();
     for dockerfile in files.iter().filter(|file| {
-        file.rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with("Dockerfile"))
+        !is_test_support_path(file)
+            && file
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("Dockerfile"))
     }) {
         let docker_root = parent_path(dockerfile);
         dockerfiles_by_root
@@ -2877,9 +2884,32 @@ fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
 fn files_named(files: &[String], name: &str) -> Vec<String> {
     files
         .iter()
-        .filter(|file| file.rsplit('/').next() == Some(name))
+        .filter(|file| file.rsplit('/').next() == Some(name) && !is_test_support_path(file))
         .cloned()
         .collect()
+}
+
+/// Cargo target directories hold tests and fixtures, not shippable
+/// packages: a manifest nested beneath one describes test support, never a
+/// unit CI should verify on its own. Scanned relative to the repository
+/// root, so manifests at a scanned root itself are unaffected.
+fn is_test_support_path(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| matches!(segment, "tests" | "benches"))
+}
+
+fn is_ignored_test_manifest(path: &str) -> bool {
+    if !is_test_support_path(path) {
+        return false;
+    }
+    match path.rsplit('/').next() {
+        Some("Cargo.toml" | "package.json" | "Package.swift") => true,
+        Some(name) if name.starts_with("Dockerfile") => true,
+        Some("settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts") => {
+            true
+        }
+        Some(_) | None => false,
+    }
 }
 
 fn has_extension(file: &str, extension: &str) -> bool {
@@ -2901,12 +2931,16 @@ fn gradle_roots(files: &BTreeSet<String>) -> Vec<String> {
     let manifests = files
         .iter()
         .filter(|file| {
-            matches!(
-                file.rsplit('/').next(),
-                Some(
-                    "settings.gradle" | "settings.gradle.kts" | "build.gradle" | "build.gradle.kts"
+            !is_test_support_path(file)
+                && matches!(
+                    file.rsplit('/').next(),
+                    Some(
+                        "settings.gradle"
+                            | "settings.gradle.kts"
+                            | "build.gradle"
+                            | "build.gradle.kts"
+                    )
                 )
-            )
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -6980,6 +7014,68 @@ path-only = { path = "../path-only" }
                 },
             ]
         );
+    }
+
+    #[test]
+    fn scanner_ignores_manifests_nested_under_test_directories() {
+        let root = temporary_repository("test-fixture-exclusion");
+        let app = root.join("crates/app");
+        let fixture = app.join("tests/fixtures/polyglot");
+        must(fs::create_dir_all(app.join("src")), "create app source");
+        must(fs::create_dir_all(&fixture), "create fixture directory");
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[workspace]\nmembers = [\"crates/app\"]\n",
+            ),
+            "write workspace manifest",
+        );
+        must(
+            fs::write(
+                app.join("Cargo.toml"),
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            ),
+            "write app manifest",
+        );
+        must(
+            fs::write(app.join("src/main.rs"), "fn main() {}\n"),
+            "write app source",
+        );
+        must(
+            fs::write(
+                fixture.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            ),
+            "write fixture manifest",
+        );
+        must(
+            fs::write(
+                fixture.join("package.json"),
+                "{\"name\":\"fixture\",\"scripts\":{\"test\":\"exit 1\"}}",
+            ),
+            "write fixture package manifest",
+        );
+        must(
+            fs::write(fixture.join("Dockerfile"), "FROM scratch\n"),
+            "write fixture Dockerfile",
+        );
+        must(
+            fs::write(fixture.join("build.gradle.kts"), "tasks {}\n"),
+            "write fixture Gradle manifest",
+        );
+
+        let config = must(scan_repository(&root, RunnerMode::Both), "scan repository");
+        assert_eq!(config.units.len(), 1);
+        assert_eq!(config.units[0].id, "rust-app");
+        assert!(
+            config
+                .analysis
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("treated as test fixtures")),
+            "fixture exclusion is recorded"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[expect(

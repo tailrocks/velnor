@@ -58,40 +58,16 @@ jobs:
     uses: ./.github/workflows/ci-docker-docker.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-unit-docker-crates-velnor-workflow-tests-fixtures-polyglot:
-    name: "Docker · Docker (crates/velnor-workflow/tests/fixtures/polyglot)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-docker-crates-velnor-workflow-tests-fixtures-polyglot.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
   group-unit-docs:
     name: "Documentation · Documentation"
     needs: [plan, policy]
     uses: ./.github/workflows/ci-docs-docs.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
-  group-unit-gradle-crates-velnor-workflow-tests-fixtures-polyglot:
-    name: "Gradle · Gradle (crates/velnor-workflow/tests/fixtures/polyglot)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-gradle-crates-velnor-workflow-tests-fixtures-polyglot.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-  group-unit-node-fixture:
-    name: "Node.js · Node.js package (fixture)"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-node-fixture.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
   group-unit-opentofu:
     name: "OpenTofu · OpenTofu"
     needs: [plan, policy]
     uses: ./.github/workflows/ci-opentofu-opentofu.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-  group-unit-rust-fixture:
-    name: "Rust · fixture"
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-fixture.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-policy:
