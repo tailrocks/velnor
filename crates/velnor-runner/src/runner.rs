@@ -6534,6 +6534,29 @@ async fn handle_job_request(
                 )
                 .await;
                 renewal.abort();
+                let teardown_result = if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                    start_failed_execution_teardown(
+                        teardown_config_dir.clone(),
+                        teardown,
+                        forensics.clone(),
+                        job_claim,
+                    )
+                    .await
+                } else {
+                    Ok(())
+                };
+                if let Err(teardown_error) = teardown_result {
+                    let detail = format!(
+                        "job execution thread failed and teardown handoff failed: {teardown_error:#}"
+                    );
+                    eprintln!("Warning: {detail}");
+                    return match completion {
+                        Ok(()) => Err(join_error.context(detail)),
+                        Err(completion_error) => {
+                            Err(completion_error.context(detail).context(join_error))
+                        }
+                    };
+                }
                 completion?;
                 clear_in_flight_job(&teardown_config_dir)
                     .context("failed to clear acknowledged in-flight job")?;
@@ -6564,10 +6587,7 @@ async fn handle_job_request(
                         step_logs: Vec::new(),
                         // The recorded owner, not `None`: a cancelled job still
                         // has containers to tear down.
-                        teardown: teardown_slot
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone(),
+                        teardown: take_teardown_owner(&teardown_slot),
                         timings: ExecutionTimings::default(),
                         executed_physical_actions: None,
                     }
@@ -6587,6 +6607,30 @@ async fn handle_job_request(
                     )
                     .await;
                     renewal.abort();
+                    let teardown_result =
+                        if let Some(teardown) = take_teardown_owner(&teardown_slot) {
+                            start_failed_execution_teardown(
+                                teardown_config_dir.clone(),
+                                teardown,
+                                forensics.clone(),
+                                job_claim,
+                            )
+                            .await
+                        } else {
+                            Ok(())
+                        };
+                    if let Err(teardown_error) = teardown_result {
+                        let detail = format!(
+                            "job execution failed and teardown handoff failed: {teardown_error:#}"
+                        );
+                        eprintln!("Warning: {detail}");
+                        return match completion {
+                            Ok(()) => Err(error.context(detail)),
+                            Err(completion_error) => {
+                                Err(completion_error.context(detail).context(error))
+                            }
+                        };
+                    }
                     completion?;
                     clear_in_flight_job(&teardown_config_dir)
                         .context("failed to clear acknowledged in-flight job")?;
@@ -8134,6 +8178,7 @@ fn execute_script_job(
         teardown_slot,
     );
     if result.is_err()
+        && !has_teardown_owner(teardown_slot)
         && let Err(e) = fs::remove_dir_all(&job_dir)
     {
         eprintln!(
@@ -8931,6 +8976,19 @@ fn execute_script_job_inner(
     let (environment_started, container_boot_duration, environment_lease) =
         precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
+    // Claim teardown ownership before the first fallible execution step. The
+    // environment may have been pre-created or may start lazily; cleanup by
+    // this job's deterministic name is idempotent when no container exists.
+    // This closes the error window before the final ScriptJobResult can return
+    // its owner, including credential-cleanup and service-stop failures.
+    record_teardown_owner(
+        teardown_slot,
+        TeardownHandle {
+            container: plan.execution.job_container.clone(),
+            job_dir: job_dir.to_path_buf(),
+            services_removed: false,
+        },
+    );
     let initialize_containers_log = initialize_containers_step.map(|(step_id, started_at)| {
         let log = StepLog {
             step_id,
@@ -9335,13 +9393,14 @@ struct TeardownHandle {
     services_removed: bool,
 }
 
-/// Where the teardown owner is recorded the moment the job container exists.
+/// Where the teardown owner is recorded before execution can return an error.
 ///
 /// Returning the handle only in `Ok` made cleanup a property of *succeeding*:
 /// a cancelled or failed job took the error path, `teardown` was `None`, and
-/// `start_post_completion_teardown` was never called, so the workspace and its
-/// containers leaked. Recording it in a cell the caller also holds makes the
-/// cleanup contract independent of how execution ends.
+/// `start_post_completion_teardown` (or the failed-execution equivalent) was
+/// never called, so the workspace and its containers leaked. Recording it in a
+/// cell the caller also holds makes the cleanup contract independent of how
+/// execution ends.
 type TeardownSlot = Arc<Mutex<Option<TeardownHandle>>>;
 
 /// Record the teardown owner and hand back the same handle for the success
@@ -9352,6 +9411,18 @@ fn record_teardown_owner(slot: &TeardownSlot, handle: TeardownHandle) -> Option<
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle.clone());
     Some(handle)
+}
+
+fn has_teardown_owner(slot: &TeardownSlot) -> bool {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some()
+}
+
+fn take_teardown_owner(slot: &TeardownSlot) -> Option<TeardownHandle> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
 }
 
 impl TeardownHandle {
@@ -9427,7 +9498,33 @@ async fn start_post_completion_teardown(
     config_dir: PathBuf,
     teardown: TeardownHandle,
     forensics: SlotForensics,
-    mut timing_record: JobTimingRecord,
+    timing_record: JobTimingRecord,
+    job_claim: JobClaim,
+) -> Result<()> {
+    start_teardown_task(
+        config_dir,
+        teardown,
+        forensics,
+        Some(timing_record),
+        job_claim,
+    )
+    .await
+}
+
+async fn start_failed_execution_teardown(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    job_claim: JobClaim,
+) -> Result<()> {
+    start_teardown_task(config_dir, teardown, forensics, None, job_claim).await
+}
+
+async fn start_teardown_task(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    mut timing_record: Option<JobTimingRecord>,
     job_claim: JobClaim,
 ) -> Result<()> {
     let timing_config_dir = config_dir.clone();
@@ -9437,8 +9534,10 @@ async fn start_post_completion_teardown(
         loop {
             match teardown.clone().run(&job_claim, &forensics) {
                 Ok(()) => {
-                    timing_record.teardown_ms = Some(duration_ms(teardown_started.elapsed()));
-                    record_job_timing(&timing_config_dir, &forensics, &timing_record);
+                    if let Some(timing_record) = timing_record.as_mut() {
+                        timing_record.teardown_ms = Some(duration_ms(teardown_started.elapsed()));
+                        record_job_timing(&timing_config_dir, &forensics, timing_record);
+                    }
                     println!(
                         "forensics.lifecycle event=teardown-done timestamp={}",
                         unix_now_iso8601()
@@ -14290,6 +14389,30 @@ mod tests {
         assert_eq!(
             slot.lock().unwrap().clone().map(|owned| owned.job_dir),
             Some(handle.job_dir)
+        );
+    }
+
+    #[test]
+    fn failed_execution_teardown_owner_is_transferred_once() {
+        let slot: TeardownSlot = Arc::new(Mutex::new(None));
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-failed-teardown-transfer-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let handle = TeardownHandle {
+            container: lease_test_container_spec(&temp),
+            job_dir: temp.join("job"),
+            services_removed: false,
+        };
+        record_teardown_owner(&slot, handle.clone());
+        assert!(has_teardown_owner(&slot));
+
+        let transferred = take_teardown_owner(&slot);
+        assert_eq!(transferred.map(|owned| owned.job_dir), Some(handle.job_dir));
+        assert!(!has_teardown_owner(&slot));
+        assert!(
+            take_teardown_owner(&slot).is_none(),
+            "an error path must transfer teardown ownership exactly once"
         );
     }
 
