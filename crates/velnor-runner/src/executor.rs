@@ -3700,7 +3700,9 @@ where
             push_arg(&mut args, "--build-arg", &build_arg);
         }
         let secret_input = native_input(action, &action_state, "secrets");
-        if !secret_input.trim().is_empty() && self.trust_scope != "trusted" {
+        if !secret_input.trim().is_empty()
+            && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
+        {
             bail!(
                 "docker/build-push-action refuses BuildKit secrets in trust scope '{}'; accepted trust scope: trusted",
                 self.trust_scope
@@ -18672,6 +18674,66 @@ type=sha,format=long,prefix=,enable=true"
         assert!(error.to_string().contains("public-forks"));
         assert!(error.to_string().contains("accepted trust scope: trusted"));
         assert!(executor.runner().calls.is_empty());
+    }
+
+    #[test]
+    fn docker_build_push_allows_buildkit_secrets_for_normalized_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope(" TRUSTED ");
+        let action = NativeActionInvocation {
+            git_ref: String::new(),
+            adapter: NativeActionAdapter::DockerBuildPush,
+            cache_kind: None,
+            source_path: None,
+            inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
+            env: Vec::new(),
+        };
+        let state = JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp);
+
+        executor
+            .native_docker_build_push(&container(&temp), &action, &state, DEFAULT_STEP_TIMEOUT)
+            .expect("normalized trusted scope must permit BuildKit secrets");
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        assert!(calls.iter().any(|call| {
+            call.contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/")
+        }));
+        assert_eq!(
+            fs::read_dir(temp.join("_velnor/build-secrets"))
+                .expect("secret directory created")
+                .count(),
+            0
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_build_push_refuses_buildkit_secrets_outside_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerJobEngine::inert(RecordingRunner::default()).with_trust_scope("public-forks");
+        let error = executor
+            .native_docker_build_push(
+                &container(&temp),
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerBuildPush,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: [("secrets".into(), "github_token=secret-value".into())].into(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::new_with_workspace(&[], &[], &temp.join("work"), &temp),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .expect_err("untrusted scope must refuse BuildKit secrets");
+
+        assert!(error.to_string().contains("public-forks"));
+        assert!(error.to_string().contains("accepted trust scope: trusted"));
+        assert!(executor.runner().calls.is_empty());
+        assert!(!temp.join("_velnor/build-secrets").exists());
+        let _ = fs::remove_dir_all(temp);
     }
 
     #[test]
