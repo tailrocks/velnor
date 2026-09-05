@@ -238,13 +238,22 @@ fn cache_namespace(token: &str) -> String {
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, service: CacheService) -> Result<()> {
+    let public_base = configured_public_base()?;
+    serve_with_public_base(listener, service, public_base).await
+}
+
+async fn serve_with_public_base(
+    listener: tokio::net::TcpListener,
+    service: CacheService,
+    public_base: String,
+) -> Result<()> {
     let service = Arc::new(service);
     loop {
         let (stream, _) = listener.accept().await?;
         let io = hyper_util::rt::TokioIo::new(stream);
         let ctx = Arc::new(Ctx {
             service: Arc::clone(&service),
-            public_base: String::new(),
+            public_base: public_base.clone(),
         });
         tokio::task::spawn(async move {
             let handler = service_fn(move |req| {
@@ -254,14 +263,6 @@ pub async fn serve(listener: tokio::net::TcpListener, service: CacheService) -> 
                         service: Arc::clone(&ctx.service),
                         public_base: ctx.public_base.clone(),
                     };
-                    if ctx.public_base.is_empty() {
-                        let host = req
-                            .headers()
-                            .get("host")
-                            .and_then(|h| h.to_str().ok())
-                            .unwrap_or("localhost");
-                        ctx.public_base = format!("http://{host}");
-                    }
                     route(req, &mut ctx).await
                 }
             });
@@ -864,6 +865,47 @@ pub fn enabled_from_env() -> Option<String> {
     Some(url)
 }
 
+const ACTIONS_CACHE_URL_ENV: &str = "VELNOR_ACTIONS_CACHE_URL";
+
+fn configured_public_base() -> Result<String> {
+    let raw = std::env::var(ACTIONS_CACHE_URL_ENV)
+        .context("read VELNOR_ACTIONS_CACHE_URL for GHA cache public base")?;
+    normalize_public_base(&raw)
+}
+
+pub(crate) fn normalize_public_base(raw: &str) -> Result<String> {
+    if raw.is_empty() {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must not be empty");
+    }
+    if raw.trim() != raw {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must not have surrounding whitespace");
+    }
+
+    let authority = raw
+        .split_once("://")
+        .map(|(_, authority)| authority)
+        .context("VELNOR_ACTIONS_CACHE_URL must include an authority")?;
+    if authority.starts_with('/') {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must include a non-empty authority");
+    }
+
+    let url = url::Url::parse(raw).context("parse VELNOR_ACTIONS_CACHE_URL")?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must use http or https");
+    }
+    if url.host_str().is_none() {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must not include credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("VELNOR_ACTIONS_CACHE_URL must not include a query or fragment");
+    }
+
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
 /// Default listen address. Operators override with `VELNOR_ACTIONS_CACHE_BIND`
 /// (e.g. `0.0.0.0:17933`) so job containers reach the service through their
 /// docker bridge gateway (`host.docker.internal`, mapped by the job's
@@ -872,13 +914,14 @@ pub const DEFAULT_CACHE_BIND: &str = "127.0.0.1:17933";
 
 /// Bind the configured address, spawn the accept loop, return the bound addr.
 pub async fn bind_configured(service: CacheService) -> Result<SocketAddr> {
+    let public_base = configured_public_base()?;
     let raw = std::env::var("VELNOR_ACTIONS_CACHE_BIND")
         .unwrap_or_else(|_| DEFAULT_CACHE_BIND.to_owned());
     let addr: SocketAddr = raw.parse().context("parse VELNOR_ACTIONS_CACHE_BIND")?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tokio::spawn(async move {
-        if let Err(error) = serve(listener, service).await {
+        if let Err(error) = serve_with_public_base(listener, service, public_base).await {
             eprintln!("Warning: gha cache service stopped: {error:#}");
         }
     });
@@ -988,13 +1031,68 @@ mod tests {
         }
     }
 
-    fn get(query: &str) -> Request<Full<Bytes>> {
+    fn get_at_host(host: &str, query: &str) -> Request<Full<Bytes>> {
         Request::builder()
-            .uri(format!(
-                "http://cache.test/_apis/artifactcache/cache?{query}"
-            ))
+            .uri(format!("http://{host}/_apis/artifactcache/cache?{query}"))
             .body(Full::new(Bytes::new()))
             .expect("build request")
+    }
+
+    fn get(query: &str) -> Request<Full<Bytes>> {
+        get_at_host("cache.test", query)
+    }
+
+    #[test]
+    fn public_base_is_normalized_and_request_host_is_ignored() {
+        assert_eq!(
+            normalize_public_base("https://cache.test///").unwrap(),
+            "https://cache.test"
+        );
+
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        service.ensure_tenant("tenant").unwrap();
+        let blob = service
+            .tenant_root(Some("tenant"))
+            .join("blobs")
+            .join(entry_hash("linux-rust-2026", "v1"));
+        std::fs::write(&blob, b"abc").unwrap();
+        commit_entry(&service, "linux-rust-2026", "v1", 3, Some("tenant")).unwrap();
+        let ctx = Ctx {
+            service: Arc::new(service),
+            public_base: normalize_public_base("https://cache.test///").unwrap(),
+        };
+
+        let hit = lookup_v1(
+            &get_at_host("attacker.test", "keys=linux-rust-2026&version=v1"),
+            &ctx,
+            "tenant",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            hit["archiveLocation"],
+            json!(format!(
+                "https://cache.test/_results/download/{}",
+                entry_hash("linux-rust-2026", "v1")
+            ))
+        );
+    }
+
+    #[test]
+    fn public_base_rejects_ambiguous_or_unsafe_values() {
+        for raw in [
+            "",
+            " ",
+            "cache.test:17933",
+            "ftp://cache.test",
+            "http:///cache",
+            "http://user:password@cache.test",
+            "http://cache.test?tenant=untrusted",
+            "http://cache.test#fragment",
+        ] {
+            assert!(normalize_public_base(raw).is_err(), "accepted {raw:?}");
+        }
     }
 
     #[test]
