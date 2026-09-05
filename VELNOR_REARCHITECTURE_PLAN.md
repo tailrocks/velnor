@@ -4137,3 +4137,32 @@ Verifier commit `a98df34` updates its current identity fields to fixture
 the generated workflow surface changed later at `630acdd`. The inventory is no
 longer presented as current parity evidence; a fresh source scan is still
 required before a verifier readiness claim.
+
+## 89. Canonical Docker/MBX branch and verifier source parity — 2026-09-05
+
+The requested canonical checkout is now
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
+`perf/docker-rust-mbx`, equal to `origin/perf/docker-rust-mbx` at
+`7da11869f795756a0e9ee4881f6e26afc9928be3`. `813ed31` extends pin-integrity
+coverage to the Rust executor and workflow sccache/mold mirrors; its pin gate
+passes. `7da1186` makes Docker host remapping slot-aware for both job and
+daemon-shared paths and centralizes the default MBX executable path; the
+focused container suite passes 54 tests.
+
+Verifier commits `5236ae6`, `50cc362`, and `9489b0c` are pushed to
+`codex/verifier-completion-fixes`. The machine-readable source workflow
+inventory now validates exact source workflow file digests and action uses.
+Generated capability provenance is bound to canonical source `7da1186` and
+the readiness audit passes from a Velnor runner export with manifest v12,
+crate `0.1.250`, and capability identity
+`23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`.
+The verifier has 53 deterministic Python tests passing. The Rust cache
+source-change scenario now mutates the app-visible label and asserts exact
+baseline/rebuilt output, preventing a dead-code edit from falsely proving
+cache invalidation.
+
+The old `/Users/donbeave/Projects/donbeave/velnor` clone remains clean and
+recoverable; no worktree or branch was deleted or force-pushed. Lifecycle
+drain, broker ACK ordering, timeout recovery, and cache lease omissions remain
+separate reserved runner-boundary findings and are not silently claimed by
+this branch.
