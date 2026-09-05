@@ -52,6 +52,7 @@ pub fn is_redaction(text: &str) -> bool {
 pub struct SecretMasker {
     patterns: Vec<String>,
     automaton: Option<AhoCorasick>,
+    literal_fallback: bool,
 }
 
 impl SecretMasker {
@@ -69,17 +70,24 @@ impl SecretMasker {
         // Longest first so a value that contains another is masked whole.
         let mut patterns: Vec<String> = patterns.into_iter().collect();
         patterns.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
-        let automaton = if patterns.is_empty() {
-            None
+        let (automaton, literal_fallback) = if patterns.is_empty() {
+            (None, false)
         } else {
-            AhoCorasick::builder()
+            match AhoCorasick::builder()
                 .match_kind(MatchKind::LeftmostLongest)
                 .build(&patterns)
-                .ok()
+            {
+                Ok(automaton) => (Some(automaton), false),
+                // Keep the registered values usable if the optimized matcher
+                // cannot be built. Returning the original value here would
+                // make redaction fail open while contains_secret says false.
+                Err(_) => (None, true),
+            }
         };
         Self {
             patterns,
             automaton,
+            literal_fallback,
         }
     }
 
@@ -91,15 +99,20 @@ impl SecretMasker {
     /// Replace every registered value with [`REDACTION`].
     #[must_use]
     pub fn mask(&self, value: &str) -> String {
-        let Some(automaton) = &self.automaton else {
-            return value.to_owned();
-        };
-        let mut masked = String::with_capacity(value.len());
-        automaton.replace_all_with(value, &mut masked, |_match, _text, destination| {
-            destination.push_str(REDACTION);
-            true
-        });
-        masked
+        if let Some(automaton) = &self.automaton {
+            let mut masked = String::with_capacity(value.len());
+            automaton.replace_all_with(value, &mut masked, |_match, _text, destination| {
+                destination.push_str(REDACTION);
+                true
+            });
+            return masked;
+        }
+
+        if self.literal_fallback {
+            return self.mask_literal_fallback(value);
+        }
+
+        value.to_owned()
     }
 
     /// Whether `value` still contains a registered secret.
@@ -108,9 +121,43 @@ impl SecretMasker {
     /// to prove the transformation actually removed everything.
     #[must_use]
     pub fn contains_secret(&self, value: &str) -> bool {
-        self.automaton
-            .as_ref()
-            .is_some_and(|automaton| automaton.find(value).is_some())
+        if let Some(automaton) = &self.automaton {
+            return automaton.find(value).is_some();
+        }
+
+        self.literal_fallback && self.patterns.iter().any(|pattern| value.contains(pattern))
+    }
+
+    fn mask_literal_fallback(&self, value: &str) -> String {
+        let mut masked = String::with_capacity(value.len());
+        let mut cursor = 0;
+
+        while cursor < value.len() {
+            let mut selected: Option<(usize, &str)> = None;
+            for pattern in &self.patterns {
+                let Some(offset) = value[cursor..].find(pattern) else {
+                    continue;
+                };
+                let start = cursor + offset;
+                let should_select = selected.map_or(true, |(selected_start, selected_pattern)| {
+                    start < selected_start
+                        || (start == selected_start && pattern.len() > selected_pattern.len())
+                });
+                if should_select {
+                    selected = Some((start, pattern));
+                }
+            }
+
+            let Some((start, pattern)) = selected else {
+                break;
+            };
+            masked.push_str(&value[cursor..start]);
+            masked.push_str(REDACTION);
+            cursor = start + pattern.len();
+        }
+
+        masked.push_str(&value[cursor..]);
+        masked
     }
 
     /// The registered patterns, longest first. Exposed for callers that need
@@ -235,6 +282,14 @@ fn base64_encode(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn force_literal_fallback(masker: SecretMasker) -> SecretMasker {
+        SecretMasker {
+            automaton: None,
+            literal_fallback: true,
+            ..masker
+        }
+    }
+
     #[test]
     fn masks_the_literal_value_with_the_shared_sentinel() {
         let masker = SecretMasker::new(["hunter2secret"]);
@@ -259,6 +314,37 @@ mod tests {
         assert!(masker.mask(&format!("json {}", json_string_escape(r#"a b"c\d"#))) == "json ***");
         assert!(masker.mask(&format!("uri {}", uri_data_escape(r#"a b"c\d"#))) == "uri ***");
         assert!(masker.mask(&format!("b64 {}", base64_encode(r#"a b"c\d"#))) == "b64 ***");
+    }
+
+    #[test]
+    fn literal_fallback_masks_and_reports_registered_values_truthfully() {
+        let masker = force_literal_fallback(SecretMasker::new(["hunter2secret"]));
+        let input = "before hunter2secret after";
+        let masked = masker.mask(input);
+
+        assert_eq!(masked, "before *** after");
+        assert!(masker.contains_secret(input));
+        assert!(!masker.contains_secret(&masked));
+    }
+
+    #[test]
+    fn literal_fallback_preserves_longest_match_and_encoded_registration() {
+        let secret = r#"a b"c\d"#;
+        let masker = force_literal_fallback(SecretMasker::new(["abc", "abcdef", secret]));
+        assert_eq!(
+            masker.mask("prefix abcdef suffix abc"),
+            "prefix *** suffix ***"
+        );
+
+        let encoded = [
+            json_string_escape(secret),
+            uri_data_escape(secret),
+            base64_encode(secret),
+        ];
+        for value in encoded {
+            assert!(masker.contains_secret(&value));
+            assert_eq!(masker.mask(&value), "***");
+        }
     }
 
     #[test]
