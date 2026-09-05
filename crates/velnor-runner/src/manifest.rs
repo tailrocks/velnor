@@ -342,8 +342,11 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
-    InputRule::Literal("cleanup", &["true", "false"]),
-    InputRule::Literal("keep-state", &["true", "false"]),
+    // Builders and their state volumes are job-scoped and mandatory teardown
+    // removes them. Until a stable trust/repository owner exists, admitting
+    // retention controls would claim persistence that Velnor cannot provide.
+    InputRule::Literal("cleanup", &["true"]),
+    InputRule::Literal("keep-state", &["false"]),
     InputRule::Literal(
         "buildkitd-config-inline",
         &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
@@ -2173,14 +2176,13 @@ mod tests {
             "sign-arm64-deb",
         ];
         let expected = "${{ needs.release_gate.outputs.tag_ref }}";
-        let expected_signer =
-            "tailrocks/velnor-actions/.github/workflows/package-signer.yml@2d045521be342284cd567b7058a0e635dc74b37c";
+        let expected_signer = "./.github/workflows/ci-release-package-signer.yml";
 
         for job in signer_jobs {
             assert_eq!(
                 workflow["jobs"][job]["uses"].as_str(),
                 Some(expected_signer),
-                "{job} must use the pinned package-signer workflow"
+                "{job} must use the local policy-approved package signer"
             );
             let source_ref = workflow["jobs"][job]["with"]["source-ref"]
                 .as_str()
@@ -3208,12 +3210,28 @@ mod tests {
     }
 
     #[test]
-    fn validate_job_accepts_buildx_cleanup_controls() {
+    fn validate_job_rejects_unrepresentable_buildx_retention_controls() {
+        let cleanup_errors = violations(&job(
+            "docker/setup-buildx-action",
+            Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+            serde_json::json!({"cleanup": false}),
+        ));
+        assert_eq!(cleanup_errors[0].field, "with.cleanup");
+        assert_eq!(cleanup_errors[0].accepted, ["true"]);
+
+        let keep_state_errors = violations(&job(
+            "docker/setup-buildx-action",
+            Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+            serde_json::json!({"keep-state": true}),
+        ));
+        assert_eq!(keep_state_errors[0].field, "with.keep-state");
+        assert_eq!(keep_state_errors[0].accepted, ["false"]);
+
         validate_job_with_context(
             &job(
                 "docker/setup-buildx-action",
                 Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
-                serde_json::json!({"cleanup": false, "keep-state": true}),
+                serde_json::json!({"cleanup": true, "keep-state": false}),
             ),
             &[],
         )

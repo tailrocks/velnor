@@ -19,6 +19,10 @@ static GITHUB_HTTP_TRANSPORT_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[cfg(test)]
+static GITHUB_TOKEN_ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[cfg(test)]
 pub(crate) struct GithubHttpTransportEnvGuard {
     previous: Option<OsString>,
     _lock: tokio::sync::MutexGuard<'static, ()>,
@@ -59,6 +63,60 @@ impl Drop for GithubHttpTransportEnvGuard {
             },
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) struct GithubTestEnvGuard {
+    _token_lock: tokio::sync::MutexGuard<'static, ()>,
+    _transport_guard: GithubHttpTransportEnvGuard,
+}
+
+#[cfg(test)]
+/// Acquire process-wide GitHub test environment locks in one fixed order:
+/// transport first, token second.
+pub(crate) async fn github_test_env() -> GithubTestEnvGuard {
+    let transport_guard = github_http_transport_env().await;
+    let token_lock = GITHUB_TOKEN_ENV_LOCK.lock().await;
+    GithubTestEnvGuard {
+        _token_lock: token_lock,
+        _transport_guard: transport_guard,
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "test-support")]
+impl GithubTestEnvGuard {
+    pub(crate) fn set_native(&self) {
+        self._transport_guard.set_native();
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn github_test_env_serializes_concurrent_environment_access() {
+    let first = github_test_env().await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let second = tokio::spawn(async move {
+        started_tx
+            .send(())
+            .expect("test guard waiter must notify its start");
+        github_test_env().await
+    });
+
+    started_rx
+        .await
+        .expect("test guard waiter must start before the first guard is released");
+    tokio::task::yield_now().await;
+    assert!(
+        !second.is_finished(),
+        "the first guard must retain both locks"
+    );
+
+    drop(first);
+    tokio::time::timeout(std::time::Duration::from_secs(1), second)
+        .await
+        .expect("second GitHub environment guard must not deadlock")
+        .expect("second GitHub environment guard task must complete");
 }
 
 struct TempDirGuard {

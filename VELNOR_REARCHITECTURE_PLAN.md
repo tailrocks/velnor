@@ -3995,3 +3995,380 @@ The full serial runner library gate passes (`1578` passed, `1` ignored), and
 all-target compile, format, and diff checks pass. The generated workflow
 ownership boundary is preserved; the disabled release state is not silently
 treated as a successful publisher.
+
+## 79. Reap abandoned checkout credentials at daemon startup — 2026-09-05
+
+`f5914c4` calls `checkout::reap_stale_checkout_credentials()` once from the
+daemon startup path, before runner registration and broker polling. Checkout
+steps still retain their per-step fail-closed reaper call, but an idle daemon
+no longer waits for the next checkout before removing credentials left by a
+crashed process. `df284aa` keeps one-shot modes fail-fast while supervised
+daemons retry the same gate with drain-aware backoff; no runner accepts work
+while stale credential state is uninspectable.
+
+The change is limited to the existing daemon boundary; direct one-shot runs
+and child job passes do not acquire a second startup sweep. Formatting,
+`git diff --check`, the all-target runner compile gate, and the focused
+abandoned-credential test pass. No unstable daemon-startup integration test
+was added because the current startup path has no network-free seam.
+
+## 80. Crash recovery preserves a durable terminal conclusion — 2026-09-05
+
+`f1e36c0` closes the crash window after `JobTerminalResult` but before the
+completion payload/outbox is written. Orphan recovery now sends a minimal
+structurally valid completion using the journal's exact `TaskResult`; it does
+not route a durable `succeeded` result through the generic synthetic-failure
+path. Unknown durable conclusion strings fail closed, and ownership,
+generation, journal intent, send-claim, checksum, and remote-ack barriers stay
+unchanged. The original synthetic failure remains the path when no terminal
+conclusion exists.
+
+The controller recovery suite (`35` tests), terminal-conclusion regression,
+all-target runner compile, formatting, and diff checks pass. No live Run
+Service integration result is claimed; the network-free regression verifies
+the payload conclusion and structural step contract.
+
+## 81. BuildKit retention inputs fail closed until ownership exists — 2026-09-05
+
+`ed61d79` narrows the admitted `docker/setup-buildx-action` surface. Velnor
+always tears down job-scoped BuildKit containers and state volumes, so
+`cleanup: false` and `keep-state: true` previously reported retention that
+could not survive the job. Admission now accepts only the truthful defaults
+(`cleanup: true`, `keep-state: false`) while a stable trust/repository builder
+owner and matching lease remain unimplemented. No teardown or persistence
+semantics were changed behind the admission boundary.
+
+The focused manifest suite passes (`49` tests), with formatting and diff checks
+clean. BuildKit retention remains an explicit future package rather than a
+silent no-op.
+
+## 82. Default Docker preflight proves the MBX runtime — 2026-09-05
+
+`8f11ecc` extends the configured Docker job-image preflight with an image-local
+`mbx` lookup and `mbx --version` probe. Non-sccache Docker jobs mount and
+configure the MBX store, so the configured default image must expose the
+executable rather than failing later during a job. Explicit sccache jobs keep
+their mutually exclusive sccache store and disable MBX.
+
+The existing preflight regression now asserts the MBX probe alongside the
+other required job tools. This proves the configured default image contract;
+workflow-specific `container.image` overrides are not covered by this startup
+probe and need a separate job-image capability contract. The focused preflight
+test, formatting, and diff checks pass.
+
+## 83. Current-toolchain lint fixes are carried into the canonical branch — 2026-09-05
+
+The stale `chore/setup-velnor-workflow-action` line contained two small fixes
+that the current canonical source still needed: `a2697cd` ports the stable
+`Option::is_none_or` form and names the `PRAGMA table_info` row tuple used by
+the journal schema helper. The entire stale line was not merged because it is
+based on `b5c666f` and would replace the current rearchitecture's workflow and
+fixture policy. The ported source fixes are independently verified by all
+control tests (`268` passed) and clippy with `-D warnings`.
+
+## 84. Stale parallel refs remain recoverable — 2026-09-05
+
+The final branch/worktree audit found no unmerged sibling tip beyond the
+already archived MBX-scenario experiment and no lost checkout-hydration edits;
+all other local worktree tips are ancestors of `perf/docker-rust-mbx`. The old
+clone at `/Users/donbeave/Projects/donbeave/velnor` is clean and its
+`ae72e3a` tip is an ancestor of the canonical branch.
+
+The remote `origin/main` snapshot and the parallel
+`origin/chore/setup-velnor-workflow-action` line remain non-ancestors because
+they carry an older workflow snapshot plus unreviewed setup-action/fixture
+policy changes. Their exact current heads are preserved under
+`refs/archive/remote/`; no branch or worktree was deleted, pruned, reset, or
+force-pushed. Only the independently verified current-toolchain lint fixes were
+ported to the canonical branch.
+
+## 85. Exact branch heads re-resolved before the next architecture wave — 2026-09-05
+
+The original immutable baselines remain the values in §0. Re-resolution against
+the requested branch lines now finds Velnor
+`perf/docker-rust-mbx@eefa543eb478124e988857b5f63d9f5219493b47` and verifier
+`codex/verifier-completion-fixes@04322d5c7e7e11f37a312e084fc354cf54dc80da`;
+both local heads match their origin tracking refs. The verifier worktree has
+no applicable `AGENTS.md`; Velnor's repository-level rules were read before
+delegation. The verifier plan's older identity fields are now stale evidence,
+not a branch substitution or readiness claim, and must be re-derived in V0.
+
+## 86. Shared masker contract prepared for runner migration — 2026-09-05
+
+`98c9354` extends `velnor-model::SecretMasker` to the complete value-encoder
+surface already implemented by the runner: standard and shifted Base64,
+command-line and expression escaping, JSON, URI, XML, quote trimming, and both
+PowerShell ampersand forms. Existing multiline, minimum-length,
+leftmost-longest, and literal-fallback behavior remains covered; nine focused
+model tests pass. The benchmark documentation correction is `4ba8fbe`, which
+now points at the runner-owned Docker metrics instead of claiming its
+`CommandRunner` seam is missing.
+
+The private runner `Masker`/`MaskPatterns` remains in `runner.rs`. Its direct
+migration is a separate ownership-boundary change: it must replace every live,
+durable, and `ops` call site atomically, preserve the union of per-step masks,
+and delete the weaker fallback rather than leave two implementations. No
+runner migration is claimed by this package.
+
+The follow-up `27fc38b` adds the runner's `U+0085`, `U+2028`, and `U+2029`
+JSON control-character escapes and vectors for them. The model redaction
+package now has ten focused tests passing; no runner call site was changed.
+
+## 87. Verifier capability provenance synchronized — 2026-09-05
+
+The verifier refresh was rerun through its supported
+`VELNOR_SOURCE_DIR=... just refresh-capability-baseline` recipe against
+canonical Velnor `perf/docker-rust-mbx@c57786af83a65428ca697cf5867abcdc26eb9539`.
+It re-exported manifest v12 from crate `0.1.250`, preserved capability identity
+`23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`, and
+passed the readiness audit. The only generated change was
+`coverage/velnor-capabilities.json` provenance; verifier commit
+`62fc276ec4c99524e43fa9c9fa9e40f04a04aef3` is pushed to
+`codex/verifier-completion-fixes`. Its contract audit, 50 Python tests, and
+diff check pass. This is provenance synchronization, not a capability-content
+change or a claim that full Velnor production readiness is complete.
+
+## 88. Verifier historical inventory claim corrected — 2026-09-05
+
+Verifier commit `a98df34` updates its current identity fields to fixture
+`62fc276ec4c99524e43fa9c9fa9e40f04a04aef3` and Velnor
+`c57786af83a65428ca697cf5867abcdc26eb9539`. It also marks the older
+`coverage/source-workflow-inventory.md` scan at `dfc5777` as historical because
+the generated workflow surface changed later at `630acdd`. The inventory is no
+longer presented as current parity evidence; a fresh source scan is still
+required before a verifier readiness claim.
+
+## 89. Canonical Docker/MBX branch and verifier source parity — 2026-09-05
+
+The requested canonical checkout is now
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on
+`perf/docker-rust-mbx`, equal to `origin/perf/docker-rust-mbx` at
+`7da11869f795756a0e9ee4881f6e26afc9928be3`. `813ed31` extends pin-integrity
+coverage to the Rust executor and workflow sccache/mold mirrors; its pin gate
+passes. `7da1186` makes Docker host remapping slot-aware for both job and
+daemon-shared paths and centralizes the default MBX executable path; the
+focused container suite passes 54 tests.
+
+Verifier commits `5236ae6`, `50cc362`, and `9489b0c` are pushed to
+`codex/verifier-completion-fixes`. The machine-readable source workflow
+inventory now validates exact source workflow file digests and action uses.
+Generated capability provenance is bound to canonical source `7da1186` and
+the readiness audit passes from a Velnor runner export with manifest v12,
+crate `0.1.250`, and capability identity
+`23749db8aab50310a27021ac24ef7dff7b8480468fd26f800d4b0018b4732229`.
+The verifier has 53 deterministic Python tests passing. The Rust cache
+source-change scenario now mutates the app-visible label and asserts exact
+baseline/rebuilt output, preventing a dead-code edit from falsely proving
+cache invalidation.
+
+The old `/Users/donbeave/Projects/donbeave/velnor` clone remains clean and
+recoverable; no worktree or branch was deleted or force-pushed. Lifecycle
+drain, broker ACK ordering, timeout recovery, and cache lease omissions remain
+separate reserved runner-boundary findings and are not silently claimed by
+this branch.
+
+## 90. Canonical head advanced after the provenance record — 2026-09-05
+
+The previous section recorded the code head `7da1186`, then commit `267b445`
+added the canonical integration record and advanced the requested branch. The
+branch is clean at `267b445` and its tracked remote agrees. The verifier's
+source inventory and generated capability baseline must therefore bind to
+`267b445`, even though the workflow and manifest content digests are unchanged
+by that documentation-only commit. No capability-content change is implied.
+
+Fresh parallel audit confirms the safe consolidation boundary: all local
+worktree tips except the archived MBX-scenario experiment are ancestors of the
+canonical branch; the old clone has no unique refs; and the sole dirty
+checkout patch is superseded by canonical fail-closed hydration handling. The
+following remain unresolved architecture work, not silently certified:
+broker durable-intent failure atomicity, Run Service fallback/error typing,
+bounded live-log framing and step-summary acknowledgement, timeout recovery,
+and live default-MBX/readiness proof.
+
+## 91. GHA cache origins are operator-bound, not request-bound — 2026-09-05
+
+`fd223f6` removes the request `Host` header from signed GHA cache upload and
+download URL construction. The cache service validates the operator's
+`VELNOR_ACTIONS_CACHE_URL` as an HTTP(S) URL with a host and without
+credentials, query, or fragment, normalizes trailing slashes, and passes that
+immutable base to every connection. Runtime job environment injection uses the
+same validator, so malformed configuration is not silently handed to jobs;
+daemon binding fails closed instead.
+
+The cache and runtime-environment suites pass (`20` and `7` tests), and the
+full runner library gate passes when its two existing timing-sensitive tests
+are rerun in isolation (`1580` parallel tests passed; both isolated reruns
+passed). This closes Host-header cache URL poisoning; cross-daemon cache
+storage synchronization and bounded cache reclamation remain separate work.
+
+## 92. Parallel runner verification wording corrected — 2026-09-05
+
+Section 91's shorthand "full runner library gate passes" was imprecise. The
+parallel invocation executed `1583` tests: `1580` passed, while
+`git_mirror::tests::checkout_reader_lease_blocks_mirror_repair` and
+`runner::tests::action_admission_slots_are_concurrent_and_waiting` failed on
+timing-sensitive assertions. Each exact test passed when rerun in isolation;
+the cache change did not touch either path. The result is recorded as a
+parallel-scheduling flake, not a clean parallel gate.
+
+## 93. Restart handoff — 2026-09-05
+
+Stop point for the next continuation:
+
+- Canonical checkout: `/Users/donbeave/Projects/tailrocks/velnor-project/velnor`.
+- Working branch: `perf/docker-rust-mbx`.
+- Canonical and `origin/perf/docker-rust-mbx` both point at
+  `e8223f5574a10ea8076e682a29495e2bee8ff1c8` (`ci: remove stale required
+  workflow`). The worktree is clean; no interrupted worker patch remains.
+- `origin/main` is `b5c666f9bf8c3b8942b361358e205c65f0393b63`, already merged by
+  `e38d93f`. The merge retained the current rearchitecture where the older
+  main snapshot conflicted; the stale no-CI `ci-required.yml` placeholder was
+  then removed because generated active CI workflows exist.
+- No push is pending. Do not force-push or reset this shared branch.
+
+Completed in this continuation:
+
+- `b0dc163` durably publishes GHA cache v1 entries after validated upload and
+  atomic blob/entry publication; focused cache tests passed.
+- `e38d93f` integrates the requested main-branch history.
+- `e8223f5` removes the contradictory stale required-workflow placeholder.
+- Verifier branch `codex/verifier-completion-fixes` is separately clean and
+  synchronized at `9d0363953cb37e95430dff51bf97bff41badbe68` in
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-actions-fixture`.
+  Its runner-source checkout binding is `aa1b944`; its generated provenance
+  metadata is `9d036395`.
+
+Preservation boundary:
+
+- The old clone `/Users/donbeave/Projects/donbeave/velnor` is clean at
+  `ae72e3a86e77bf8b68cc8f616ec88814ffc849ea`; it has no known unique work to
+  port. Use the canonical checkout above for all new work.
+- Preserve the dirty worktree
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-checkout-hydration-errors-20260905`.
+  It has only `crates/velnor-runner/src/checkout.rs` modified. The patch is a
+  weaker duplicate of the canonical fail-closed hydration fix; do not reset,
+  stash, or merge it casually.
+- All other local sibling tips are ancestors of the canonical branch except
+  the held MBX experiment `codex/scenario-mbx-requirements-20260905` at
+  `88218d4`. Its recovery ref is
+  `refs/archive/branch/codex-scenario-mbx-requirements-20260905`; do not merge
+  wholesale. It keys admission to host-local `mbx --version`, which can reject
+  valid image-only MBX or accept irrelevant host MBX.
+- The old remote setup line is preserved at
+  `refs/archive/remote/chore/setup-velnor-workflow-action-20260905` (`1352011`),
+  and old main at `refs/archive/remote/main-20260905` (`b5c666f`). Port only
+  independently verified changes from those archives.
+
+Next bounded work, not yet started:
+
+1. Docker cancellation: in `crates/velnor-runner/src/executor.rs`, make the
+   live started-container step path adopt `execution::cancel::active()` when
+   present, while retaining inert cancellation for cleanup/test engines and
+   preserving post-step cancellation semantics. Add deterministic executor
+   tests proving Docker/MBX subprocess cancellation and unchanged argv. Do
+   not broaden into `runner.rs` or `controller.rs` without ownership review.
+2. Durable worker lifecycle: `node/controller.rs` still has process-local
+   child ownership/maps, so controller restart cannot adopt, drain, or clean
+   active workers. Build durable worker-control handoff and restart tests.
+3. Protocol correctness: durable intent must precede Busy ACK; add Run Service
+   URL fallback, typed transport errors, bounded live-log framing, and strict
+   step-summary acknowledgement.
+4. Verifier trust handoff: current CI invokes readiness without a real
+   `--capabilities-export`/runner-source handoff. Build the real Velnor runner,
+   export capability plus run-bound source/runner identity, upload it, and
+   make compare-evidence consume the authenticated export. Do not claim
+   readiness from metadata alone.
+5. Storage/benchmark gates: finish injective cache-key handling, live lease
+   publication and bounded GC/resource admission, plus a real remote MBX
+   benchmark driver with stage metrics and fault/soak evidence.
+
+Restart commands:
+
+```bash
+cd /Users/donbeave/Projects/tailrocks/velnor-project/velnor
+git switch perf/docker-rust-mbx
+git pull --ff-only origin perf/docker-rust-mbx
+git status --short --branch
+```
+
+Continue with disjoint file ownership, Luna max-reasoning agents, small
+incremental commits, and `git commit -s` including
+`Co-authored-by: Codex <codex@openai.com>`. Re-check remote parity before every
+push. The complete task specification remains at
+`/Users/donbeave/.codex-chainargos/attachments/c421e50d-ded9-4c83-8080-b938af6484fa/pasted-text-1.txt`.
+
+## 94. Second restart handoff — main advanced after §93 — 2026-09-05
+
+The next continuation must begin with the current authoritative state:
+
+- Canonical Velnor remains clean at
+  `perf/docker-rust-mbx@f5f28ca1e75ae9a4a9c71c94229163294f6ef58b`, equal to
+  `origin/perf/docker-rust-mbx`.
+- `origin/main` advanced to
+  `008be2bd9143c9e10afadfa128fb04a389f26133` after §93. It is not merged into
+  the canonical branch.
+- An isolated merge was started at
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current`
+  on `codex/merge-main-20260905`, based on `f5f28ca`. Its merge of
+  `origin/main` is intentionally left unresolved and uncommitted. It contains
+  generated-workflow add/add conflicts plus staged main-side changes. Preserve
+  this worktree as evidence; do not abort, reset, stash, or delete it until a
+  fresh merge review decides whether to continue or recreate it safely.
+- The new main snapshot adds the setup action and changes generated CI,
+  workflow scanning, source-build identity handling, and several Rust paths.
+  It also removes fixture workflow units and carries a stale runtime revision
+  (`05ff9b8`). Do not accept it wholesale: re-audit each hunk against the
+  canonical MBX, verifier, cache, redaction, lifecycle, and CI contracts, then
+  regenerate generated workflows from the final generator source.
+- All six merge/audit workers were halted at this pause. No Docker cancellation
+  implementation was applied. Full architecture completion remains unproven.
+
+Safe restart sequence:
+
+```bash
+cd /Users/donbeave/Projects/tailrocks/velnor-project/velnor
+git switch perf/docker-rust-mbx
+git fetch origin main perf/docker-rust-mbx
+git status --short --branch
+git rev-parse HEAD origin/perf/docker-rust-mbx origin/main
+cd /Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current
+git status --short
+```
+
+Resume main integration first. Use one Luna-max worker per disjoint conflict
+surface and an independent review before committing the merge. The verifier
+worktree remains clean at
+`codex/verifier-completion-fixes@9d0363953cb37e95430dff51bf97bff41badbe68`.
+Keep the dirty checkout-hydration worktree named in §93 untouched. Commit
+small, sign with `git commit -s`, include the Codex co-author trailer, and push
+only after checking `HEAD...origin/perf/docker-rust-mbx` parity.
+
+## 95. Third restart handoff — merge worktree partially edited — 2026-09-05
+
+This pause occurred during the next continuation attempt:
+
+- Canonical Velnor is still clean at
+  `perf/docker-rust-mbx@976516fd65b875acacca7e864479cedcd778f2a6`, equal to
+  `origin/perf/docker-rust-mbx` (`0/0`). No canonical code change was made in
+  this attempt.
+- `origin/main` remains
+  `008be2bd9143c9e10afadfa128fb04a389f26133` and is not merged.
+- The isolated merge worktree is
+  `/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-merge-main-current`
+  on `codex/merge-main-20260905`. It still contains the merge of `origin/main`
+  into `f5f28ca`, with 18 generated workflow files unmerged. A resolver made
+  partial working-tree edits in those files, but no commit exists. Preserve
+  this worktree and inspect its conflict markers/stages before continuing; do
+  not abort, reset, stash, or delete it casually.
+- Five audit workers and one workflow resolver were halted. No Docker
+  cancellation fix or other implementation from this attempt reached the
+  canonical branch.
+
+The next run should resume from §95, resolve and review the isolated merge
+first, then stage one coherent merge commit only after generated-state,
+workflow, Rust, and verifier checks pass. Keep canonical Velnor at the path
+above, keep the verifier at
+`/Users/donbeave/Projects/tailrocks/velnor-project/.rearch/velnor-actions-fixture`
+on its clean `codex/verifier-completion-fixes` branch, and keep the dirty
+checkout-hydration worktree untouched. The complete architecture objective is
+still open.

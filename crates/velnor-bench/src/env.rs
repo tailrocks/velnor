@@ -90,19 +90,19 @@ impl EnvironmentIdentity {
             ram_bytes: ram_bytes(runner).into(),
             cpu_arch: Fact::Known(std::env::consts::ARCH.to_owned()),
             os: Fact::Known(std::env::consts::OS.to_owned()),
-            kernel: runner.capture("uname", &["-sr"]).into(),
+            kernel: runner.capture_probe("uname", &["-sr"]).into(),
             filesystem: filesystem_type(&inputs.work_root, runner).into(),
             docker_server_version: runner
-                .capture("docker", &["version", "--format", "{{.Server.Version}}"])
+                .capture_probe("docker", &["version", "--format", "{{.Server.Version}}"])
                 .into(),
             docker_api_version: runner
-                .capture(
+                .capture_probe(
                     "docker",
                     &["version", "--format", DOCKER_SERVER_API_VERSION_FORMAT],
                 )
                 .into(),
             docker_storage_driver: runner
-                .capture("docker", &["info", "--format", "{{.Driver}}"])
+                .capture_probe("docker", &["info", "--format", "{{.Driver}}"])
                 .into(),
             buildkit_version: buildkit_version(runner).into(),
             velnor_commit: git_commit(&inputs.velnor_repo, runner).into(),
@@ -110,9 +110,9 @@ impl EnvironmentIdentity {
                 || Fact::unavailable("no actions fixture checkout was supplied"),
                 |repo| fixture_commit(repo, runner).into(),
             ),
-            rustc_version: runner.capture("rustc", &["--version"]).into(),
-            cargo_version: runner.capture("cargo", &["--version"]).into(),
-            mbx_version: runner.capture("mbx", &["--version"]).into(),
+            rustc_version: runner.capture_probe("rustc", &["--version"]).into(),
+            cargo_version: runner.capture_probe("cargo", &["--version"]).into(),
+            mbx_version: runner.capture_probe("mbx", &["--version"]).into(),
             job_image_digest: inputs.job_image.as_ref().map_or_else(
                 || Fact::unavailable("no job image was supplied"),
                 |image| image_digest(image, runner).into(),
@@ -178,7 +178,7 @@ impl EnvironmentIdentity {
 
 fn cpu_model(runner: &mut Runner) -> Result<String, String> {
     if cfg!(target_os = "macos") {
-        return runner.capture("sysctl", &["-n", "machdep.cpu.brand_string"]);
+        return runner.capture_probe("sysctl", &["-n", "machdep.cpu.brand_string"]);
     }
     let text = std::fs::read_to_string("/proc/cpuinfo")
         .map_err(|error| format!("/proc/cpuinfo unreadable: {error}"))?;
@@ -204,7 +204,7 @@ fn cpu_cores(runner: &mut Runner) -> Result<u32, String> {
             .map_err(|error| format!("available_parallelism failed: {error}"));
     };
     runner
-        .capture("sysctl", &["-n", key])?
+        .capture_probe("sysctl", &["-n", key])?
         .parse()
         .map_err(|error| format!("sysctl {key} was not an integer: {error}"))
 }
@@ -212,7 +212,7 @@ fn cpu_cores(runner: &mut Runner) -> Result<u32, String> {
 fn ram_bytes(runner: &mut Runner) -> Result<u64, String> {
     if cfg!(target_os = "macos") {
         return runner
-            .capture("sysctl", &["-n", "hw.memsize"])?
+            .capture_probe("sysctl", &["-n", "hw.memsize"])?
             .parse()
             .map_err(|error| format!("sysctl hw.memsize was not an integer: {error}"));
     }
@@ -231,18 +231,18 @@ fn filesystem_type(path: &Path, runner: &mut Runner) -> Result<String, String> {
     let path = path.display().to_string();
     if cfg!(target_os = "macos") {
         // `df -P` names the device; `mount` names its filesystem type.
-        let df = runner.capture("df", &["-P", &path])?;
+        let df = runner.capture_probe("df", &["-P", &path])?;
         let device = df
             .lines()
             .nth(1)
             .and_then(|line| line.split_whitespace().next())
             .ok_or_else(|| format!("df -P {path} produced no device row"))?
             .to_owned();
-        let mounts = runner.capture("mount", &[] as &[&str])?;
+        let mounts = runner.capture_probe("mount", &[] as &[&str])?;
         return parse_darwin_mount_type(&mounts, &device)
             .ok_or_else(|| format!("no mount entry for {device}"));
     }
-    runner.capture("stat", &["-f", "-c", "%T", &path])
+    runner.capture_probe("stat", &["-f", "-c", "%T", &path])
 }
 
 fn parse_darwin_mount_type(mounts: &str, device: &str) -> Option<String> {
@@ -257,11 +257,11 @@ fn parse_darwin_mount_type(mounts: &str, device: &str) -> Option<String> {
 }
 
 fn buildkit_version(runner: &mut Runner) -> Result<String, String> {
-    runner.capture("docker", &["buildx", "version"])
+    runner.capture_probe("docker", &["buildx", "version"])
 }
 
 fn git_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
-    runner.capture(
+    runner.capture_probe(
         "git",
         &["-C", &repo.display().to_string(), "rev-parse", "HEAD"],
     )
@@ -269,7 +269,7 @@ fn git_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
 
 fn fixture_commit(repo: &Path, runner: &mut Runner) -> Result<String, String> {
     let remote = runner
-        .capture(
+        .capture_probe(
             "git",
             &[
                 "-C",
@@ -305,7 +305,7 @@ fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
     // Identity probing is read-only. Workload preparation owns image
     // acquisition; pulling here would contaminate cold-pull measurements.
     let inspect = runner
-        .run("docker", &["image", "inspect", image])
+        .probe("docker", &["image", "inspect", image])
         .map_err(|error| format!("docker image inspect {image} could not run: {error}"))?;
     if !inspect.ok() {
         return Err(format!(
@@ -314,7 +314,7 @@ fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
     }
     // RepoDigests is the content identity; fall back to the local image ID,
     // which is still a digest, when the image was never pushed or pulled.
-    if let Ok(digests) = runner.capture(
+    if let Ok(digests) = runner.capture_probe(
         "docker",
         &[
             "image",
@@ -331,7 +331,7 @@ fn image_digest(image: &str, runner: &mut Runner) -> Result<String, String> {
     {
         return Ok(first.to_owned());
     }
-    runner.capture(
+    runner.capture_probe(
         "docker",
         &["image", "inspect", image, "--format", "{{.Id}}"],
     )

@@ -3945,6 +3945,7 @@ dependencies = [
  "serde",
  "serde_json",
  "velnor-model",
+ "velnor-runner",
 ]
 
 [[package]]
@@ -4002,7 +4003,7 @@ dependencies = [
 
 [[package]]
 name = "velnor-runner"
-version = "0.1.250"
+version = "0.1.251"
 dependencies = [
  "aho-corasick",
  "anyhow",

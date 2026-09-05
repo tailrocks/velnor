@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.250"
+version = "0.1.251"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
