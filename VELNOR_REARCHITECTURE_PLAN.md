@@ -4027,3 +4027,17 @@ The controller recovery suite (`35` tests), terminal-conclusion regression,
 all-target runner compile, formatting, and diff checks pass. No live Run
 Service integration result is claimed; the network-free regression verifies
 the payload conclusion and structural step contract.
+
+## 81. BuildKit retention inputs fail closed until ownership exists — 2026-09-05
+
+`ed61d79` narrows the admitted `docker/setup-buildx-action` surface. Velnor
+always tears down job-scoped BuildKit containers and state volumes, so
+`cleanup: false` and `keep-state: true` previously reported retention that
+could not survive the job. Admission now accepts only the truthful defaults
+(`cleanup: true`, `keep-state: false`) while a stable trust/repository builder
+owner and matching lease remain unimplemented. No teardown or persistence
+semantics were changed behind the admission boundary.
+
+The focused manifest suite passes (`49` tests), with formatting and diff checks
+clean. BuildKit retention remains an explicit future package rather than a
+silent no-op.
