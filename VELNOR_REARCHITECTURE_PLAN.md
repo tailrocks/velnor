@@ -3934,3 +3934,19 @@ The non-ancestor MBX scenario branch was likewise preserved at
 unmerged because its host-side MBX probe cannot prove the in-container default
 job path. Authoritative typed slot-count propagation remains the next resource
 correctness gate.
+
+## 75. Authoritative slot topology carried into every job — 2026-09-05
+
+`ceee878` carries validated daemon `--slots` as a nonzero typed value through
+the service/run boundary, execution thread, GitHub adapter, and
+`JobContainerSpec`. Production resource budgeting now divides host CPU and
+memory by that carried count; it no longer falls back to `VELNOR_SLOTS` or
+filesystem sibling discovery. Constructor and multislot regression coverage
+passes, along with the runner compile gate and focused container, budget, and
+GitHub-adapter suites.
+
+The legacy slot-directory discovery helpers remain only under test
+configuration to document the rejected failure mode. Full runner completion is
+still open: one intermittent `git_mirror` lease test currently reports
+`WouldBlock` under the complete suite and is being investigated before any
+lock-related change.
