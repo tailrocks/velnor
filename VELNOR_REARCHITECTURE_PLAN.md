@@ -3877,3 +3877,31 @@ shapes return `journal.schema.mismatch` before commit and remain unchanged.
 
 Focused poison tests pass, and the complete `velnor-control` library suite
 passes (`233 passed`). The fix is pushed to `perf/docker-rust-mbx`.
+
+## 72. Completion, teardown, capacity, and cancellation hardening — 2026-09-05
+
+The six requested post-§71 commits are narrow correctness fixes:
+
+- `29ff406` makes acquired-job completion require the exact durable acquisition
+  row; it promotes only the current process's provisional row, proves recovered
+  ownership with `renewjob`, and withholds completion when proof is absent.
+- `758a5c1` adds schema-v7 `CompletionPayloadLost`; missing or mismatched
+  outbox payloads become durable local terminal failures after exact
+  owner/generation/checksum validation, releasing only the proven slot and
+  never recording remote acknowledgement.
+- `e1b33ea` keeps guest-Docker probe and sparse-checkout children owned through
+  setup errors, killing and reaping them while preserving the original error.
+- `5ce1643` retains Firecracker jailer ownership and cancellation registrations
+  until kill/reap succeeds, and publishes `JobCompleted` only after teardown;
+  failed teardown remains retryable.
+- `d2b4869` folds workflow and daemon CPU flags into one runner-owned cap,
+  preserves fractional Docker quota, and emits no integer compiler capacity for
+  sub-CPU slots.
+- `dc584ff` captures one monotonic forced-cancellation deadline, applies a
+  deterministic termination order, and keeps failed targets retryable.
+
+All six diffs add or update focused regression tests for their boundaries. No
+consolidated post-tip test or CI result is recorded in the commit history, and
+this documentation-only update ran no code tests; therefore no passing-suite
+claim is made. The existing live Docker/disposable-daemon, child-process census,
+VelnorJob, and default-MBX job-image evidence gates remain open.
