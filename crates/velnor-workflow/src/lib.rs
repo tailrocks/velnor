@@ -35,7 +35,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef9
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd";
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
