@@ -4045,11 +4045,22 @@ silent no-op.
 ## 82. Default Docker preflight proves the MBX runtime — 2026-09-05
 
 `8f11ecc` extends the configured Docker job-image preflight with an image-local
-`mbx` lookup and `mbx --version` probe. Runtime container setup always mounts
-and configures the MBX store, so an image that lacks the executable must be
-rejected before admission rather than failing later during a job.
+`mbx` lookup and `mbx --version` probe. Non-sccache Docker jobs mount and
+configure the MBX store, so the configured default image must expose the
+executable rather than failing later during a job. Explicit sccache jobs keep
+their mutually exclusive sccache store and disable MBX.
 
 The existing preflight regression now asserts the MBX probe alongside the
 other required job tools. This proves the configured default image contract;
 workflow-specific image overrides remain subject to their own image contract.
 The focused preflight test, formatting, and diff checks pass.
+
+## 83. Current-toolchain lint fixes are carried into the canonical branch — 2026-09-05
+
+The stale `chore/setup-velnor-workflow-action` line contained two small fixes
+that the current canonical source still needed: `a2697cd` ports the stable
+`Option::is_none_or` form and names the `PRAGMA table_info` row tuple used by
+the journal schema helper. The entire stale line was not merged because it is
+based on `b5c666f` and would replace the current rearchitecture's workflow and
+fixture policy. The ported source fixes are independently verified by all
+control tests (`268` passed) and clippy with `-D warnings`.
