@@ -45,7 +45,7 @@ const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
     "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
-    "package", "publish", "run", "test", "zigbuild",
+    "package", "publish", "run", "test", "update", "zigbuild",
 ];
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
 const VELNOR_POLICY_PROVIDER_WORKFLOW: &str = "velnor-workflow-policy.yml";
@@ -8758,6 +8758,14 @@ path-only = { path = "../path-only" }
         assert_eq!(
             mbxify_cargo_command("cargo-deny --version"),
             "cargo-deny --version"
+        );
+        assert_eq!(
+            mbxify_cargo_command("cargo update --workspace --offline"),
+            "mbx update --workspace --offline"
+        );
+        assert_eq!(
+            mbxify_cargo_command("cargo install --locked --path ."),
+            "cargo install --locked --path ."
         );
     }
 
