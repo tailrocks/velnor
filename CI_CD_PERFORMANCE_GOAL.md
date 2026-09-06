@@ -462,6 +462,35 @@ deleted by exact ID and re-listed absent. The current account exceeds the
 8-GiB acceptance ceiling. The required seven consecutive daily snapshots are
 not present.
 
+### Recheck 2026-09-06T19:14:14Z
+
+- Release [v0.1.272](https://github.com/tailrocks/velnor/releases/tag/v0.1.272)
+  now exists. The published job image is also present at
+  `ghcr.io/tailrocks/velnor-job-ubuntu:0.1.272`, OCI index
+  `sha256:3d5167b2617bca2fae535a152b78b8fbb46631deafd2c1203305c9eaaa0274d2`;
+  this proves publication, not fleet activation.
+- The package contract keeps activation separate: the Debian `postinst` does
+  not restart the fleet; an operator must run `velnorctl release activate`.
+  Therefore live passing Velnor main proof remains OPEN.
+- PR [#607](https://github.com/tailrocks/velnor/pull/607) changes hosted
+  Mr. Boxington lanes to `github-cache-mode: objects`; run
+  [34053795798](https://github.com/tailrocks/velnor/actions/runs/34053795798)
+  has all Velnor callers skipped by the existing trust gate. It is not a
+  comparable warm affected run until merged and followed by a main cache-save
+  run; its hosted runner/bench/ctl jobs were still pending at this snapshot.
+- A fresh two-page cache listing contained 106 entries and
+  12,919,364,637 bytes (12.032 GiB); no `a1e07a28` orphan key remained.
+  Budget and seven-day evidence are still OPEN.
+
+Provider, queue, and coverage record:
+
+| Area | Evidence | State |
+| --- | --- | --- |
+| GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
+| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | over the 8-GiB target |
+| Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
+| Required coverage | `ci-required` aggregates all 15 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
+
 ### Safety fixtures and remaining blockers
 
 - Commit `4df3da27` removes the blanket `src/lib.rs` watch edge. The checked
