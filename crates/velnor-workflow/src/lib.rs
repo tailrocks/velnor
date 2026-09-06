@@ -6742,6 +6742,10 @@ fn run_estate(cli: &Cli) -> Result<(), GeneratorError> {
 
 fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
     let mut files = BTreeMap::new();
+    files.insert(
+        PathBuf::from(".github/actionlint.yaml"),
+        render_actionlint_config(config),
+    );
     files.insert(PathBuf::from(".github/ci/project.toml"), config.toml());
     let workflow = WorkflowIr::from_config(config);
     for workflow_file in &config.workflow_files {
@@ -6792,6 +6796,26 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
         }
     }
     files
+}
+
+fn render_actionlint_config(config: &ProjectConfig) -> String {
+    let labels = config
+        .velnor_labels
+        .iter()
+        .chain(std::iter::once(&config.github_runner))
+        .filter(|label| !label.is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut output = String::from(GENERATED_HEADER);
+    output.push_str("# Runner labels are derived from the generated workflow contract.\n");
+    output.push_str(
+        "# The actionlint catalog can lag GitHub-hosted labels; keep this allowlist generated.\n\n",
+    );
+    output.push_str("self-hosted-runner:\n  labels:\n");
+    for label in labels {
+        let _ = writeln!(output, "    - {}", yaml_scalar(&label));
+    }
+    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7124,6 +7148,7 @@ fn generated_file_state(relative: &Path, outcome: &WriteOutcome, root: &Path) ->
 
 fn generated_file_purpose(path: &Path) -> &'static str {
     match path.to_string_lossy().as_ref() {
+        ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         value if value.ends_with("ci-pr.yml") => "parallel PR verification",
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
@@ -10182,6 +10207,24 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(files
             .values()
             .any(|content| content.contains("velnor-workflow run")));
+    }
+
+    #[test]
+    fn generated_actionlint_config_covers_declared_runner_labels() {
+        let config = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for actionlint configuration",
+        );
+        let files = generated_files(&config);
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated actionlint configuration",
+        );
+        assert!(actionlint.starts_with(GENERATED_HEADER));
+        assert!(actionlint.contains("self-hosted-runner:\n  labels:\n"));
+        assert!(actionlint.contains("    - self-hosted\n"));
+        assert!(actionlint.contains("    - ubuntu-24.04\n"));
+        assert!(actionlint.contains("    - velnor-target-mvp\n"));
     }
 
     #[test]
