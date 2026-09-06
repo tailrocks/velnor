@@ -493,6 +493,22 @@ not present.
   12,919,364,637 bytes (12.032 GiB); no `a1e07a28` orphan key remained.
   Budget and seven-day evidence are still OPEN.
 
+### Recheck 2026-09-06T19:26:50Z
+
+- PR [#607](https://github.com/tailrocks/velnor/pull/607) merged at
+  19:25:36Z as `40b7a5d1`. Its trusted main push,
+  [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439),
+  was still pending with no jobs at this snapshot. Therefore object-mode main
+  cache saving and a post-change warm PR remain unproven.
+- Release run [34053258476](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  remains in progress. Both package jobs completed binary compilation and are
+  staging the pinned Firecracker assets; the GitHub Release API still returns
+  404 for `v0.1.272`. No fleet activation occurred.
+- The cache account remains 106 entries and 12,919,364,637 bytes (12.032 GiB).
+  Main-ref caches account for 10,299,479,881 bytes (9.592 GiB); tag-scoped
+  `v0.1.272` caches account for 2,619,884,756 bytes (2.440 GiB). No deletion
+  is safe while the release and the first object-mode main save are active.
+
 Provider, queue, and coverage record:
 
 | Area | Evidence | State |
