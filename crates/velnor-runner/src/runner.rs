@@ -16961,11 +16961,12 @@ jobs:
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished(), "the caller must wait, not fail");
         held.pop();
-        let (_permit, waited) = waiter
+        // Do not lower-bound the measured duration: the spawned task may not
+        // be scheduled until after the test task starts its 50 ms sleep.
+        let (_permit, _waited) = waiter
             .await
             .expect("waiter task")
             .expect("a released slot must be granted, never rejected");
-        assert!(waited >= Duration::from_millis(50));
     }
 
     /// A genuinely exhausted budget is a bounded, explained wait — never an
