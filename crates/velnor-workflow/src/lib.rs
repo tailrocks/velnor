@@ -1489,27 +1489,10 @@ fn include_str_paths(
     }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
-        let mut cursor = 0;
-        while let Some(relative) = source_contents[cursor..].find("include_str!") {
-            let start = cursor + relative + "include_str!".len();
-            let remainder = source_contents[start..].trim_start();
-            let Some(argument) = remainder.strip_prefix('(') else {
-                cursor = start;
-                continue;
-            };
-            let Some(end) = argument.find(')') else {
-                return Err(GeneratorError::usage(format!(
-                    "unterminated include_str! in {}",
-                    root.join(source).display()
-                )));
-            };
-            let literal = argument[..end].trim();
-            let included = serde_json::from_str::<String>(literal).map_err(|error| {
-                GeneratorError::usage(format!(
-                    "include_str! must use a plain string literal in {}: {error}",
-                    root.join(source).display()
-                ))
-            })?;
+        let included_paths = parse_include_str_literals(&source_contents).map_err(|error| {
+            GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
+        })?;
+        for included in included_paths {
             let target = resolve_repo_path(&parent_path(source), &included).ok_or_else(|| {
                 GeneratorError::usage(format!(
                     "include_str! escapes the repository from {}: {included}",
@@ -1524,10 +1507,161 @@ fn include_str_paths(
                 )));
             }
             targets.insert(target);
-            cursor = start + argument[..end].len() + 1;
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
+    const MACRO: &str = "include_str!";
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut included = Vec::new();
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
+            cursor = skip_line_comment(bytes, cursor + 2);
+            continue;
+        }
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+            cursor = skip_block_comment(bytes, cursor + 2);
+            continue;
+        }
+        if let Some(end) = skip_raw_string(bytes, cursor) {
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            cursor = skip_quoted_literal(bytes, cursor, b'"')
+                .map_err(|error| format!("{error} at byte {cursor}"))?;
+            continue;
+        }
+        if bytes[cursor] == b'\'' && is_char_literal_start(bytes, cursor) {
+            cursor = skip_quoted_literal(bytes, cursor, b'\'')
+                .map_err(|error| format!("{error} at byte {cursor}"))?;
+            continue;
+        }
+
+        if bytes[cursor..].starts_with(MACRO.as_bytes())
+            && (cursor == 0 || !is_rust_identifier_byte(bytes[cursor - 1]))
+        {
+            let mut argument = cursor + MACRO.len();
+            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
+                argument += 1;
+            }
+            if bytes.get(argument) != Some(&b'(') {
+                cursor += MACRO.len();
+                continue;
+            }
+            argument += 1;
+            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
+                argument += 1;
+            }
+            if bytes.get(argument) != Some(&b'"') {
+                return Err("include_str! must use a plain string literal".to_owned());
+            }
+            let literal_end = skip_quoted_literal(bytes, argument, b'"')
+                .map_err(|error| format!("{error} at byte {argument}"))?;
+            let literal = &source[argument..literal_end];
+            let value = serde_json::from_str::<String>(literal).map_err(|error| {
+                format!("include_str! must use a plain string literal: {error}")
+            })?;
+            let mut close = literal_end;
+            while bytes.get(close).is_some_and(u8::is_ascii_whitespace) {
+                close += 1;
+            }
+            if bytes.get(close) != Some(&b')') {
+                return Err("unterminated include_str!".to_owned());
+            }
+            included.push(value);
+            cursor = close + 1;
+            continue;
+        }
+        cursor += 1;
+    }
+    Ok(included)
+}
+
+fn is_rust_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    let mut depth = 1;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            depth += 1;
+            cursor += 2;
+        } else if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+            depth -= 1;
+            cursor += 2;
+            if depth == 0 {
+                return cursor;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn skip_raw_string(bytes: &[u8], cursor: usize) -> Option<usize> {
+    let (hash_start, content_start) = match bytes.get(cursor..) {
+        Some([b'r', rest @ ..]) => (
+            cursor + 1,
+            cursor + 1 + rest.iter().take_while(|byte| **byte == b'#').count(),
+        ),
+        Some([b'b', b'r', rest @ ..]) => (
+            cursor + 2,
+            cursor + 2 + rest.iter().take_while(|byte| **byte == b'#').count(),
+        ),
+        _ => return None,
+    };
+    if bytes.get(content_start) != Some(&b'"') {
+        return None;
+    }
+    let hashes = content_start - hash_start;
+    let mut end = content_start + 1;
+    while end < bytes.len() {
+        if bytes[end] == b'"'
+            && bytes
+                .get(end + 1..end + 1 + hashes)
+                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+        {
+            return Some(end + 1 + hashes);
+        }
+        end += 1;
+    }
+    Some(bytes.len())
+}
+
+fn is_char_literal_start(bytes: &[u8], cursor: usize) -> bool {
+    match bytes.get(cursor + 1) {
+        Some(b'\\') => true,
+        Some(byte) if *byte != b'\'' && *byte != b'\n' => bytes.get(cursor + 2) == Some(&b'\''),
+        _ => false,
+    }
+}
+
+fn skip_quoted_literal(bytes: &[u8], mut cursor: usize, delimiter: u8) -> Result<usize, String> {
+    cursor += 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = cursor.saturating_add(2),
+            character if character == delimiter => return Ok(cursor + 1),
+            b'\n' if delimiter == b'\'' => {
+                return Err(format!("unterminated quoted literal at byte {cursor}"));
+            }
+            _ => cursor += 1,
+        }
+    }
+    Err(format!("unterminated quoted literal at byte {cursor}"))
 }
 
 fn static_github_input_exists(root: &Path, target: &str) -> Result<bool, GeneratorError> {
@@ -5107,19 +5241,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if github_lane && tools.contains(&ToolRequirement::Mold) {
             output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
         }
-        if tools.contains(&ToolRequirement::DockerBuildx) {
-            if github_lane {
-                let _ = writeln!(
-                    output,
-                    "      - name: Expose GitHub Actions runtime\n        uses: {}",
-                    ActionPin::GithubRuntime.reference()
-                );
-                let _ = writeln!(
-                    output,
-                    "      - name: Set up Docker Buildx\n        uses: {}",
-                    ActionPin::DockerBuildx.reference()
-                );
-            }
+        if github_lane && tools.contains(&ToolRequirement::DockerBuildx) {
+            let _ = writeln!(
+                output,
+                "      - name: Expose GitHub Actions runtime\n        uses: {}",
+                ActionPin::GithubRuntime.reference()
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Set up Docker Buildx\n        uses: {}",
+                ActionPin::DockerBuildx.reference()
+            );
         }
         if github_lane && tools.contains(&ToolRequirement::OpenTofu) {
             let _ = writeln!(
@@ -8980,6 +9112,26 @@ path-only = { path = "../path-only" }
             .to_string()
             .contains("include_str! target does not exist"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_parser_ignores_comments_and_other_literals() {
+        let source = r##"
+// include_str!("missing-line-comment")
+/* include_str!("missing-block-comment") */
+const TEXT: &str = "an apostrophe's include_str!(\"missing-string\")";
+const RAW: &str = r#"include_str!("missing-raw-string")"#;
+const CHARACTER: char = '\'';
+const INCLUDED: &str = include_str!("fixture.txt");
+"##;
+
+        assert_eq!(
+            must(
+                parse_include_str_literals(source),
+                "parse include_str literals"
+            ),
+            vec!["fixture.txt"]
+        );
     }
 
     #[expect(
