@@ -673,8 +673,10 @@ pub struct GitHubJitRunner {
     pub labels: Vec<GitHubJitRunnerLabel>,
     #[serde(default)]
     pub runner_group_id: Option<i64>,
+    /// GitHub's JIT response currently omits this summary field. The
+    /// encoded `.runner` file is the authoritative ephemeral assertion.
     #[serde(default)]
-    pub ephemeral: bool,
+    pub ephemeral: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
