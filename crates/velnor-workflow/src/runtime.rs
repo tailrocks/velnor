@@ -133,10 +133,14 @@ enum RunnerLane {
 }
 
 impl RunnerLane {
-    /// Velnor's job runtime marks its node `self-hosted`; hosted GitHub jobs
-    /// and local invocations deliberately fall back to the GitHub command set.
-    fn from_runner_environment(environment: Option<&str>) -> Self {
-        if environment.is_some_and(|value| value.eq_ignore_ascii_case("self-hosted")) {
+    /// Velnor's job container advertises its authoritative execution backend;
+    /// hosted GitHub jobs and local invocations deliberately fall back to the
+    /// GitHub command set.
+    fn from_execution_backend(backend: Option<&str>) -> Self {
+        if backend.is_some_and(|value| {
+            value.trim().eq_ignore_ascii_case("docker")
+                || value.trim().eq_ignore_ascii_case("microvm")
+        }) {
             Self::Velnor
         } else {
             Self::Github
@@ -144,7 +148,7 @@ impl RunnerLane {
     }
 
     fn current() -> Self {
-        Self::from_runner_environment(env::var("RUNNER_ENVIRONMENT").ok().as_deref())
+        Self::from_execution_backend(env::var("VELNOR_EXECUTION_BACKEND").ok().as_deref())
     }
 }
 
@@ -438,26 +442,27 @@ mod runner_lane_tests {
     use super::{CiUnit, RunnerLane, Scope};
 
     #[test]
-    fn hosted_runner_is_the_default_lane() {
+    fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
+        assert_eq!(RunnerLane::from_execution_backend(None), RunnerLane::Github);
         assert_eq!(
-            RunnerLane::from_runner_environment(None),
+            RunnerLane::from_execution_backend(Some("github-hosted")),
             RunnerLane::Github
         );
         assert_eq!(
-            RunnerLane::from_runner_environment(Some("github-hosted")),
-            RunnerLane::Github
-        );
-        assert_eq!(
-            RunnerLane::from_runner_environment(Some("self-hosted")),
+            RunnerLane::from_execution_backend(Some("docker")),
             RunnerLane::Velnor
         );
         assert_eq!(
-            RunnerLane::from_runner_environment(Some("SELF-HOSTED")),
+            RunnerLane::from_execution_backend(Some("MICROVM")),
             RunnerLane::Velnor
         );
         assert_eq!(
             RunnerLane::Github,
-            RunnerLane::from_runner_environment(Some("unknown"))
+            RunnerLane::from_execution_backend(Some("self-hosted"))
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_execution_backend(Some("unknown"))
         );
     }
 

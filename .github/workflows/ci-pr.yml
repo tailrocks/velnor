@@ -28,9 +28,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6e6653a54f3ed64f6188af10c8417e7df9c1b8d1
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@ba6ff17be548f7885622d481ad0d3ff62b721e24
         with:
-          rev: 6e6653a54f3ed64f6188af10c8417e7df9c1b8d1
+          rev: ba6ff17be548f7885622d481ad0d3ff62b721e24
       - name: Select affected units
         id: plan
         env:

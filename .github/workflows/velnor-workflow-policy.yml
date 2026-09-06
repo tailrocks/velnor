@@ -39,7 +39,7 @@ jobs:
         with:
           backend: github
           version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-6e6653a54f3ed64f6188af10c8417e7df9c1b8d1
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-ba6ff17be548f7885622d481ad0d3ff62b721e24
           restore-keys: |
             velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
 
@@ -59,7 +59,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 6e6653a54f3ed64f6188af10c8417e7df9c1b8d1 \
+            --rev ba6ff17be548f7885622d481ad0d3ff62b721e24 \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow

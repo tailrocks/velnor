@@ -20,8 +20,8 @@ velnor-workflow release verify-tag
 
 Project commands remain explicit shell command strings in the checked-in TOML;
 each unit declares separate GitHub and Velnor PR/full command arrays. Runtime
-defaults to GitHub and selects Velnor commands from the runner's standard
-`RUNNER_ENVIRONMENT=self-hosted` marker. The binary owns selection, dependency
+defaults to GitHub and selects Velnor commands from the Velnor-owned
+`VELNOR_EXECUTION_BACKEND` marker. The binary owns selection, dependency
 ordering, policy, release validation, and every `.github/workflows/*.{yml,yaml}`
 file it emits. `--adopt` is the
 reviewed migration switch for an existing workflow surface: it snapshots each
