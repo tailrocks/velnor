@@ -8110,7 +8110,21 @@ path-only = { path = "../path-only" }
             .full_commands
             .iter()
             .any(|command| command.contains(MR_BOXINGTON_ENABLED_ENV)));
-        assert!(config.toml().contains("Mr. Boxington 1.8.3"));
+        let serialized = config.toml();
+        assert!(serialized.contains("Mr. Boxington 1.8.3"));
+        for field in [
+            "github_pr_commands",
+            "github_full_commands",
+            "velnor_pr_commands",
+            "velnor_full_commands",
+        ] {
+            assert!(
+                serialized
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{field} = [")) && line.contains("mbx ")),
+                "{field} must default to Mr. Boxington"
+            );
+        }
         let workflow =
             WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
@@ -8157,9 +8171,15 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
         assert!(release_workflow.contains("mbx run -p velnor-runner --bin velnor-guest-image"));
         assert!(release_workflow.contains("runner: ubuntu-24.04-arm"));
-        assert!(release_workflow.contains("gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu"));
+        assert!(release_workflow.contains("target: aarch64-unknown-linux-gnu"));
+        assert!(release_workflow.contains("dist/microvm/velnor-guest-agent"));
+        assert!(release_workflow.contains("guest-image missing guest-agent"));
+        assert!(release_workflow.contains(
+            "cmp -- \"target/${TARGET}/release/velnor-guest-agent\" guest-image/velnor-guest-agent"
+        ));
         assert!(release_workflow.contains("Normalize workflow binary mode after artifact download"));
-        assert!(release_workflow.contains("sccache"));
+        assert!(!release_workflow.contains("sccache-action@"));
+        assert!(!release_workflow.contains("Cache Cargo target"));
         assert!(release_workflow.contains("actions/cache@"));
         assert!(!release_workflow.contains("docker/setup-qemu-action@"));
 
