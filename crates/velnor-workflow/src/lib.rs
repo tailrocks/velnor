@@ -2812,7 +2812,7 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
                 }
             }
         }
-        if matches!(unit.kind, UnitKind::Rust | UnitKind::Docker)
+        if matches!(unit.id.as_str(), "rust-velnor-runner" | "rust-velnor-tools")
             && file_set.iter().any(|file| file.starts_with("fleet/"))
         {
             unit.watch.push("fleet/**".to_owned());
@@ -11329,6 +11329,23 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 "workflow runtime must watch {path}"
             );
         }
+        let fleet_watchers = config
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern).is_ok_and(|glob| {
+                        glob.compile_matcher().is_match("fleet/release-refs.toml")
+                    })
+                })
+            })
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fleet_watchers,
+            vec!["rust-velnor-runner", "rust-velnor-tools"],
+            "fleet inputs must not fan out to unrelated Rust units"
+        );
         for name in expected {
             let path = PathBuf::from(".github/workflows").join(name);
             let content = must_some(files.get(&path), "generated current workflow");
