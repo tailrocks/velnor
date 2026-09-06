@@ -170,8 +170,8 @@ silently no-op a needed unit (`return Ok(())`, accepted as pass).
 R8 — Hidden file couplings the manifest graph cannot see (adversarial
 review, all confirmed) + ONE proven toolchain incompatibility:
 
-R8a. mbx vs zig link (PROVEN failure, workaround legitimate but
-improperly scoped). `velnor-runner` and `velnorctl` pull C code via
+R8a. mbx vs zig C-shim (PROVEN failure, scoped fix verified).
+`velnor-runner` and `velnorctl` pull C code via
 `aws-lc-rs ← sigstore-sign` (`cargo tree -i aws-lc-rs`; tools/workflow do
 NOT). Release v0.1.264 amd64 log (run 34027800870, job 101474103309):
 direct-cargo `zigbuild -p velnor-runner` linked OK, then `mbx zigbuild -p
@@ -184,20 +184,13 @@ host==target only (aarch64 cross passed). History: `b7fac245` (#581)
 rename to `VELNOR_DIRECT_CARGO=1 cargo zigbuild` (generator guard
 `DIRECT_CARGO_ENV`, `lib.rs:2586`, template comment quoting this failure;
 tests pin it at `lib.rs:8648,8751-8775`) → #589 enforced all-mbx on main
-(test asserts no `cargo zigbuild`) → #590 OPEN re-adds the bypass for
-runner+ctl because main's mbx ctl leg is the broken one. Bypass is NARROW
-(final zig link of the two aws-lc bins; everything else stays on mbx) and
-evidence-backed — NOT theater. Required path forward, in order:
-(1) decisive experiment on pinned ubuntu-24.04 x86_64 (rust/zig 0.16.0 /
-cargo-zigbuild 0.23.3 / mbx 1.8.3, same RUSTFLAGS, VELNOR_RELEASE_BUILD=1):
-plain `cargo zigbuild -p velnorctl` (expect PASS) vs `mbx zigbuild`
-(expect FAIL) vs `MBX_DISABLE=1 mbx zigbuild` (expect PASS → wrapper, not
-toolchain) vs `MBX_CC=0 mbx zigbuild` (if PASS → C-shim layer is the
-poison; fix = scoped `MBX_CC=0` on the two legs, cache kept for the rest);
-`nm` each `libaws_lc_sys-*.rlib | grep isoc23` + `mbx explain --last`.
-(2) Upstream issue to mbx with that matrix. (3) Only then: keep the
-two-line exception with dated comment, or retire it. Never expand it to
-other packages; never claim "all lanes behind mbx" while it exists.
+(test asserts no `cargo zigbuild`) → #590 re-added the direct bypass → #591
+replaced it with `MBX_CC=0 mbx zigbuild` for the two aws-lc binaries. The
+fix disables only mbx's C/C++ build-script shim; Rust remains inside mbx and
+all other release packages stay on normal mbx. Pinned release run 34031576987
+passed both amd64 and arm64 binary/deb jobs with no `__isoc23_sscanf` failure.
+Never expand the scope to other packages; never claim the C shim is enabled
+for those two invocations.
 
 R8b. Manifest-invisible file couplings (all confirmed): `velnor-tools`
 `include_str!`s `../../velnor-runner/src/manifest.rs` in a TEST while depending only on
@@ -355,13 +348,12 @@ snapshot + one measured CI run. Never disable a check to gain speed.
 - No `MBX_DISABLE=1`, `VELNOR_DIRECT_CARGO=1`, or any namespaced-env
     plain-cargo carve-out as a "fix" FOR PR CI LANES. (The #588 branch
     renames the bypass without removing it — renames do not comply.)
-    EXCEPTION (proven, narrow): the release `cargo zigbuild` final link of
-    aws-lc-carrying bins (`velnor-runner`, `velnorctl`) — see R8a. That
-    exception stays scoped to those two invocations, keeps a dated comment
-    with the failure signature, and must be retired by the experiment in
-    R8a, not expanded. #588's body claim "All Rust lanes remain behind
-    mbx" was FALSE while carrying the bypass — body claims are evidence
-    too (§8).
+    RELEASE FIX (proven, narrow): use `MBX_CC=0 mbx zigbuild` for the
+    aws-lc-carrying bins (`velnor-runner`, `velnorctl`) — see R8a. This
+    keeps the Rust builds behind mbx while disabling only the C/C++ shim.
+    Keep it scoped to those two invocations and retain the failure-signature
+    comment. #588's body claim "All Rust lanes remain behind mbx" was FALSE
+    while the direct Cargo bypass existed; #591 restored that Rust path.
 - No per-commit cache-key suffixes (re-floods the 10 GiB budget; the
     orphans in R1b are the corpse of that design).
 - No "workflow unit only" generator narrowing (runtime executes every
@@ -432,13 +424,13 @@ open-PRs analysis, CI re-measurement, adversarial critique).
   keeps the runner release link off-MBX under renamed env
   `VELNOR_DIRECT_CARGO=1` — non-compliant with §6 by rename.
 - #584 CLOSED (v0.1.264 bump + drop-superseded).
-- #585/#587 CLOSED (goal-doc churn, superseded); #588 OPEN (v4 text +
+- #585/#587 CLOSED (goal-doc churn, superseded); #588 MERGED (v4 text +
   cancel.rs test stabilization; runner flake
   `supervised_controller_capacity…` failing, Docker critical path).
 - #589 MERGED (enforce all-mbx release: deleted `DIRECT_CARGO_ENV`,
-  test asserts no `cargo zigbuild`); #590 OPEN (re-add bypass for
-  runner+ctl — main's mbx ctl leg fails per R8a; resolve via the R8a
-  experiment, not policy reverts).
+  test asserts no `cargo zigbuild`); #590 MERGED (temporary direct
+  cargo-zigbuild bypass for runner+ctl); #591 MERGED (replace that bypass
+  with scoped `MBX_CC=0 mbx zigbuild`, validated by release run 34031576987).
 - Staleness policy: every measurement dated; expires after 7d or any
   generator/`.github`/Docker/mise/mbx change, whichever first. Anchors
   are symbol/pattern-first (`scope_for_event_values`,
