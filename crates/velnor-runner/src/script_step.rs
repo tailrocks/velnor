@@ -613,6 +613,12 @@ pub(crate) fn value_truthy(value: &Value) -> bool {
             .or_else(|| object.get("Value"))
             .or_else(|| object.get("lit"))
             .or_else(|| object.get("Lit"))
+            // GitHub's BooleanToken/NumberToken use `bool`/`num` (the
+            // TemplateToken type is carried separately in `type`).
+            .or_else(|| object.get("bool"))
+            .or_else(|| object.get("Bool"))
+            .or_else(|| object.get("num"))
+            .or_else(|| object.get("Num"))
             .is_some_and(value_truthy),
         _ => false,
     }
@@ -1540,6 +1546,18 @@ mod tests {
                 "reference": { "type": "Script" },
                 "inputs": { "script": "cargo test" },
                 "continueOnError": { "lit": "false" }
+            },
+            {
+                "id": "broker-bool",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "cargo check" },
+                "continueOnError": { "type": 5, "bool": true }
+            },
+            {
+                "id": "broker-false",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "cargo clippy" },
+                "continueOnError": { "type": 5, "bool": false }
             }
         ]))
         .unwrap();
@@ -1548,6 +1566,8 @@ mod tests {
 
         assert!(mapped[0].continue_on_error);
         assert!(!mapped[1].continue_on_error);
+        assert!(mapped[2].continue_on_error);
+        assert!(!mapped[3].continue_on_error);
     }
 
     #[test]
