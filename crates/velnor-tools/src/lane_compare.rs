@@ -550,10 +550,9 @@ fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// Download every `job-log` artifact of the run and concatenate their text
-/// content. Several Velnor jobs in one run all upload an artifact named
-/// `job-log` (per-job naming remains future work), so the content check is
-/// lane-level rather than per-job.
+/// Download every per-job `job-log-*` artifact of the run and concatenate
+/// their text content. Legacy runs may still contain the unsuffixed `job-log`
+/// name, so the prefix also preserves backwards compatibility.
 fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
     let payload = gh_api_bytes(&format!(
         "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"

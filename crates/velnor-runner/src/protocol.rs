@@ -6122,15 +6122,32 @@ fn list_results_artifacts(
             RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
         );
     }
-    let mut validated = Vec::with_capacity(artifacts.len());
+    let validated = artifacts
+        .into_iter()
+        .map(|artifact| artifact.validate(plan_id))
+        .collect::<Result<Vec<_>>>()?;
+    validate_result_artifact_identities(&validated)?;
+    Ok(validated)
+}
+
+/// New artifact producers must use a unique name per workflow run. Keep the
+/// duplicate-name check scoped to the producing job so legacy Velnor runs with
+/// cross-job `job-log` artifacts remain readable during fan-in downloads.
+fn validate_result_artifact_identities(
+    artifacts: &[ValidatedResultsArtifactDescriptor],
+) -> Result<()> {
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
     for artifact in artifacts {
-        let artifact = artifact.validate(plan_id)?;
-        if !names.insert(artifact.name.clone()) {
+        let name_key = (
+            artifact.workflow_job_run_backend_id.as_str(),
+            artifact.name.as_str(),
+        );
+        if !names.insert(name_key) {
             bail!(
-                "Results Service returned duplicate artifact name '{}'",
-                artifact.name
+                "Results Service returned duplicate artifact name '{}' for job {}",
+                artifact.name,
+                artifact.workflow_job_run_backend_id
             );
         }
         if !ids.insert(artifact.database_id) {
@@ -6139,9 +6156,23 @@ fn list_results_artifacts(
                 artifact.database_id
             );
         }
-        validated.push(artifact);
     }
-    Ok(validated)
+    Ok(())
+}
+
+fn validate_selected_result_artifact_names(
+    artifacts: &[ValidatedResultsArtifactDescriptor],
+) -> Result<()> {
+    let mut names = BTreeSet::new();
+    for artifact in artifacts {
+        if !names.insert(artifact.name.as_str()) {
+            bail!(
+                "Results Service returned duplicate selected artifact name '{}'",
+                artifact.name
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Restrict destructive artifact operations to artifacts produced by this
@@ -6237,22 +6268,27 @@ fn download_artifacts_blocking_in_temp_dir(
         .context("build Results Service HTTP client")?;
 
     let artifacts = list_results_artifacts(&client, base, token, plan_id, job_id)?;
+    // Filter before enforcing global name uniqueness. Legacy runs can contain
+    // duplicate names from unrelated producer jobs; those must not poison a
+    // narrow download. Selected duplicates remain ambiguous and fail closed.
+    let selected_artifacts = artifacts
+        .into_iter()
+        .filter(|artifact| {
+            let artifact_name = artifact.name.as_str();
+            if !name.is_empty() {
+                artifact_name == name
+            } else if let Some(matcher) = &matcher {
+                matcher.is_match(artifact_name)
+            } else {
+                true
+            }
+        })
+        .collect::<Vec<_>>();
+    validate_selected_result_artifact_names(&selected_artifacts)?;
     let mut downloads = Vec::new();
     let mut total_returned_bytes = 0_u64;
-    for artifact in artifacts {
+    for artifact in selected_artifacts {
         let artifact_name = artifact.name.as_str();
-        // Filter BEFORE signing/downloading: unrequested artifacts (notably
-        // non-zip `.dockerbuild` build records) must never be fetched.
-        let selected = if !name.is_empty() {
-            artifact_name == name
-        } else if let Some(matcher) = &matcher {
-            matcher.is_match(artifact_name)
-        } else {
-            true
-        };
-        if !selected {
-            continue;
-        }
         let signed_body = serde_json::to_string(&serde_json::json!({
             "workflow_run_backend_id": artifact.workflow_run_backend_id,
             "workflow_job_run_backend_id": artifact.workflow_job_run_backend_id,
@@ -6932,6 +6968,24 @@ mod tests {
     }
 
     #[test]
+    fn artifact_names_are_scoped_to_the_producing_job() {
+        let same_name_different_jobs = vec![
+            test_results_artifact_descriptor("producer", 1),
+            test_results_artifact_descriptor("other-job", 2),
+        ];
+        assert!(validate_result_artifact_identities(&same_name_different_jobs).is_ok());
+        assert!(validate_selected_result_artifact_names(&same_name_different_jobs).is_err());
+
+        let duplicate_in_one_job = vec![
+            test_results_artifact_descriptor("producer", 1),
+            test_results_artifact_descriptor("producer", 2),
+        ];
+        let error = validate_result_artifact_identities(&duplicate_in_one_job).unwrap_err();
+        assert!(error.to_string().contains("duplicate artifact name"));
+        assert!(error.to_string().contains("producer"));
+    }
+
+    #[test]
     fn artifact_create_request_uses_current_results_service_wire_shape() {
         let request = artifact_create_request(
             "plan",
@@ -7567,6 +7621,14 @@ mod tests {
                                     "workflow_run_backend_id": "plan",
                                     "workflow_job_run_backend_id": "image",
                                     "database_id": 22,
+                                    "size": zip_bytes.len(),
+                                    "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
+                                },
+                                {
+                                    "name": ".dockerbuild",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "image-2",
+                                    "database_id": 23,
                                     "size": zip_bytes.len(),
                                     "digest": format!("sha256:{}", sha2::Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect::<String>())
                                 }
