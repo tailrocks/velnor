@@ -29,9 +29,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c3a38b5ffffb844ab0dffc730a67f953b6af9eb7
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
         with:
-          rev: c3a38b5ffffb844ab0dffc730a67f953b6af9eb7
+          rev: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
       - name: Select affected units
         id: plan
         env:
@@ -49,9 +49,9 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     with:
-      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
+      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     permissions:
       contents: read
   group-unit-bun-velnor:

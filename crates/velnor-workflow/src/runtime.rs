@@ -1451,7 +1451,7 @@ mod tests {
     use super::*;
 
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
-    const POLICY_REVISION: &str = "f15ff2e8449a34f77f04746fa461a349bad22e79";
+    const POLICY_REVISION: &str = "a1cbfcbe5ab179032e37125f0383cdcae8183c8c";
 
     fn policy_fixture(
         name: &str,
@@ -1658,9 +1658,9 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     with:
-      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
+      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1711,9 +1711,9 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     with:
-      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
+      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     permissions:
       contents: read
 ";

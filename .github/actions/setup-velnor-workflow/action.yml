@@ -9,7 +9,7 @@ inputs:
   rev:
     description: Velnor git revision to install
     required: false
-    default: c3a38b5ffffb844ab0dffc730a67f953b6af9eb7
+    default: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
   cache:
     description: Cache the installation with GitHub cache
     required: false

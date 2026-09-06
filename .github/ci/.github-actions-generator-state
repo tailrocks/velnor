@@ -4,10 +4,10 @@ schema = 1
 .github/workflows/ci-bun-velnor.yml	4906baef47424f88
 .github/workflows/ci-docker-docker.yml	30fcd503411f515d
 .github/workflows/ci-docs-docs.yml	9aebdcfba4c65a85
-.github/workflows/ci-main.yml	b515d97322ac19b4
+.github/workflows/ci-main.yml	7abee3127a054704
 .github/workflows/ci-opentofu-opentofu.yml	1c4b72a8eacd3393
-.github/workflows/ci-policy.yml	c9999e498972f78c
-.github/workflows/ci-pr.yml	0788b5518b1b5430
+.github/workflows/ci-policy.yml	1a9daa07a682d0e8
+.github/workflows/ci-pr.yml	311708aeddb2f5ec
 .github/workflows/ci-release-package-signer.yml	b251fce779f479d8
 .github/workflows/ci-rust-policy.yml	d091cfbcb57f626f
 .github/workflows/ci-rust-unit-collector.yml	b910ab74a249385e
@@ -21,6 +21,6 @@ schema = 1
 .github/workflows/ci-rust-velnor-workflow.yml	80420f12fe1b9a08
 .github/workflows/ci-rust-velnorctl.yml	efa50054ee963969
 .github/workflows/maintenance.yml	b105b861d892fbd7
-.github/workflows/nightly.yml	a597bd55c2c10d9d
+.github/workflows/nightly.yml	c649ec022b37cc15
 .github/workflows/release.yml	504c7c6c3148acd4
-.github/workflows/velnor-workflow-policy.yml	19acd14b00647e14
+.github/workflows/velnor-workflow-policy.yml	499a7b4acf855858
