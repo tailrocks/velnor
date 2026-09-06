@@ -9304,6 +9304,48 @@ path-only = { path = "../path-only" }
             .map_or("", |(_, lane)| lane)
             .contains(ActionPin::DockerBuildx.reference()));
 
+        config.units.push(catalog_unit(
+            "bun-velnor",
+            "Bun package",
+            UnitKind::Bun,
+            &["package.json", "bun.lock"],
+            &["bun install --frozen-lockfile"],
+            &["bun install --frozen-lockfile"],
+            None,
+        ));
+        let bun = must_some(
+            config.units.iter().find(|unit| unit.id == "bun-velnor"),
+            "reviewed Bun unit",
+        );
+        let bun_workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(bun, WorkflowKind::Main);
+        assert!(bun_workflow.contains(ActionPin::Bun.reference()));
+        assert!(!bun_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::Bun.reference()));
+
+        config.units.push(catalog_unit(
+            "opentofu",
+            "OpenTofu",
+            UnitKind::OpenTofu,
+            &["**/*.tf"],
+            &["tofu validate"],
+            &["tofu validate"],
+            None,
+        ));
+        let opentofu = must_some(
+            config.units.iter().find(|unit| unit.id == "opentofu"),
+            "reviewed OpenTofu unit",
+        );
+        let opentofu_workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(opentofu, WorkflowKind::Main);
+        assert!(opentofu_workflow.contains(ActionPin::OpenTofuSetup.reference()));
+        assert!(!opentofu_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::OpenTofuSetup.reference()));
+
         let parent = WorkflowIr::from_config(&config).render_nested(WorkflowKind::PullRequest);
         assert!(parent.contains("units: ${{ steps.plan.outputs.units }}"));
         assert!(parent.contains("contains(format(',{0},', needs.plan.outputs.units)"));
