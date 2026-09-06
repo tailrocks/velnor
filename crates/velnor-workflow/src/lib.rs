@@ -4504,14 +4504,14 @@ impl WorkflowIr {
                     "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
                     yaml_scalar(&self.default_branch)
                 ),
-                "false",
+                "true",
             ),
             WorkflowKind::Nightly => (
                 "Nightly",
                 "Nightly",
                 "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
                     .to_owned(),
-                "false",
+                "true",
             ),
         };
         let _ = writeln!(
@@ -4627,14 +4627,14 @@ impl WorkflowIr {
                     "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
                     yaml_scalar(&self.default_branch)
                 ),
-                "false",
+                "true",
             ),
             WorkflowKind::Nightly => (
                 "Nightly",
                 "Nightly",
                 "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
                     .to_owned(),
-                "false",
+                "true",
             ),
         };
         let _ = writeln!(
