@@ -1,4 +1,4 @@
-# CI/CD performance goal (v3)
+# CI/CD performance goal (v4)
 
 Status: NOT ACHIEVED. Previous revisions let agents claim success without
 measurements. This revision is falsifiable: no claim counts without the
@@ -12,17 +12,36 @@ check, coverage, and compatibility. Fix the generator
 `.github/workflows` (see `.github/workflows/AGENTS.md`). Obey repo
 `AGENTS.md`.
 
+## 0. Gate contract (what actually gates merge — verified 2026-09-06)
+
+Required checks on `main` (ruleset 19573071): `DCO` + `ci-required` only.
+`strict` (require-branches-up-to-date) is FALSE: stale-green merges are
+legal today. Reviews required: 0. No merge queue exists (API 404), so the
+`merge_group` trigger in `ci-pr.yml` never fires — any `merge_group`
+prescription below is dead code until a queue is enabled (or the trigger
+is deleted). `ci-required` needs plan + all 15 group-unit callers;
+skipped-unselected counts as pass. Re-verify via
+`gh api repos/tailrocks/velnor/rulesets/19573071 --jq .rules`.
+All lanes are `ubuntu-24.04` (+ self-hosted Velnor); no macOS/Windows.
+
 ## 1. SLOs
 
 | Metric | Baseline 2026-09-06 | Target |
 | --- | --- | --- |
-| PR gate wall (plan start → `ci-required` green), affected scope | 12m05s (run 34022845304) | ≤ 6m warm |
-| Slowest Rust PR job (`velnor-runner`) | 11m39s, run step 11m10s | ≤ 5m warm |
-| Docker PR job | 9m18s (release build 7m46s inside) | ≤ 4m |
+| PR gate wall (plan start → `ci-required` green), affected scope | 12m05s cold-cache (run 34022845304, EXPIRED — see below) / 12m09s warm-cache (run 34026137664) | ≤ 6m warm, net of queue |
+| Slowest Rust PR job (`velnor-runner`) | 11m39s cold → 2m35s warm (exact GHA restore; dev 19s + test 52s) | ≤ 5m warm |
+| Docker PR job | 9m18s → 11m46s (NOW the critical path) | ≤ 4m |
 | Rust setup overhead per job (mise + nextest + mold) | ~25–30s after cache hit | ≤ 10s |
-| PR jobs with usable build-cache restore | 0 of 10 Rust jobs (all `No mbx cache found`) | ≥ 90% prefix restores |
+| PR jobs with usable build-cache restore | cold 08:47 → exact-key GHA hits from ~09:54 (mbx layer still 0-hit prefix restores, 5–10× faster compiles) | ≥ 90% restores, exact vs prefix reported separately |
 | Main push wall (no queue) | ~25m, plus queue pile-ups | ≤ 15m |
-| Nightly wall | 1h33m (run 34020370896) | measure, then budget |
+| Nightly wall | 1h33m (run 34020370896, wedged) | measure, then budget |
+
+08:47 cold-cache baselines EXPIRED 2026-09-06T09:53Z on merge of #582
+(static Rust lanes through mbx; new `velnor-static-mbx-*` keys, changed
+tree). Current reference: warm run 34026137664 (09:58:57→10:11:06).
+Baselines expire on ANY merge touching `crates/velnor-workflow/**`,
+`.github/**`, `Dockerfile`, `mise.toml`, or mbx version — re-baseline on
+expiry, never compare across it.
 
 Targets are proposed, not proven. An agent may revise a target only with
 new measurements attached.
@@ -60,9 +79,13 @@ Reference baselines (PR run 34022845304, branch
 | workflow / control / render / client / model / unit-collector | 53s–1m56s | 25–82s | — | cold |
 | bun / docs / opentofu / policy | 9–49s | — | — | ok |
 
-Compilation is 94–99.5% of the slow Rust jobs. Warm remainder is ~1–2 min
-(test exec + ~28s setup). Cache account 2026-09-06: 108 entries, 11.88 GiB
-used vs ~10 GiB limit — over budget (see §3 R1).
+Compilation is 94–99.5% of the slow Rust jobs when cold. Cache account
+(10:2xZ direct check): 108 entries, 11.88 GiB vs ~10 GiB limit — still
+over budget. The 7 legacy per-commit orphans (suffix `-a1e07a28…`,
+last_access stuck 09:05) are STILL present — do not trust secondhand
+"orphans gone" claims; re-list before deleting. Stable entries' last_access
+is fresh (10:22Z restores happening). Never quote byte counts as literals
+without a date; use the §2 `gh api` query + snapshot date.
 
 ## 3. Root causes (ranked, verified 2026-09-06 by 8 subagents + 2 verifiers)
 
@@ -78,10 +101,13 @@ Verified facts:
      5.11 GiB + 7 legacy per-commit orphans 2.14 GiB, suffix
      `-a1e07a28…`, never re-hit since the stable-key change) plus ~4.1 GiB
      Docker buildkit blobs. GitHub LRU must evict ~1.9 GiB of warm weight.
-  c. Every release-bump PR changes `Cargo.lock`, which is in 12 units'
-     `hashFiles` keys (docker, rust-policy, all 10 other rust units) —
+  c. Every release-bump PR changes `Cargo.lock`, which sits in 12 units'
+     watch lists but only 11 `hashFiles` key sets (docker has no mbx key —
+     buildx layer instead): docker, rust-policy, all 10 other rust units —
      exact misses on the most common PR type. Prior attempt PR #580
      (closed; key stabilization) is live and did NOT fix wall time.
+     (Count corrected by verifier: watch-12, keys-11. #582 added further
+     `velnor-static-mbx-*` `Cargo.lock`-keyed static entries.)
   d. `mise install --locked rust` re-downloads 6 toolchain components
      (~17s) on EVERY Rust job despite the mise cache hit.
   e. nextest + mold binaries download on every job, uncached (~1–2s × 10).
@@ -90,18 +116,19 @@ Verified facts:
 
 R2 — `affected` selects ~everything. PR #581 ran all 15 units. Verified:
   a. `crates/velnor-workflow/**` is watched by ALL 15 units (generator
-     `lib.rs:2434`; `project.toml:38,52,63,77,91,105,119,134,149,164,178,
-     193,208,223,237`). Any generator change = full CI without ever
-     hitting a fallback.
+     `unit.watch.push("crates/velnor-workflow/**")`, currently `lib.rs:2439`
+     — line drifts, anchor on the symbol; `project.toml` watch lines
+     38,52,63,77,91,105,119,134,149,164,178,193,208,223,237). Any generator
+     change = full CI without ever hitting a fallback.
   b. Docker watches `crates/**` + `tools/**` (`project.toml:52`): ANY crate
      file (source, test, README, fixture) rebuilds the image.
   c. `Cargo.lock` + root `Cargo.toml` watched by 12 units; a version bump
      (own manifest + lockfile + changelog) selects 13/15 (all but bun and
      opentofu; changelog `*.md` pulls docs via `**/*.md`).
   d. Docs unit watches repo-wide `**/*.md` plus nonexistent `docs/**` and
-     `mkdocs.yml`; real docs are `content/docs/**/*.mdx` (20 files) which
-     match NOTHING → full fallback. Crate READMEs trigger markdownlint
-     noise; real doc edits trigger full CI. Both directions wrong.
+     `mkdocs.yml`; real docs are `content/docs/**/*.mdx` (23 files — count
+     corrected) which match NOTHING → full fallback. Crate READMEs trigger
+     markdownlint noise; real doc edits trigger full CI. Both wrong.
   e. Opentofu `**/*.tf` matches exactly one file: a test fixture
      (`crates/velnor-workflow/tests/fixtures/polyglot/infra.tf`).
   f. Single-crate source change (e.g. `velnor-client/src/*`) correctly
@@ -110,11 +137,12 @@ R2 — `affected` selects ~everything. PR #581 ran all 15 units. Verified:
      shared crates recompile per job (R3).
   g. Degrade-to-full triggers in `runtime.rs`: empty/unset/zero BASE_SHA,
      git-diff failure, any `.github/` path, any unmatched file
-     (`debian/**`, `fleet/**`, `schemas/**`, `docker/job-*` match nothing
-     → full), empty diff hard-ERRORS (fails plan on no-op PRs), two-dot
-     diff with possibly stale base over-selects, and unit jobs re-resolve
-     on shallow checkouts (no `fetch-depth` in reusable workflows) so
-     re-resolution silently degrades to full every time.
+     (`fleet/**`, `schemas/**`, `docker/job-*` match nothing → full;
+     `debian/` does not exist — do not cite it), empty diff hard-ERRORS
+     (fails plan on no-op PRs), two-dot diff with possibly stale base
+     over-selects, and unit jobs re-resolve on shallow checkouts (no
+     `fetch-depth` in reusable workflows) so re-resolution silently
+     degrades to full every time.
 
 R3 — Shared dependencies compiled once per unit. Per-unit isolated caches
 rebuild `velnor-model` etc. inside every dependent; each job builds twice
@@ -140,8 +168,39 @@ without ever being tested together; plan/job double-resolution can
 silently no-op a needed unit (`return Ok(())`, accepted as pass).
 
 R8 — Hidden file couplings the manifest graph cannot see (adversarial
-review, all confirmed): `velnor-tools` `include_str!`s
-`../../velnor-runner/src/manifest.rs` in a TEST while depending only on
+review, all confirmed) + ONE proven toolchain incompatibility:
+
+R8a. mbx vs zig link (PROVEN failure, workaround legitimate but
+improperly scoped). `velnor-runner` and `velnorctl` pull C code via
+`aws-lc-rs ← sigstore-sign` (`cargo tree -i aws-lc-rs`; tools/workflow do
+NOT). Release v0.1.264 amd64 log (run 34027800870, job 101474103309):
+direct-cargo `zigbuild -p velnor-runner` linked OK, then `mbx zigbuild -p
+velnorctl` failed at link: `ld.lld: error: undefined symbol:
+__isoc23_sscanf ... bcm.c ... libaws_lc_sys-6f1fcba62f591763.rlib`.
+Mechanism: objects built under mbx's wrappers reference glibc ≥2.38
+fortified symbols the zig-0.16 bundled-older sysroot cannot resolve;
+host==target only (aarch64 cross passed). History: `b7fac245` (#581)
+`MBX_DISABLE=1 mbx zigbuild` → #583/#586 plain-cargo attempts (closed) →
+rename to `VELNOR_DIRECT_CARGO=1 cargo zigbuild` (generator guard
+`DIRECT_CARGO_ENV`, `lib.rs:2586`, template comment quoting this failure;
+tests pin it at `lib.rs:8648,8751-8775`) → #589 enforced all-mbx on main
+(test asserts no `cargo zigbuild`) → #590 OPEN re-adds the bypass for
+runner+ctl because main's mbx ctl leg is the broken one. Bypass is NARROW
+(final zig link of the two aws-lc bins; everything else stays on mbx) and
+evidence-backed — NOT theater. Required path forward, in order:
+(1) decisive experiment on pinned ubuntu-24.04 x86_64 (rust/zig 0.16.0 /
+cargo-zigbuild 0.23.3 / mbx 1.8.3, same RUSTFLAGS, VELNOR_RELEASE_BUILD=1):
+plain `cargo zigbuild -p velnorctl` (expect PASS) vs `mbx zigbuild`
+(expect FAIL) vs `MBX_DISABLE=1 mbx zigbuild` (expect PASS → wrapper, not
+toolchain) vs `MBX_CC=0 mbx zigbuild` (if PASS → C-shim layer is the
+poison; fix = scoped `MBX_CC=0` on the two legs, cache kept for the rest);
+`nm` each `libaws_lc_sys-*.rlib | grep isoc23` + `mbx explain --last`.
+(2) Upstream issue to mbx with that matrix. (3) Only then: keep the
+two-line exception with dated comment, or retire it. Never expand it to
+other packages; never claim "all lanes behind mbx" while it exists.
+
+R8b. Manifest-invisible file couplings (all confirmed): `velnor-tools`
+`include_str!`s `../../velnor-runner/src/manifest.rs` in a TEST while depending only on
 client+model; `velnorctl` re-exports runner scaffold yet omits
 `microvm/**` from its watch; `env!("CARGO_PKG_VERSION")` compiled into
 model/runner/ctl-facing output (version-only ≠ no-op); `build.rs`
@@ -159,15 +218,21 @@ unselected reusable calls are scheduler-skipped, `steps=[]`).
 
 D1. Scope engine (`crates/velnor-workflow/src/runtime.rs`):
 
-- Single resolution: plan computes the unit list once; unit jobs consume
-    it verbatim (pass allowlist through). Fail closed on SHA mismatch;
-    log no-ops as `::warning::` with both SHAs. Eliminates the
-    plan/job double-read + shallow-checkout silent-full path (keep
-    `fetch-depth: 0` on plan only).
-- `merge_group` → `full` (one-line change in `scope_for_event_values`).
-    Required BEFORE any narrowing.
+- Single resolution, stated as OUTCOME (implementer picks cheapest
+    measured mechanism): a unit job performs ZERO git reads — plan emits
+    the unit list once, jobs consume it verbatim. Any SHA/artifact
+    mismatch fails closed (non-zero exit) with both SHAs in a
+    `::warning::`. Fixture: shallow unit checkout + valid artifact still
+    runs the correct subset. (Rationale: "pass allowlist through" alone
+    leaves the second git read + shallow-degrade path alive.)
+- `merge_group` → `full` counts ONLY together with an enabled merge
+    queue (see §0: trigger is dead today). EITHER enable the queue and
+    prove queued combos test together, OR delete the trigger. The
+    one-liner alone counts as nothing.
 - Empty diff → empty selection (vacuous pass), not `Err`.
-- Three-dot diff `base...head` instead of two-dot.
+- Stale-base over-selection: OUTCOME "stale-base fixture does not
+    over-select" + passing fixture; diff syntax (two- vs three-dot) is
+    implementer's choice.
 - KEEP fail-closed fallbacks exactly as coded: empty/zero base → full,
     git failure → full, any `.github/` path → full, any unmatched file →
     full. Never allowlist the unmatched fallback — it is the only guard
@@ -187,11 +252,16 @@ D2. Watch graph (`crates/velnor-workflow/src/lib.rs` + `project.toml`):
     is UNSAFE (runtime binary executes every job).
 - Docs: watch real docs (`content/docs/**/*.mdx`, root `*.md`), drop
     repo-wide `**/*.md` + nonexistent `docs/**`/`mkdocs.yml`.
-- Add missing watches: `debian/**` → runner+ctl; `schemas/**` →
-    model+dependents; `fleet/**` → tools+runner; `microvm/**` → ctl;
-    `velnor-tools` += `crates/velnor-runner/src/manifest.rs`
-    (`include_str!` edge). Teach the generator to parse `include_str!`
-    and fail when a target is watch-uncovered.
+- Add missing watches: `schemas/**` → model+dependents; `fleet/**` →
+    tools+runner; `microvm/**` → ctl; `velnor-tools` +=
+    `crates/velnor-runner/src/manifest.rs` (`include_str!` edge). Teach the
+    generator to parse `include_str!` and fail when a target is
+    watch-uncovered. (No `debian/` dir exists — no watch needed.)
+- NOTE — atomicity: until ALL missing watches land in ONE generator
+    change + regen + fixture matrix, partial steps still fall to full via
+    the (correct, untouchable) unmatched fallback and measure zero gain.
+    P3 below is therefore atomic, with fixture-only acceptance per
+    sub-step and ONE measured CI run after the atom lands.
 - Opentofu: exclude `**/tests/fixtures/**`. Bun: narrow `**` globs to
     `src/**`, `scripts/**`, package files.
 - KEEP `Cargo.lock` + root `Cargo.toml` + toolchain/mise/`.cargo/**` in
@@ -220,9 +290,12 @@ D3. Cache (budgets + behavior):
 - Fix mise 17s/job (pre-bake/pin toolchain or repair mise cache),
     cache nextest+mold binaries (keyed by version), keep runtime
     prebuilt-download direction for `setup-velnor-workflow`.
-- Docker PR: scoped `--cache-to` write path or main-only release build
-    (PR validates Dockerfile cheaply). PR must stop full-recompiling
-    `Dockerfile:50-54` per `.rs` change.
+- Docker PR, stated as OUTCOME: PR Docker job ≤4m; an `.rs`-only change
+    never recompiles the release layer (`Dockerfile` COPY/mbx-build
+    block); `Dockerfile`/build-mise edits still validate the image.
+    Guardrail: `release.yml` verify-tag + full-scope main run green.
+    (Main-only release builds would widen the R8 build.rs-identity hole —
+    rejected unless that gate moves into PR.)
 
 D4. Topology + queue:
 
@@ -248,19 +321,30 @@ D5. Safety nets that MUST exist before narrowing (status):
     wire into CI; per-crate `--all-features` green is not shippable (H2).
 - `include_str!` coverage test: ADD (see D2).
 
-## 5. Plan (in order, smallest correct change first)
+## 5. Plan (in order; later steps may not assume earlier ones)
 
-P1. D3 orphans + budget proof; one warm PR run (≥90% restores). Unblocks
-    all measurement.
-P2. D1 merge-blocking safety (merge_group full, single resolution,
-    empty-diff pass, three-dot diff) with fixture tests.
-P3. D2 watch narrowing (docker, generator classification, docs, missing
-    watches, file edges) — release-bump-equivalent diff must select ≤4
-    units; single-crate PR selects target + closure only.
-P4. D2 prerequisite build-only tier; D4 dual-codegen kill.
-P5. D3 setup overhead (mise/nextest/mold) + Docker PR write path.
-P6. D5 gates (production-topology, version allowlist, include_str! test),
-    R5 test sharding, R6/R7 queue + nightly.
+P1. D3 orphans (re-list first — direct check 10:2xZ says present; one
+    auditor misreported deletion) + budget ≤8 GiB proof; warm-PR evidence
+    (already emerging: exact GHA hits from ~09:54 — consolidate, don't
+    re-prove from zero).
+P2. D1 merge-blocking safety (queue-or-delete-trigger, single resolution
+    as OUTCOME, empty-diff pass, stale-base fixture) + version-bump
+    allowlist fixture test FIRST (it is what reconciles KEEP-lockfile
+    with a small lock-bump selection; without it P3's "≤4 units" is
+    unprovable — restate as "lock-bump selects exactly the enumerated
+    allowlist set, hypothesized ≤4, must be proven").
+P3. ATOMIC D2 watch landing (docker, generator classification, docs,
+    missing watches, file edges) + regen + fixture matrix; single-crate
+    PR selects target + closure only. Fixture-only acceptance per
+    sub-step; ONE measured CI run after the atom.
+P4. D2 prerequisite build-only tier, stated as OUTCOME (≤3 full suites on
+    a single-crate PR, dependents still compile; workspace
+    `cargo check --workspace --all-targets` default-features gate green);
+    D4 dual-codegen kill.
+P5. D3 setup overhead (mise/nextest/mold) + Docker PR outcome (D3).
+P6. D5 gates (production-topology with named workflow + command,
+    include_str! test), R5 test sharding, R6/R7 queue + nightly (named
+    red-to-signal path + one test red run).
 P7. Bootstrap hardening (prebuilt runtime; R1f).
 
 Each step: generator change + regenerated workflows + regression test /
@@ -268,9 +352,18 @@ snapshot + one measured CI run. Never disable a check to gain speed.
 
 ## 6. What NOT to do
 
-- No `MBX_DISABLE=1` / plain-cargo fallbacks as a "fix".
+- No `MBX_DISABLE=1`, `VELNOR_DIRECT_CARGO=1`, or any namespaced-env
+    plain-cargo carve-out as a "fix" FOR PR CI LANES. (The #588 branch
+    renames the bypass without removing it — renames do not comply.)
+    EXCEPTION (proven, narrow): the release `cargo zigbuild` final link of
+    aws-lc-carrying bins (`velnor-runner`, `velnorctl`) — see R8a. That
+    exception stays scoped to those two invocations, keeps a dated comment
+    with the failure signature, and must be retired by the experiment in
+    R8a, not expanded. #588's body claim "All Rust lanes remain behind
+    mbx" was FALSE while carrying the bypass — body claims are evidence
+    too (§8).
 - No per-commit cache-key suffixes (re-floods the 10 GiB budget; the
-  orphans in R1b are the corpse of that design).
+    orphans in R1b are the corpse of that design).
 - No "workflow unit only" generator narrowing (runtime executes every
   job; §4 D2 classification instead).
 - No version/lockfile-only = no-op (version strings compiled in; H7).
@@ -280,40 +373,74 @@ snapshot + one measured CI run. Never disable a check to gain speed.
 - No process theater: subagent counts, model names, report length are not
   progress. Only merged generator changes plus measured runs count.
 
-## 7. What changed in this revision (v3)
+## 7. What changed in this revision (v4)
 
-Deep analysis 2026-09-06: 6 parallel investigators (scope logic, watch
-graph, cache behavior, workflow topology, build/test cost, adversarial
-review) + 2 independent verifiers re-checking every load-bearing claim
-against code lines, `gh` logs, and cache API. Result: 17 of 18 sampled
-claims CONFIRMED verbatim (1 count corrected: 12 units watch `Cargo.lock`
-— docker + policy + 10 rust — not 11). Prior v2 root-cause list kept where
-confirmed; watch-level precision, file:line anchors, and the D1–D5 target
-configuration are new. All evidence re-derivable via §2 commands.
+Re-verification 2026-09-06 ~10:20Z: 4 more subagents (goal-accuracy audit,
+open-PRs analysis, CI re-measurement, adversarial critique).
+- Baselines: §1 cold numbers reconfirmed to ±9s, but EXPIRED by #582
+  (09:53Z); new warm reference run 34026137664. Critical path flipped
+  Rust → Docker (11m46s). Rust warm via exact GHA hits (dev ~19s).
+- Selection model VALIDATED on live data: predicted 9-unit set for #588's
+  2-file state matched run 34026985573 exactly (9/9, no over/under).
+- Corrections applied: .mdx 23 (was 20), `lib.rs:2439` (was 2434), watch-12
+  vs keys-11, `debian/` vacuous, §0 gate contract added (required: DCO +
+  `ci-required`; `strict=false`; no queue → merge_group dead), §6 ban
+  generalized past the `VELNOR_DIRECT_CARGO` rename, plan reordered
+  (allowlist before ≤4; atomic P3), mechanisms restated as outcomes
+  where the goal over-prescribed.
+- One auditor misreported orphans as deleted; direct `gh cache list`
+  check overruled it (still present 10:2xZ). Trust commands, not reports
+  — including this file. Re-derive via §2.
+- Open PR #588 (9 files, full-scope): runner FAILED on
+  `supervised_controller_capacity…` (flaky, NOT the stabilized cancel
+  test); Docker slowest again. Blocked on that failure, not on the goal.
 
 ## 8. Acceptance (all required, none optional)
 
-1. Before/after table using §2 protocol on comparable PRs: per-job
-   totals, run-step splits, cache account lines.
-2. Warm affected-scope PR within §1 SLOs, ≥90% Rust jobs restored.
-3. `Cargo.lock`-only bump selects the minimal set (P3 fixture test);
-   single-crate PR never runs unaffected units.
-4. Cache account under budget with headroom; no warm-entry eviction in
-   7 days; orphans deleted.
-5. D5 safety nets (merge_group full, single resolution, nightly
-   alerting, production-topology gate) merged before scope narrowing
-   counts as done.
-6. Remaining costs listed with proof they are intrinsic (provider,
-   queue, required coverage), not just "slow".
+1. Before/after table using §2 protocol on comparable PRs, where
+   comparable = same unit-selection output + same base tree modulo the
+   change + same cache-generation keys; queue time reported separately
+   (SLOs are net of queue).
+2. Warm affected-scope PR within §1 SLOs: exact-hit and prefix-restore
+   rates reported SEPARATELY (≥90% combined restores; exact-hit rate
+   tracked as its own metric).
+3. `Cargo.lock`-only bump selects exactly the P2-allowlist enumerated set
+   (unit ids listed in the fixture); single-crate PR runs target +
+   closure ids listed, never others. "Minimal" without ids proves nothing.
+4. Cache: 7-day daily `gh api .../actions/caches --paginate --jq` snapshot
+   log; headroom = ≤8 GiB (not ~10); orphans deleted (re-list to confirm).
+5. D5 safety nets merged before scope narrowing counts: queue-or-delete
+   trigger proof, single-resolution fixture, nightly named red-to-signal
+   path + one test red run, production-topology named workflow + command.
+6. Remaining costs listed with proof they are intrinsic (provider docs
+   link + queue timestamps + coverage requirement), not just "slow".
+   Provider/queue/coverage cited without those artifacts do not count.
 7. Any unmet item stated exactly with blocking evidence — never
-   "achieved".
+   "achieved". Confession does not count as completion either: externally
+   blocked items (e.g. R6 runner capacity) stay OPEN with owner + date.
 
-## 9. Context (not work items)
+## 9. Context (changelog, not work items)
 
-- PR #557 (runner architecture merge): historical baseline only.
-- PR #570 (Velnor sole generator), #572/#577 (source pins): current
-  architecture; generator owns all workflow behavior.
-- PR #580 (closed): stabilized mbx keys; live but insufficient (R1c).
-- Mr. Boxington 1.8.3 default on both lanes; GitHub lane
-  `backend: github`, Velnor lane `backend: local`. Version bumps must
-  re-baseline §2.
+- #557 runner-arch merge: historical baseline only.
+- #570 Velnor sole generator; #572/#577 source pins: current arch.
+- #579 MERGED (release admission races).
+- #580 CLOSED: stabilized mbx keys; live but insufficient (R1c).
+- #581 MERGED (v0.1.263): the §2 cold-baseline run's own bump.
+- #582 MERGED 09:53Z (static Rust lanes through mbx): EXPIRED all
+  pre-09:53 baselines; added `velnor-static-mbx-*` keys.
+- #583/#586 CLOSED (release-link MBX bypass attempts); local revert chain
+  keeps the runner release link off-MBX under renamed env
+  `VELNOR_DIRECT_CARGO=1` — non-compliant with §6 by rename.
+- #584 CLOSED (v0.1.264 bump + drop-superseded).
+- #585/#587 CLOSED (goal-doc churn, superseded); #588 OPEN (v4 text +
+  cancel.rs test stabilization; runner flake
+  `supervised_controller_capacity…` failing, Docker critical path).
+- #589 MERGED (enforce all-mbx release: deleted `DIRECT_CARGO_ENV`,
+  test asserts no `cargo zigbuild`); #590 OPEN (re-add bypass for
+  runner+ctl — main's mbx ctl leg fails per R8a; resolve via the R8a
+  experiment, not policy reverts).
+- Staleness policy: every measurement dated; expires after 7d or any
+  generator/`.github`/Docker/mise/mbx change, whichever first. Anchors
+  are symbol/pattern-first (`scope_for_event_values`,
+  `git_changed_files`, `unit.watch.push("crates/velnor-workflow/**")`,
+  unit ids + glob strings); line numbers informational + dated.
