@@ -1,3 +1,5 @@
+# CI/CD performance goal
+
 Act as CI/CD performance lead for tailrocks/velnor. Execute fixes, not only recommendations.
 
 Goal: make CI/CD as fast as technically possible while preserving correctness, coverage, required checks, and compatibility.
@@ -5,7 +7,7 @@ Goal: make CI/CD as fast as technically possible while preserving correctness, c
 Scope:
 
 1. Analyze PR #557:
-   https://github.com/tailrocks/velnor/pull/557
+   [PR #557](https://github.com/tailrocks/velnor/pull/557)
 
 2. Inventory every CI/CD workflow on `main`.
 
@@ -16,11 +18,11 @@ Scope:
 5. Inspect every newly created or updated PR from parallel agents. Reanalyze each one for CI/CD regressions and optimization opportunities.
 
 6. Verify whether this tool is used:
-   https://mr-boxington.jdx.dev/
+   [Mr. Boxington](https://mr-boxington.jdx.dev/)
 
    The generator must enable this tool by default for both GitHub-hosted and Velnor nodes. Verify actual generated output, integration code, defaults, opt-outs, and tests. Do not assume usage from documentation alone.
 
-Always make sure Velnor is using https://github.com/jdx/mr-boxington latest version even for Github Actions.
+Always make sure Velnor is using the latest [Mr. Boxington](https://github.com/jdx/mr-boxington) version even for Github Actions.
 
 Subagents:
 

@@ -303,7 +303,7 @@ fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
             path.display()
         ))
     })?;
-    if config.schema != 1 {
+    if config.schema != 2 {
         return Err(GeneratorError::usage(format!(
             "unsupported CI configuration schema: {}",
             config.schema
@@ -1601,7 +1601,7 @@ mod tests {
             cache: None,
         };
         CiConfig {
-            schema: 1,
+            schema: 2,
             repository: "example/repository".to_owned(),
             profile: "rust-workspace".to_owned(),
             verified: true,
