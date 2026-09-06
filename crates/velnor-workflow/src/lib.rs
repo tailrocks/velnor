@@ -4570,9 +4570,10 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
 }
 
 fn render_static_template(template: &str) -> String {
+    let template = template.replace("__VELNOR_WORKFLOW_SOURCE_REV__", VELNOR_WORKFLOW_SOURCE_REV);
     format!(
         "{GENERATED_HEADER}{}",
-        template.replace("__VELNOR_WORKFLOW_SOURCE_REV__", VELNOR_WORKFLOW_SOURCE_REV)
+        refresh_velnor_source_pins(&template)
     )
 }
 
@@ -4582,6 +4583,53 @@ fn render_policy_provider(config: &ProjectConfig) -> String {
         &yaml_scalar(&config.github_runner),
     );
     render_static_template(&template)
+}
+
+fn refresh_velnor_source_pins(template: &str) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut previous_line_was_velnor_repository = false;
+
+    for segment in template.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let replacement = if previous_line_was_velnor_repository {
+            replace_full_sha_after_key(line, "ref:")
+        } else {
+            replace_full_sha_after_key(line, "VELNOR_SOURCE_SHA:")
+        };
+        if let Some(replacement) = replacement {
+            rendered.push_str(&replacement);
+            if segment.ends_with('\n') {
+                rendered.push('\n');
+            }
+        } else {
+            rendered.push_str(segment);
+        }
+        previous_line_was_velnor_repository = line.trim() == "repository: tailrocks/velnor";
+    }
+
+    rendered
+}
+
+fn replace_full_sha_after_key(line: &str, key: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let indentation = line.len() - trimmed.len();
+    let rest = trimmed.strip_prefix(key)?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let value_offset = rest.find(|character: char| !character.is_whitespace())?;
+    let value = rest[value_offset..].split_whitespace().next()?;
+    if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    let value_start = indentation + key.len() + value_offset;
+    let value_end = value_start + value.len();
+    let mut replacement = String::with_capacity(line.len());
+    replacement.push_str(&line[..value_start]);
+    replacement.push_str(VELNOR_WORKFLOW_SOURCE_REV);
+    replacement.push_str(&line[value_end..]);
+    Some(replacement)
 }
 
 fn known_legacy_template(relative: &Path) -> Option<&'static str> {
@@ -7431,6 +7479,21 @@ mod tests {
         assert!(policy.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
         assert!(!policy.contains("runs-on: ubuntu-26.04"));
+    }
+
+    #[test]
+    fn adopted_templates_refresh_literal_velnor_source_pins_only() {
+        let old_revision = "0123456789abcdef0123456789abcdef01234567";
+        let template = format!(
+            "jobs:\n  checkout:\n    with:\n      repository: tailrocks/velnor\n      ref: {old_revision}\n      path: .velnor-source\n    env:\n      VELNOR_SOURCE_SHA: {old_revision}\n  other:\n    with:\n      repository: another/example\n      ref: {old_revision}\n    env:\n      OTHER_SOURCE_SHA: {old_revision}\n"
+        );
+
+        let rendered = render_static_template(&template);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        assert_eq!(rendered.matches(VELNOR_WORKFLOW_SOURCE_REV).count(), 2);
+        assert_eq!(rendered.matches(old_revision).count(), 2);
+        assert!(rendered.contains("repository: another/example\n      ref: 0123456789"));
+        assert!(rendered.contains("OTHER_SOURCE_SHA: 0123456789"));
     }
 
     #[test]
