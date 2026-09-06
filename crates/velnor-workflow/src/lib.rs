@@ -8186,7 +8186,12 @@ path-only = { path = "../path-only" }
         assert!(release_workflow
             .contains("mbx run -p velnor-runner --bin velnor-guest-image --locked --release --"));
         assert!(release_workflow.contains("workflow:\n    needs: [identity, release_gate]"));
-        assert!(release_workflow.contains("needs: [identity, release_gate, metadata, workflow]"));
+        assert!(release_workflow
+            .contains("needs: [identity, release_gate, metadata, workflow, image-admission]"));
+        assert!(release_workflow.contains("name: Admit immutable image tag"));
+        assert!(release_workflow.contains("release-${{ env.COMMIT }}-${{ matrix.arch }}"));
+        assert!(release_workflow.contains("refusing a fail-open publish"));
+        assert!(release_workflow.contains("Verify OCI index stayed immutable before publication"));
         assert!(release_workflow.contains("pattern: release-*"));
         assert!(release_workflow.contains("name: image-digests\n          path: artifacts"));
         assert!(!release_workflow.contains("name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n            manifest.json"));
