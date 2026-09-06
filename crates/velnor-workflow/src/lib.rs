@@ -1484,10 +1484,9 @@ fn include_str_paths(
 ) -> Result<Vec<String>, GeneratorError> {
     let prefix = path_prefix(package_root);
     let mut targets = BTreeSet::new();
-    for source in files
-        .iter()
-        .filter(|file| file.ends_with(".rs") && (package_root == "." || file.starts_with(&prefix)))
-    {
+    for source in files.iter().filter(|file| {
+        has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
+    }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
         let mut cursor = 0;
@@ -2536,7 +2535,7 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
     ];
     for unit in &mut config.units {
         if unit.kind == UnitKind::Docker && unit.root == "." {
-            unit.watch = docker_watch.clone();
+            unit.watch.clone_from(&docker_watch);
         }
         match unit.id.as_str() {
             "bun-velnor" => {
@@ -4417,16 +4416,16 @@ impl WorkflowIr {
             Self::render_policy(&mut output, RunnerMode::Github, false);
         }
         self.render_nested_unit_callers(&mut output, kind != WorkflowKind::PullRequest);
-        if kind != WorkflowKind::Nightly {
+        if kind == WorkflowKind::Nightly {
+            self.render_nested_required(&mut output, true, "nightly-required", true);
+            self.render_nightly_alert(&mut output);
+        } else {
             self.render_nested_required(
                 &mut output,
                 kind != WorkflowKind::PullRequest,
                 "ci-required",
                 false,
             );
-        } else {
-            self.render_nested_required(&mut output, true, "nightly-required", true);
-            self.render_nightly_alert(&mut output);
         }
         while output.ends_with("\n\n") {
             output.pop();

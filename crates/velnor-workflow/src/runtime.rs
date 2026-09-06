@@ -902,7 +902,7 @@ fn selection_for_diff<'a>(
     })
 }
 
-fn full_selection<'a>(config: &'a CiConfig) -> Result<UnitSelection<'a>, GeneratorError> {
+fn full_selection(config: &CiConfig) -> Result<UnitSelection<'_>, GeneratorError> {
     Ok(UnitSelection {
         units: ordered_units(&config.unit, None)?,
         full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
