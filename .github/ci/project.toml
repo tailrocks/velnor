@@ -14,7 +14,7 @@ limitations = ["Cargo deny license checks are skipped because deny.toml declares
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
 files = ["ci-apt.yml", "ci-code.yml", "ci-fixture.yml", "ci-native.yml", "ci-tap.yml", "ci.yml", "fanout-smoke.yml", "fleet-audit.yml", "owner-fanout-canary.yml", "package-signer.yml", "package-updater.yml", "release-check.yml"]
-notes = ["Rust verification uses Mr. Boxington 1.8.3 by default; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."]
+notes = ["Rust verification uses Mr. Boxington 1.8.3 by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with stable per-unit keys (exact hits reuse the cache; a new entry is saved only when dependency inputs change). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."]
 
 [release]
 enabled = false
