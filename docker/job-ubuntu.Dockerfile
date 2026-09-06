@@ -115,6 +115,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
        mise install --locked --yes \
          'aqua:nextest-rs/nextest/cargo-nextest' \
+         'aqua:opentofu/opentofu' \
+         'aqua:oven-sh/bun' \
          'github:fornwall/rust-script' \
          cosign \
          gh \
@@ -167,6 +169,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && mise exec -- rustc --version \
     && mise exec -- node --version \
     && mise exec -- npm --version \
+    && mise exec -- bun --version \
+    && mise exec -- tofu version \
     && mise exec -- python3 --version \
     && mise exec -- hadolint --version \
     && mise exec -- cargo nextest --version \

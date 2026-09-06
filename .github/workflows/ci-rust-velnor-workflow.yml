@@ -123,19 +123,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
-      - name: Set up Mise Rust toolchain
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
-        with:
-          install_args: rust aqua:nextest-rs/nextest/cargo-nextest
-          cache: true
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
-      - name: Set up mold
-        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
-        with:
-          make-default: true
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}

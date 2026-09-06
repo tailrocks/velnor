@@ -4940,8 +4940,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         unit: &Unit,
         cache_save: bool,
     ) {
+        // The Velnor job image is the toolchain boundary for self-hosted jobs.
+        // Hosted setup actions either are not admitted by Velnor or would
+        // redundantly download tools already pinned in that image. Keep
+        // transport/setup actions lane-specific instead of rendering one
+        // action surface and hoping the runner can ignore the other lane.
+        let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
-        if tools.contains(&ToolRequirement::Mise) {
+        if github_lane && tools.contains(&ToolRequirement::Mise) {
             let _ = writeln!(
                 output,
                 "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust aqua:nextest-rs/nextest/cargo-nextest\n          cache: true",
@@ -5000,7 +5006,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 );
             }
         }
-        if tools.contains(&ToolRequirement::Bun) {
+        if github_lane && tools.contains(&ToolRequirement::Bun) {
             if let Some(bun_version) = unit.tool_version.as_deref() {
                 let _ = writeln!(
                     output,
@@ -5015,7 +5021,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 );
             }
         }
-        if tools.contains(&ToolRequirement::Node) {
+        if github_lane && tools.contains(&ToolRequirement::Node) {
             let cache_manager = "npm";
             let cache_dependency_path = unit.cache.as_ref().and_then(|cache| {
                 cache
@@ -5038,67 +5044,59 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 ActionPin::Node.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
+        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::CargoDeny) {
+        if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-deny\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::CargoAudit) {
+        if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-audit\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Gradle) {
+        if github_lane && tools.contains(&ToolRequirement::Gradle) {
             let _ = writeln!(
                 output,
                 "      - name: Set up Gradle\n        uses: {}",
                 ActionPin::Gradle.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Sccache) {
+        if github_lane && tools.contains(&ToolRequirement::Sccache) {
             let _ = writeln!(
                 output,
                 "      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0",
                 ActionPin::Sccache.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Mold) {
-            if lane == RunnerMode::Github {
-                output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
-            } else {
-                let _ = writeln!(
-                    output,
-                    "      - name: Set up mold\n        uses: {}\n        with:\n          make-default: true",
-                    ActionPin::Mold.reference()
-                );
-            }
+        if github_lane && tools.contains(&ToolRequirement::Mold) {
+            output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
         }
         if tools.contains(&ToolRequirement::DockerBuildx) {
-            if lane == RunnerMode::Github {
+            if github_lane {
                 let _ = writeln!(
                     output,
                     "      - name: Expose GitHub Actions runtime\n        uses: {}",
                     ActionPin::GithubRuntime.reference()
                 );
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Docker Buildx\n        uses: {}",
+                    ActionPin::DockerBuildx.reference()
+                );
             }
-            let _ = writeln!(
-                output,
-                "      - name: Set up Docker Buildx\n        uses: {}",
-                ActionPin::DockerBuildx.reference()
-            );
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
+        if github_lane && tools.contains(&ToolRequirement::OpenTofu) {
             let _ = writeln!(
                 output,
                 "      - name: Set up OpenTofu\n        uses: {}\n        with:\n          tofu_version: {}\n          tofu_wrapper: false",
@@ -5106,7 +5104,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 OPEN_TOFU_VERSION,
             );
         }
-        if tools.contains(&ToolRequirement::Homebrew) {
+        if github_lane && tools.contains(&ToolRequirement::Homebrew) {
             output.push_str(
                 "      - name: Prepare Linuxbrew path\n        shell: bash\n        run: |\n          set -euo pipefail\n          if command -v brew >/dev/null 2>&1; then\n            exit 0\n          fi\n          linuxbrew_bin=/home/linuxbrew/.linuxbrew/bin\n          linuxbrew_sbin=/home/linuxbrew/.linuxbrew/sbin\n          if [[ ! -x \"$linuxbrew_bin/brew\" ]]; then\n            printf '%s\\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2\n            exit 1\n          fi\n          [[ -n \"${GITHUB_PATH:-}\" ]] || { printf '%s\\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }\n          printf '%s\\n%s\\n' \"$linuxbrew_bin\" \"$linuxbrew_sbin\" >> \"$GITHUB_PATH\"\n",
             );
@@ -9141,6 +9139,9 @@ path-only = { path = "../path-only" }
         assert!(!velnor_lane.contains("cache-key:"));
         assert!(!velnor_lane.contains("version: 1.8.3"));
         assert!(!velnor_lane.contains("save-on-workflow-dispatch"));
+        assert!(!velnor_lane.contains(ActionPin::Mise.reference()));
+        assert!(!velnor_lane.contains(ActionPin::RustTool.reference()));
+        assert!(!velnor_lane.contains(ActionPin::Mold.reference()));
         assert!(github_lane.contains("actions/cache/restore@"));
         assert!(github_lane.contains("sha256sum --check --strict"));
         assert!(!github_lane.contains(ActionPin::Mold.reference()));
@@ -9152,6 +9153,10 @@ path-only = { path = "../path-only" }
         let policy_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(policy, WorkflowKind::Main);
         assert!(policy_workflow.contains("name: Set up cargo-deny"));
+        let policy_velnor_lane = policy_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane);
+        assert!(!policy_velnor_lane.contains(ActionPin::RustTool.reference()));
         let collector = must_some(
             config
                 .units
@@ -9162,6 +9167,10 @@ path-only = { path = "../path-only" }
         let collector_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(collector, WorkflowKind::Main);
         assert!(collector_workflow.contains("name: Set up cargo-nextest"));
+        let collector_velnor_lane = collector_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane);
+        assert!(!collector_velnor_lane.contains(ActionPin::RustTool.reference()));
 
         let release = must_some(config.release.as_ref(), "Velnor release contract");
         let release_workflow = render_release(&config, release);
@@ -9290,6 +9299,10 @@ path-only = { path = "../path-only" }
             .split_once("\n  velnor:")
             .map_or("", |(_, lane)| lane)
             .contains(ActionPin::GithubRuntime.reference()));
+        assert!(!docker_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::DockerBuildx.reference()));
 
         let parent = WorkflowIr::from_config(&config).render_nested(WorkflowKind::PullRequest);
         assert!(parent.contains("units: ${{ steps.plan.outputs.units }}"));
