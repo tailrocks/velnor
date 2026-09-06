@@ -528,12 +528,18 @@ not present.
   is not valid current-tip proof: its logs used synthetic merge SHA
   `3a71275d` and invoked obsolete `mbx check --locked --no-deps` commands;
   current generated config emits the valid per-unit `fmt`, `clippy`, and
-  `nextest` commands. A synchronized rerun remains required.
+  `nextest` commands.
+- Synchronized PR #603 run
+  [34051511815](https://github.com/tailrocks/velnor/actions/runs/34051511815)
+  at `b204a55e` passed `ci-required`; every GitHub lane passed and every
+  Velnor PR lane skipped. Planning took `2m08s`; Docker `1m12s`, runner
+  `3m15s`, and velnorctl `1m42s`. The run included generated workflow-runtime
+  pin refreshes, so it is correctness evidence, not a comparable warm
+  affected-scope performance measurement.
 - Remaining unmet items: new job image release/deployment, live passing Velnor
   main proof, comparable warm affected PR, exact/prefix restore rates after
   the fix, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
-  provider/queue/coverage proof table, and synchronized PR #603 validation. Do
-  not claim achievement.
+  provider/queue/coverage proof table. Do not claim achievement.
 
 ## 9. Context (changelog, not work items)
 
