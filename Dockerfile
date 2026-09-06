@@ -44,9 +44,60 @@ RUN mkdir -p /opt/mise/bin \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY crates/velnor-model/Cargo.toml ./crates/velnor-model/Cargo.toml
+COPY crates/velnor-control/Cargo.toml ./crates/velnor-control/Cargo.toml
+COPY crates/velnor-client/Cargo.toml ./crates/velnor-client/Cargo.toml
+COPY crates/velnor-render/Cargo.toml ./crates/velnor-render/Cargo.toml
+COPY crates/velnorctl/Cargo.toml ./crates/velnorctl/Cargo.toml
+COPY crates/velnor-runner/Cargo.toml ./crates/velnor-runner/Cargo.toml
+COPY crates/velnor-workflow/Cargo.toml ./crates/velnor-workflow/Cargo.toml
+COPY crates/velnor-tools/Cargo.toml ./crates/velnor-tools/Cargo.toml
+COPY crates/velnor-bench/Cargo.toml ./crates/velnor-bench/Cargo.toml
+COPY tools/unit-collector/Cargo.toml ./tools/unit-collector/Cargo.toml
+RUN mkdir -p \
+        crates/velnor-model/src \
+        crates/velnor-control/src \
+        crates/velnor-client/src \
+        crates/velnor-render/src \
+        crates/velnorctl/src \
+        crates/velnor-runner/src/bin \
+        crates/velnor-workflow/src \
+        crates/velnor-tools/src \
+        crates/velnor-bench/src \
+        tools/unit-collector/src \
+    && touch \
+        crates/velnor-model/src/lib.rs \
+        crates/velnor-control/src/lib.rs \
+        crates/velnor-client/src/lib.rs \
+        crates/velnor-render/src/lib.rs \
+        crates/velnorctl/src/lib.rs \
+        crates/velnorctl/src/main.rs \
+        crates/velnor-runner/build.rs \
+        crates/velnor-runner/src/lib.rs \
+        crates/velnor-runner/src/main.rs \
+        crates/velnor-runner/src/bin/velnor-guest-agent.rs \
+        crates/velnor-runner/src/bin/velnor-guest-image.rs \
+        crates/velnor-workflow/src/lib.rs \
+        crates/velnor-workflow/src/main.rs \
+        crates/velnor-tools/src/main.rs \
+        crates/velnor-bench/src/lib.rs \
+        crates/velnor-bench/src/main.rs \
+        tools/unit-collector/src/lib.rs \
+        tools/unit-collector/src/main.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cd /opt/mise/config \
+    && mise exec -- cargo fetch --manifest-path /src/Cargo.toml --locked
+COPY crates/velnor-model ./crates/velnor-model
+COPY crates/velnor-control ./crates/velnor-control
+COPY crates/velnor-client ./crates/velnor-client
+COPY crates/velnor-render ./crates/velnor-render
+COPY crates/velnorctl ./crates/velnorctl
+COPY crates/velnor-runner ./crates/velnor-runner
+COPY crates/velnor-workflow ./crates/velnor-workflow
+COPY crates/velnor-tools ./crates/velnor-tools
 COPY microvm ./microvm
-COPY tools ./tools
+COPY tools/unit-collector ./tools/unit-collector
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/mbx \

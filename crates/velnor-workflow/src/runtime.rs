@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
@@ -73,6 +73,8 @@ struct Workflow {
     velnor_labels: Vec<String>,
     files: Vec<String>,
     notes: Vec<String>,
+    #[serde(default)]
+    version_bump_units: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -362,6 +364,19 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
             }
         }
     }
+    let mut version_bump_units = BTreeSet::new();
+    for unit in &config.workflow.version_bump_units {
+        if !known.contains(unit) {
+            return Err(GeneratorError::usage(format!(
+                "workflow.version_bump_units names unknown unit: {unit}"
+            )));
+        }
+        if !version_bump_units.insert(unit) {
+            return Err(GeneratorError::usage(format!(
+                "workflow.version_bump_units contains duplicate unit: {unit}"
+            )));
+        }
+    }
     Ok(config.clone())
 }
 
@@ -381,11 +396,31 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     };
     let root = env::current_dir()
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
-    let units = selected_units(&root, &config, scope)?
+    let base = env::var("BASE_SHA").unwrap_or_default();
+    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let units = selection
+        .units
         .into_iter()
         .map(|unit| unit.id.as_str())
         .collect::<Vec<_>>()
         .join(",");
+    let full_units = selection
+        .full_units
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    if let Some(path) = env::var_os("VELNOR_SELECTION_FILE") {
+        write_selection_file(
+            &PathBuf::from(path),
+            &base,
+            &head,
+            scope,
+            &units,
+            &full_units,
+        )?;
+    }
     if let Some(output) = env::var_os("GITHUB_OUTPUT") {
         let output_path = PathBuf::from(output);
         let mut file = fs::OpenOptions::new()
@@ -397,9 +432,12 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "units={units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "full_units={full_units}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
     }
     println!("scope={}", scope_name(scope));
     println!("units={units}");
+    println!("full_units={full_units}");
     Ok(())
 }
 
@@ -422,7 +460,7 @@ pub(crate) fn scope_for_event_values(
             }
             Ok(Some("full".to_owned()))
         }
-        "pull_request" | "merge_group" => Ok(override_scope
+        "pull_request" => Ok(override_scope
             .map(ToOwned::to_owned)
             .or_else(|| Some("affected".to_owned()))),
         "" => Ok(override_scope.map(ToOwned::to_owned)),
@@ -600,7 +638,37 @@ pub(crate) fn run_units(
             "trusted events require full CI scope",
         ));
     }
-    let selected = selected_units(root, &config, scope)?;
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from);
+    let (selected, full_units) = if let Some(path) = selection_file {
+        let selection = read_selection_file(&path)?;
+        validate_selection_sha(&selection)?;
+        if selection.scope != scope {
+            return Err(GeneratorError::usage(format!(
+                "CI selection artifact scope mismatch: plan={} job={}",
+                scope_name(selection.scope),
+                scope_name(scope)
+            )));
+        }
+        let selected = ordered_units(&config.unit, Some(&selection.units))?;
+        if selected.len() != selection.units.len() {
+            return Err(GeneratorError::usage(
+                "CI selection artifact names an unknown unit",
+            ));
+        }
+        if selection
+            .full_units
+            .iter()
+            .any(|unit| !selection.units.contains(unit))
+        {
+            return Err(GeneratorError::usage(
+                "CI selection artifact marks an unselected unit as full",
+            ));
+        }
+        (selected, selection.full_units)
+    } else {
+        let selection = selection_for_current_diff(root, &config, scope)?;
+        (selection.units, selection.full_units)
+    };
     let selected = match only_unit {
         Some(id) => {
             if !selected.iter().any(|unit| unit.id == id) {
@@ -613,19 +681,137 @@ pub(crate) fn run_units(
         }
         None => selected,
     };
-    run_layers(root, &selected, scope)
+    run_layers(root, &selected, scope, &full_units)
 }
 
-fn selected_units<'a>(
+fn selection_for_current_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
     scope: Scope,
-) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+) -> Result<UnitSelection<'a>, GeneratorError> {
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    selected_units_for_diff(root, config, scope, &base, &head)
+    selection_for_diff(root, config, scope, &base, &head)
 }
 
+struct UnitSelection<'a> {
+    units: Vec<&'a CiUnit>,
+    full_units: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedSelection {
+    base_sha: String,
+    head_sha: String,
+    scope: Scope,
+    units: BTreeSet<String>,
+    full_units: BTreeSet<String>,
+}
+
+const SELECTION_FILE_VERSION: &str = "1";
+
+fn write_selection_file(
+    path: &Path,
+    base_sha: &str,
+    head_sha: &str,
+    scope: Scope,
+    units: &str,
+    full_units: &str,
+) -> Result<(), GeneratorError> {
+    let contents = format!(
+        "version={SELECTION_FILE_VERSION}\nbase_sha={base_sha}\nhead_sha={head_sha}\nscope={}\nunits={units}\nfull_units={full_units}\n",
+        scope_name(scope)
+    );
+    fs::write(path, contents)
+        .map_err(|error| GeneratorError::io("write CI selection", path, &error))
+}
+
+fn read_selection_file(path: &Path) -> Result<PlannedSelection, GeneratorError> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| GeneratorError::io("read CI selection", path, &error))?;
+    let mut fields = BTreeMap::new();
+    for line in contents.lines() {
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| GeneratorError::usage("malformed CI selection artifact"))?;
+        if fields.insert(key.to_owned(), value.to_owned()).is_some() {
+            return Err(GeneratorError::usage(
+                "CI selection artifact contains duplicate fields",
+            ));
+        }
+    }
+    if fields.remove("version").as_deref() != Some(SELECTION_FILE_VERSION) {
+        return Err(GeneratorError::usage(
+            "unsupported CI selection artifact version",
+        ));
+    }
+    let base_sha = fields
+        .remove("base_sha")
+        .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing base_sha"))?;
+    let head_sha = fields
+        .remove("head_sha")
+        .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing head_sha"))?;
+    let scope = Scope::parse(
+        &fields
+            .remove("scope")
+            .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing scope"))?,
+    )?;
+    let units = parse_selection_ids(
+        &fields
+            .remove("units")
+            .ok_or_else(|| GeneratorError::usage("CI selection artifact is missing units"))?,
+    )?;
+    let full_units =
+        parse_selection_ids(&fields.remove("full_units").ok_or_else(|| {
+            GeneratorError::usage("CI selection artifact is missing full_units")
+        })?)?;
+    if !fields.is_empty() {
+        return Err(GeneratorError::usage(
+            "CI selection artifact contains unknown fields",
+        ));
+    }
+    Ok(PlannedSelection {
+        base_sha,
+        head_sha,
+        scope,
+        units,
+        full_units,
+    })
+}
+
+fn parse_selection_ids(value: &str) -> Result<BTreeSet<String>, GeneratorError> {
+    let mut ids = BTreeSet::new();
+    for value in value.split(',').filter(|value| !value.is_empty()) {
+        if !is_unit_id(value) {
+            return Err(GeneratorError::usage(format!(
+                "invalid unit id in CI selection artifact: {value}"
+            )));
+        }
+        if !ids.insert(value.to_owned()) {
+            return Err(GeneratorError::usage(format!(
+                "duplicate unit id in CI selection artifact: {value}"
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+fn validate_selection_sha(selection: &PlannedSelection) -> Result<(), GeneratorError> {
+    let job_base = env::var("BASE_SHA").unwrap_or_default();
+    let job_head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    if selection.base_sha != job_base || selection.head_sha != job_head {
+        println!(
+            "::warning::CI selection artifact SHA mismatch: plan base SHA `{}` vs job base SHA `{}`; plan head SHA `{}` vs job head SHA `{}`",
+            selection.base_sha, job_base, selection.head_sha, job_head
+        );
+        return Err(GeneratorError::usage(
+            "CI selection artifact does not match this job checkout",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn selected_units_for_diff<'a>(
     root: &Path,
     config: &'a CiConfig,
@@ -633,60 +819,164 @@ fn selected_units_for_diff<'a>(
     base: &str,
     head: &str,
 ) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    Ok(selection_for_diff(root, config, scope, base, head)?.units)
+}
+
+fn selection_for_diff<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<UnitSelection<'a>, GeneratorError> {
     if scope == Scope::Full {
-        return ordered_units(&config.unit, None);
+        return full_selection(config);
     }
     if base.is_empty() || base.chars().all(|character| character == '0') {
-        return ordered_units(&config.unit, None);
+        return full_selection(config);
     }
     let Some(changed) = git_changed_files(root, base, head)? else {
-        return ordered_units(&config.unit, None);
+        return full_selection(config);
     };
     if changed.is_empty() {
-        return Err(GeneratorError::usage(
-            "affected CI scope has no changed files",
-        ));
+        return Ok(UnitSelection {
+            units: Vec::new(),
+            full_units: BTreeSet::new(),
+        });
     }
     if changed.iter().any(|file| file.starts_with(".github/")) {
-        return ordered_units(&config.unit, None);
+        return full_selection(config);
     }
-    let mut builder = GlobSetBuilder::new();
-    for unit in &config.unit {
-        for pattern in &unit.watch {
-            let glob = Glob::new(pattern).map_err(|error| {
-                GeneratorError::usage(format!("invalid watch pattern {pattern}: {error}"))
-            })?;
-            builder.add(glob);
-        }
+    if version_bump_matches(
+        root,
+        base,
+        head,
+        &changed,
+        &config.workflow.version_bump_units,
+    )? {
+        let allowlist = config
+            .workflow
+            .version_bump_units
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        return Ok(UnitSelection {
+            units: ordered_units(&config.unit, Some(&allowlist))?,
+            full_units: allowlist,
+        });
     }
-    let globset = builder
-        .build()
-        .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
+    let matchers = config
+        .unit
+        .iter()
+        .map(|unit| {
+            let mut builder = GlobSetBuilder::new();
+            for pattern in &unit.watch {
+                let glob = Glob::new(pattern).map_err(|error| {
+                    GeneratorError::usage(format!("invalid watch pattern {pattern}: {error}"))
+                })?;
+                builder.add(glob);
+            }
+            let matcher = builder
+                .build()
+                .map_err(|error| GeneratorError::usage(format!("build watch matcher: {error}")))?;
+            Ok::<_, GeneratorError>((unit, matcher))
+        })
+        .collect::<Result<Vec<(&CiUnit, GlobSet)>, _>>()?;
     let mut selected = BTreeSet::new();
     for file in &changed {
         let mut matched = false;
-        for unit in &config.unit {
-            if unit.watch.iter().any(|pattern| {
-                Glob::new(pattern).is_ok_and(|glob| glob.compile_matcher().is_match(file))
-            }) {
+        for (unit, matcher) in &matchers {
+            if matcher.is_match(file) {
                 selected.insert(unit.id.clone());
                 matched = true;
             }
         }
-        if !matched && !globset.is_match(file) {
-            return ordered_units(&config.unit, None);
+        if !matched {
+            return full_selection(config);
         }
     }
-    selected = expand_affected_units(&config.unit, selected);
-    ordered_units(&config.unit, Some(&selected))
+    let (selected, full_units) = expand_affected_units_with_full(&config.unit, selected);
+    Ok(UnitSelection {
+        units: ordered_units(&config.unit, Some(&selected))?,
+        full_units,
+    })
 }
 
-/// Return the directed Cargo closure for changed units.
-///
-/// Dependents are seeded only from units matched by changed files. Their
-/// prerequisites are added after that reverse walk, so a prerequisite shared
-/// by an affected unit cannot pull in an unrelated sibling dependent.
-fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
+fn full_selection<'a>(config: &'a CiConfig) -> Result<UnitSelection<'a>, GeneratorError> {
+    Ok(UnitSelection {
+        units: ordered_units(&config.unit, None)?,
+        full_units: config.unit.iter().map(|unit| unit.id.clone()).collect(),
+    })
+}
+
+fn version_bump_matches(
+    root: &Path,
+    base: &str,
+    head: &str,
+    changed: &[String],
+    allowlist: &[String],
+) -> Result<bool, GeneratorError> {
+    if allowlist.is_empty() || changed.is_empty() {
+        return Ok(false);
+    }
+    let mut diff_files = Vec::new();
+    for file in changed {
+        if file == "Cargo.lock" {
+            diff_files.push(file.clone());
+            continue;
+        }
+        let Some(crate_name) = file
+            .strip_prefix("crates/")
+            .and_then(|value| value.strip_suffix("/Cargo.toml"))
+        else {
+            return Ok(false);
+        };
+        let unit_id = if crate_name == "velnorctl" {
+            "rust-velnorctl".to_owned()
+        } else {
+            format!("rust-{crate_name}")
+        };
+        if !allowlist.iter().any(|allowed| allowed == &unit_id) {
+            return Ok(false);
+        }
+        diff_files.push(file.clone());
+    }
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--unified=0"])
+        .arg(format!("{base}...{head}"))
+        .arg("--");
+    for file in &diff_files {
+        command.arg(file);
+    }
+    let output = command
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("run version diff: {error}")))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let mut changed_lines = 0;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        let Some(content) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else {
+            continue;
+        };
+        changed_lines += 1;
+        if !content.trim_start().starts_with("version = \"") {
+            return Ok(false);
+        }
+    }
+    Ok(changed_lines > 0)
+}
+
+fn expand_affected_units_with_full(
+    units: &[CiUnit],
+    changed: BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut affected = changed.clone();
     let mut pending = changed.into_iter().collect::<Vec<_>>();
     while let Some(changed_id) = pending.pop() {
@@ -701,9 +991,9 @@ fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSe
             }
         }
     }
-
-    let mut required = affected.clone();
-    let mut pending = affected.into_iter().collect::<Vec<_>>();
+    let full_units = affected.clone();
+    let mut required = affected;
+    let mut pending = required.iter().cloned().collect::<Vec<_>>();
     while let Some(unit_id) = pending.pop() {
         let Some(unit) = units.iter().find(|unit| unit.id == unit_id) else {
             continue;
@@ -714,7 +1004,12 @@ fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSe
             }
         }
     }
-    required
+    (required, full_units)
+}
+
+#[cfg(test)]
+fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
+    expand_affected_units_with_full(units, changed).0
 }
 
 fn git_changed_files(
@@ -726,7 +1021,7 @@ fn git_changed_files(
         .arg("-C")
         .arg(root)
         .args(["diff", "--name-only"])
-        .arg(format!("{base}..{head}"))
+        .arg(format!("{base}...{head}"))
         .output()
         .map_err(|error| GeneratorError::usage(format!("run git diff: {error}")))?;
     if !output.status.success() {
@@ -778,7 +1073,12 @@ fn ordered_units<'a>(
     Ok(result)
 }
 
-fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), GeneratorError> {
+fn run_layers(
+    root: &Path,
+    units: &[&CiUnit],
+    run_scope: Scope,
+    full_units: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
     let runner_lane = RunnerLane::current();
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
@@ -805,9 +1105,13 @@ fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), Ge
         thread::scope(|thread_scope| {
             for unit in ready.iter().copied() {
                 let sender = sender.clone();
+                let commands = if full_units.contains(&unit.id) {
+                    unit.commands(runner_lane, run_scope).to_vec()
+                } else {
+                    prerequisite_commands(unit, runner_lane, run_scope)
+                };
                 thread_scope.spawn(move || {
-                    let commands = unit.commands(runner_lane, run_scope);
-                    let result = run_unit(root, unit, commands);
+                    let result = run_unit(root, unit, &commands);
                     let _ = sender.send((unit.id.clone(), result));
                 });
             }
@@ -819,6 +1123,21 @@ fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), Ge
         }
     }
     Ok(())
+}
+
+fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<String> {
+    if unit.kind != "rust" {
+        return Vec::new();
+    }
+    unit.commands(lane, scope)
+        .iter()
+        .filter(|command| command.contains(" clippy "))
+        .map(|command| {
+            command
+                .replacen(" clippy ", " check ", 1)
+                .replace(" -- -D warnings", "")
+        })
+        .collect()
 }
 
 fn run_unit(root: &Path, unit: &CiUnit, commands: &[String]) -> Result<(), GeneratorError> {
@@ -1797,16 +2116,226 @@ mod tests {
         Ok((root, base, head))
     }
 
+    fn stale_base_selection_git_fixture(
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-stale-base-selection-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("crates/base/src"))?;
+        std::fs::create_dir_all(root.join("docs"))?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        std::fs::write(root.join("crates/base/src/lib.rs"), "initial\n")?;
+        std::fs::write(root.join("docs/index.md"), "initial\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let initial = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+
+        init(&["checkout", "-q", "-b", "base-line"])?;
+        std::fs::write(root.join("docs/index.md"), "base-only\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base-only"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+
+        init(&["checkout", "-q", "-b", "feature", &initial])?;
+        std::fs::write(root.join("crates/base/src/lib.rs"), "feature-only\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "feature-only"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn lockfile_version_selection_git_fixture(
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-version-selection-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("crates/runner"))?;
+        std::fs::create_dir_all(root.join("crates/ctl"))?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = \"1\"\nchecksum = \"unchanged\"\n",
+        )?;
+        std::fs::write(
+            root.join("crates/runner/Cargo.toml"),
+            "version = \"0.1.0\"\n",
+        )?;
+        std::fs::write(root.join("crates/ctl/Cargo.toml"), "version = \"0.1.0\"\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        std::fs::write(
+            root.join("Cargo.lock"),
+            "version = \"2\"\nchecksum = \"unchanged\"\n",
+        )?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "version bump"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
     fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
         units.into_iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    #[test]
+    fn selection_artifact_round_trips_scope_and_sha() -> Result<(), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-artifact-{}-{id}",
+            std::process::id()
+        ));
+        write_selection_file(
+            &path,
+            "base-sha",
+            "head-sha",
+            Scope::Affected,
+            "base,app",
+            "app",
+        )?;
+        let selection = read_selection_file(&path)?;
+        assert_eq!(selection.base_sha, "base-sha");
+        assert_eq!(selection.head_sha, "head-sha");
+        assert_eq!(selection.scope, Scope::Affected);
+        assert_eq!(
+            selection.units,
+            ["app", "base"].into_iter().map(str::to_owned).collect()
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app"].into_iter().map(str::to_owned).collect()
+        );
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prerequisite_tier_rewrites_rust_clippy_to_check() {
+        let unit = CiUnit {
+            id: "rust-app".to_owned(),
+            label: "rust-app".to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["crates/app/**".to_owned()],
+            github_pr_commands: vec![
+                "cargo fmt --check".to_owned(),
+                "cargo clippy --locked --no-deps --all-targets -- -D warnings".to_owned(),
+                "cargo nextest run --locked".to_owned(),
+            ],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec![
+                "mbx clippy --locked --no-deps --all-targets -- -D warnings".to_owned()
+            ],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+        };
+        assert_eq!(
+            prerequisite_commands(&unit, RunnerLane::Github, Scope::Affected),
+            vec!["cargo check --locked --no-deps --all-targets"]
+        );
+        assert_eq!(
+            prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
+            vec!["mbx check --locked --no-deps --all-targets"]
+        );
     }
 
     #[test]
     fn affected_selection_expands_dependency_and_dependent_closure() -> Result<(), Box<dyn Error>> {
         let (root, base, head) = selection_git_fixture("closure", "crates/base/src/lib.rs")?;
         let config = selection_config();
-        let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        assert_eq!(selected_ids(units), vec!["base", "app", "consumer"]);
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "base", "consumer"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let (root, base, head) = selection_git_fixture("prerequisite", "crates/app/src/lib.rs")?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["app", "consumer"].into_iter().map(str::to_owned).collect()
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1824,6 +2353,92 @@ mod tests {
             assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
             std::fs::remove_dir_all(root)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_is_empty_for_an_empty_diff() -> Result<(), Box<dyn Error>> {
+        let (root, base, _) = selection_git_fixture("empty", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &base)?;
+        assert!(selection.units.is_empty());
+        assert!(selection.full_units.is_empty());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_to_full_for_a_stale_base() -> Result<(), Box<dyn Error>> {
+        let (root, _, head) = selection_git_fixture("stale-base", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let units = selected_units_for_diff(
+            &root,
+            &config,
+            Scope::Affected,
+            "0000000000000000000000000000000000000001",
+            &head,
+        )?;
+        assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_uses_merge_base_for_a_stale_branch_base() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = stale_base_selection_git_fixture()?;
+        let config = selection_config();
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["base", "app", "consumer"]
+        );
+        assert!(!selection.full_units.contains("docs"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cargo_version_bump_uses_the_explicit_allowlist_ids() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = lockfile_version_selection_git_fixture()?;
+        let command_unit = |id: &str, watch: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+        };
+        let mut config = selection_config();
+        config.workflow.version_bump_units = vec![
+            "rust-runner".to_owned(),
+            "rust-ctl".to_owned(),
+            "docker".to_owned(),
+        ];
+        config.unit = vec![
+            command_unit("rust-runner", &["crates/runner/**"]),
+            command_unit("rust-ctl", &["crates/ctl/**"]),
+            command_unit("docker", &["Dockerfile"]),
+            command_unit("unrelated", &["unrelated/**"]),
+        ];
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(
+            selected_ids(selection.units),
+            vec!["rust-runner", "rust-ctl", "docker"]
+        );
+        assert_eq!(
+            selection.full_units,
+            ["docker", "rust-ctl", "rust-runner"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

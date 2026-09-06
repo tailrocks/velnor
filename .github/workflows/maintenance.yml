@@ -5,6 +5,8 @@ run-name: Maintenance · ${{ github.event_name }}
 on:
   pull_request:
     types: [closed]
+  schedule:
+    - cron: '31 3 * * *'
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -55,3 +57,40 @@ jobs:
           ' _ "$GITHUB_REPOSITORY"; then
             echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
           fi
+  cache-budget:
+    name: Cache budget snapshot
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Snapshot Actions cache account
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cache-budget"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
+            > "$RUNNER_TEMP/cache-budget/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-budget/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-budget/entries.json"
+          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-budget/entries.json")"
+          headroom="$((MAX_BYTES - total))"
+          jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
+            > "$RUNNER_TEMP/cache-budget/summary.json"
+          cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          if (( total > MAX_BYTES )); then
+            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
+            exit 1
+          fi
+      - name: Publish cache budget snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-budget-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-budget
+          if-no-files-found: error
+          retention-days: 14

@@ -723,6 +723,7 @@ mod tests {
             verified: true,
             workflow_files: vec!["ci-pr.yml".to_owned()],
             notes: Vec::new(),
+            version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
