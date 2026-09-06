@@ -36,8 +36,10 @@ label = "Bun package (velnor)"
 kind = "bun"
 root = "."
 watch = ["**/*.js", "**/*.json", "**/*.jsx", "**/*.ts", "**/*.tsx", "bun.lock", "bun.lockb", "crates/velnor-workflow/**", "package-lock.json", "package.json"]
-pr_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
-full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
+github_pr_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
+github_full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
+velnor_pr_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
+velnor_full_commands = ["bun install --frozen-lockfile", "bun run typecheck", "bun run build"]
 [unit.cache]
 key_files = ["package.json", "bun.lock"]
 paths = ["~/.bun/install/cache"]
@@ -48,8 +50,10 @@ label = "Docker"
 kind = "docker"
 root = "."
 watch = [".dockerignore", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/**", "crates/velnor-workflow/**", "docker/build-mise.lock", "docker/build-mise.toml", "microvm/**", "rust-toolchain.toml", "tools/**"]
-pr_commands = ["if [[ \"${CI_RUNNER_LANE:-github}\" == \"github\" && \"${CI_CACHE_WRITE:-false}\" == \"true\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'; elif [[ \"${CI_RUNNER_LANE:-github}\" == \"github\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'; else docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'; fi"]
-full_commands = ["if [[ \"${CI_RUNNER_LANE:-github}\" == \"github\" && \"${CI_CACHE_WRITE:-false}\" == \"true\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'; elif [[ \"${CI_RUNNER_LANE:-github}\" == \"github\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'; else docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'; fi"]
+github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 [[unit]]
 id = "docs"
@@ -57,8 +61,10 @@ label = "Documentation"
 kind = "docs"
 root = "."
 watch = ["**/*.md", "crates/velnor-workflow/**", "docs/**", "mkdocs.yml"]
-pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
-full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+github_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+github_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+velnor_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+velnor_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
 paths = ["~/.npm"]
@@ -69,8 +75,10 @@ label = "OpenTofu"
 kind = "opentofu"
 root = "."
 watch = ["**/*.tf", "**/*.tofu", "**/.terraform.lock.hcl", "crates/velnor-workflow/**"]
-pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
-full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
+github_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
+github_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
+velnor_pr_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
+velnor_full_commands = ["tofu fmt -check -recursive -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu init -backend=false -input=false -no-color", "TF_IN_AUTOMATION=1 TF_INPUT=0 tofu validate -no-color"]
 [unit.cache]
 key_files = ["**/.terraform.lock.hcl"]
 paths = ["~/.terraform.d/plugin-cache"]
@@ -81,8 +89,10 @@ label = "Rust dependency policy"
 kind = "rust"
 root = "."
 watch = [".cargo/audit.toml", ".cargo/deny.toml", "Cargo.lock", "Cargo.toml", "audit.toml", "crates/velnor-workflow/**", "deny.toml"]
-pr_commands = ["mbx deny check"]
-full_commands = ["mbx deny check"]
+github_pr_commands = ["mbx deny check"]
+github_full_commands = ["mbx deny check"]
+velnor_pr_commands = ["mbx deny check"]
+velnor_full_commands = ["mbx deny check"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
@@ -93,8 +103,10 @@ label = "Rust crate (unit-collector)"
 kind = "rust"
 root = "tools/unit-collector"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml", "tools/unit-collector/**/*.rs", "tools/unit-collector/Cargo.toml", "tools/unit-collector/benches/**", "tools/unit-collector/examples/**", "tools/unit-collector/src/**", "tools/unit-collector/tests/**"]
-pr_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
-full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
+github_pr_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
+github_full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
+velnor_pr_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
+velnor_full_commands = ["cd -- 'tools/unit-collector' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'tools/unit-collector' && mbx clippy --locked --all-targets --all-features --package 'unit-collector' -- -D warnings", "cd -- 'tools/unit-collector' && mbx nextest run --locked --all-features --package 'unit-collector'"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "tools/unit-collector/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
@@ -105,8 +117,10 @@ label = "Rust crate (velnor-bench)"
 kind = "rust"
 root = "crates/velnor-bench"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-bench/**/*.rs", "crates/velnor-bench/Cargo.toml", "crates/velnor-bench/benches/**", "crates/velnor-bench/examples/**", "crates/velnor-bench/src/**", "crates/velnor-bench/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
-full_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
+github_pr_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
+github_full_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
+velnor_full_commands = ["cd -- 'crates/velnor-bench' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-bench' && mbx clippy --locked --all-targets --all-features --package 'velnor-bench' -- -D warnings", "cd -- 'crates/velnor-bench' && mbx nextest run --locked --all-features --package 'velnor-bench'"]
 depends_on = ["rust-velnor-model", "rust-velnor-runner"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-bench/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -118,8 +132,10 @@ label = "Rust crate (velnor-client)"
 kind = "rust"
 root = "crates/velnor-client"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-client/**/*.rs", "crates/velnor-client/Cargo.toml", "crates/velnor-client/benches/**", "crates/velnor-client/examples/**", "crates/velnor-client/src/**", "crates/velnor-client/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
-full_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
+github_pr_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
+github_full_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
+velnor_full_commands = ["cd -- 'crates/velnor-client' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-client' && mbx clippy --locked --all-targets --all-features --package 'velnor-client' -- -D warnings", "cd -- 'crates/velnor-client' && mbx nextest run --locked --all-features --package 'velnor-client'"]
 depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-client/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -131,8 +147,10 @@ label = "Rust crate (velnor-control)"
 kind = "rust"
 root = "crates/velnor-control"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-control/**/*.rs", "crates/velnor-control/Cargo.toml", "crates/velnor-control/benches/**", "crates/velnor-control/examples/**", "crates/velnor-control/src/**", "crates/velnor-control/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
-full_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
+github_pr_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
+github_full_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
+velnor_full_commands = ["cd -- 'crates/velnor-control' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-control' && mbx clippy --locked --all-targets --all-features --package 'velnor-control' -- -D warnings", "cd -- 'crates/velnor-control' && mbx nextest run --locked --all-features --package 'velnor-control'"]
 depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-control/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -144,8 +162,10 @@ label = "Rust crate (velnor-model)"
 kind = "rust"
 root = "crates/velnor-model"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-model/**/*.rs", "crates/velnor-model/Cargo.toml", "crates/velnor-model/benches/**", "crates/velnor-model/examples/**", "crates/velnor-model/src/**", "crates/velnor-model/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
-full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
+github_pr_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
+github_full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
+velnor_full_commands = ["cd -- 'crates/velnor-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-model' && mbx clippy --locked --all-targets --all-features --package 'velnor-model' -- -D warnings", "cd -- 'crates/velnor-model' && mbx nextest run --locked --all-features --package 'velnor-model'"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-model/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
@@ -156,8 +176,10 @@ label = "Rust crate (velnor-render)"
 kind = "rust"
 root = "crates/velnor-render"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-render/**/*.rs", "crates/velnor-render/Cargo.toml", "crates/velnor-render/benches/**", "crates/velnor-render/examples/**", "crates/velnor-render/src/**", "crates/velnor-render/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
-full_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
+github_pr_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
+github_full_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
+velnor_full_commands = ["cd -- 'crates/velnor-render' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-render' && mbx clippy --locked --all-targets --all-features --package 'velnor-render' -- -D warnings", "cd -- 'crates/velnor-render' && mbx nextest run --locked --all-features --package 'velnor-render'"]
 depends_on = ["rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-render/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -169,8 +191,10 @@ label = "Rust crate (velnor-runner)"
 kind = "rust"
 root = "crates/velnor-runner"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-runner/**/*.rs", "crates/velnor-runner/Cargo.toml", "crates/velnor-runner/benches/**", "crates/velnor-runner/build.rs", "crates/velnor-runner/examples/**", "crates/velnor-runner/src/**", "crates/velnor-runner/tests/**", "crates/velnor-workflow/**", "microvm/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
-full_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
+github_pr_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
+github_full_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
+velnor_full_commands = ["cd -- 'crates/velnor-runner' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-runner' && mbx clippy --locked --all-targets --all-features --package 'velnor-runner' -- -D warnings", "cd -- 'crates/velnor-runner' && mbx nextest run --locked --all-features --package 'velnor-runner'"]
 depends_on = ["rust-velnor-control", "rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-runner/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -182,8 +206,10 @@ label = "Rust crate (velnor-tools)"
 kind = "rust"
 root = "crates/velnor-tools"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-tools/**/*.rs", "crates/velnor-tools/Cargo.toml", "crates/velnor-tools/benches/**", "crates/velnor-tools/examples/**", "crates/velnor-tools/src/**", "crates/velnor-tools/tests/**", "crates/velnor-workflow/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
-full_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
+github_pr_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
+github_full_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
+velnor_full_commands = ["cd -- 'crates/velnor-tools' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-tools' && mbx clippy --locked --all-targets --all-features --package 'velnor-tools' -- -D warnings", "cd -- 'crates/velnor-tools' && mbx nextest run --locked --all-features --package 'velnor-tools'"]
 depends_on = ["rust-velnor-client", "rust-velnor-model"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-tools/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
@@ -195,8 +221,10 @@ label = "Rust crate (velnor-workflow)"
 kind = "rust"
 root = "crates/velnor-workflow"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-workflow/**", "crates/velnor-workflow/**/*.rs", "crates/velnor-workflow/Cargo.toml", "crates/velnor-workflow/benches/**", "crates/velnor-workflow/examples/**", "crates/velnor-workflow/src/**", "crates/velnor-workflow/tests/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
-full_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
+github_pr_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
+github_full_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
+velnor_full_commands = ["cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --all-targets --all-features --package 'velnor-workflow' -- -D warnings", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow'"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnor-workflow/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
@@ -207,8 +235,10 @@ label = "Rust crate (velnorctl)"
 kind = "rust"
 root = "crates/velnorctl"
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/velnor-workflow/**", "crates/velnorctl/**/*.rs", "crates/velnorctl/Cargo.toml", "crates/velnorctl/benches/**", "crates/velnorctl/examples/**", "crates/velnorctl/src/**", "crates/velnorctl/tests/**", "rust-toolchain", "rust-toolchain.toml"]
-pr_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
-full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
+github_pr_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
+github_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
+velnor_pr_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
+velnor_full_commands = ["cd -- 'crates/velnorctl' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnorctl' && mbx clippy --locked --all-targets --all-features --package 'velnorctl' -- -D warnings", "cd -- 'crates/velnorctl' && mbx nextest run --locked --all-features --package 'velnorctl'"]
 depends_on = ["rust-velnor-client", "rust-velnor-control", "rust-velnor-model", "rust-velnor-render", "rust-velnor-runner"]
 [unit.cache]
 key_files = [".cargo/**", "Cargo.toml", "crates/velnorctl/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]

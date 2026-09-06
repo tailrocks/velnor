@@ -58,8 +58,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-          CI_RUNNER_LANE: github
-          CI_CACHE_WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
 
   velnor:
@@ -93,7 +91,5 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-          CI_RUNNER_LANE: velnor
-          CI_CACHE_WRITE: false
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit rust-velnor-client
 

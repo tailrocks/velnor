@@ -508,6 +508,10 @@ pub struct Unit {
     watch: Vec<String>,
     pr_commands: Vec<String>,
     full_commands: Vec<String>,
+    github_pr_commands: Option<Vec<String>>,
+    github_full_commands: Option<Vec<String>>,
+    velnor_pr_commands: Option<Vec<String>>,
+    velnor_full_commands: Option<Vec<String>>,
     depends_on: Vec<String>,
     cache: Option<CacheSpec>,
     tool_version: Option<String>,
@@ -578,6 +582,10 @@ fn default_workflow_files() -> Vec<String> {
 }
 
 impl ProjectConfig {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the generated TOML keeps the complete checked-in runtime contract together"
+    )]
     fn toml(&self) -> String {
         let mut output = String::from(GENERATED_HEADER);
         output.push_str("schema = 1\n");
@@ -643,8 +651,34 @@ impl ProjectConfig {
             write_toml_string(&mut output, "kind", unit.kind.id_prefix());
             write_toml_string(&mut output, "root", &unit.root);
             write_toml_array(&mut output, "watch", &unit.watch);
-            write_toml_array(&mut output, "pr_commands", &unit.pr_commands);
-            write_toml_array(&mut output, "full_commands", &unit.full_commands);
+            write_toml_array(
+                &mut output,
+                "github_pr_commands",
+                unit.github_pr_commands
+                    .as_deref()
+                    .unwrap_or(&unit.pr_commands),
+            );
+            write_toml_array(
+                &mut output,
+                "github_full_commands",
+                unit.github_full_commands
+                    .as_deref()
+                    .unwrap_or(&unit.full_commands),
+            );
+            write_toml_array(
+                &mut output,
+                "velnor_pr_commands",
+                unit.velnor_pr_commands
+                    .as_deref()
+                    .unwrap_or(&unit.pr_commands),
+            );
+            write_toml_array(
+                &mut output,
+                "velnor_full_commands",
+                unit.velnor_full_commands
+                    .as_deref()
+                    .unwrap_or(&unit.full_commands),
+            );
             if !unit.depends_on.is_empty() {
                 write_toml_array(&mut output, "depends_on", &unit.depends_on);
             }
@@ -1314,6 +1348,10 @@ fn analyze_rust_manifests(
             watch,
             pr_commands: commands.clone(),
             full_commands: commands,
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: Some(CacheSpec {
                 key_files: cache_key_files,
@@ -1354,6 +1392,10 @@ fn analyze_rust_manifests(
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: Some(CacheSpec {
                 key_files: vec![
@@ -1799,6 +1841,10 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             ],
             pr_commands: commands.clone(),
             full_commands: commands,
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: Some(CacheSpec {
                 key_files: cache_key_files,
@@ -2354,16 +2400,32 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
                     "tools/**".to_owned(),
                 ];
             }
-            unit.pr_commands = unit
+            let github_pr_commands = unit
                 .pr_commands
                 .iter()
-                .map(|command| velnor_docker_cache_command(command))
-                .collect();
-            unit.full_commands = unit
+                .map(|command| github_docker_cache_command(command, false))
+                .collect::<Vec<_>>();
+            let github_full_commands = unit
                 .full_commands
                 .iter()
-                .map(|command| velnor_docker_cache_command(command))
-                .collect();
+                .map(|command| github_docker_cache_command(command, true))
+                .collect::<Vec<_>>();
+            let velnor_pr_commands = unit
+                .pr_commands
+                .iter()
+                .map(|command| velnor_docker_command(command))
+                .collect::<Vec<_>>();
+            let velnor_full_commands = unit
+                .full_commands
+                .iter()
+                .map(|command| velnor_docker_command(command))
+                .collect::<Vec<_>>();
+            unit.pr_commands.clone_from(&github_pr_commands);
+            unit.full_commands.clone_from(&github_full_commands);
+            unit.github_pr_commands = Some(github_pr_commands);
+            unit.github_full_commands = Some(github_full_commands);
+            unit.velnor_pr_commands = Some(velnor_pr_commands);
+            unit.velnor_full_commands = Some(velnor_full_commands);
         }
         // Every generated unit installs and invokes this runtime. Treat
         // generator/runtime changes as broad-impact changes instead of only
@@ -2393,13 +2455,23 @@ fn mbxify_cargo_command(command: &str) -> String {
     command.replace("cargo ", "mbx ")
 }
 
-fn velnor_docker_cache_command(command: &str) -> String {
+fn github_docker_cache_command(command: &str, write_cache: bool) -> String {
     let Some(arguments) = command.strip_prefix("docker build ") else {
         return command.to_owned();
     };
+    let cache_to = write_cache
+        .then_some(" --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true");
     format!(
-            "if [[ \"${{CI_RUNNER_LANE:-github}}\" == \"github\" && \"${{CI_CACHE_WRITE:-false}}\" == \"true\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true {arguments}; elif [[ \"${{CI_RUNNER_LANE:-github}}\" == \"github\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker {arguments}; else docker buildx build --load {arguments}; fi"
+        "docker buildx build --load --cache-from type=gha,scope=velnor-docker{} {arguments}",
+        cache_to.unwrap_or_default()
     )
+}
+
+fn velnor_docker_command(command: &str) -> String {
+    let Some(arguments) = command.strip_prefix("docker build ") else {
+        return command.to_owned();
+    };
+    format!("docker buildx build --load {arguments}")
 }
 
 fn reject_retired_workflow_provider_reference(
@@ -2713,6 +2785,10 @@ fn catalog_unit(
             .iter()
             .map(|value| (*value).to_owned())
             .collect(),
+        github_pr_commands: None,
+        github_full_commands: None,
+        velnor_pr_commands: None,
+        velnor_full_commands: None,
         depends_on: Vec::new(),
         cache,
         tool_version: None,
@@ -3459,6 +3535,10 @@ fn unit(
         watch,
         pr_commands: commands.clone(),
         full_commands: commands,
+        github_pr_commands: None,
+        github_full_commands: None,
+        velnor_pr_commands: None,
+        velnor_full_commands: None,
         depends_on: Vec::new(),
         cache,
         tool_version: None,
@@ -3918,11 +3998,9 @@ impl WorkflowIr {
         }
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          CI_RUNNER_LANE: {}\n          CI_CACHE_WRITE: {}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
-            lane.as_str(),
-            self.cache_write_value(lane, cache_save),
             yaml_scalar(&unit.id)
         );
         if cache_save
@@ -3947,16 +4025,6 @@ impl WorkflowIr {
             );
         }
         output.push('\n');
-    }
-
-    fn cache_write_value(&self, lane: RunnerMode, cache_save: bool) -> String {
-        if !cache_save || lane != RunnerMode::Github {
-            return "false".to_owned();
-        }
-        format!(
-            "${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}') }}}}",
-            self.default_branch, self.default_branch
-        )
     }
 
     fn runner_for(&self, lane: RunnerMode) -> String {
@@ -4135,11 +4203,9 @@ impl WorkflowIr {
             }
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          CI_RUNNER_LANE: {}\n          CI_CACHE_WRITE: {}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
                 verify_name,
                 yaml_scalar(&unit.id),
-                lane.as_str(),
-                self.cache_write_value(lane, cache_save),
                 yaml_scalar(&unit.id),
             );
             if cache_save
@@ -8108,16 +8174,42 @@ path-only = { path = "../path-only" }
                 .find(|unit| unit.kind == UnitKind::Docker),
             "reviewed Docker unit",
         );
-        assert!(docker
-            .pr_commands
+        let github_pr_commands = must_some(
+            docker.github_pr_commands.as_ref(),
+            "GitHub PR Docker commands",
+        );
+        assert!(github_pr_commands
             .iter()
             .any(|command| command.contains("docker buildx build --load")));
-        assert!(docker
-            .pr_commands
+        assert!(github_pr_commands
             .iter()
             .any(|command| command.contains("type=gha,scope=velnor-docker")));
+        assert!(!github_pr_commands
+            .iter()
+            .any(|command| command.contains("if [[")));
+        let github_full_commands = must_some(
+            docker.github_full_commands.as_ref(),
+            "GitHub full Docker commands",
+        );
+        assert!(github_full_commands
+            .iter()
+            .any(|command| command.contains("--cache-to type=gha")));
+        let velnor_commands =
+            must_some(docker.velnor_pr_commands.as_ref(), "Velnor Docker commands");
+        assert!(velnor_commands
+            .iter()
+            .all(|command| !command.contains("type=gha") && !command.contains("if [[")));
+        let toml = config.toml();
+        assert!(toml.contains("github_pr_commands"));
+        assert!(toml.contains("github_full_commands"));
+        assert!(toml.contains("velnor_pr_commands"));
+        assert!(toml.contains("velnor_full_commands"));
+        assert!(!toml.contains("CI_RUNNER_LANE"));
+        assert!(!toml.contains("CI_CACHE_WRITE"));
         let docker_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(docker, WorkflowKind::Main);
+        assert!(!docker_workflow.contains("CI_RUNNER_LANE"));
+        assert!(!docker_workflow.contains("CI_CACHE_WRITE"));
         assert!(docker_workflow.contains(ActionPin::GithubRuntime.reference()));
         assert!(!docker_workflow
             .split_once("\n  velnor:")
@@ -8408,6 +8500,10 @@ path-only = { path = "../path-only" }
             watch: vec!["**".to_owned()],
             pr_commands: vec![command.clone()],
             full_commands: vec![command],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on,
             cache: None,
             tool_version: None,

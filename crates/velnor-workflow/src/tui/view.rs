@@ -659,6 +659,10 @@ mod tests {
                 .map(|index| format!("cargo test --package example-{index}"))
                 .collect(),
             full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: Some("1.97.1".to_owned()),

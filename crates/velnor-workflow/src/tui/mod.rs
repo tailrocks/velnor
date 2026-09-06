@@ -917,6 +917,10 @@ mod tests {
             watch: Vec::new(),
             pr_commands: vec!["cargo test".to_owned()],
             full_commands: vec!["cargo test --all-targets".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())

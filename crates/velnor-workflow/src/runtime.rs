@@ -114,14 +114,49 @@ struct CiUnit {
     #[serde(default)]
     root: String,
     watch: Vec<String>,
-    pr_commands: Vec<String>,
-    full_commands: Vec<String>,
+    github_pr_commands: Vec<String>,
+    github_full_commands: Vec<String>,
+    velnor_pr_commands: Vec<String>,
+    velnor_full_commands: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerLane {
+    Github,
+    Velnor,
+}
+
+impl RunnerLane {
+    /// Velnor's job runtime marks its node `self-hosted`; hosted GitHub jobs
+    /// and local invocations deliberately fall back to the GitHub command set.
+    fn from_runner_environment(environment: Option<&str>) -> Self {
+        if environment.is_some_and(|value| value.eq_ignore_ascii_case("self-hosted")) {
+            Self::Velnor
+        } else {
+            Self::Github
+        }
+    }
+
+    fn current() -> Self {
+        Self::from_runner_environment(env::var("RUNNER_ENVIRONMENT").ok().as_deref())
+    }
+}
+
+impl CiUnit {
+    fn commands(&self, lane: RunnerLane, scope: Scope) -> &[String] {
+        match (lane, scope) {
+            (RunnerLane::Github, Scope::Affected) => &self.github_pr_commands,
+            (RunnerLane::Github, Scope::Full) => &self.github_full_commands,
+            (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
+            (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,9 +330,14 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
-        if unit.watch.is_empty() || unit.pr_commands.is_empty() || unit.full_commands.is_empty() {
+        if unit.watch.is_empty()
+            || unit.github_pr_commands.is_empty()
+            || unit.github_full_commands.is_empty()
+            || unit.velnor_pr_commands.is_empty()
+            || unit.velnor_full_commands.is_empty()
+        {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare watch, PR, and full commands: {}",
+                "CI unit must declare watch plus GitHub and Velnor PR/full commands: {}",
                 unit.id
             )));
         }
@@ -390,6 +430,69 @@ fn scope_name(scope: Scope) -> &'static str {
     match scope {
         Scope::Affected => "affected",
         Scope::Full => "full",
+    }
+}
+
+#[cfg(test)]
+mod runner_lane_tests {
+    use super::{CiUnit, RunnerLane, Scope};
+
+    #[test]
+    fn hosted_runner_is_the_default_lane() {
+        assert_eq!(
+            RunnerLane::from_runner_environment(None),
+            RunnerLane::Github
+        );
+        assert_eq!(
+            RunnerLane::from_runner_environment(Some("github-hosted")),
+            RunnerLane::Github
+        );
+        assert_eq!(
+            RunnerLane::from_runner_environment(Some("self-hosted")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::from_runner_environment(Some("SELF-HOSTED")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_runner_environment(Some("unknown"))
+        );
+    }
+
+    #[test]
+    fn lane_and_scope_select_the_matching_command_array() {
+        let unit = CiUnit {
+            id: "docker".to_owned(),
+            label: "Docker".to_owned(),
+            kind: "docker".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["Dockerfile".to_owned()],
+            github_pr_commands: vec!["github-pr".to_owned()],
+            github_full_commands: vec!["github-full".to_owned()],
+            velnor_pr_commands: vec!["velnor-pr".to_owned()],
+            velnor_full_commands: vec!["velnor-full".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+        };
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Affected),
+            &["github-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Full),
+            &["github-full".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Affected),
+            &["velnor-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Full),
+            &["velnor-full".to_owned()]
+        );
     }
 }
 
@@ -568,6 +671,7 @@ fn ordered_units<'a>(
 }
 
 fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), GeneratorError> {
+    let runner_lane = RunnerLane::current();
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
         let ready = units
@@ -594,10 +698,7 @@ fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), Ge
             for unit in ready.iter().copied() {
                 let sender = sender.clone();
                 thread_scope.spawn(move || {
-                    let commands = match run_scope {
-                        Scope::Affected => unit.pr_commands.as_slice(),
-                        Scope::Full => unit.full_commands.as_slice(),
-                    };
+                    let commands = unit.commands(runner_lane, run_scope);
                     let result = run_unit(root, unit, commands);
                     let _ = sender.send((unit.id.clone(), result));
                 });
@@ -1491,8 +1592,10 @@ mod tests {
             kind: "rust".to_owned(),
             root: ".".to_owned(),
             watch: watch.iter().map(|value| (*value).to_owned()).collect(),
-            pr_commands: vec!["true".to_owned()],
-            full_commands: vec!["true".to_owned()],
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
             depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
             tool_version: None,
             cache: None,
