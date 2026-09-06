@@ -31,7 +31,7 @@ const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .gith
 const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-const VELNOR_POLICY_WORKFLOW_REV: &str = "12da6232672f039e42c21fe9dff00085856ef92d";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "07750dcaaff8173ef622a081142ff25855e4bf5e";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
@@ -7721,7 +7721,7 @@ path-only = { path = "../path-only" }
         must(
             fs::write(
                 workflows.join("ci-policy.yml"),
-                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@12da6232672f039e42c21fe9dff00085856ef92d\n    with:\n      policy-revision: 12da6232672f039e42c21fe9dff00085856ef92d\n    permissions:\n      contents: read\n",
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e\n    with:\n      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e\n    permissions:\n      contents: read\n",
             ),
             "write policy entrypoint",
         );

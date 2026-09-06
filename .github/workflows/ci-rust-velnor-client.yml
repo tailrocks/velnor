@@ -28,7 +28,7 @@ jobs:
         with:
           rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12da6232672f039e42c21fe9dff00085856ef92d" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=07750dcaaff8173ef622a081142ff25855e4bf5e" >> "$GITHUB_ENV"
       - name: Set up Mise Rust toolchain
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:

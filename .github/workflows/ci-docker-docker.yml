@@ -23,7 +23,7 @@ jobs:
         with:
           rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12da6232672f039e42c21fe9dff00085856ef92d" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=07750dcaaff8173ef622a081142ff25855e4bf5e" >> "$GITHUB_ENV"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Run Docker checks
