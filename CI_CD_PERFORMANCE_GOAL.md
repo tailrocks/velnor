@@ -318,11 +318,12 @@ D5. Safety nets that MUST exist before narrowing (status):
 - `merge_group` full: PASS by deleting the dead trigger while no queue exists;
     re-enable only with an enabled queue and proof of queued-combination
     coverage.
-- Single resolution + no silent no-op: PARTIAL — the selection artifact
-    handoff exists, but the shallow-checkout/no-git-read and SHA-mismatch
-    fixtures remain open (D1, merge-blocking).
+- Single resolution + no silent no-op: IMPLEMENTED on the remediation branch
+    with fail-closed unit filtering and shallow/no-git-read plus SHA-mismatch
+    fixtures (PRs #630 and #632); merge/current-main proof remains open.
 - Version-bump allowlist (unit + dependents; lockfile stays broad): runtime
-    implementation exists; exact real-project fixture is open in PR #621.
+    implementation plus exact checked-in-project fixtures are present on the
+    remediation branch (PR #631); merge/current-main proof remains open.
 - Production-topology gate (`cargo check --workspace --all-targets`
     default features + release-feature boundary from `mise.toml:42-52`):
     EXISTS in the named generated workflow and command; live trusted proof
@@ -679,6 +680,7 @@ are follow-up commitments, not evidence that a blocker is cleared:
 | Unmet item | Owner | Deadline |
 | --- | --- | --- |
 | Passing trusted Velnor main proof and Docker/runner/control/render/production-topology failures | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
+| Merge and verify D1 safety-fixture PRs #630/#631/#632 on current main | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
 | Matched before/after post-`objects-v2` PR pair, plus all §1 SLOs (PR #616 runner is 5m30s) | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
 | Seven consecutive daily cache snapshots at or below 8 GiB | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
 | Provider → queue timestamp → coverage evidence for remaining costs | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
@@ -783,6 +785,23 @@ Provider, queue, and coverage record:
   misses the Rust-runner target by 30s), seven-day ≤8-GiB snapshots, the
   required provider/queue/coverage proof table, v0.1.273 fleet activation, and
   synchronized PR #603 validation. Do not claim achievement.
+
+### Recheck 2026-09-07 — remediation branch
+
+- Branch `codex/ci-goal-remediation-20260906` now contains the D1 safety
+  implementation and fixtures: `332f4bdd`, `257902d5`, and `0db40801`.
+  PRs #630, #631, and #632 remain open; none is merged into `main`.
+- D2 watch precision is tightened by `f96bf868`: `Dockerfile` and
+  `docker/build-mise.*` select `rust-velnor-workflow`, while `fleet/**`
+  selects only `rust-velnor-runner` and `rust-velnor-tools` in the generated
+  config. The generator check and 148-package-test suite pass locally.
+- Local proof passes: `cargo clippy --locked -p velnor-workflow --all-targets
+  --all-features -- -D warnings`, `cargo check --workspace --all-targets
+  --locked`, generator `--check`, formatting, and diff checks.
+- The trusted main run `34064512456` terminated failure: all 16 GitHub lanes
+  passed, but 11 Velnor lanes failed and `ci-required` failed. This remains
+  infrastructure/fleet evidence, not a reason to split Velnor into a
+  non-gating workflow.
 
 ## 9. Context (changelog, not work items)
 
