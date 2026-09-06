@@ -63,12 +63,16 @@ grep -q "^  push:" "$workflow"
 grep -q "      - 'v\\[0-9\\]\\*'" "$workflow"
 grep -q -- "--features release-build" "$workflow"
 grep -q 'VELNOR_RELEASE_BUILD: "1"' "$workflow"
-grep -q "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner" "$workflow"
-grep -q "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl" "$workflow"
+grep -q "MBX_CC=0 mbx zigbuild -p velnor-runner" "$workflow"
+grep -q "MBX_CC=0 mbx zigbuild -p velnorctl" "$workflow"
 grep -q "mbx zigbuild -p velnor-tools" "$workflow"
 grep -q "mbx zigbuild -p velnor-workflow" "$workflow"
-if grep -E "cargo zigbuild -p (velnor-runner|velnorctl)" "$workflow" | grep -v "VELNOR_DIRECT_CARGO=1"; then
-  echo "release:check: C-native release zigbuild commands require the explicit direct-cargo marker" >&2
+if grep -Eq "(^|[[:space:]])cargo zigbuild -p" "$workflow"; then
+  echo "release:check: every release zigbuild command must use Mr. Boxington" >&2
+  exit 1
+fi
+if grep -q "VELNOR_DIRECT_CARGO" "$workflow"; then
+  echo "release:check: direct Cargo release escape hatch is forbidden" >&2
   exit 1
 fi
 if grep -q -- "-p velnor-tools.*--features release-build" "$workflow"; then

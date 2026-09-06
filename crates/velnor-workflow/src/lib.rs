@@ -47,7 +47,6 @@ const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
     "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
     "package", "publish", "run", "test", "update", "zigbuild",
 ];
-const DIRECT_CARGO_ENV: &str = "VELNOR_DIRECT_CARGO=1 ";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
 const VELNOR_POLICY_PROVIDER_WORKFLOW: &str = "velnor-workflow-policy.yml";
 const VELNOR_RELEASE_WORKFLOW_TEMPLATE: &str = include_str!("../templates/velnor-release.yml");
@@ -2583,9 +2582,7 @@ fn mbxify_cargo_invocations(input: &str) -> (String, bool) {
         };
         let subcommand = &input[subcommand_start..subcommand_end];
         output.push_str(&input[cursor..start]);
-        if is_mr_boxington_cargo_subcommand(subcommand)
-            && !input[..start].ends_with(DIRECT_CARGO_ENV)
-        {
+        if is_mr_boxington_cargo_subcommand(subcommand) {
             output.push_str("mbx");
             changed = true;
         } else {
@@ -7499,7 +7496,7 @@ fn github_coordinates(value: &str) -> Option<(String, String)> {
 }
 
 fn local_github_repository(root: &Path) -> Option<String> {
-    let config = fs::read_to_string(root.join(".git/config")).ok()?;
+    let config = fs::read_to_string(git_config_path(root)?).ok()?;
     let mut origin = false;
     for line in config.lines().map(str::trim) {
         if let Some(remote) = line
@@ -7526,6 +7523,43 @@ fn local_github_repository(root: &Path) -> Option<String> {
         return Some(format!("{owner}/{repository}"));
     }
     None
+}
+
+fn git_config_path(root: &Path) -> Option<PathBuf> {
+    let dot_git = root.join(".git");
+    if fs::metadata(&dot_git).ok()?.is_dir() {
+        return Some(dot_git.join("config"));
+    }
+
+    // Linked worktrees store a gitdir pointer in root/.git and the remote
+    // configuration in the common git directory named by commondir.
+    let gitfile = fs::read_to_string(&dot_git).ok()?;
+    let gitdir_value = gitfile
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("gitdir:").map(str::trim))
+        .filter(|value| !value.is_empty())?;
+    let gitdir = resolve_git_path(root, gitdir_value);
+    let config_dir = fs::read_to_string(gitdir.join("commondir"))
+        .ok()
+        .and_then(|commondir| {
+            commondir
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| resolve_git_path(&gitdir, line))
+        })
+        .unwrap_or(gitdir);
+    Some(config_dir.join("config"))
+}
+
+fn resolve_git_path(base: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        base.join(path)
+    }
 }
 
 fn valid_github_component(value: &str) -> bool {
@@ -7985,6 +8019,42 @@ mod tests {
         assert!(github_coordinates("../example-repo").is_none());
         assert!(github_coordinates("example-org/..").is_none());
         assert!(github_coordinates("https://github.com/example-org/example-repo/issues").is_none());
+    }
+
+    #[test]
+    fn local_repository_parser_reads_linked_worktree_config() {
+        let root = temporary_repository("linked-worktree");
+        let common_git = temporary_repository("linked-worktree-common-git");
+        let worktree_git = common_git.join("worktrees/name");
+        must(
+            fs::create_dir_all(&worktree_git),
+            "create linked worktree metadata",
+        );
+        must(
+            fs::write(
+                root.join(".git"),
+                format!("gitdir: {}\n", worktree_git.display()),
+            ),
+            "write linked worktree pointer",
+        );
+        must(
+            fs::write(worktree_git.join("commondir"), "../..\n"),
+            "write linked worktree common directory",
+        );
+        must(
+            fs::write(
+                common_git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor.git\n",
+            ),
+            "write common git config",
+        );
+
+        assert_eq!(
+            local_github_repository(&root),
+            Some("tailrocks/velnor".to_owned())
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(common_git);
     }
 
     #[test]
@@ -8645,10 +8715,10 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("gcc-aarch64-linux-gnu"));
-        assert!(release_workflow.contains("cargo zigbuild -p velnor-runner"));
-        assert!(release_workflow.contains("cargo zigbuild -p velnorctl"));
-        assert!(!release_workflow.contains("mbx zigbuild -p velnor-runner"));
-        assert!(!release_workflow.contains("mbx zigbuild -p velnorctl"));
+        assert!(release_workflow.contains("MBX_CC=0 mbx zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("MBX_CC=0 mbx zigbuild -p velnorctl"));
+        assert!(!release_workflow.contains("cargo zigbuild -p"));
+        assert!(!release_workflow.contains("VELNOR_DIRECT_CARGO"));
         assert!(release_workflow
             .contains("mbx run -p velnor-runner --bin velnor-guest-image --locked --release --"));
         assert!(release_workflow.contains("workflow:\n    needs: [identity, release_gate]"));
@@ -8757,12 +8827,12 @@ path-only = { path = "../path-only" }
             "mbx zigbuild -p velnor-runner"
         );
         assert_eq!(
-            mbxify_cargo_command("VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner"),
-            "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner"
+            mbxify_cargo_command("MBX_CC=0 cargo zigbuild -p velnor-runner"),
+            "MBX_CC=0 mbx zigbuild -p velnor-runner"
         );
         assert_eq!(
-            mbxify_cargo_command("VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl"),
-            "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl"
+            mbxify_cargo_command("MBX_CC=0 cargo zigbuild -p velnorctl"),
+            "MBX_CC=0 mbx zigbuild -p velnorctl"
         );
         assert_eq!(
             mbxify_cargo_command("cd -- 'crates/app' && cargo nextest run"),
