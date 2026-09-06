@@ -481,6 +481,14 @@ not present.
   callers were skipped by the existing trust gate. It is not a comparable
   warm affected run: generated `.github` changes force full selection, and the
   branch is not merged or followed by a main cache-save run.
+- The last successful affected release-bump run before the object-cache
+  change, [34052912769](https://github.com/tailrocks/velnor/actions/runs/34052912769),
+  gives the required restore split for the three MBX-bearing Rust jobs:
+  exact-key hits `0/3 (0%)`, prefix restores `3/3 (100%)`, combined usable
+  restores `3/3 (100%)`. The Docker job uses BuildKit rather than MBX and is
+  excluded from this MBX rate. This is warm-prefix evidence only: its branch
+  and cache-generation keys differ from a post-change main run, so it does not
+  satisfy the comparable warm affected PR item.
 - A fresh two-page cache listing contained 106 entries and
   12,919,364,637 bytes (12.032 GiB); no `a1e07a28` orphan key remained.
   Budget and seven-day evidence are still OPEN.
