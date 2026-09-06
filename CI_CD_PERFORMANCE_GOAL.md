@@ -19,7 +19,7 @@ Required checks on `main` (ruleset 19573071): `DCO` + `ci-required` only.
 legal today. Reviews required: 0. No merge queue exists (API 404), so the
 `merge_group` trigger in `ci-pr.yml` never fires — any `merge_group`
 prescription below is dead code until a queue is enabled (or the trigger
-is deleted). `ci-required` needs plan + all 15 group-unit callers;
+is deleted). `ci-required` needs plan + all 16 group-unit callers;
 skipped-unselected counts as pass. Re-verify via
 `gh api repos/tailrocks/velnor/rulesets/19573071 --jq .rules`.
 All lanes are `ubuntu-24.04` (+ self-hosted Velnor); no macOS/Windows.
@@ -489,7 +489,7 @@ Provider, queue, and coverage record:
 | GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
 | Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | over the 8-GiB target |
 | Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
-| Required coverage | `ci-required` aggregates all 15 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
+| Required coverage | `ci-required` aggregates all 16 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
 
 ### Safety fixtures and remaining blockers
 
