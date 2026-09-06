@@ -478,6 +478,32 @@ not present.
   the 8-GiB limit. Over-budget days therefore remain observable as artifacts
   and still fail the budget gate.
 
+- Commit `c266ce93` replaced the generator's naive `include_str!` search with
+  a lexical scanner that ignores comments, ordinary/raw strings, and char
+  literals; the workflow test suite and generated-output check pass. Commit
+  `6fb75a7a` then records static `.github` inputs without reintroducing
+  generated-file fanout.
+- Commit `9a88b708` adds a Docker `ci` target after source validation and makes
+  PR Docker commands stop at that target; release/default builds still compile
+  the shipped binaries. Local `docker buildx build --target ci` and full builds
+  pass. Remote run [34048737638](https://github.com/tailrocks/velnor/actions/runs/34048737638)
+  passed Docker job `101528745154` in `1m16s` (`55s` for the Docker check),
+  but it was not a comparable affected-only run.
+- Commit `d0315e34` closes the runner cancellation fan-out race by making the
+  public synchronous fan-out wait for the in-flight marker to clear. The
+  targeted regression test and the full local `velnor-runner` suite pass
+  (`1690` passed, `1` ignored). Remote run
+  [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813)
+  passed `velnor-runner` job `101530695572` in `3m12s` and `velnorctl` job
+  `101530695444` in `10m42s`; `ci-required` passed and all Velnor PR lanes
+  were skipped.
+- Commit `32ce5a37` corrects Results Service artifact JSON: protobuf
+  `StringValue` uses the JSON primitive string form and the current artifact
+  protocol version is 7. The focused wire-shape and feature-gated upload tests
+  pass; the live v0.1.270 fixture probe proved the prior object-shaped field
+  still returned Results Service HTTP 400 `malformed`. This follow-up is not
+  part of merged PR #602.
+
 - Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
   `rust-velnor-runner`, `rust-velnorctl`.
 - Single-crate `velnor-client` full IDs:
@@ -494,10 +520,19 @@ not present.
   `ci-rust-production-topology.yml`; its Velnor command is
   `mbx check --workspace --all-targets --locked` plus
   `mise run test-release-feature-boundary`.
-- Remaining unmet items: PR #602 CI completion, new job image
-  release/deployment, live passing Velnor main proof, comparable warm affected
-  PR, exact/prefix restore rates after the fix, Docker ≤4m proof, seven-day
-  ≤8-GiB snapshots, and the required provider/queue/coverage proof table. Do
+- PR #602 completion is proven by run
+  [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813):
+  `ci-required` passed and its selected GitHub lanes passed; Velnor PR lanes
+  were skipped. Follow-up PR #603 run
+  [34050605194](https://github.com/tailrocks/velnor/actions/runs/34050605194)
+  is not valid current-tip proof: its logs used synthetic merge SHA
+  `3a71275d` and invoked obsolete `mbx check --locked --no-deps` commands;
+  current generated config emits the valid per-unit `fmt`, `clippy`, and
+  `nextest` commands. A synchronized rerun remains required.
+- Remaining unmet items: new job image release/deployment, live passing Velnor
+  main proof, comparable warm affected PR, exact/prefix restore rates after
+  the fix, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
+  provider/queue/coverage proof table, and synchronized PR #603 validation. Do
   not claim achievement.
 
 ## 9. Context (changelog, not work items)
