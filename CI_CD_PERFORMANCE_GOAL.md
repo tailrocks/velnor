@@ -520,10 +520,19 @@ not present.
   `ci-rust-production-topology.yml`; its Velnor command is
   `mbx check --workspace --all-targets --locked` plus
   `mise run test-release-feature-boundary`.
-- Remaining unmet items: PR #602 CI completion, new job image
-  release/deployment, live passing Velnor main proof, comparable warm affected
-  PR, exact/prefix restore rates after the fix, Docker ≤4m proof, seven-day
-  ≤8-GiB snapshots, and the required provider/queue/coverage proof table. Do
+- PR #602 completion is proven by run
+  [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813):
+  `ci-required` passed and its selected GitHub lanes passed; Velnor PR lanes
+  were skipped. Follow-up PR #603 run
+  [34050605194](https://github.com/tailrocks/velnor/actions/runs/34050605194)
+  is not valid current-tip proof: its logs used synthetic merge SHA
+  `3a71275d` and invoked obsolete `mbx check --locked --no-deps` commands;
+  current generated config emits the valid per-unit `fmt`, `clippy`, and
+  `nextest` commands. A synchronized rerun remains required.
+- Remaining unmet items: new job image release/deployment, live passing Velnor
+  main proof, comparable warm affected PR, exact/prefix restore rates after
+  the fix, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
+  provider/queue/coverage proof table, and synchronized PR #603 validation. Do
   not claim achievement.
 
 ## 9. Context (changelog, not work items)
