@@ -9669,11 +9669,12 @@ path-only = { path = "../path-only" }
             "write selection artifact",
         );
         must(
-            runtime::run_units(
+            runtime::run_units_with_selection_file(
                 &root,
                 &root.join(".github/ci/project.toml"),
                 runtime::Scope::Full,
                 None,
+                &selection,
             ),
             "run parallel units",
         );

@@ -628,6 +628,20 @@ pub(crate) fn run_units(
     scope: Scope,
     only_unit: Option<&str>,
 ) -> Result<(), GeneratorError> {
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
+        || root.join(".velnor-ci-selection/velnor-ci-selection"),
+        PathBuf::from,
+    );
+    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+}
+
+pub(crate) fn run_units_with_selection_file(
+    root: &Path,
+    config_path: &Path,
+    scope: Scope,
+    only_unit: Option<&str>,
+    selection_file: &Path,
+) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
     if matches!(
         env::var("EVENT_NAME").as_deref(),
@@ -638,11 +652,7 @@ pub(crate) fn run_units(
             "trusted events require full CI scope",
         ));
     }
-    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
-        || root.join(".velnor-ci-selection/velnor-ci-selection"),
-        PathBuf::from,
-    );
-    let selection = read_selection_file(&selection_file)?;
+    let selection = read_selection_file(selection_file)?;
     validate_selection_sha(&selection)?;
     if selection.scope != scope {
         return Err(GeneratorError::usage(format!(
