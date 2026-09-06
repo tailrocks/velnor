@@ -509,6 +509,27 @@ not present.
   `v0.1.272` caches account for 2,619,884,756 bytes (2.440 GiB). No deletion
   is safe while the release and the first object-mode main save are active.
 
+### Recheck 2026-09-06T19:33:06Z
+
+- Release run [34053258476](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  completed successfully at 19:30:24Z. The [GitHub Release for `v0.1.272`](https://github.com/tailrocks/velnor/releases/tag/v0.1.272)
+  is published with 14 assets, including both amd64/arm64 tarballs and debs,
+  manifests, checksums, and signatures. This proves publication, not fleet
+  activation.
+- The pinned [Mr. Boxington action documentation](https://github.com/jdx/mr-boxington-action/blob/7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777/README.md#github-actions-cache)
+  says `objects` omits the Cargo registry and exports an object closure; its
+  [pinned implementation](https://github.com/jdx/mr-boxington-action/blob/7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777/dist/index.js)
+  skips saving when the custom primary key is an exact hit. The current
+  generated custom key was unchanged across the target-to-object transition,
+  so PR #607 could not create a new object payload. Follow-up PR
+  [#610](https://github.com/tailrocks/velnor/pull/610) adds the `objects-v2`
+  marker to every hosted MBX key and prefix. Its checks are pending; no
+  object-v2 cache exists yet.
+- Main run [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  remains pending with no jobs. The cache listing still has zero `objects-v2`
+  entries and 12,919,364,637 bytes total (12.032 GiB), so post-fix warm proof
+  and budget headroom remain OPEN.
+
 Provider, queue, and coverage record:
 
 | Area | Evidence | State |
