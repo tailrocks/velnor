@@ -494,8 +494,15 @@ not present.
   targeted regression test and the full local `velnor-runner` suite pass
   (`1690` passed, `1` ignored). Remote run
   [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813)
-  passed `velnor-runner` job `101530695572` in `3m12s`; the PR run was still
-  waiting on `velnorctl` when this entry was written.
+  passed `velnor-runner` job `101530695572` in `3m12s` and `velnorctl` job
+  `101530695444` in `10m42s`; `ci-required` passed and all Velnor PR lanes
+  were skipped.
+- Commit `32ce5a37` corrects Results Service artifact JSON: protobuf
+  `StringValue` uses the JSON primitive string form and the current artifact
+  protocol version is 7. The focused wire-shape and feature-gated upload tests
+  pass; the live v0.1.270 fixture probe proved the prior object-shaped field
+  still returned Results Service HTTP 400 `malformed`. This follow-up is not
+  part of merged PR #602.
 
 - Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
   `rust-velnor-runner`, `rust-velnorctl`.
