@@ -23,7 +23,6 @@ TimeoutStopSec=10800
 KillMode=mixed
 User=root
 StateDirectory=velnor
-RuntimeDirectory=velnor
 WorkingDirectory=/var/lib/velnor
 ReadWritePaths=/var/lib/velnor /run/velnor /var/log/velnor
 

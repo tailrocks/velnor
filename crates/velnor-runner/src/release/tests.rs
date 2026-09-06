@@ -273,6 +273,43 @@ fn debian_package_ships_boot_persistent_transaction_lock_path() {
 }
 
 #[test]
+fn runner_units_do_not_own_the_shared_runtime_directory() {
+    // /run/velnor is shared by every runner unit and by velnor-tools. If each
+    // unit owns it through RuntimeDirectory, stopping one unit removes the
+    // transaction lock and breaks namespace setup for the others. The package
+    // tmpfiles entry owns this shared path instead.
+    for (name, service) in [
+        ("daemon", include_str!("../../debian/velnor-daemon.service")),
+        (
+            "daemon instance",
+            include_str!("../../debian/velnor-daemon@.service"),
+        ),
+        (
+            "controller",
+            include_str!("../../debian/velnor-controller@.service"),
+        ),
+        ("doctor", include_str!("../../debian/velnor-doctor.service")),
+        (
+            "doctor instance",
+            include_str!("../../debian/velnor-doctor@.service"),
+        ),
+        (
+            "guardian",
+            include_str!("../../debian/velnor-guardian.service"),
+        ),
+        ("job", include_str!("../../debian/velnor-job@.service")),
+        ("slot", include_str!("../../debian/velnor-slot@.service")),
+    ] {
+        assert!(
+            !service
+                .lines()
+                .any(|line| line.trim() == "RuntimeDirectory=velnor"),
+            "{name} unit must not own the shared /run/velnor directory"
+        );
+    }
+}
+
+#[test]
 fn activate_hashes_the_shipped_daemon_binary() {
     let src = include_str!("../release.rs");
     assert!(

@@ -24,7 +24,6 @@ TimeoutStopSec=120
 KillMode=mixed
 User=root
 StateDirectory=velnor
-RuntimeDirectory=velnor
 LogsDirectory=velnor
 WorkingDirectory=/var/lib/velnor
 NoNewPrivileges=true

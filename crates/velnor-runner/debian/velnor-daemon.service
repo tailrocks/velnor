@@ -64,7 +64,6 @@ KillMode=mixed
 User=root
 StateDirectory=velnor
 CacheDirectory=velnor
-RuntimeDirectory=velnor
 LogsDirectory=velnor
 WorkingDirectory=/var/lib/velnor
 NoNewPrivileges=true
