@@ -41,7 +41,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "f15ff2e8449a34f77f04746fa461a349bad22e
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "c3a38b5ffffb844ab0dffc730a67f953b6af9eb0";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "c3a38b5ffffb844ab0dffc730a67f953b6af9eb7";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
@@ -2417,6 +2417,15 @@ fn reject_retired_workflow_provider_reference(
     Ok(())
 }
 
+fn is_retired_workflow_provider_repository(root: &Path) -> bool {
+    let Some(repository) = local_github_repository(root) else {
+        return false;
+    };
+    RETIRED_WORKFLOW_PROVIDER_REPOSITORIES
+        .iter()
+        .any(|candidate| *candidate == repository)
+}
+
 fn yaml_contains_retired_workflow_provider(value: &serde_yaml::Value) -> bool {
     match value {
         serde_yaml::Value::Mapping(mapping) => mapping.iter().any(|(key, value)| {
@@ -2478,6 +2487,7 @@ fn load_workflow_templates(
     }
     let entries = fs::read_dir(&directory)
         .map_err(|error| GeneratorError::io("read workflow templates", &directory, &error))?;
+    let reject_retired_provider_references = !is_retired_workflow_provider_repository(root);
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
@@ -2502,7 +2512,9 @@ fn load_workflow_templates(
                 path.display()
             ))
         })?;
-        reject_retired_workflow_provider_reference(&path, body)?;
+        if reject_retired_provider_references {
+            reject_retired_workflow_provider_reference(&path, body)?;
+        }
         names.push(name.to_owned());
         config
             .workflow_templates
@@ -2574,6 +2586,7 @@ fn adopt_existing_workflow_templates(
 
     let local_velnor = config.repository == "tailrocks/velnor";
     let already_adopted = config.adopted_workflow_surface;
+    let reject_retired_provider_references = !is_retired_workflow_provider_repository(root);
     if !local_velnor && !already_adopted {
         config.workflow_files.clone_from(&existing);
     }
@@ -2586,7 +2599,9 @@ fn adopt_existing_workflow_templates(
         let path = root.join(&output);
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow for adoption", &path, &error))?;
-        reject_retired_workflow_provider_reference(&path, &content)?;
+        if reject_retired_provider_references {
+            reject_retired_workflow_provider_reference(&path, &content)?;
+        }
         if already_adopted
             && content.starts_with(GENERATED_HEADER)
             && !config.workflow_templates.contains_key(&name)
@@ -4475,7 +4490,9 @@ fn nested_unit_workflow_file(unit: &Unit) -> String {
 
 fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
     let mut files = config.workflow_files.clone();
-    files.extend(config.units.iter().map(nested_unit_workflow_file));
+    if !config.adopted_workflow_surface {
+        files.extend(config.units.iter().map(nested_unit_workflow_file));
+    }
     files
 }
 
@@ -8032,6 +8049,10 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx build"));
         assert!(release_workflow.contains("mbx zigbuild"));
         assert!(release_workflow.contains("mbx run"));
+        assert!(release_workflow.contains("target: aarch64-unknown-linux-gnu"));
+        assert!(release_workflow.contains("--target \"$TARGET\""));
+        assert!(release_workflow.contains("target/$TARGET/release/velnor-guest-agent"));
+        assert!(release_workflow.contains("Normalize downloaded workflow binaries"));
         assert!(!release_workflow.contains("sccache"));
         assert!(!release_workflow.contains("actions/cache"));
 
@@ -8945,6 +8966,25 @@ path-only = { path = "../path-only" }
     }
 
     #[test]
+    fn adopted_workflow_config_does_not_advertise_unrendered_unit_workflows() {
+        let mut config = must(
+            scan_repository(&fixture_root(), RunnerMode::Github),
+            "scan fixture for adopted config test",
+        );
+        assert!(!config.units.is_empty());
+        config.workflow_files = vec!["ci.yml".to_owned()];
+        config
+            .workflow_templates
+            .insert("ci.yml".to_owned(), "name: CI\n".to_owned());
+        config.adopted_workflow_surface = true;
+
+        let toml = config.toml();
+        assert!(toml.contains("files = [\"ci.yml\"]"));
+        assert!(!toml.contains("ci-rust-"));
+        assert!(!toml.contains("ci-docs-"));
+    }
+
+    #[test]
     fn generator_owned_template_rejects_retired_provider_but_allows_fixture_repository() {
         let root = temporary_repository("retired-provider-template");
         let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
@@ -9224,6 +9264,47 @@ path-only = { path = "../path-only" }
             Ok(WriteOutcome::Unchanged)
         ));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retired_provider_repository_can_scan_its_own_workflows() {
+        let root = temporary_repository("retired-provider-self-scan");
+        must(
+            fs::create_dir_all(root.join(".git")),
+            "create repository metadata directory",
+        );
+        must(
+            fs::write(
+                root.join(".git/config"),
+                "[remote \"origin\"]\n    url = git@github.com:tailrocks/velnor-actions.git\n",
+            ),
+            "write provider repository metadata",
+        );
+        let retired = format!(
+            "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: tailrocks/velnor-actions/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+        );
+        let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
+        must(
+            fs::create_dir_all(must_some(template.parent(), "template parent")),
+            "create provider template directory",
+        );
+        must(fs::write(&template, &retired), "write provider template");
+        let workflow = root.join(".github/workflows/ci.yml");
+        must(
+            fs::create_dir_all(must_some(workflow.parent(), "workflow parent")),
+            "create provider workflow directory",
+        );
+        must(fs::write(&workflow, &retired), "write provider workflow");
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan provider repository",
+        );
+        must(
+            adopt_existing_workflow_templates(&root, config),
+            "adopt provider workflow",
+        );
         let _ = fs::remove_dir_all(root);
     }
 

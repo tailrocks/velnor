@@ -2732,7 +2732,7 @@ mod tests {
             .join("fleet/release-refs.toml");
         let ledger = ReleaseRefLedger::load(&path).expect("production ledger parses");
         assert_eq!(ledger.schema_version, 1);
-        assert_eq!(ledger.entries.len(), 157);
+        assert_eq!(ledger.entries.len(), 136);
         assert!(ledger
             .entries
             .iter()
@@ -2742,7 +2742,7 @@ mod tests {
                 .approved_workflow_identities()
                 .expect("identities")
                 .len(),
-            157
+            136
         );
     }
 
