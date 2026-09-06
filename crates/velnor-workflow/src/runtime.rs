@@ -1131,9 +1131,15 @@ fn prerequisite_commands(unit: &CiUnit, lane: RunnerLane, scope: Scope) -> Vec<S
         .iter()
         .filter(|command| command.contains(" clippy "))
         .map(|command| {
-            command
+            let command = command
                 .replacen(" clippy ", " check ", 1)
-                .replace(" -- -D warnings", "")
+                .replace(" -- -D warnings", "");
+            if lane == RunnerLane::Velnor {
+                // `mbx check` does not expose Cargo's `--no-deps` flag.
+                command.replace(" --no-deps", "")
+            } else {
+                command
+            }
         })
         .collect()
 }
@@ -2302,7 +2308,7 @@ mod tests {
         );
         assert_eq!(
             prerequisite_commands(&unit, RunnerLane::Velnor, Scope::Affected),
-            vec!["mbx check --locked --no-deps --all-targets"]
+            vec!["mbx check --locked --all-targets"]
         );
     }
 
