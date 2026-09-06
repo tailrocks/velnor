@@ -157,15 +157,19 @@ R5 — Slow tests dominate warm time: `idle_resource_scaling…` 20.1s,
 `oauth_client_assertion…` 11.9s, `supervised_controller…` 8.3s,
 `actual_sqlite_lock` 5.1s, `complete_job_retries_5xx` 5.1s.
 
-R6 — Self-hosted lane zero throughput: 15/15 Velnor jobs `queued` forever
-on main run 34023394569 and nightly 34020370896; with main
-`cancel-in-progress: false` this wedges main and Nightly queues (50min–
-2h+). PR lane unaffected (Velnor skipped, auto-cancel on).
+R6 — Historical self-hosted lane zero throughput: 15/15 Velnor jobs were
+`queued` forever on main run 34023394569 and nightly 34020370896; with main
+`cancel-in-progress: false` this wedged main and Nightly queues (50min–2h+).
+PR lanes were unaffected because Velnor was skipped and auto-cancel remained
+enabled. Current remediation is runner health/capacity plus a passing trusted
+main/Nightly proof; a non-gating split is not a remedy.
 
-R7 — Nightly duplicates main CI with no `ci-required` fan-in and no
-alerting; `merge_group` maps to `affected`, so queue combinations merge
-without ever being tested together; plan/job double-resolution can
-silently no-op a needed unit (`return Ok(())`, accepted as pass).
+R7 — Historical Nightly topology and queue risks: the current generated
+Nightly workflow now has full-scope planning, `nightly-required` fan-in, and
+red-to-signal alerting. The disabled `merge_group` trigger is deleted while
+no merge queue exists. Plan/job double-resolution remains a D1 acceptance
+risk until the single-resolution fixture is proven; `return Ok(())` must not
+silently pass a needed unit.
 
 R8 — Hidden file couplings the manifest graph cannot see (adversarial
 review, all confirmed) + ONE proven toolchain incompatibility:
@@ -292,14 +296,16 @@ D3. Cache (budgets + behavior):
 
 D4. Topology + queue:
 
-- Unwedge `velnor-target-mvp` (scale/fix runners). Velnor must remain in
-    the same gating `ci-pr`/`ci-main`/Nightly caller DAG; never move it to
-    a non-gating `ci-velnor.yml`, because that disconnects Velnor failures
-    from `ci-required`/`nightly-required` and can report green CI while the
-    provider lane is broken. Forever-queued jobs currently hold main +
-    Nightly pending indefinitely.
-- Nightly: narrow scope, add `ci-required`-equivalent + alerting (red
-    blocks nobody today).
+- Unwedge `velnor-target-mvp` (scale/fix runners). PR Velnor jobs are
+    intentionally skipped by the trust gate; trusted main/Nightly Velnor
+    jobs must remain in the same gating `ci-pr`/`ci-main`/Nightly caller DAG.
+    Never move them to a non-gating `ci-velnor.yml`, because that disconnects
+    Velnor failures from `ci-required`/`nightly-required` and can report green
+    CI while the provider lane is broken. Historical forever-queued incidents
+    require runner-health remediation, queue-owner escalation, and a terminal
+    trusted main/Nightly result.
+- Nightly: retain full scope, `nightly-required` fan-in, and red-to-signal
+    alerting; prove a live trusted run.
 - Kill dual codegen per job (shared check artifacts or single
     `check --tests`), then shard the R5 slow tests with nextest
     partitioning.
@@ -307,15 +313,22 @@ D4. Topology + queue:
 D5. Safety nets that MUST exist before narrowing (status):
 
 - Main full runs: EXISTS (forced full on push). Keep.
-- Nightly full + alerting: ADD (see D4).
-- `merge_group` full: MISSING — D1 one-liner, merge-blocking.
-- Single resolution + no silent no-op: MISSING — D1, merge-blocking.
-- Version-bump allowlist (unit + dependents; lockfile stays broad):
-    ADD with fixture tests.
+- Nightly full + alerting: EXISTS in generated `nightly.yml` and the
+    red-to-signal test; live trusted-run proof remains open.
+- `merge_group` full: PASS by deleting the dead trigger while no queue exists;
+    re-enable only with an enabled queue and proof of queued-combination
+    coverage.
+- Single resolution + no silent no-op: PARTIAL — the selection artifact
+    handoff exists, but the shallow-checkout/no-git-read and SHA-mismatch
+    fixtures remain open (D1, merge-blocking).
+- Version-bump allowlist (unit + dependents; lockfile stays broad): runtime
+    implementation exists; exact real-project fixture is open in PR #621.
 - Production-topology gate (`cargo check --workspace --all-targets`
     default features + release-feature boundary from `mise.toml:42-52`):
-    wire into CI; per-crate `--all-features` green is not shippable (H2).
-- `include_str!` coverage test: ADD (see D2).
+    EXISTS in the named generated workflow and command; live trusted proof
+    remains open.
+- `include_str!` coverage test: EXISTS through the lexical scanner and
+    generator tests; its acceptance is retained in the D2 fixture matrix.
 
 ## 5. Plan (in order; later steps may not assume earlier ones)
 
@@ -660,15 +673,16 @@ not present.
   communication; `ci-required` job `101558904566` failed. This is not passing
   Velnor-main proof.
 
-Owner/deadline register for the remaining proof:
+Proposed owner/deadline register for the remaining proof. These assignments
+are follow-up commitments, not evidence that a blocker is cleared:
 
 | Unmet item | Owner | Deadline |
 | --- | --- | --- |
-| Passing trusted Velnor main proof and Docker/runner/control/render/production-topology failures | unassigned | no due date |
-| Matched before/after post-`objects-v2` PR pair, plus all §1 SLOs (PR #616 runner is 5m30s) | unassigned | no due date |
-| Seven consecutive daily cache snapshots at or below 8 GiB | unassigned | no due date |
-| Provider → queue timestamp → coverage evidence for remaining costs | unassigned | no due date |
-| v0.1.273 fleet activation | Velnor fleet operator (the documented activation role) | no due date |
+| Passing trusted Velnor main proof and Docker/runner/control/render/production-topology failures | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
+| Matched before/after post-`objects-v2` PR pair, plus all §1 SLOs (PR #616 runner is 5m30s) | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
+| Seven consecutive daily cache snapshots at or below 8 GiB | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
+| Provider → queue timestamp → coverage evidence for remaining costs | Repository CI owner (`donbeave`) | 2026-09-08 UTC |
+| v0.1.273 fleet activation | Velnor fleet operator (the documented activation role) | 2026-09-08 UTC |
 
 Provider, queue, and coverage record:
 
@@ -703,7 +717,7 @@ Provider, queue, and coverage record:
   configuration matches a generator edit to exactly `docker`,
   `rust-velnor-workflow`, and `rust-production-topology`; `runtime.rs` remains
   watched by every unit. This prevents generator-only edits from selecting all
-  15 verification units while retaining the image, regeneration, and workspace
+  verification units while retaining the image, regeneration, and workspace
   safety gates.
 - Local proof after that change: `cargo test --locked -p velnor-workflow` passed
   133 tests; `cargo check --workspace --all-targets --locked` passed; the
