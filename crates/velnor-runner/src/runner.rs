@@ -2041,10 +2041,11 @@ fn validate_jit_endpoint(
     let scope_url = crate::protocol::validate_authenticated_url(&scope.original_url)
         .context("validate configured GitHub scope endpoint")?;
     let host_matches = hosted_host.is_some_and(|host| {
-        endpoint
-            .host_str()
-            .is_some_and(|actual| actual.eq_ignore_ascii_case(host))
-            && endpoint.port().is_none()
+        endpoint.host_str().is_some_and(|actual| {
+            actual.eq_ignore_ascii_case(host)
+                || (crate::protocol::is_github_actions_service_host(actual)
+                    && crate::protocol::is_github_actions_service_host(host))
+        }) && endpoint.port().is_none()
     });
     if scope.hosted {
         if hosted_host.is_some() {
@@ -13650,6 +13651,37 @@ fn default_agent_name() -> String {
 mod tests {
     use super::*;
     use crate::slot_log::LIFECYCLE_LOG;
+
+    #[test]
+    fn hosted_jit_endpoint_accepts_regional_actions_service_host() {
+        let scope = GitHubScope::parse("https://github.com/owner/repo").unwrap();
+        validate_jit_endpoint(
+            &scope,
+            "authorizationUrl",
+            "https://pipelinesghubeus14.actions.githubusercontent.com/tenant/_apis/oauth2/token",
+            Some("vstoken.actions.githubusercontent.com"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hosted_jit_endpoint_rejects_lookalike_actions_domain() {
+        let scope = GitHubScope::parse("https://github.com/owner/repo").unwrap();
+        for endpoint in [
+            "https://pipelinesghubeus14.actions.githubusercontent.com.evil.example/token",
+            "https://nested.pipelinesghubeus14.actions.githubusercontent.com/token",
+        ] {
+            let error = validate_jit_endpoint(
+                &scope,
+                "authorizationUrl",
+                endpoint,
+                Some("vstoken.actions.githubusercontent.com"),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("approved GitHub Actions service"), "{error}");
+        }
+    }
 
     #[test]
     fn workflow_source_context_requires_exact_workflow_sha() {
