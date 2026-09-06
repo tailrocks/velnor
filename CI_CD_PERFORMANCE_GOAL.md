@@ -292,9 +292,12 @@ D3. Cache (budgets + behavior):
 
 D4. Topology + queue:
 
-- Unwedge `velnor-target-mvp` (scale/fix runners) or move Velnor jobs to
-    a non-gating workflow: 15 forever-queued jobs hold main + Nightly
-    pending indefinitely.
+- Unwedge `velnor-target-mvp` (scale/fix runners). Velnor must remain in
+    the same gating `ci-pr`/`ci-main`/Nightly caller DAG; never move it to
+    a non-gating `ci-velnor.yml`, because that disconnects Velnor failures
+    from `ci-required`/`nightly-required` and can report green CI while the
+    provider lane is broken. Fifteen forever-queued jobs currently hold
+    main + Nightly pending indefinitely.
 - Nightly: narrow scope, add `ci-required`-equivalent + alerting (red
     blocks nobody today).
 - Kill dual codegen per job (shared check artifacts or single
