@@ -594,12 +594,21 @@ jobs:
 
       - name: Record platform digest
         env:
-          PLATFORM_DIGEST: ${{ steps.push.outputs.digest }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+          IMAGE_REF: ${{ env.GHCR_IMAGE }}:release-${{ env.COMMIT }}-${{ matrix.arch }}
         run: |
           set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE_REF" --format '{{json .}}' > platform-image.json
+          platform_digest="$(jq -er --arg arch "$EXPECTED_ARCH" '
+            [.manifest.manifests[]
+              | select(.platform.os == "linux" and .platform.architecture == $arch)
+              | .digest]
+            | if length == 1 then .[0] else error("expected exactly one Linux platform manifest") end
+          ' platform-image.json)"
+          PLATFORM_DIGEST="$platform_digest"
           case "$PLATFORM_DIGEST" in
             sha256:[0-9a-fA-F]*) ;;
-            *) echo "::error::build-push did not return a platform digest" >&2; exit 1 ;;
+            *) echo "::error::staged image did not expose one platform digest" >&2; exit 1 ;;
           esac
           printf '%s\n' "$PLATFORM_DIGEST" > "image-${{ matrix.arch }}.digest"
 

@@ -8333,6 +8333,11 @@ path-only = { path = "../path-only" }
             .contains("needs: [identity, release_gate, metadata, workflow, image-admission]"));
         assert!(release_workflow.contains("name: Admit immutable image tag"));
         assert!(release_workflow.contains("release-${{ env.COMMIT }}-${{ matrix.arch }}"));
+        assert!(release_workflow.contains(
+            "IMAGE_REF: ${{ env.GHCR_IMAGE }}:release-${{ env.COMMIT }}-${{ matrix.arch }}"
+        ));
+        assert!(release_workflow.contains("| .digest]\n            | if length == 1 then .[0]"));
+        assert!(!release_workflow.contains("PLATFORM_DIGEST: ${{ steps.push.outputs.digest }}"));
         assert!(release_workflow.contains("refusing a fail-open publish"));
         assert!(release_workflow.contains("Verify OCI index stayed immutable before publication"));
         assert!(release_workflow.contains("pattern: release-*"));
