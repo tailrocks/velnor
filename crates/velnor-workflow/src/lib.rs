@@ -2442,7 +2442,7 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
     }
     if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
         config.notes.push(format!(
-            "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION} by default; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."
+            "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION} by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with stable per-unit keys (exact hits reuse the cache; a new entry is saved only when dependency inputs change). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."
         ));
     }
 }
@@ -4301,35 +4301,57 @@ impl WorkflowIr {
                 ActionPin::Mise.reference()
             );
         }
-        if tools.contains(&ToolRequirement::MrBoxington) && lane == RunnerMode::Github {
-            let (_, key_files) = unit.cache.as_ref().map_or_else(
-                || {
-                    rendered_cache_values(&CacheSpec {
-                        key_files: vec![
-                            "Cargo.lock".to_owned(),
-                            "rust-toolchain.toml".to_owned(),
-                            "rust-toolchain".to_owned(),
-                            "mise.toml".to_owned(),
-                            "mise.lock".to_owned(),
-                        ],
-                        paths: Vec::new(),
-                    })
-                },
-                rendered_cache_values,
-            );
-            let cache_key = format!(
-                "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}-${{{{ github.sha }}}}",
-                unit.id,
-            );
-            let restore_key = format!(
-                "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}-",
-                unit.id,
-            );
-            let _ = writeln!(
-                output,
-                "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
-                ActionPin::MrBoxington.reference()
-            );
+        if tools.contains(&ToolRequirement::MrBoxington) {
+            if lane == RunnerMode::Github {
+                let (_, key_files) = unit.cache.as_ref().map_or_else(
+                    || {
+                        rendered_cache_values(&CacheSpec {
+                            key_files: vec![
+                                "Cargo.lock".to_owned(),
+                                "rust-toolchain.toml".to_owned(),
+                                "rust-toolchain".to_owned(),
+                                "mise.toml".to_owned(),
+                                "mise.lock".to_owned(),
+                            ],
+                            paths: Vec::new(),
+                        })
+                    },
+                    rendered_cache_values,
+                );
+                // Stable per-unit key: exact hits reuse the cache on every run
+                // with unchanged dependency inputs, and a new immutable entry
+                // is saved only when those inputs change. A per-commit suffix
+                // would mint one entry per unit per push, flood the 10 GiB
+                // GitHub cache, evict warm entries, and force cold
+                // `Downloading crates` / `Compiling` builds.
+                let cache_key = format!(
+                    "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}",
+                    unit.id,
+                );
+                // Unit-level prefix (no dependency hash): after a lockfile or
+                // toolchain bump the previous tree still warms unchanged
+                // dependencies instead of rebuilding the world cold.
+                let restore_key = format!(
+                    "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-",
+                    unit.id,
+                );
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
+                    ActionPin::MrBoxington.reference()
+                );
+            } else {
+                // Velnor lane: the job image pins Mr. Boxington and the runner
+                // mounts its host-persistent local store, so the local backend
+                // reuses it with no download and no cache transport. The
+                // version is deliberately omitted: pinning one would force a
+                // release download on every job instead of reusing PATH mbx.
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: local",
+                    ActionPin::MrBoxington.reference()
+                );
+            }
         }
         if tools.contains(&ToolRequirement::Bun) {
             if let Some(bun_version) = unit.tool_version.as_deref() {
@@ -8274,11 +8296,32 @@ path-only = { path = "../path-only" }
         assert!(workflow
             .contains("cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust"));
         assert!(workflow.contains("restore-keys: |"));
-        assert_eq!(workflow.matches("jdx/mr-boxington-action@").count(), 1);
-        assert!(!workflow
+        // Stable per-unit keys: an exact hit reuses the cache on every run
+        // with unchanged dependency inputs. A per-commit suffix would mint one
+        // entry per unit per push, flood the GitHub cache, evict warm entries,
+        // and force cold `Downloading crates` / `Compiling` builds.
+        for line in workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("cache-key:"))
+        {
+            assert!(
+                !line.contains("github.sha"),
+                "mbx cache-key must be stable across commits: {line}"
+            );
+        }
+        assert!(workflow.contains("save-on-workflow-dispatch: true"));
+        assert_eq!(workflow.matches("jdx/mr-boxington-action@").count(), 2);
+        let velnor_lane = workflow
             .split_once("\n  velnor:")
-            .map_or("", |(_, lane)| lane)
-            .contains("jdx/mr-boxington-action@"));
+            .map_or("", |(_, lane)| lane);
+        // Velnor lane reuses the image-pinned mbx against the
+        // runner-provided local store: no download, no cache transport.
+        assert!(velnor_lane.contains("jdx/mr-boxington-action@"));
+        assert!(velnor_lane.contains("backend: local"));
+        assert!(!velnor_lane.contains("backend: github"));
+        assert!(!velnor_lane.contains("cache-key:"));
+        assert!(!velnor_lane.contains("version: 1.8.3"));
+        assert!(!velnor_lane.contains("save-on-workflow-dispatch"));
         assert!(!workflow.contains("sccache"));
         assert!(!workflow.contains("actions/cache"));
         let policy = must_some(
@@ -9159,6 +9202,36 @@ path-only = { path = "../path-only" }
     }
 
     #[test]
+    fn velnor_only_lane_uses_local_mbx_backend() {
+        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let config = catalog_config_with_default_branch(profile, RunnerMode::Velnor, "main");
+        let rust = must_some(
+            config.units.iter().find(|unit| unit.id == "rust"),
+            "reviewed Rust unit",
+        );
+        for kind in [
+            WorkflowKind::PullRequest,
+            WorkflowKind::Main,
+            WorkflowKind::Nightly,
+        ] {
+            let workflow = WorkflowIr::from_config(&config).render_nested_unit(rust, kind);
+            assert!(!workflow.contains("\n  github:"));
+            assert!(workflow.contains("\n  velnor:"));
+            assert!(workflow.contains(ActionPin::MrBoxington.reference()));
+            assert!(workflow.contains("backend: local"));
+            assert!(!workflow.contains("backend: github"));
+            assert!(!workflow.contains("cache-key:"));
+            assert!(!workflow.contains("save-on-workflow-dispatch"));
+            assert!(!workflow.contains("actions/cache"));
+            assert!(!workflow.contains("sccache"));
+            // The setup step is explicit so both-lane usage is verifiable in
+            // generated output; the mbx invocations themselves live in
+            // project.toml unit commands.
+            assert!(workflow.contains("name: Set up Mr. Boxington"));
+        }
+    }
+
+    #[test]
     fn cache_rendering_uses_only_detected_unit_cache_settings() {
         let root = temporary_repository("rust-cache");
         must(
@@ -9176,6 +9249,15 @@ path-only = { path = "../path-only" }
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
         assert!(workflow.contains("backend: github"));
         assert!(workflow.contains("cache-key: velnor-mbx-1.8.3-"));
+        for line in workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("cache-key:"))
+        {
+            assert!(
+                !line.contains("github.sha"),
+                "mbx cache-key must be stable across commits: {line}"
+            );
+        }
         assert!(!workflow.contains("~/.cargo/registry"));
         assert!(!workflow.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert!(workflow.contains(".cargo/**"));

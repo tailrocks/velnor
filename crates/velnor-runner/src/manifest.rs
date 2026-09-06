@@ -316,7 +316,11 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Forbidden("token"),
 ];
 const MR_BOXINGTON_INPUTS: &[InputRule] = &[
-    InputRule::Literal("backend", &["github", "server"]),
+    // `local` is the Velnor-lane backend: the job image pins mbx and the
+    // runner mounts its host-persistent store, so generated Velnor steps use
+    // it with no download and no cache transport. `github`/`server` remain
+    // the GitHub-hosted transports.
+    InputRule::Literal("backend", &["github", "server", "local"]),
     InputRule::Any("version"),
     InputRule::Any("github-token"),
     InputRule::Any("cache-key"),
@@ -2490,10 +2494,12 @@ mod tests {
     }
 
     #[test]
-    fn mr_boxington_rejects_unsupported_local_backend() {
+    fn mr_boxington_admits_github_server_and_local_backends() {
         const SHA: &str = "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777";
 
-        for backend in ["github", "server"] {
+        // `local` is the generated Velnor-lane backend: the job image pins
+        // mbx and the runner mounts its host-persistent store.
+        for backend in ["github", "server", "local"] {
             validate_resolved_action(
                 "cache",
                 "jdx/mr-boxington-action",
@@ -2503,22 +2509,6 @@ mod tests {
             )
             .unwrap();
         }
-
-        let local_error = validate_resolved_action(
-            "cache",
-            "jdx/mr-boxington-action",
-            SHA,
-            None,
-            &BTreeMap::from([("backend".to_string(), "local".to_string())]),
-        )
-        .unwrap_err();
-        assert_eq!(
-            local_error
-                .downcast_ref::<CapabilityViolation>()
-                .unwrap()
-                .field,
-            "with.backend"
-        );
 
         let unknown_error = validate_resolved_action(
             "cache",

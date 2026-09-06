@@ -38,9 +38,9 @@ jobs:
         with:
           backend: github
           version: 1.8.3
-          cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-bench/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}-${{ github.sha }}
+          cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-bench/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
           restore-keys: |
-            velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-bench/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}-
+            velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-bench-
           save-on-workflow-dispatch: true
       - name: Set up cargo-nextest
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
@@ -75,6 +75,10 @@ jobs:
         with:
           install_args: rust
           cache: true
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
       - name: Set up cargo-nextest
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
         with:
