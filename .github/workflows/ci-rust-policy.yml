@@ -48,6 +48,7 @@ jobs:
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
+          github-cache-mode: objects
           version: 1.8.3
           cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
