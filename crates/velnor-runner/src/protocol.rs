@@ -4811,7 +4811,7 @@ fn artifact_create_request(
         "workflow_job_run_backend_id": job_id,
         "name": name,
         "mime_type": {"value": "application/zip"},
-        "version": 7
+        "version": 4
     });
     if let Some(days) = retention_days {
         let expires_at = (now + time::Duration::days(i64::from(days)))
@@ -6926,7 +6926,7 @@ mod tests {
             time::OffsetDateTime::UNIX_EPOCH,
         )
         .unwrap();
-        assert_eq!(request["version"], 7);
+        assert_eq!(request["version"], 4);
         assert_eq!(
             request["mime_type"],
             serde_json::json!({"value": "application/zip"})
@@ -7057,7 +7057,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
         let create = String::from_utf8_lossy(&requests[0]);
-        assert!(create.contains("\"version\":7"));
+        assert!(create.contains("\"version\":4"));
         assert!(create.contains("\"mime_type\":{\"value\":\"application/zip\"}"));
         let finalize = String::from_utf8_lossy(&requests[2]);
         assert!(finalize.contains("\"hash\":{"));
