@@ -6357,7 +6357,7 @@ jobs:
           headroom="$((MAX_BYTES - total))"
           jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
             --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
             > "$RUNNER_TEMP/cache-budget/summary.json"
           cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish cache budget snapshot
@@ -10988,6 +10988,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
                         .is_some_and(|enforce| publish < enforce)
                 }),
             "cache evidence must be published before an over-budget failure"
+        );
+        assert!(
+            maintenance.contains("{captured_at: $captured_at, cache_count: $count"),
+            "cache snapshot must serialize the captured_at jq variable"
         );
     }
 
