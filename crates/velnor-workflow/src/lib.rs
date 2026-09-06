@@ -2529,10 +2529,15 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
     let files = repository_files(root)?;
     let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
     let docker_watch = docker_watch_paths(root, &config.units)?;
-    let common_runtime_inputs = [
-        "crates/velnor-workflow/src/lib.rs",
-        "crates/velnor-workflow/src/runtime.rs",
-    ];
+    // `runtime.rs` executes in every generated job, so its selection and
+    // command-contract changes are broad-impact. `lib.rs` is the generator
+    // and already belongs to the workflow crate plus the Docker image that
+    // packages the runtime. Keeping it out of this common list prevents a
+    // generator-only edit from selecting every verification unit; stale
+    // generated output is then caught by the workflow unit's regeneration
+    // gate, while changed generated `.github/**` output still fails closed to
+    // full selection in the runtime.
+    let common_runtime_inputs = ["crates/velnor-workflow/src/runtime.rs"];
     for unit in &mut config.units {
         if unit.kind == UnitKind::Docker && unit.root == "." {
             unit.watch.clone_from(&docker_watch);
@@ -10534,6 +10539,23 @@ path-only = { path = "../path-only" }
                     .any(|path| path == "crates/velnor-workflow/src/runtime.rs"))
                 .map(|unit| &unit.id)
                 .collect::<Vec<_>>()
+        );
+        let generator_path = "crates/velnor-workflow/src/lib.rs";
+        let generator_watchers = config
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern)
+                        .is_ok_and(|glob| glob.compile_matcher().is_match(generator_path))
+                })
+            })
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            generator_watchers,
+            vec!["docker", "rust-velnor-workflow", "rust-production-topology"],
+            "generator edits must not fan out to every verification unit"
         );
         for name in expected {
             let path = PathBuf::from(".github/workflows").join(name);

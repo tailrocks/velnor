@@ -1,6 +1,6 @@
 # Generated ownership state; do not edit.
 schema = 1
-.github/ci/project.toml	9883a687dd677f3b
+.github/ci/project.toml	b8efd6c213068b87
 .github/workflows/ci-bun-velnor.yml	9ae3d3d60b324832
 .github/workflows/ci-docker-docker.yml	d7b219877af23101
 .github/workflows/ci-docs-docs.yml	b6c1cf6b2644f89e
