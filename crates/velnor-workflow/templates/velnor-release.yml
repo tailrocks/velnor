@@ -347,8 +347,84 @@ jobs:
             manifest.json
             velnor-release-tool
 
+  workflow:
+    needs: [identity, release_gate]
+    name: Build ${{ matrix.arch }} workflow binary
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ubuntu-24.04
+    env:
+      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.release_gate.outputs.default_branch_commit }}
+          fetch-depth: 1
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+          version: 1.8.3
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build workflow binary
+        run: mbx zigbuild -p velnor-workflow --release --locked --target "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: workflow-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release/velnor-workflow
+          if-no-files-found: error
+
   image-platform:
-    needs: [identity, release_gate, metadata, build]
+    needs: [identity, release_gate, metadata, workflow]
     name: Build ${{ matrix.arch }} GHCR image
     timeout-minutes: 60
     strategy:
@@ -535,7 +611,6 @@ jobs:
           path: |
             image-digests.json
             image-index.digest
-            manifest.json
 
   guest-image:
     needs: [identity, release_gate]
@@ -647,7 +722,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/microvm
           agent="target/$TARGET/release/velnor-guest-agent"
-          mbx run -p velnor-runner --bin velnor-guest-image --locked -- \
+          mbx run -p velnor-runner --bin velnor-guest-image --locked --release -- \
             build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz \
             --guest-agent "$agent"
           test -s dist/microvm/vmlinux
@@ -678,7 +753,7 @@ jobs:
             dist/microvm/guest-agent.sha256
 
   build:
-    needs: [identity, release_gate, metadata, guest-image]
+    needs: [identity, release_gate, metadata, guest-image, workflow]
     name: Build ${{ matrix.arch }} binary + deb (release-build)
     timeout-minutes: 60
     strategy:
@@ -771,8 +846,19 @@ jobs:
             --release --locked --features release-build --target "${{ matrix.target }}"
           mbx zigbuild -p velnor-tools \
             --release --locked --target "${{ matrix.target }}"
-          mbx zigbuild -p velnor-workflow \
-            --release --locked --target "${{ matrix.target }}"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: workflow-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/release
+
+      - name: Normalize workflow binary mode after artifact download
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/velnor-workflow"
+          test -f "$binary"
+          chmod 0755 "$binary"
+          test -x "$binary"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -859,7 +945,7 @@ jobs:
           expected_jailer="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_sha256' microvm/pins.json)"
           [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
           [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
-          mbx run -p velnor-runner --bin velnor-guest-image --locked -- \
+          mbx run -p velnor-runner --bin velnor-guest-image --locked --release -- \
             stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
             --rootfs-sha256 "$rootfs_sha256" \
             --guest-agent-sha256 "$guest_agent_sha256"
@@ -995,6 +1081,13 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: image-digests
           path: artifacts
           merge-multiple: true
 

@@ -3892,7 +3892,7 @@ impl WorkflowIr {
             let result = github_expression(&format!("needs['{job}'].result"));
             let _ = writeln!(
                 output,
-                "          if [[ \"$selected\" == *\",{}\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+            "          if [[ \"$selected\" == *\",{},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
                 unit.id,
                 unit.id,
                 unit.id
@@ -4568,6 +4568,14 @@ fn render_static_template(template: &str) -> String {
     )
 }
 
+fn render_policy_provider(config: &ProjectConfig) -> String {
+    let template = VELNOR_POLICY_PROVIDER_TEMPLATE.replace(
+        "__VELNOR_GITHUB_RUNNER__",
+        &yaml_scalar(&config.github_runner),
+    );
+    render_static_template(&template)
+}
+
 fn known_legacy_template(relative: &Path) -> Option<&'static str> {
     match relative.to_string_lossy().as_ref() {
         ".github/workflows/release.yml" => Some(VELNOR_RELEASE_WORKFLOW_TEMPLATE),
@@ -4581,7 +4589,7 @@ fn known_legacy_template(relative: &Path) -> Option<&'static str> {
 
 fn render_policy_entrypoint() -> String {
     format!(
-            "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\npermissions:\n  contents: read\n\njobs:\n  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read\n"
+            "{GENERATED_HEADER}name: Velnor workflow policy\n\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\n\nconcurrency:\n  group: policy-${{{{ github.repository }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  policy:\n    name: Policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read\n"
     )
 }
 
@@ -4609,11 +4617,10 @@ fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
 }
 
 #[allow(dead_code)]
-fn unit_needs(lane: RunnerMode, unit: &Unit, include_policy: bool) -> Vec<String> {
+fn unit_needs(_lane: RunnerMode, unit: &Unit, include_policy: bool) -> Vec<String> {
     // Cargo resolves and builds each unit's prerequisites itself. Keeping
     // dependency jobs out of `needs` lets independent hosted and Velnor jobs
     // start together; ci-required still aggregates every selected result.
-    let _ = (lane, unit);
     let mut needs = vec!["plan".to_owned()];
     if include_policy {
         needs.push("policy".to_owned());
@@ -5258,7 +5265,7 @@ jobs:
     name: Prune closed-PR cache
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -5268,12 +5275,26 @@ jobs:
           set -euo pipefail
           ref="refs/pull/$PR_NUMBER/merge"
           encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          keys="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].key')"
-          while IFS= read -r key; do
-            [[ -n "$key" ]] || continue
-            key_encoded="$(printf '%s' "$key" | jq -sRr @uri)"
-            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches?key=$key_encoded&ref=$encoded"
-          done <<< "$keys"
+          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
+          if [[ -z "$cache_ids" ]]; then
+            echo "No merge-ref cache entries found for $ref"
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          if ! printf '%s\n' "$cache_ids" | xargs -r -P 4 -n 1 bash -c '
+            repo="$1"
+            id="$2"
+            for delay in 1 2 4 8; do
+              if gh api --method DELETE "repos/$repo/actions/caches/$id" >/dev/null 2>&1; then
+                exit 0
+              fi
+              sleep "$delay"
+            done
+            printf "::warning::failed to delete cache id %s after retries\\n" "$id" >&2
+            exit 1
+          ' _ "$GITHUB_REPOSITORY"; then
+            echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
+          fi
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
@@ -5429,9 +5450,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
                 "ci-release-package-signer.yml" => Some(render_static_template(
                     VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
                 )),
-                "velnor-workflow-policy.yml" => {
-                    Some(render_static_template(VELNOR_POLICY_PROVIDER_TEMPLATE))
-                }
+                "velnor-workflow-policy.yml" => Some(render_policy_provider(config)),
                 "ci-main.yml" => Some(workflow.render_nested(WorkflowKind::Main)),
                 "nightly.yml" => Some(workflow.render_nested(WorkflowKind::Nightly)),
                 "maintenance.yml" => {
@@ -7399,9 +7418,11 @@ mod tests {
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
         assert!(workflow.contains("name: velnor-workflow-runtime"));
         assert!(!workflow.contains("cargo install --locked --git"));
-        let policy = render_static_template(VELNOR_POLICY_PROVIDER_TEMPLATE);
+        let policy = render_policy_provider(&config);
         assert!(policy.contains(ActionPin::MrBoxington.reference()));
         assert!(policy.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}")));
+        assert!(policy.contains("runs-on: ubuntu-24.04"));
+        assert!(!policy.contains("runs-on: ubuntu-26.04"));
     }
 
     #[test]
@@ -8147,14 +8168,20 @@ path-only = { path = "../path-only" }
         let release_workflow = render_release(&config, release);
         assert_eq!(
             release_workflow.matches("jdx/mr-boxington-action@").count(),
-            3
+            4
         );
         assert!(release_workflow.contains("backend: local"));
         assert!(release_workflow.contains("version: 1.8.3"));
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
-        assert!(release_workflow.contains("mbx run -p velnor-runner --bin velnor-guest-image"));
+        assert!(release_workflow
+            .contains("mbx run -p velnor-runner --bin velnor-guest-image --locked --release --"));
+        assert!(release_workflow.contains("workflow:\n    needs: [identity, release_gate]"));
+        assert!(release_workflow.contains("needs: [identity, release_gate, metadata, workflow]"));
+        assert!(release_workflow.contains("pattern: release-*"));
+        assert!(release_workflow.contains("name: image-digests\n          path: artifacts"));
+        assert!(!release_workflow.contains("name: image-digests\n          path: |\n            image-digests.json\n            image-index.digest\n            manifest.json"));
         assert!(release_workflow.contains("runner: ubuntu-24.04-arm"));
         assert!(release_workflow.contains("target: aarch64-unknown-linux-gnu"));
         assert!(release_workflow.contains("GUEST_ARCH: ${{ matrix.arch }}"));

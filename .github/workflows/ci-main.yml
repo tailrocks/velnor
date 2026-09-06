@@ -180,7 +180,7 @@ jobs:
             exit 1
           fi
           selected=",${{ needs.plan.outputs.units }},"
-          if [[ "$selected" == *",bun-velnor"* ]]; then
+          if [[ "$selected" == *",bun-velnor,"* ]]; then
             result="${{ needs['group-unit-bun-velnor'].result }}"
             case "$result" in
               success) ;;
@@ -192,7 +192,7 @@ jobs:
               *) echo "unselected CI unit bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",docker"* ]]; then
+          if [[ "$selected" == *",docker,"* ]]; then
             result="${{ needs['group-unit-docker'].result }}"
             case "$result" in
               success) ;;
@@ -204,7 +204,7 @@ jobs:
               *) echo "unselected CI unit docker failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",docs"* ]]; then
+          if [[ "$selected" == *",docs,"* ]]; then
             result="${{ needs['group-unit-docs'].result }}"
             case "$result" in
               success) ;;
@@ -216,7 +216,7 @@ jobs:
               *) echo "unselected CI unit docs failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",opentofu"* ]]; then
+          if [[ "$selected" == *",opentofu,"* ]]; then
             result="${{ needs['group-unit-opentofu'].result }}"
             case "$result" in
               success) ;;
@@ -228,7 +228,7 @@ jobs:
               *) echo "unselected CI unit opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-policy"* ]]; then
+          if [[ "$selected" == *",rust-policy,"* ]]; then
             result="${{ needs['group-unit-rust-policy'].result }}"
             case "$result" in
               success) ;;
@@ -240,7 +240,7 @@ jobs:
               *) echo "unselected CI unit rust-policy failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-unit-collector"* ]]; then
+          if [[ "$selected" == *",rust-unit-collector,"* ]]; then
             result="${{ needs['group-unit-rust-unit-collector'].result }}"
             case "$result" in
               success) ;;
@@ -252,7 +252,7 @@ jobs:
               *) echo "unselected CI unit rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-bench"* ]]; then
+          if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-bench'].result }}"
             case "$result" in
               success) ;;
@@ -264,7 +264,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-client"* ]]; then
+          if [[ "$selected" == *",rust-velnor-client,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-client'].result }}"
             case "$result" in
               success) ;;
@@ -276,7 +276,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-control"* ]]; then
+          if [[ "$selected" == *",rust-velnor-control,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-control'].result }}"
             case "$result" in
               success) ;;
@@ -288,7 +288,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-model"* ]]; then
+          if [[ "$selected" == *",rust-velnor-model,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-model'].result }}"
             case "$result" in
               success) ;;
@@ -300,7 +300,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-render"* ]]; then
+          if [[ "$selected" == *",rust-velnor-render,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-render'].result }}"
             case "$result" in
               success) ;;
@@ -312,7 +312,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-runner"* ]]; then
+          if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-runner'].result }}"
             case "$result" in
               success) ;;
@@ -324,7 +324,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-tools"* ]]; then
+          if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-tools'].result }}"
             case "$result" in
               success) ;;
@@ -336,7 +336,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnor-workflow"* ]]; then
+          if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
             result="${{ needs['group-unit-rust-velnor-workflow'].result }}"
             case "$result" in
               success) ;;
@@ -348,7 +348,7 @@ jobs:
               *) echo "unselected CI unit rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          if [[ "$selected" == *",rust-velnorctl"* ]]; then
+          if [[ "$selected" == *",rust-velnorctl,"* ]]; then
             result="${{ needs['group-unit-rust-velnorctl'].result }}"
             case "$result" in
               success) ;;
