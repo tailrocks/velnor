@@ -477,9 +477,10 @@ not present.
 - PR [#607](https://github.com/tailrocks/velnor/pull/607) changes hosted
   Mr. Boxington lanes to `github-cache-mode: objects`; run
   [34053795798](https://github.com/tailrocks/velnor/actions/runs/34053795798)
-  has all Velnor callers skipped by the existing trust gate. It is not a
-  comparable warm affected run until merged and followed by a main cache-save
-  run; its hosted runner/bench/ctl jobs were still pending at this snapshot.
+  completed successfully at 19:18:02Z, including `ci-required`; all Velnor
+  callers were skipped by the existing trust gate. It is not a comparable
+  warm affected run: generated `.github` changes force full selection, and the
+  branch is not merged or followed by a main cache-save run.
 - A fresh two-page cache listing contained 106 entries and
   12,919,364,637 bytes (12.032 GiB); no `a1e07a28` orphan key remained.
   Budget and seven-day evidence are still OPEN.
