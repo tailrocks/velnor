@@ -4569,7 +4569,7 @@ fn render_static_template(template: &str) -> String {
     let template = template.replace("__VELNOR_WORKFLOW_SOURCE_REV__", VELNOR_WORKFLOW_SOURCE_REV);
     format!(
         "{GENERATED_HEADER}{}",
-        refresh_velnor_source_pins(&template)
+        refresh_velnor_action_pins(&refresh_velnor_source_pins(&template))
     )
 }
 
@@ -4626,6 +4626,55 @@ fn replace_full_sha_after_key(line: &str, key: &str) -> Option<String> {
     replacement.push_str(VELNOR_WORKFLOW_SOURCE_REV);
     replacement.push_str(&line[value_end..]);
     Some(replacement)
+}
+
+fn refresh_velnor_action_pins(template: &str) -> String {
+    let action = "jdx/mr-boxington-action";
+    let marker = format!("{action}@");
+    let replacement = ActionPin::MrBoxington.reference();
+    let mut rendered = String::with_capacity(template.len());
+    let mut mr_boxington_step_indent = None;
+
+    for segment in template.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let trimmed = line.trim_start();
+        let indentation = line.len() - trimmed.len();
+        if mr_boxington_step_indent
+            .is_some_and(|step_indent| !trimmed.is_empty() && indentation <= step_indent)
+        {
+            mr_boxington_step_indent = None;
+        }
+
+        if mr_boxington_step_indent.is_some_and(|step_indent| {
+            indentation > step_indent && trimmed.starts_with("max-size:")
+        }) {
+            if segment.ends_with('\n') {
+                rendered.push('\n');
+            }
+            continue;
+        }
+
+        if let Some(marker_start) = line.find(&marker) {
+            let value_start = marker_start + marker.len();
+            let value = line[value_start..]
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                rendered.push_str(&line[..marker_start]);
+                rendered.push_str(replacement);
+                if segment.ends_with('\n') {
+                    rendered.push('\n');
+                }
+                mr_boxington_step_indent = Some(indentation);
+                continue;
+            }
+        }
+
+        rendered.push_str(segment);
+    }
+
+    rendered
 }
 
 fn known_legacy_template(relative: &Path) -> Option<&'static str> {
@@ -6344,7 +6393,10 @@ fn verify_generated_ownership(
         let Some(current) = preimage.bytes() else {
             continue;
         };
-        if adopt && relative.starts_with(Path::new(".github/workflows")) {
+        if adopt
+            && (relative.starts_with(Path::new(".github/workflows"))
+                || relative.starts_with(Path::new(WORKFLOW_TEMPLATE_DIR)))
+        {
             needs_refresh = true;
             continue;
         }
@@ -7469,6 +7521,7 @@ mod tests {
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
         assert!(workflow.contains("name: velnor-workflow-runtime"));
+        assert_eq!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
         assert!(!workflow.contains("cargo install --locked --git"));
         let policy = render_policy_provider(&config);
         assert!(policy.contains(ActionPin::MrBoxington.reference()));
@@ -7490,6 +7543,21 @@ mod tests {
         assert_eq!(rendered.matches(old_revision).count(), 2);
         assert!(rendered.contains("repository: another/example\n      ref: 0123456789"));
         assert!(rendered.contains("OTHER_SOURCE_SHA: 0123456789"));
+    }
+
+    #[test]
+    fn adopted_templates_refresh_mr_boxington_pins_and_drop_retired_inputs() {
+        let old_revision = "0123456789abcdef0123456789abcdef01234567";
+        let template = format!(
+            "steps:\n  - uses: jdx/mr-boxington-action@{old_revision} # old pin\n    with:\n      backend: github\n      max-size: 20GiB\n      cache-key: fixture\n  - run: echo keep\n"
+        );
+
+        let rendered = render_static_template(&template);
+        assert!(rendered.contains(ActionPin::MrBoxington.reference()));
+        assert!(!rendered.contains(old_revision));
+        assert!(!rendered.contains("max-size: 20GiB"));
+        assert!(rendered.contains("cache-key: fixture"));
+        assert!(rendered.contains("- run: echo keep"));
     }
 
     #[test]
@@ -8239,6 +8307,25 @@ path-only = { path = "../path-only" }
         );
         assert!(release_workflow.contains("backend: local"));
         assert!(release_workflow.contains("version: 1.8.3"));
+        assert!(release_workflow.contains(
+            "group: release-${{ github.workflow }}-${{ inputs.tag || github.ref_name }}"
+        ));
+        assert!(release_workflow.contains("existing-image-digest:"));
+        assert!(release_workflow.contains("RECOVERY_INDEX_DIGEST:"));
+        assert!(release_workflow.contains("adopting explicitly supplied recovery index"));
+        assert!(release_workflow
+            .contains("manual release dispatch must use the default-branch workflow definition"));
+        assert!(release_workflow.contains("Verify release tag stayed immutable before publication"));
+        assert!(release_workflow
+            .contains("gh release create \"$tag\" --verify-tag --target \"$COMMIT\""));
+        assert_eq!(
+            release_workflow
+                .matches(
+                    "name: workflow-${{ matrix.arch }}\n          path: target/${{ matrix.target }}/release/velnor-workflow\n          if-no-files-found: error"
+                )
+                .count(),
+            1
+        );
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
@@ -8249,6 +8336,13 @@ path-only = { path = "../path-only" }
             .contains("needs: [identity, release_gate, metadata, workflow, image-admission]"));
         assert!(release_workflow.contains("name: Admit immutable image tag"));
         assert!(release_workflow.contains("release-${{ env.COMMIT }}-${{ matrix.arch }}"));
+        assert!(release_workflow.contains(
+            "GHCR_IMAGE: ${{ env.GHCR_IMAGE }}\n          COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}\n          ARCH: ${{ matrix.arch }}"
+        ));
+        assert!(release_workflow.contains("docker buildx imagetools inspect"));
+        assert!(release_workflow.contains("attestation-manifest"));
+        assert!(release_workflow.contains("| if length == 1 then .[0]"));
+        assert!(!release_workflow.contains("PLATFORM_DIGEST: ${{ steps.push.outputs.digest }}"));
         assert!(release_workflow.contains("refusing a fail-open publish"));
         assert!(release_workflow.contains("Verify OCI index stayed immutable before publication"));
         assert!(release_workflow.contains("pattern: release-*"));
@@ -10220,6 +10314,36 @@ path-only = { path = "../path-only" }
             must(fs::read_to_string(&workflow), "read preserved workflow"),
             custom
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_adoption_refreshes_modified_workflow_template() {
+        let root = temporary_repository("adopt-modified-workflow-template");
+        let relative = PathBuf::from(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
+        let path = root.join(&relative);
+        must(
+            fs::create_dir_all(must_some(path.parent(), "template parent")),
+            "create template parent",
+        );
+        must(fs::write(&path, "old template\n"), "write template");
+
+        let preimage = must(
+            capture_file_preimage(&path, &relative),
+            "capture template preimage",
+        );
+        let mut files = BTreeMap::new();
+        files.insert(relative.clone(), "new template\n".to_owned());
+        let mut ownership = BTreeMap::new();
+        ownership.insert(relative.clone(), content_digest("different template\n"));
+        let mut preimages = BTreeMap::new();
+        preimages.insert(relative, preimage);
+
+        let refresh = must(
+            verify_generated_ownership(&files, Some(&ownership), &preimages, true),
+            "adopt modified template",
+        );
+        assert!(refresh);
         let _ = fs::remove_dir_all(root);
     }
 
