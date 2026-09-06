@@ -13,7 +13,7 @@ check, coverage, and compatibility. Fix the generator
 ## 1. SLOs
 
 | Metric | Baseline 2026-09-06 | Target |
-|---|---|---|
+| --- | --- | --- |
 | PR gate wall (plan start → `ci-required` green), affected scope | 12m05s (run 34022845304) | ≤ 6m warm |
 | Slowest Rust PR job (`velnor-runner`) | 11m39s, run step 11m10s | ≤ 5m warm |
 | Docker PR job | 9m18s (release build 7m46s inside) | ≤ 4m |
@@ -37,7 +37,7 @@ gh cache list --repo tailrocks/velnor --limit 100 | grep -E "velnor-mbx|mise-v1"
 Cache signals per Rust job log:
 
 | Signal | Meaning |
-|---|---|
+| --- | --- |
 | `No mbx cache found` + `first build on this machine` | cold: full registry download + compile |
 | `Downloading crates ...` | registry cache missed |
 | `Finished dev/test profile in …` (two of them: clippy + nextest) | double compilation per job |
@@ -47,7 +47,7 @@ Reference baselines (PR run 34022845304, branch
 `codex/release-v0.1.263-20260906`, scope `affected`, all GitHub lane):
 
 | Job | Total | Run step | Cache |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | velnor-runner (101458506956) | 11m39s | 11m10s (1685 tests, 35s test time) | cold |
 | velnorctl (101458506934) | 10m43s | 10m07s (dev 4m51s + test 5m11s) | cold |
 | velnor-bench (101458507063) | 9m00s | 8m28s (dev 4m04s + test 4m19s) | cold |
