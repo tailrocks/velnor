@@ -3098,6 +3098,7 @@ const STATIC_MR_BOXINGTON_STEP: &str = r"      - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
+          github-cache-mode: objects
           version: 1.8.3
           cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
           restore-keys: |
@@ -5168,7 +5169,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 );
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
                     ActionPin::MrBoxington.reference()
                 );
             } else {
@@ -9425,6 +9426,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
         assert!(workflow.contains("backend: github"));
+        assert!(workflow.contains("github-cache-mode: objects"));
         assert!(workflow.contains("version: 1.8.3"));
         assert!(workflow
             .contains("cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust"));
