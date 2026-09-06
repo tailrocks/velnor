@@ -25,7 +25,7 @@ jobs:
     name: Prune closed-PR cache
     if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
         env:
@@ -35,9 +35,23 @@ jobs:
           set -euo pipefail
           ref="refs/pull/$PR_NUMBER/merge"
           encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
-          keys="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].key')"
-          while IFS= read -r key; do
-            [[ -n "$key" ]] || continue
-            key_encoded="$(printf '%s' "$key" | jq -sRr @uri)"
-            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches?key=$key_encoded&ref=$encoded"
-          done <<< "$keys"
+          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
+          if [[ -z "$cache_ids" ]]; then
+            echo "No merge-ref cache entries found for $ref"
+            exit 0
+          fi
+          # shellcheck disable=SC2016
+          if ! printf '%s\n' "$cache_ids" | xargs -r -P 4 -n 1 bash -c '
+            repo="$1"
+            id="$2"
+            for delay in 1 2 4 8; do
+              if gh api --method DELETE "repos/$repo/actions/caches/$id" >/dev/null 2>&1; then
+                exit 0
+              fi
+              sleep "$delay"
+            done
+            printf "::warning::failed to delete cache id %s after retries\\n" "$id" >&2
+            exit 1
+          ' _ "$GITHUB_REPOSITORY"; then
+            echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
+          fi

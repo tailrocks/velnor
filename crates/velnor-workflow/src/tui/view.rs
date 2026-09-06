@@ -51,7 +51,7 @@ fn render_title(frame: &mut Frame<'_>, app: &App, system: &DesignSystem, area: R
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "GitHub Actions",
+                app.cli.runners.display_name(),
                 system.style(Role::Text).add_modifier(Modifier::BOLD),
             ),
             Span::styled("  ", system.style(Role::TextMuted)),
@@ -185,7 +185,7 @@ fn render_review(frame: &mut Frame<'_>, app: &mut App, system: &DesignSystem, ar
     ];
     if selected != total {
         lines.push(Line::from(Span::styled(
-            "! Partial selection disables release and preview workflows",
+            "! Partial selection disables release, signer, and preview workflows",
             system.style(Role::Warning),
         )));
     }
@@ -406,16 +406,24 @@ fn selected_unit(app: &App, system: &DesignSystem) -> Vec<Line<'static>> {
     }) else {
         return vec![Line::from("No check focused")];
     };
-    unit_details(unit, system)
+    unit_details(unit, app.cli.runners, system)
 }
 
-fn unit_details(unit: &Unit, system: &DesignSystem) -> Vec<Line<'static>> {
+fn unit_details(
+    unit: &Unit,
+    runners: crate::RunnerMode,
+    system: &DesignSystem,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             unit.label.clone(),
             system.style(Role::Text).add_modifier(Modifier::BOLD),
         )),
         Line::from(format!("{}  {}", unit.kind.label(), unit.root)),
+        Line::from(vec![
+            Span::styled("Runner  ", system.style(Role::TextMuted)),
+            Span::raw(runners.display_name()),
+        ]),
     ];
     if !unit.depends_on.is_empty() {
         lines.push(Line::from(format!(
@@ -426,28 +434,65 @@ fn unit_details(unit: &Unit, system: &DesignSystem) -> Vec<Line<'static>> {
     if let Some(version) = &unit.tool_version {
         lines.push(Line::from(format!("Tool  {version}")));
     }
-    lines.extend([
-        Line::from(""),
-        Line::from(Span::styled("Pull requests", system.style(Role::TextMuted))),
-    ]);
+    match runners {
+        crate::RunnerMode::Github | crate::RunnerMode::Velnor => {
+            append_lane_details(&mut lines, unit, runners, system);
+        }
+        crate::RunnerMode::Both => {
+            append_lane_details(&mut lines, unit, crate::RunnerMode::Github, system);
+            lines.push(Line::from(""));
+            append_lane_details(&mut lines, unit, crate::RunnerMode::Velnor, system);
+        }
+    }
+    lines
+}
+
+fn append_lane_details(
+    lines: &mut Vec<Line<'static>>,
+    unit: &Unit,
+    lane: crate::RunnerMode,
+    system: &DesignSystem,
+) {
+    let (pr_commands, full_commands) = match lane {
+        crate::RunnerMode::Github => (
+            unit.github_pr_commands
+                .as_deref()
+                .unwrap_or(&unit.pr_commands),
+            unit.github_full_commands
+                .as_deref()
+                .unwrap_or(&unit.full_commands),
+        ),
+        crate::RunnerMode::Velnor => (
+            unit.velnor_pr_commands
+                .as_deref()
+                .unwrap_or(&unit.pr_commands),
+            unit.velnor_full_commands
+                .as_deref()
+                .unwrap_or(&unit.full_commands),
+        ),
+        crate::RunnerMode::Both => (unit.pr_commands.as_slice(), unit.full_commands.as_slice()),
+    };
+    lines.extend([Line::from(Span::styled(
+        format!("{} · Pull requests", lane.display_name()),
+        system.style(Role::TextMuted),
+    ))]);
     lines.extend(
-        unit.pr_commands
+        pr_commands
             .iter()
             .map(|command| Line::from(format!("{} {command}", system.glyphs.bullet()))),
     );
     lines.extend([
         Line::from(""),
         Line::from(Span::styled(
-            "Main and scheduled runs",
+            format!("{} · Main and scheduled runs", lane.display_name()),
             system.style(Role::TextMuted),
         )),
     ]);
     lines.extend(
-        unit.full_commands
+        full_commands
             .iter()
             .map(|command| Line::from(format!("{} {command}", system.glyphs.bullet()))),
     );
-    lines
 }
 
 fn render_scrolled_lines(
@@ -640,6 +685,7 @@ mod tests {
                 dry_run: false,
                 check: false,
                 force: false,
+                adopt: false,
                 plain: false,
             },
             receiver,
@@ -658,6 +704,10 @@ mod tests {
                 .map(|index| format!("cargo test --package example-{index}"))
                 .collect(),
             full_commands: vec!["cargo test --workspace --all-targets".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: Vec::new(),
             cache: None,
             tool_version: Some("1.97.1".to_owned()),
@@ -681,6 +731,8 @@ mod tests {
             release_reason: "not configured".to_owned(),
             release: None,
             units: vec![unit],
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: false,
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));
@@ -727,13 +779,20 @@ mod tests {
 
     #[test]
     fn scanning_frame_is_calm_and_honest() {
-        let text = render_text(&mut app(), 80, 24);
-        assert!(text.contains("GitHub Actions"));
+        let mut app = app();
+        let text = render_text(&mut app, 80, 24);
+        assert!(text.contains("GitHub"));
+        assert!(!text.contains("GitHub Actions"));
         assert!(text.contains("Scanning project"));
         assert!(text.contains("No project commands are run"));
         assert!(!text.contains("[waiting]"));
         assert!(!text.contains("TR/phosphor"));
         assert!(text.contains("q quit"));
+
+        app.cli.runners = crate::RunnerMode::Velnor;
+        assert!(render_text(&mut app, 80, 24).contains("Velnor"));
+        app.cli.runners = crate::RunnerMode::Both;
+        assert!(render_text(&mut app, 80, 24).contains("Both"));
     }
 
     #[test]
@@ -880,6 +939,48 @@ mod tests {
         assert!(text.contains("Check details"));
         assert!(text.contains("↑↓/jk scroll"));
         assert!(app.scroll.overflows_y());
+    }
+
+    #[test]
+    fn details_overlay_shows_exact_selected_lane_and_scope_commands() {
+        let mut app = configured_app();
+        if let Some(config) = app.config.as_mut()
+            && let Some(unit) = config.units.first_mut()
+        {
+            unit.github_pr_commands = Some(vec!["github-pr-exact".to_owned()]);
+            unit.github_full_commands = Some(vec!["github-full-exact".to_owned()]);
+            unit.velnor_pr_commands = Some(vec!["velnor-pr-exact".to_owned()]);
+            unit.velnor_full_commands = Some(vec!["velnor-full-exact".to_owned()]);
+        }
+        app.overlay = Some(super::super::Overlay::Details);
+
+        app.cli.runners = crate::RunnerMode::Github;
+        let github = render_text(&mut app, 80, 24);
+        assert!(github.contains("Runner  GitHub"));
+        assert!(github.contains("GitHub · Pull requests"));
+        assert!(github.contains("github-pr-exact"));
+        assert!(github.contains("GitHub · Main and scheduled runs"));
+        assert!(github.contains("github-full-exact"));
+        assert!(!github.contains("velnor-pr-exact"));
+
+        app.cli.runners = crate::RunnerMode::Velnor;
+        let velnor = render_text(&mut app, 80, 24);
+        assert!(velnor.contains("Runner  Velnor"));
+        assert!(velnor.contains("Velnor · Pull requests"));
+        assert!(velnor.contains("velnor-pr-exact"));
+        assert!(velnor.contains("Velnor · Main and scheduled runs"));
+        assert!(velnor.contains("velnor-full-exact"));
+        assert!(!velnor.contains("github-pr-exact"));
+
+        app.cli.runners = crate::RunnerMode::Both;
+        let both = render_text(&mut app, 80, 24);
+        assert!(both.contains("Runner  Both"));
+        assert!(both.contains("GitHub · Pull requests"));
+        assert!(both.contains("github-pr-exact"));
+        assert!(both.contains("Velnor · Pull requests"));
+        assert!(both.contains("velnor-pr-exact"));
+        assert!(both.contains("github-full-exact"));
+        assert!(both.contains("velnor-full-exact"));
     }
 
     #[test]

@@ -15,9 +15,9 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
 // Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
-// Kache v0.14.2 admission is v10; mr-boxington-action v1.2.0 admission is v11;
-// explicit planner dispatch classes are v12.
-pub const MANIFEST_VERSION: u32 = 12;
+// Kache v0.14.2 admission is v10; mr-boxington-action v1.3.0 admission is v11;
+// explicit planner dispatch classes are v12; legacy provider removal is v13.
+pub const MANIFEST_VERSION: u32 = 13;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
@@ -322,9 +322,9 @@ const MR_BOXINGTON_INPUTS: &[InputRule] = &[
     InputRule::Any("cache-key"),
     InputRule::Any("restore-keys"),
     InputRule::Any("cache-generation"),
+    InputRule::Literal("github-cache-mode", &["target", "objects"]),
     InputRule::Literal("save-on-workflow-dispatch", &["true", "false"]),
     InputRule::Any("toolchain"),
-    InputRule::Any("max-size"),
     InputRule::Literal("cache-links", &["auto", "true", "false"]),
     InputRule::Any("server-url"),
     InputRule::Any("namespace"),
@@ -390,47 +390,6 @@ macro_rules! capability {
 
 pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
-        repository: "tailrocks/velnor-actions",
-        adapter: ActionAdapter::Composite,
-        allowed_refs: &[
-            allowed(
-                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
-                "unified CI release 2026.8.30",
-            ),
-            allowed(
-                "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
-                "unified CI release 2026.8.18",
-            ),
-        ],
-        allowed_subpaths: &[
-            "actions/run-gate",
-            "actions/cache-contract",
-            "actions/aggregate",
-        ],
-        inputs: &[
-            InputRule::Any("name"),
-            InputRule::Any("command"),
-            InputRule::Any("schema-version"),
-            InputRule::Any("declaration-sha256"),
-            InputRule::Any("expected-declaration-sha256"),
-            InputRule::Any("cache-id"),
-            InputRule::Any("expected-cache-id"),
-            InputRule::Any("scope"),
-            InputRule::Any("expected-scope"),
-            InputRule::Any("cache-owner"),
-            InputRule::Any("expected-cache-owner"),
-            InputRule::Any("reservation-id"),
-            InputRule::Any("expected-reservation-id"),
-            InputRule::Any("required-peak-bytes"),
-            InputRule::Any("quota-reserved-bytes"),
-            InputRule::Any("attributed-bytes"),
-            InputRule::Any("cleanup-state"),
-            InputRule::Any("materialization-id"),
-            InputRule::Any("expected-materialization-id"),
-        ],
-        notes: "pinned unified-CI composites; exact subpaths fetched and recursively validated",
-    },
-    ActionCapability {
         repository: "jackin-project/jackin-role-action",
         adapter: ActionAdapter::Composite,
         allowed_refs: &[
@@ -471,8 +430,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "jdx/mr-boxington-action",
         adapter: ActionAdapter::JavaScript,
         allowed_refs: &[allowed(
-            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
-            "v1.2.0",
+            "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777",
+            "v1.3.0",
         )],
         allowed_subpaths: &[],
         inputs: MR_BOXINGTON_INPUTS,
@@ -735,12 +694,6 @@ const PUBLISH_WORKFLOW_INPUTS: &[InputRule] = &[
     InputRule::Literal("publish", &["true", "false"]),
 ];
 
-const PACKAGE_SIGNER_WORKFLOW_INPUTS: &[InputRule] = &[
-    InputRule::Any("artifact-name"),
-    InputRule::Any("subject-path"),
-    InputRule::Any("source-ref"),
-];
-
 pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
     ReusableWorkflow {
         repository: "jackin-project/jackin-role-action",
@@ -757,30 +710,6 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
         ],
         inputs: PUBLISH_WORKFLOW_INPUTS,
         notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
-    },
-    ReusableWorkflow {
-        repository: "tailrocks/velnor-actions",
-        path: ".github/workflows/package-signer.yml",
-        allowed_refs: &[
-            allowed(
-                "2d045521be342284cd567b7058a0e635dc74b37c",
-                "fleet 2026.8.33 hosted package signer",
-            ),
-            allowed(
-                "c222e52030fee9ea6eae573a5769770be01d8438",
-                "fleet 2026.8.32 hosted package signer",
-            ),
-            allowed(
-                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
-                "fleet 2026.8.30 hosted package signer",
-            ),
-            allowed(
-                "643c5341b160be151a7fae19b89b6a4f8ab3b275",
-                "fleet 2026.8.5 hosted package signer",
-            ),
-        ],
-        inputs: PACKAGE_SIGNER_WORKFLOW_INPUTS,
-        notes: "hosted package signer; full-SHA and closed inputs admitted",
     },
 ];
 
@@ -1084,9 +1013,6 @@ pub fn validate_resolved_action(
     if let Some(error) = subpath_violation(step, repository, action_ref, source_path, capability) {
         return Err(error.into());
     }
-    if repository.eq_ignore_ascii_case("tailrocks/velnor-actions") {
-        validate_unified_ci_composite_inputs(step, repository, action_ref, source_path, inputs)?;
-    }
     let mut found = Vec::new();
     validate_inputs(
         &mut found,
@@ -1098,74 +1024,6 @@ pub fn validate_resolved_action(
     );
     if let Some(error) = found.into_iter().next() {
         return Err(error.into());
-    }
-    Ok(())
-}
-
-fn validate_unified_ci_composite_inputs(
-    step: &str,
-    repository: &str,
-    action_ref: &str,
-    source_path: Option<&str>,
-    inputs: &BTreeMap<String, String>,
-) -> Result<()> {
-    const RUN_GATE: &[&str] = &["name", "command"];
-    const CACHE_CONTRACT: &[&str] = &[
-        "schema-version",
-        "declaration-sha256",
-        "expected-declaration-sha256",
-        "cache-id",
-        "expected-cache-id",
-        "scope",
-        "expected-scope",
-        "cache-owner",
-        "expected-cache-owner",
-        "reservation-id",
-        "expected-reservation-id",
-        "required-peak-bytes",
-        "quota-reserved-bytes",
-        "attributed-bytes",
-        "cleanup-state",
-        "materialization-id",
-        "expected-materialization-id",
-    ];
-    let subpath = source_path
-        .map(|value| value.trim().trim_matches('/'))
-        .filter(|value| !value.is_empty());
-    let accepted = match subpath {
-        Some("actions/run-gate") => RUN_GATE,
-        Some("actions/cache-contract") => CACHE_CONTRACT,
-        Some("actions/aggregate") => &[],
-        _ => {
-            return Err(violation(
-                step,
-                repository,
-                action_ref,
-                "subpath",
-                subpath.unwrap_or("<root>"),
-                vec![
-                    "actions/run-gate".to_string(),
-                    "actions/cache-contract".to_string(),
-                    "actions/aggregate".to_string(),
-                ],
-            )
-            .into());
-        }
-    };
-    if let Some(name) = inputs.keys().find(|name| {
-        !accepted
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(name))
-    }) {
-        return Err(violation(
-            step,
-            repository,
-            action_ref,
-            "input",
-            name,
-            accepted.iter().map(|name| (*name).to_string()).collect(),
-        )
-        .into());
     }
     Ok(())
 }
@@ -1964,18 +1822,17 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_twelve_and_structurally_immutable() {
-        // Generic remote action runtime kinds change the exported capability
-        // surface and require a new version so stale consumers fail closed.
-        assert_eq!(MANIFEST_VERSION, 12);
-        assert_eq!(MANIFEST.version, 12);
+    fn compiled_manifest_is_version_thirteen_and_structurally_immutable() {
+        // Removing a provider changes the exported capability surface and
+        // requires a new version so stale consumers fail closed.
+        assert_eq!(MANIFEST_VERSION, 13);
+        assert_eq!(MANIFEST.version, 13);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
     #[test]
     fn admitted_remote_actions_declare_their_actual_runtime_kind() {
         let expected = [
-            ("tailrocks/velnor-actions", ActionAdapter::Composite),
             (
                 "jackin-project/jackin-role-action",
                 ActionAdapter::Composite,
@@ -2634,7 +2491,7 @@ mod tests {
 
     #[test]
     fn mr_boxington_rejects_unsupported_local_backend() {
-        const SHA: &str = "adc5c234c02592f7edd008bf81d5bc0e9584dc03";
+        const SHA: &str = "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777";
 
         for backend in ["github", "server"] {
             validate_resolved_action(
@@ -2702,7 +2559,7 @@ mod tests {
         validate_action_runtime(
             "cache",
             "jdx/mr-boxington-action",
-            "adc5c234c02592f7edd008bf81d5bc0e9584dc03",
+            "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777",
             &ActionRuntime::JavaScript {
                 node: "node24".to_string(),
                 main: "dist/index.js".to_string(),
@@ -2760,60 +2617,6 @@ mod tests {
             "actions/cache",
             "not-a-real-input"
         ));
-    }
-
-    #[test]
-    fn pinned_unified_ci_composites_are_exactly_scoped() {
-        let sha = "3057391f93f3bfc0fe570ee08cfcea9533ea3f92";
-        let inputs = BTreeMap::from([
-            ("name".to_string(), "test".to_string()),
-            ("command".to_string(), "mise run test".to_string()),
-        ]);
-        validate_resolved_action(
-            "gate",
-            "tailrocks/velnor-actions",
-            sha,
-            Some("actions/run-gate"),
-            &inputs,
-        )
-        .unwrap();
-        for (rejected, field) in [
-            ("actions/not-approved", "path"),
-            ("../actions/run-gate", "path"),
-        ] {
-            let error = validate_resolved_action(
-                "gate",
-                "tailrocks/velnor-actions",
-                sha,
-                Some(rejected),
-                &inputs,
-            )
-            .unwrap_err();
-            assert_eq!(
-                error.downcast_ref::<CapabilityViolation>().unwrap().field,
-                field
-            );
-        }
-        assert!(validate_resolved_action(
-            "gate",
-            "tailrocks/velnor-actions",
-            "1111111111111111111111111111111111111111",
-            Some("actions/run-gate"),
-            &inputs,
-        )
-        .is_err());
-        let error = validate_resolved_action(
-            "aggregate",
-            "tailrocks/velnor-actions",
-            sha,
-            Some("actions/aggregate"),
-            &BTreeMap::from([("command".to_string(), "true".to_string())]),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.downcast_ref::<CapabilityViolation>().unwrap().field,
-            "input"
-        );
     }
 
     #[test]

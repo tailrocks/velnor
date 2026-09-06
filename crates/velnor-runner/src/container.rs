@@ -671,6 +671,7 @@ impl JobContainerSpec {
         builder.pair("--workdir", working_directory);
         self.append_base_exec_env(&mut builder);
         self.append_step_env(&mut builder, env);
+        self.append_authoritative_runner_env(&mut builder);
         let prepared = builder
             .operands()
             .operand(self.name.clone())
@@ -689,6 +690,20 @@ impl JobContainerSpec {
                 continue;
             }
             command.env(name.clone(), value.clone());
+        }
+    }
+
+    /// Re-assert the daemon-owned backend after workflow and step env. The
+    /// value is injected by `backend_advertising_env`; a workflow must not be
+    /// able to switch a Velnor job to the GitHub command contract through
+    /// `env:` or `GITHUB_ENV`.
+    fn append_authoritative_runner_env(&self, command: &mut DockerCommand) {
+        if let Some((_, value)) = self
+            .env
+            .iter()
+            .find(|(name, _)| name == "VELNOR_EXECUTION_BACKEND")
+        {
+            command.env("VELNOR_EXECUTION_BACKEND", value.clone());
         }
     }
 
@@ -801,6 +816,7 @@ impl JobContainerSpec {
             args.env("PATH", path);
         }
         self.append_step_env(args, env);
+        self.append_authoritative_runner_env(args);
         let prepared = command
             .image(&image)
             .operand(entrypoint_container_path.to_owned())
@@ -2335,6 +2351,26 @@ mod tests {
                 "/__a/action/dist/index.js"
             ]
         );
+    }
+
+    #[test]
+    fn runner_backend_cannot_be_overridden_by_step_environment() {
+        let mut spec = spec();
+        spec.env
+            .push(("VELNOR_EXECUTION_BACKEND".into(), "docker".into()));
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w/repo",
+                &[("VELNOR_EXECUTION_BACKEND".into(), "spoofed".into())],
+                &[],
+                &["sh".into(), "-c".into(), "true".into()],
+            )
+            .unwrap();
+        let rendered = rendered(&prepared);
+        let backend = rendered
+            .iter()
+            .rfind(|argument| argument.starts_with("VELNOR_EXECUTION_BACKEND="));
+        assert_eq!(backend, Some(&"VELNOR_EXECUTION_BACKEND=docker".to_owned()));
     }
 
     #[test]

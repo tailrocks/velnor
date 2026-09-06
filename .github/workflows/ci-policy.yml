@@ -5,14 +5,18 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 
+concurrency:
+  group: policy-${{ github.repository }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
     permissions:
       contents: read

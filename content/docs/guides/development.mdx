@@ -56,7 +56,7 @@ focused loop, use `mise run test-focused -- -p <package>` or
 The current tagged release build uses:
 
 ```sh
-cargo zigbuild -p velnor-runner -p velnorctl -p velnor-tools \
+mbx zigbuild -p velnor-runner -p velnorctl -p velnor-tools \
   --release --locked --features release-build --target "$TGT"
 cargo deb -p velnor-runner --target "$TGT" --no-build --no-strip \
   --deb-version "$VERSION"

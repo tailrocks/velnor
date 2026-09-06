@@ -7,4 +7,4 @@ idiomatic_version_file_enable_tools = ["rust"]
 lockfile = true
 
 [tools]
-sccache = "0.16.0"
+mr-boxington = "1.8.3"

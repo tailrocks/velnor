@@ -9,7 +9,7 @@ inputs:
   rev:
     description: Velnor git revision to install
     required: false
-    default: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+    default: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
   cache:
     description: Cache the installation with GitHub cache
     required: false
@@ -35,7 +35,7 @@ runs:
           ~/.cargo/git
           ~/.cargo/registry
           ~/.cargo/bin/velnor-workflow
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ inputs.rev }}
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}
 
     - name: Install runtime from source
       if: steps.cache.outputs.cache-hit != 'true'
@@ -70,4 +70,4 @@ runs:
           ~/.cargo/git
           ~/.cargo/registry
           ~/.cargo/bin/velnor-workflow
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ inputs.rev }}
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}

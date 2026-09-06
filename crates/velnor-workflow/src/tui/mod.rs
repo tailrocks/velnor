@@ -612,9 +612,11 @@ impl App {
             filtered.release_reason = String::from(
                 "Release workflows disabled because the TUI selected a partial configuration.",
             );
-            filtered
-                .workflow_files
-                .retain(|file| file != "release.yml" && file != "preview.yml");
+            filtered.workflow_files.retain(|file| {
+                file != "release.yml"
+                    && file != "ci-release-package-signer.yml"
+                    && file != "preview.yml"
+            });
         }
         Some(filtered)
     }
@@ -915,6 +917,10 @@ mod tests {
             watch: Vec::new(),
             pr_commands: vec!["cargo test".to_owned()],
             full_commands: vec!["cargo test --all-targets".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
             depends_on: dependencies
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
@@ -934,7 +940,12 @@ mod tests {
                 limitations: Vec::new(),
             },
             verified: true,
-            workflow_files: vec!["ci-pr.yml".to_owned(), "release.yml".to_owned()],
+            workflow_files: vec![
+                "ci-pr.yml".to_owned(),
+                "release.yml".to_owned(),
+                "ci-release-package-signer.yml".to_owned(),
+                "preview.yml".to_owned(),
+            ],
             notes: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Github,
@@ -948,6 +959,8 @@ mod tests {
                 unit("middle", &["core"]),
                 unit("app", &["middle"]),
             ],
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: false,
         }
     }
 
@@ -962,6 +975,7 @@ mod tests {
                 dry_run: true,
                 check: false,
                 force: false,
+                adopt: false,
                 plain: false,
             },
             receiver,
@@ -1260,5 +1274,13 @@ mod tests {
             .workflow_files
             .iter()
             .any(|file| file == "release.yml"));
+        assert!(!selected
+            .workflow_files
+            .iter()
+            .any(|file| file == "ci-release-package-signer.yml"));
+        assert!(!selected
+            .workflow_files
+            .iter()
+            .any(|file| file == "preview.yml"));
     }
 }

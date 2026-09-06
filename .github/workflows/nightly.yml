@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
+      units: ${{ steps.plan.outputs.units }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,9 +29,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@31aef64ac948a8197f4c86eb0794db3039be75c8
         with:
-          rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+          rev: 31aef64ac948a8197f4c86eb0794db3039be75c8
       - name: Select affected units
         id: plan
         env:
@@ -39,100 +40,122 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: velnor-workflow plan --config .github/ci/project.toml
 
+      - name: Publish Velnor workflow runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-workflow-runtime
+          path: ~/.cargo/bin/velnor-workflow
+          if-no-files-found: error
+          retention-days: 1
   policy:
     name: Advisory policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
     permissions:
       contents: read
   group-unit-bun-velnor:
     name: "Bun · Bun package (velnor)"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-bun-velnor.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-docker:
     name: "Docker · Docker"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-docker-docker.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-docs:
     name: "Documentation · Documentation"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-docs-docs.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-opentofu:
     name: "OpenTofu · OpenTofu"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-opentofu-opentofu.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-policy:
     name: "Rust · Rust dependency policy"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-policy.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-unit-collector:
     name: "Rust · unit-collector"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-unit-collector.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-bench:
     name: "Rust · velnor-bench"
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-bench.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-client:
     name: "Rust · velnor-client"
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-client.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-control:
     name: "Rust · velnor-control"
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-control.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-model:
     name: "Rust · velnor-model"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-model.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-render:
     name: "Rust · velnor-render"
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-render.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    needs: [plan, policy, group-unit-rust-velnor-control, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-runner.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    needs: [plan, policy, group-unit-rust-velnor-client, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-tools.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
     needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-workflow.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnorctl:
     name: "Rust · velnorctl"
-    needs: [plan, policy, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnorctl.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
