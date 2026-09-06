@@ -43,6 +43,10 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Velnor commit that changes the workflow runtime contract.
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "c0aee2d43c2fa313146aa9e59f24a5b04fc3ed3e";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
+// The GitHub cache payload changed from Cargo's target tree to mbx objects.
+// Keep the transition explicit: the generated custom keys bypass the action's
+// cache-generation input, so the mode marker is part of every key and prefix.
+const MR_BOXINGTON_CACHE_GENERATION: &str = "objects-v2";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
 const MOLD_AARCH64_SHA256: &str =
@@ -3147,9 +3151,9 @@ const STATIC_MR_BOXINGTON_STEP: &str = r"      - name: Set up Mr. Boxington
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          cache-key: velnor-static-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
           restore-keys: |
-            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+            velnor-static-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
           save-on-workflow-dispatch: true
 ";
 
@@ -5204,14 +5208,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 // GitHub cache, evict warm entries, and force cold
                 // `Downloading crates` / `Compiling` builds.
                 let cache_key = format!(
-                    "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}",
+                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}",
                     unit.id,
                 );
                 // Unit-level prefix (no dependency hash): after a lockfile or
                 // toolchain bump the previous tree still warms unchanged
                 // dependencies instead of rebuilding the world cold.
                 let restore_key = format!(
-                    "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-",
+                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-",
                     unit.id,
                 );
                 let _ = writeln!(
@@ -9474,9 +9478,11 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
         assert!(workflow.contains("backend: github"));
         assert!(workflow.contains("github-cache-mode: objects"));
+        assert!(workflow.contains("velnor-mbx-objects-v2-1.8.3-"));
         assert!(workflow.contains("version: 1.8.3"));
-        assert!(workflow
-            .contains("cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust"));
+        assert!(workflow.contains(
+            "cache-key: velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust"
+        ));
         assert!(workflow.contains("restore-keys: |"));
         // Stable per-unit keys: an exact hit reuses the cache on every run
         // with unchanged dependency inputs. A per-commit suffix would mint one
@@ -10572,7 +10578,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         .render(WorkflowKind::Main);
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
         assert!(workflow.contains("backend: github"));
-        assert!(workflow.contains("cache-key: velnor-mbx-1.8.3-"));
+        assert!(workflow.contains("cache-key: velnor-mbx-objects-v2-1.8.3-"));
         for line in workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("cache-key:"))

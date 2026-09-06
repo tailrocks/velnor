@@ -50,9 +50,9 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnorctl/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          cache-key: velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnorctl/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
           restore-keys: |
-            velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-
+            velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnorctl-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache

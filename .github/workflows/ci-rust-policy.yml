@@ -50,9 +50,9 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
+          cache-key: velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
           restore-keys: |
-            velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-policy-
+            velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-policy-
           save-on-workflow-dispatch: true
       - name: Set up cargo-deny
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3
