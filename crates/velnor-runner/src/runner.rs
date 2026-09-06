@@ -11453,8 +11453,9 @@ fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
     merged
 }
 
-/// Upload the combined job log as a `job-log.txt` artifact (best-effort). This
-/// stays as an explicit fallback even when GitHub's native log endpoint works.
+/// Upload the combined job log as a per-job `job-log-<job-id>` artifact
+/// (best-effort). This stays as an explicit fallback even when GitHub's native
+/// log endpoint works. Artifact names must not collide across jobs in one run.
 async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
     if step_logs.is_empty() {
         return;
@@ -11470,6 +11471,8 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
     };
     let plan_id = job.plan.plan_id.clone();
     let job_id = job.job_id.clone();
+    let artifact_name = job_log_artifact_name(&job_id);
+    let upload_artifact_name = artifact_name.clone();
     let content = build_combined_job_log(job, step_logs).into_bytes();
     let outcome = tokio::task::spawn_blocking(move || {
         crate::protocol::upload_artifact_blocking(
@@ -11477,17 +11480,21 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
             &token,
             &plan_id,
             &job_id,
-            "job-log",
+            &upload_artifact_name,
             &[("job-log.txt".to_string(), content)],
             crate::protocol::ArtifactUploadOptions::default(),
         )
     })
     .await;
     match outcome {
-        Ok(Ok(_)) => println!("Uploaded job-log.txt artifact."),
+        Ok(Ok(_)) => println!("Uploaded {artifact_name} artifact."),
         Ok(Err(e)) => eprintln!("Best-effort job-log artifact upload failed: {e:#}"),
         Err(e) => eprintln!("Best-effort job-log artifact task join failed: {e:#}"),
     }
+}
+
+fn job_log_artifact_name(job_id: &str) -> String {
+    format!("job-log-{job_id}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11510,7 +11517,7 @@ async fn complete_run_service_job(
         eprintln!("Best-effort timeline log upload failed: {error:#}");
     }
     // Best-effort: publish the whole job log to the same Results Service job-log
-    // blob used by official runners, then keep a `job-log.txt` artifact fallback.
+    // blob used by official runners, then keep a per-job artifact fallback.
     // The two independent uploads used to run serially, needlessly adding both
     // network tails to terminal completion. Keep both before CompleteJob, but
     // overlap them so completion waits only for the slower upload.
@@ -20449,6 +20456,15 @@ runs:
         }
         assert!(combined.contains("##[group]Run tests"));
         assert!(combined.contains("hello"));
+    }
+
+    #[test]
+    fn job_log_artifact_names_are_unique_per_job() {
+        assert_eq!(job_log_artifact_name("job-1"), "job-log-job-1");
+        assert_ne!(
+            job_log_artifact_name("job-1"),
+            job_log_artifact_name("job-2")
+        );
     }
 
     #[test]
