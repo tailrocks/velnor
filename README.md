@@ -5,7 +5,7 @@ plane. GitHub remains the scheduler and job source of truth; Velnor validates
 jobs before side effects, executes admitted work through an explicitly selected
 Docker or Firecracker backend, and keeps bounded operational evidence.
 
-Docker Rust jobs use the image-pinned Mr Boxington 1.7.0 integration by
+Docker Rust jobs use the image-pinned Mr Boxington 1.8.3 integration by
 default: ordinary `cargo` commands enter Mr Boxington and use a bounded,
 host-persistent store scoped by the daemon pool's trust boundary and, when
 available in the acquired job payload, repository identity. See

@@ -11,17 +11,21 @@ RUN apt-get update \
         tar \
     && rm -rf /var/lib/apt/lists/*
 
-# Rust and sccache are installed only by the locked project mise contract.
+# Rust and Mr. Boxington are installed only by the locked project mise contract.
 # The mise binary itself is the documented bootstrap exception.
 ENV MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config \
     MISE_CONFIG_FILE=/opt/mise/config/mise.toml \
     CARGO_HOME=/usr/local/cargo \
-    PATH=/opt/mise/bin:/opt/mise/shims:$PATH \
+    PATH=/opt/mbx/bin:/opt/mise/bin:/opt/mise/shims:$PATH \
     MISE_LOCKFILE=1 \
     MISE_LOCKED=1 \
-    MISE_LOCKED_VERIFY_PROVENANCE=1
+    MISE_LOCKED_VERIFY_PROVENANCE=1 \
+    MBX_CACHE_DIR=/mbx \
+    MBX_TARGET_ROOT=/mbx/targets \
+    MBX_GC_AUTO=true \
+    MBX_GC_MAX_TOTAL_SIZE=50GiB
 
 COPY docker/build-mise.toml /opt/mise/config/mise.toml
 COPY docker/build-mise.lock /opt/mise/config/mise.lock
@@ -32,15 +36,11 @@ RUN mkdir -p /opt/mise/bin \
     && export MISE_GLOBAL_CONFIG_FILE=/tmp/mise-empty.toml \
     && curl -fsSL https://mise.run | MISE_VERSION="v2026.9.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh \
     && mise trust /opt/mise/config/mise.toml \
-    && mise install --locked --yes rust sccache \
+    && mise install --locked --yes rust mr-boxington \
     && mise reshim \
     && mise exec -- rustc --version \
-    && mise exec -- sccache --version
-
-# sccache: object-level compiler cache in a BuildKit cache mount so source
-# changes rebuild from warm objects (estate instant-cache mandate).
-ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache
+    && XDG_DATA_HOME=/opt mise exec -- mbx setup --yes \
+    && mise exec -- mbx --version | grep -F '1.8.3'
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -49,10 +49,9 @@ COPY microvm ./microvm
 COPY tools ./tools
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/sccache \
+    --mount=type=cache,target=/mbx \
     cd /opt/mise/config \
-    && mise exec -- cargo build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow \
-    && mise exec -- sccache --show-stats
+    && CARGO_TARGET_DIR=/src/target mise exec -- mbx build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
 

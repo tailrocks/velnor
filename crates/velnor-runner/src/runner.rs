@@ -14321,7 +14321,7 @@ mod tests {
         assert!(text.contains("unsupported capability"), "{text}");
         assert!(text.contains("execution.context_data"), "{text}");
         assert!(text.contains("received '<empty>'"), "{text}");
-        assert!(text.contains("manifest version 12"), "{text}");
+        assert!(text.contains("manifest version 13"), "{text}");
     }
 
     #[test]

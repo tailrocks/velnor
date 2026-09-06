@@ -253,7 +253,7 @@ impl SlotBudget {
     ///   build scripts, which otherwise pick their own `-j`.
     /// * `MBX_SCHEDULER_CPUS` / `MBX_SCHEDULER_MEMORY` are mbx's documented
     ///   environment contract for its scheduler pool (`crates/mbx/src/config.rs`
-    ///   in `jdx/mr-boxington`, v1.7.0, the version this image pins). Their
+    ///   in `jdx/mr-boxington`, v1.8.3, the version this image pins). Their
     ///   defaults are "logical CPUs" and "85% of physical memory", neither of
     ///   which sees the slice quota, so both are stated explicitly.
     pub(crate) fn job_env(&self) -> Vec<(String, String)> {

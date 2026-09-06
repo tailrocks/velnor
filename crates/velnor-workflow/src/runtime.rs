@@ -114,14 +114,53 @@ struct CiUnit {
     #[serde(default)]
     root: String,
     watch: Vec<String>,
-    pr_commands: Vec<String>,
-    full_commands: Vec<String>,
+    github_pr_commands: Vec<String>,
+    github_full_commands: Vec<String>,
+    velnor_pr_commands: Vec<String>,
+    velnor_full_commands: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
     #[serde(default)]
     tool_version: Option<String>,
     #[serde(default)]
     cache: Option<Cache>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunnerLane {
+    Github,
+    Velnor,
+}
+
+impl RunnerLane {
+    /// Velnor's job container advertises its authoritative execution backend;
+    /// hosted GitHub jobs and local invocations deliberately fall back to the
+    /// GitHub command set.
+    fn from_execution_backend(backend: Option<&str>) -> Self {
+        if backend.is_some_and(|value| {
+            value.trim().eq_ignore_ascii_case("docker")
+                || value.trim().eq_ignore_ascii_case("microvm")
+        }) {
+            Self::Velnor
+        } else {
+            Self::Github
+        }
+    }
+
+    fn current() -> Self {
+        Self::from_execution_backend(env::var("VELNOR_EXECUTION_BACKEND").ok().as_deref())
+    }
+}
+
+impl CiUnit {
+    fn commands(&self, lane: RunnerLane, scope: Scope) -> &[String] {
+        match (lane, scope) {
+            (RunnerLane::Github, Scope::Affected) => &self.github_pr_commands,
+            (RunnerLane::Github, Scope::Full) => &self.github_full_commands,
+            (RunnerLane::Velnor, Scope::Affected) => &self.velnor_pr_commands,
+            (RunnerLane::Velnor, Scope::Full) => &self.velnor_full_commands,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,7 +307,7 @@ fn read_config(path: &Path) -> Result<CiConfig, GeneratorError> {
             path.display()
         ))
     })?;
-    if config.schema != 1 {
+    if config.schema != 2 {
         return Err(GeneratorError::usage(format!(
             "unsupported CI configuration schema: {}",
             config.schema
@@ -295,9 +334,14 @@ fn validate_config(config: &CiConfig) -> Result<CiConfig, GeneratorError> {
                 unit.id
             )));
         }
-        if unit.watch.is_empty() || unit.pr_commands.is_empty() || unit.full_commands.is_empty() {
+        if unit.watch.is_empty()
+            || unit.github_pr_commands.is_empty()
+            || unit.github_full_commands.is_empty()
+            || unit.velnor_pr_commands.is_empty()
+            || unit.velnor_full_commands.is_empty()
+        {
             return Err(GeneratorError::usage(format!(
-                "CI unit must declare watch, PR, and full commands: {}",
+                "CI unit must declare watch plus GitHub and Velnor PR/full commands: {}",
                 unit.id
             )));
         }
@@ -335,6 +379,13 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let units = selected_units(&root, &config, scope)?
+        .into_iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     if let Some(output) = env::var_os("GITHUB_OUTPUT") {
         let output_path = PathBuf::from(output);
         let mut file = fs::OpenOptions::new()
@@ -344,9 +395,11 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "units={units}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
     }
     println!("scope={}", scope_name(scope));
-    let _ = config;
+    println!("units={units}");
     Ok(())
 }
 
@@ -381,6 +434,153 @@ fn scope_name(scope: Scope) -> &'static str {
     match scope {
         Scope::Affected => "affected",
         Scope::Full => "full",
+    }
+}
+
+#[cfg(test)]
+mod runner_lane_tests {
+    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
+    use std::path::Path;
+
+    #[test]
+    fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
+        assert_eq!(RunnerLane::from_execution_backend(None), RunnerLane::Github);
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("github-hosted")),
+            RunnerLane::Github
+        );
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("docker")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::from_execution_backend(Some("MICROVM")),
+            RunnerLane::Velnor
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_execution_backend(Some("self-hosted"))
+        );
+        assert_eq!(
+            RunnerLane::Github,
+            RunnerLane::from_execution_backend(Some("unknown"))
+        );
+    }
+
+    #[test]
+    fn lane_and_scope_select_the_matching_command_array() {
+        let unit = CiUnit {
+            id: "docker".to_owned(),
+            label: "Docker".to_owned(),
+            kind: "docker".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["Dockerfile".to_owned()],
+            github_pr_commands: vec!["github-pr".to_owned()],
+            github_full_commands: vec!["github-full".to_owned()],
+            velnor_pr_commands: vec!["velnor-pr".to_owned()],
+            velnor_full_commands: vec!["velnor-full".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+        };
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Affected),
+            &["github-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Github, Scope::Full),
+            &["github-full".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Affected),
+            &["velnor-pr".to_owned()]
+        );
+        assert_eq!(
+            unit.commands(RunnerLane::Velnor, Scope::Full),
+            &["velnor-full".to_owned()]
+        );
+    }
+
+    #[test]
+    fn affected_closure_does_not_follow_dependents_of_added_prerequisites() {
+        let units = vec![
+            CiUnit {
+                id: "base".to_owned(),
+                label: "base".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["base".to_owned()],
+                github_full_commands: vec!["base".to_owned()],
+                velnor_pr_commands: vec!["base".to_owned()],
+                velnor_full_commands: vec!["base".to_owned()],
+                depends_on: Vec::new(),
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "changed".to_owned(),
+                label: "changed".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["changed".to_owned()],
+                github_full_commands: vec!["changed".to_owned()],
+                velnor_pr_commands: vec!["changed".to_owned()],
+                velnor_full_commands: vec!["changed".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "sibling".to_owned(),
+                label: "sibling".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["sibling".to_owned()],
+                github_full_commands: vec!["sibling".to_owned()],
+                velnor_pr_commands: vec!["sibling".to_owned()],
+                velnor_full_commands: vec!["sibling".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "leaf".to_owned(),
+                label: "leaf".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["leaf".to_owned()],
+                github_full_commands: vec!["leaf".to_owned()],
+                velnor_pr_commands: vec!["leaf".to_owned()],
+                velnor_full_commands: vec!["leaf".to_owned()],
+                depends_on: vec!["changed".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+        ];
+        let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["base", "changed", "leaf"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn crate_test_collection_matches_scanner_fixture_exclusions() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut manifests = Vec::new();
+        assert!(collect_manifests(root, root, &mut manifests).is_ok());
+        assert!(manifests.iter().all(|path| {
+            path.strip_prefix(root).is_ok_and(|relative| {
+                !super::super::is_test_support_path(&relative.to_string_lossy())
+            })
+        }));
     }
 }
 
@@ -421,15 +621,25 @@ fn selected_units<'a>(
     config: &'a CiConfig,
     scope: Scope,
 ) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    let base = env::var("BASE_SHA").unwrap_or_default();
+    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    selected_units_for_diff(root, config, scope, &base, &head)
+}
+
+fn selected_units_for_diff<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
     if scope == Scope::Full {
         return ordered_units(&config.unit, None);
     }
-    let base = env::var("BASE_SHA").unwrap_or_default();
-    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
     if base.is_empty() || base.chars().all(|character| character == '0') {
         return ordered_units(&config.unit, None);
     }
-    let Some(changed) = git_changed_files(root, &base, &head)? else {
+    let Some(changed) = git_changed_files(root, base, head)? else {
         return ordered_units(&config.unit, None);
     };
     if changed.is_empty() {
@@ -467,24 +677,44 @@ fn selected_units<'a>(
             return ordered_units(&config.unit, None);
         }
     }
-    let mut expanded = true;
-    while expanded {
-        expanded = false;
-        for unit in &config.unit {
-            if selected.contains(&unit.id) {
-                for dependency in &unit.depends_on {
-                    expanded |= selected.insert(dependency.clone());
-                }
-            } else if unit
+    selected = expand_affected_units(&config.unit, selected);
+    ordered_units(&config.unit, Some(&selected))
+}
+
+/// Return the directed Cargo closure for changed units.
+///
+/// Dependents are seeded only from units matched by changed files. Their
+/// prerequisites are added after that reverse walk, so a prerequisite shared
+/// by an affected unit cannot pull in an unrelated sibling dependent.
+fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
+    let mut affected = changed.clone();
+    let mut pending = changed.into_iter().collect::<Vec<_>>();
+    while let Some(changed_id) = pending.pop() {
+        for unit in units {
+            if unit
                 .depends_on
                 .iter()
-                .any(|dependency| selected.contains(dependency))
+                .any(|dependency| dependency == &changed_id)
+                && affected.insert(unit.id.clone())
             {
-                expanded |= selected.insert(unit.id.clone());
+                pending.push(unit.id.clone());
             }
         }
     }
-    ordered_units(&config.unit, Some(&selected))
+
+    let mut required = affected.clone();
+    let mut pending = affected.into_iter().collect::<Vec<_>>();
+    while let Some(unit_id) = pending.pop() {
+        let Some(unit) = units.iter().find(|unit| unit.id == unit_id) else {
+            continue;
+        };
+        for dependency in &unit.depends_on {
+            if required.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    required
 }
 
 fn git_changed_files(
@@ -549,6 +779,7 @@ fn ordered_units<'a>(
 }
 
 fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), GeneratorError> {
+    let runner_lane = RunnerLane::current();
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
         let ready = units
@@ -575,10 +806,7 @@ fn run_layers(root: &Path, units: &[&CiUnit], run_scope: Scope) -> Result<(), Ge
             for unit in ready.iter().copied() {
                 let sender = sender.clone();
                 thread_scope.spawn(move || {
-                    let commands = match run_scope {
-                        Scope::Affected => unit.pr_commands.as_slice(),
-                        Scope::Full => unit.full_commands.as_slice(),
-                    };
+                    let commands = unit.commands(runner_lane, run_scope);
                     let result = run_unit(root, unit, commands);
                     let _ = sender.send((unit.id.clone(), result));
                 });
@@ -643,7 +871,13 @@ pub(crate) fn test_crates(
             continue;
         }
         println!("::group::cargo tests: {}", manifest.display());
-        let mut command = Command::new(cargo_program.unwrap_or_else(|| Path::new("cargo")));
+        let default_cargo =
+            if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
+                Path::new("mbx")
+            } else {
+                Path::new("cargo")
+            };
+        let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
         command
             .arg(if nextest { "nextest" } else { "test" })
             .arg(if nextest { "run" } else { "--all-features" });
@@ -690,7 +924,11 @@ fn collect_manifests(
                 continue;
             }
             collect_manifests(root, &path, manifests)?;
-        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml")
+            && relative
+                .to_str()
+                .is_none_or(|path| !super::is_test_support_path(path))
+        {
             manifests.push(path);
         }
     }
@@ -1426,7 +1664,7 @@ mod tests {
     use super::*;
 
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
-    const POLICY_REVISION: &str = "07750dcaaff8173ef622a081142ff25855e4bf5e";
+    const POLICY_REVISION: &str = "a1cbfcbe5ab179032e37125f0383cdcae8183c8c";
 
     fn policy_fixture(
         name: &str,
@@ -1444,7 +1682,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e\n    with:\n      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e\n    permissions:\n      contents: read\n",
+            format!("name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@{POLICY_REVISION}\n    with:\n      policy-revision: {POLICY_REVISION}\n    permissions:\n      contents: read\n"),
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1457,6 +1695,136 @@ mod tests {
         let result = enforce_policy_with_revision(&root, POLICY_REVISION).is_ok();
         std::fs::remove_dir_all(root)?;
         Ok(result)
+    }
+
+    fn selection_config() -> CiConfig {
+        let unit = |id: &str, watch: &[&str], depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+        };
+        CiConfig {
+            schema: 2,
+            repository: "example/repository".to_owned(),
+            profile: "rust-workspace".to_owned(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "github".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit("base", &["crates/base/**"], &[]),
+                unit("app", &["crates/app/**"], &["base"]),
+                unit("consumer", &["crates/consumer/**"], &["app"]),
+                unit("docs", &["docs/**"], &[]),
+            ],
+        }
+    }
+
+    fn selection_git_fixture(
+        name: &str,
+        changed: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        for path in [
+            "crates/base/src/lib.rs",
+            "crates/app/src/lib.rs",
+            "crates/consumer/src/lib.rs",
+            "docs/index.md",
+        ] {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, "initial\n")?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        let changed_path = root.join(changed);
+        let parent = changed_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "changed parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(changed_path, "changed\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
+        units.into_iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    #[test]
+    fn affected_selection_expands_dependency_and_dependent_closure() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("closure", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(units), vec!["base", "app", "consumer"]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
+    ) -> Result<(), Box<dyn Error>> {
+        for (name, changed) in [
+            ("github", ".github/workflows/ci.yml"),
+            ("unmatched", "README.md"),
+        ] {
+            let (root, base, head) = selection_git_fixture(name, changed)?;
+            let config = selection_config();
+            let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -1505,9 +1873,9 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1558,9 +1926,9 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
     permissions:
       contents: read
 ";

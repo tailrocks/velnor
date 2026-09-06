@@ -159,7 +159,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && test "$(cat /opt/mbx/bin/mbx-target)" = "$mbx_real" \
     && cargo --version \
     && MBX_DISABLE=1 cargo --version \
-    && mbx --version | grep -F '1.7.0' \
+    && mbx --version | grep -F '1.8.3' \
     && mbx doctor \
     && test -z "${RUSTC_WRAPPER:-}" \
     && mise exec -- sccache --version | grep -F 'sccache 0.16.0' \
