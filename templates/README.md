@@ -18,7 +18,7 @@ repository of that class ships as `.github/workflows/ci.yml`. Each template:
   `github.repository_owner`; exactly one runs and the other two skip;
 - gives each static call an owner-local SHA placeholder and shares one anchored
   `@CALVER@` across all three calls (the only non-executable placeholders), all
-  replaced together by `render-consumer`; this binds the same CalVer release while
+  replaced together by the Velnor workflow generator; this binds the same CalVer release while
   allowing the three mirror tags to target their independent Git histories;
 - exposes the sole `lane` selector (`github`, `velnor`, `both`) on
   `workflow_dispatch`, and triggers on `pull_request`, `push`, `merge_group`, and
@@ -29,8 +29,7 @@ repository of that class ships as `.github/workflows/ci.yml`. Each template:
   explicit contract output are both `success` while the other two calls are
   `skipped` with empty outputs.
 
-Materialize one with
-`mise exec -- cargo run -p velnor-actions-generator -- render-consumer
---repository OWNER/REPO --jackin-release-sha <40-hex>
---tailrocks-release-sha <40-hex> --chainargos-release-sha <40-hex>
---calver <CalVer> --output DIR`.
+The checked-in `.github/workflows` surface is materialized only by
+`velnor-workflow`; use `mise run generate` in the canonical repository and
+`velnor-workflow TARGET --adopt --runners both --plain` for a reviewed consumer
+migration.

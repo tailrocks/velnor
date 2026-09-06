@@ -64,14 +64,14 @@ depends = ["_toolchain"]
 run = "cargo deny check advisories"
 
 [tasks.generate]
-description = "Render the five class templates and callable workflows from fleet data"
+description = "Generate every GitHub Actions workflow through Velnor CLI"
 depends = ["_toolchain"]
-run = "cargo run --locked -p velnor-actions-generator -- generate --root ."
+run = "bash tools/run-velnor-workflow.sh --plain --force ."
 
 [tasks.generator-check]
-description = "Audit the fleet: regenerate, compare committed bytes, prove the closure"
+description = "Check every generated workflow through Velnor CLI"
 depends = ["_toolchain"]
-run = "cargo run --locked -p velnor-actions-generator -- audit --root ."
+run = "bash tools/run-velnor-workflow.sh --plain --check ."
 
 [tasks.remote-closure-check]
 description = "Fetch pinned remote actions and verify their recursive executable closure"

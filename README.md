@@ -37,24 +37,21 @@ Canonical source of the Velnor Actions fleet.
   (jackin-project / tailrocks / ChainArgos) selected by `github.repository_owner`, a
   owner-local `@<sha> # <CalVer>` release pins, and a fail-closed `ci-required`
   aggregator.
-- `crates/velnor-actions-generator/` — the Rust generator: `model` (data + validation),
-  `render` (deterministic rendering), `cache` (trusted cache declaration/key
-  validation), `audit` (regeneration, byte, closure, and fail-closed aggregation
-  checks), and the CLI.
+- `crates/velnor-actions-generator/` — the legacy fleet model and audit library.
+  It no longer exposes a workflow-writing CLI; Velnor owns every workflow output.
 
 ## Generator CLI
 
-- `generate --root .` — render the five templates (and, once `block-sha` is bound,
-  the five callable workflows).
+- `mise run generate` — invoke the Velnor workflow generator. The task uses the
+  sibling `../velnor` checkout by default. In CI or another standalone checkout,
+  it runs the pinned Velnor revision; set `VELNOR_WORKFLOW_SOURCE_DIR` to use a
+  different local checkout.
 - `tool-registry --root . --fleet fleet/repositories.toml` — validate the
   generator-owned tool registry, root mise graph, lockfile, and 28-repository
   manifest shape.
-- `render-consumer --root . --repository OWNER/REPO --jackin-release-sha <40-hex>
-  --tailrocks-release-sha <40-hex> --chainargos-release-sha <40-hex> --calver
-  <CalVer> --output DIR` — materialize one consumer's
-  `DIR/.github/workflows/ci.yml`, atomically replacing the three owner-local SHA
-  placeholders and their shared CalVer. Each SHA is the target of that owner's
-  immutable mirror tag; mirror histories need not share commit identities.
+- The legacy `render-consumer` APIs remain only for compatibility tests. They are
+  not workflow-generation entry points; all workflow files are produced by
+  `velnor-workflow`.
 - `audit --root .` — the full fleet audit (prints
   `fleet valid: 28 repositories, 5 classes, 5 templates`).
 
@@ -65,7 +62,8 @@ with:
 
 ```bash
 mise install --locked
-mise run generate       # re-render from data (should be a no-op on a clean tree)
+mise run generate       # Velnor CLI; should be a no-op on a clean tree
+mise run generator-check # Velnor CLI ownership and byte check
 mise run ci
 mise run ci:contract    # registry + fleet contract gate
 bash tools/check-tool-registry.sh --fixtures tests/fixtures/tools/

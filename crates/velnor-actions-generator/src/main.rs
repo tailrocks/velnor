@@ -2,11 +2,9 @@
 //!
 //! Subcommands:
 //! - `check --root PATH` — skeleton layout self-check (unchanged from plan 004).
-//! - `generate --root PATH` — render the five class templates (and, once the
-//!   block SHA is bound, the five callable workflows).
-//! - `render-consumer --root PATH --repository OWNER/REPO` plus three
-//!   owner-local release SHA flags, `--calver VER --output DIR`.
 //! - `audit --root PATH` — full fleet audit; prints the exact fleet-valid line.
+//! - workflow-writing commands are intentionally retired; `velnor-workflow` is
+//!   the sole workflow generator.
 //!
 //! Malformed arguments, a missing layout root, or any audit violation exit
 //! nonzero.
@@ -16,8 +14,7 @@ use std::process::ExitCode;
 
 use velnor_actions_generator::model::{CensusMetadata, RepositoryKind, RepositoryTier, Visibility};
 use velnor_actions_generator::{
-    ALL_CLASSES, REQUIRED_LAYOUT, RepositoryClass, audit, generate, render_consumer_to_dir,
-    render_package_consumer_to_dir, tools, validate_layout,
+    ALL_CLASSES, REQUIRED_LAYOUT, RepositoryClass, audit, tools, validate_layout,
 };
 
 fn main() -> ExitCode {
@@ -36,9 +33,9 @@ fn main() -> ExitCode {
 fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     match args.next().as_deref() {
         Some("check") => run_check(args),
-        Some("generate") => run_generate(args),
-        Some("render-consumer") => run_render_consumer(args),
-        Some("render-package-consumer") => run_render_package_consumer(args),
+        Some("generate" | "render-consumer" | "render-package-consumer") => {
+            Err("workflow generation moved to velnor-workflow; use `mise run generate`".to_owned())
+        }
         Some("audit") => run_audit(args),
         Some("census") => run_census(args),
         Some("scaffold") => run_scaffold(args),
@@ -48,7 +45,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
         Some("tool-registry") => run_tool_registry(args),
         Some(other) => Err(format!("unknown subcommand: {other}")),
         None => Err(
-            "missing subcommand (expected: check, generate, render-consumer, scaffold, census, audit, or fleet-audit)".to_string(),
+            "missing subcommand (expected: check, scaffold, census, audit, fleet-audit, verify-remote, release-check, or tool-registry)".to_string(),
         ),
     }
 }
@@ -191,51 +188,6 @@ fn parse_metadata(
     })
 }
 
-fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result<String, String> {
-    let mut root = PathBuf::from(".");
-    let mut repository = None;
-    let mut jackin_release_sha = None;
-    let mut tailrocks_release_sha = None;
-    let mut chainargos_release_sha = None;
-    let mut calver = None;
-    let mut output = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--root" => root = PathBuf::from(require_value(&mut args, "--root")?),
-            "--repository" => repository = Some(require_value(&mut args, "--repository")?),
-            "--jackin-release-sha" => {
-                jackin_release_sha = Some(require_value(&mut args, "--jackin-release-sha")?)
-            }
-            "--tailrocks-release-sha" => {
-                tailrocks_release_sha = Some(require_value(&mut args, "--tailrocks-release-sha")?)
-            }
-            "--chainargos-release-sha" => {
-                chainargos_release_sha = Some(require_value(&mut args, "--chainargos-release-sha")?)
-            }
-            "--calver" => calver = Some(require_value(&mut args, "--calver")?),
-            "--output" => output = Some(PathBuf::from(require_value(&mut args, "--output")?)),
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-    }
-    let repository = repository.ok_or("render-package-consumer requires --repository")?;
-    let release_shas = [
-        jackin_release_sha.ok_or("render-package-consumer requires --jackin-release-sha")?,
-        tailrocks_release_sha.ok_or("render-package-consumer requires --tailrocks-release-sha")?,
-        chainargos_release_sha
-            .ok_or("render-package-consumer requires --chainargos-release-sha")?,
-    ];
-    let calver = calver.ok_or("render-package-consumer requires --calver")?;
-    let output = output.ok_or("render-package-consumer requires --output")?;
-    let path = render_package_consumer_to_dir(
-        &root,
-        &repository,
-        [&release_shas[0], &release_shas[1], &release_shas[2]],
-        &calver,
-        &output,
-    )?;
-    Ok(format!("rendered {}", path.display()))
-}
-
 fn run_release_check(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     let mut root: Option<PathBuf> = None;
     let mut release: Option<String> = None;
@@ -279,19 +231,6 @@ fn run_check(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     ))
 }
 
-fn run_generate(mut args: impl Iterator<Item = String>) -> Result<String, String> {
-    let mut root: Option<PathBuf> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--root" => root = Some(PathBuf::from(require_value(&mut args, "--root")?)),
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-    }
-    let root = root.ok_or("generate requires --root PATH")?;
-    let written = generate(&root)?;
-    Ok(format!("generated {} files", written.len()))
-}
-
 fn run_audit(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     let mut root: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
@@ -332,50 +271,6 @@ fn run_tool_registry(mut args: impl Iterator<Item = String>) -> Result<String, S
         )?,
     };
     Ok(format!("tool registry valid: {count} effective tools"))
-}
-
-fn run_render_consumer(mut args: impl Iterator<Item = String>) -> Result<String, String> {
-    let mut root = PathBuf::from(".");
-    let mut repository: Option<String> = None;
-    let mut jackin_release_sha: Option<String> = None;
-    let mut tailrocks_release_sha: Option<String> = None;
-    let mut chainargos_release_sha: Option<String> = None;
-    let mut calver: Option<String> = None;
-    let mut output: Option<PathBuf> = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--root" => root = PathBuf::from(require_value(&mut args, "--root")?),
-            "--repository" => repository = Some(require_value(&mut args, "--repository")?),
-            "--jackin-release-sha" => {
-                jackin_release_sha = Some(require_value(&mut args, "--jackin-release-sha")?)
-            }
-            "--tailrocks-release-sha" => {
-                tailrocks_release_sha = Some(require_value(&mut args, "--tailrocks-release-sha")?)
-            }
-            "--chainargos-release-sha" => {
-                chainargos_release_sha = Some(require_value(&mut args, "--chainargos-release-sha")?)
-            }
-            "--calver" => calver = Some(require_value(&mut args, "--calver")?),
-            "--output" => output = Some(PathBuf::from(require_value(&mut args, "--output")?)),
-            other => return Err(format!("unexpected argument: {other}")),
-        }
-    }
-    let repository = repository.ok_or("render-consumer requires --repository OWNER/REPO")?;
-    let release_shas = [
-        jackin_release_sha.ok_or("render-consumer requires --jackin-release-sha")?,
-        tailrocks_release_sha.ok_or("render-consumer requires --tailrocks-release-sha")?,
-        chainargos_release_sha.ok_or("render-consumer requires --chainargos-release-sha")?,
-    ];
-    let calver = calver.ok_or("render-consumer requires --calver VERSION")?;
-    let output = output.ok_or("render-consumer requires --output DIRECTORY")?;
-    let path = render_consumer_to_dir(
-        &root,
-        &repository,
-        [&release_shas[0], &release_shas[1], &release_shas[2]],
-        &calver,
-        &output,
-    )?;
-    Ok(format!("rendered {}", path.display()))
 }
 
 fn require_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {

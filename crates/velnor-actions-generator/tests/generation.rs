@@ -810,43 +810,43 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "b64037e36988a9056dad0f90f8b798588e56a62cd91f158574e785f38e71df5a",
+            "91288e0157d7e385c9ffc0bd022b6e112c1cecf001b3ed9252943645c9e745ec",
         ),
         (
             "templates/native/ci.yml",
-            "8666e38f835806cd0d93e120b0b7c73320b5ab01914befbc7d67795214c59d87",
+            "8269b67cb7049b23bf40a2be00ca058f5a866af6be1cca182a8850cee816e279",
         ),
         (
             "templates/tap/ci.yml",
-            "dba7498a02346438f1d4ff070a964d711faa18827ea4deb3105058a41556c0ca",
+            "defe2d64d8518d542768dfcfc477442a57e1bcca6c4dbc78a09df291831a14ce",
         ),
         (
             "templates/apt/ci.yml",
-            "89e1b7970898087b62d16239f0abde4da0f4b8e10855ebde3ae9e722597264be",
+            "f6e020b22b39bde6f0a1161fee81784c34647b70c6532428882843e5ed7ae65c",
         ),
         (
             "templates/fixture/ci.yml",
-            "75a311d5d733be8772325e125cdae11c3fb9173ba01a79803d8a0d62a4119a7d",
+            "8c4c25c86d7421e34e0a13bf268ff15548e02c49187dbbad8527afcc328b3732",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "14c5cc482b8e10a027ddaa3187c244b659555b44014aadde70547c4345bf48ef",
+            "1b40f575915792689506efc6651a6983e7c737a2e14d4262b209f8e6e5002459",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "96337e1beb3659ffa9c25196d00ef4e23c683bb6d75caf99fe6ed7293e9f8925",
+            "f2ec5c72641692a4f11d1ed0b4dcc53f623812c191bad8731579993ccdd985e8",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "6b8e9c35c347b314946da6132bec58a4786876eb545da71412da9e572adb619a",
+            "1bff471646c9984bd1c36f2f24be42debdbefdb98273e63d8b7d75f53e21827a",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "a01a913d9f5e0023a85597bd23bb5f84d45d8f774a3bd4db34453c0b07079bf3",
+            "e10d4a71956996a52d104d6abffc10804b11ba3bbd38d6bffbef125b37cdbcc7",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "258e66504be29dc9bb6babc9f8a16738ac1a6a2c34b09ad34de4a0ed6be0361b",
+            "6ffc78d0a59850f90c0e23984f7e7c2e3ef4961958112fd704e2812007664916",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();
