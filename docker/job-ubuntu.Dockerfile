@@ -255,22 +255,13 @@ ARG VELNOR_IMAGE_VERSION=development
 LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
       org.opencontainers.image.source="https://github.com/tailrocks/velnor"
 
-# Build the workflow generator from the locked workspace source after the
-# complete job image exists. The builder inherits the already-installed Rust
-# toolchain, while the final stage receives only the executable.
-FROM jobimage AS workflow-builder
-WORKDIR /tmp/velnor-workflow-build
-COPY Cargo.toml Cargo.lock rust-toolchain.toml /tmp/velnor-workflow-build/
-COPY crates /tmp/velnor-workflow-build/crates
-COPY tools /tmp/velnor-workflow-build/tools
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/root/.cache/sccache \
-    cargo build --locked --release --package velnor-workflow --bin velnor-workflow \
-    && install -Dm0755 target/release/velnor-workflow /usr/local/bin/velnor-workflow
-
 FROM jobimage
-COPY --from=workflow-builder /usr/local/bin/velnor-workflow /usr/local/bin/velnor-workflow
+ARG TARGETARCH
+# Build jobs cross-compile this binary once per release architecture. Reusing
+# those exact bytes avoids compiling the complete workflow workspace under
+# QEMU during the multi-platform image build, which previously hit the
+# 60-minute job timeout before the image could be published.
+COPY release-binaries/${TARGETARCH}/velnor-workflow /usr/local/bin/velnor-workflow
 RUN test -x /usr/local/bin/velnor-workflow \
     && /usr/local/bin/velnor-workflow --help >/dev/null \
     && install -d -m 0755 /usr/local/share/velnor \
