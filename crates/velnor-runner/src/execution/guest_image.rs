@@ -401,10 +401,13 @@ pub fn build_guest_image(
 }
 
 fn cross_compile(arch: GuestArch) -> Option<&'static str> {
-    match (std::env::consts::ARCH, arch) {
-        ("x86_64", GuestArch::Aarch64) => Some("aarch64-linux-gnu-"),
-        ("aarch64", GuestArch::X86_64) => Some("x86_64-linux-gnu-"),
-        _ => None,
+    match arch {
+        // Keep the ARM kernel on the pinned cross-GCC path even when the
+        // GitHub job itself runs natively on ARM. Native and cross-GCC emit
+        // different bytes for the same source/configuration.
+        GuestArch::Aarch64 => Some("aarch64-linux-gnu-"),
+        GuestArch::X86_64 if std::env::consts::ARCH == "aarch64" => Some("x86_64-linux-gnu-"),
+        GuestArch::X86_64 => None,
     }
 }
 
@@ -728,6 +731,9 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "KBUILD_BUILD_TIMESTAMP=1970-01-01"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "CROSS_COMPILE=aarch64-linux-gnu-"));
     }
 
     #[test]

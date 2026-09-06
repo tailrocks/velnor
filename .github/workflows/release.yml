@@ -795,6 +795,11 @@ jobs:
               qemu-user-static binfmt-support
             sudo update-binfmts --enable qemu-aarch64
             test -x /usr/bin/qemu-aarch64-static
+          else
+            # Build the ARM kernel with the same cross-GCC identity on every
+            # runner; native ARM GCC changes the pinned vmlinux bytes.
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu
           fi
           arch-test arm64
 
@@ -952,7 +957,10 @@ jobs:
           # release-build is a feature of velnor-runner and velnorctl only.
           # The deb also ships velnor-tools and velnor-workflow, so build those
           # packages explicitly without inventing a feature they do not own.
-          mbx zigbuild -p velnor-runner \
+          # aws-lc-sys emits glibc ISO C23 references that the MBX target
+          # overlay's Zig linker cannot resolve. MBX_DISABLE selects the
+          # known-good plain cargo-zigbuild path for this C-native package.
+          MBX_DISABLE=1 mbx zigbuild -p velnor-runner \
             --bin velnor-runner \
             --release --locked --features release-build --target "${{ matrix.target }}"
           mbx zigbuild -p velnorctl \
