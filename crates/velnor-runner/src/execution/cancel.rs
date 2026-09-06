@@ -1615,6 +1615,11 @@ mod tests {
         token.request(CancelReason::ServerRequested);
         token.fan_out_once();
 
+        // `request` starts the detached ladder thread. The explicit
+        // `fan_out_once` above can race that worker while it is processing the
+        // same targets, so wait for the recorded outcomes before observing the
+        // hook's side effect.
+        wait_for_outcomes(&token, 2);
         assert!(
             guest_cancelled.load(Ordering::SeqCst),
             "the guest is told to stop"
