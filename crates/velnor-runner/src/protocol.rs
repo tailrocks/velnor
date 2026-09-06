@@ -270,13 +270,40 @@ pub(crate) fn validate_authenticated_url(raw: &str) -> Result<Url> {
     }
 }
 
+/// GitHub publishes hosted Actions services on fixed and regional
+/// subdomains below this suffix. Keep the match to one valid DNS label so a
+/// lookalike domain or a nested untrusted host cannot pass the allowlist.
+pub(crate) fn is_github_actions_service_host(host: &str) -> bool {
+    const SUFFIX: &str = ".actions.githubusercontent.com";
+
+    let Some(prefix_len) = host.len().checked_sub(SUFFIX.len()) else {
+        return false;
+    };
+    let (prefix, suffix) = host.split_at(prefix_len);
+    if !suffix.eq_ignore_ascii_case(SUFFIX) || prefix.is_empty() {
+        return false;
+    }
+
+    let bytes = prefix.as_bytes();
+    bytes
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
 fn validate_known_service_url(raw: &str, field: &str, hosts: &[&str]) -> Result<Url> {
     let url = validate_authenticated_url(raw)?;
     let host = url.host_str().unwrap_or_default();
     let allowed_host = is_loopback_host(host)
-        || hosts
-            .iter()
-            .any(|allowed| host.eq_ignore_ascii_case(allowed));
+        || hosts.iter().any(|allowed| {
+            host.eq_ignore_ascii_case(allowed)
+                || (is_github_actions_service_host(host) && is_github_actions_service_host(allowed))
+        });
     let allowed_port = is_loopback_host(host) || url.port().is_none();
     if !allowed_host || !allowed_port {
         bail!(
@@ -9090,6 +9117,47 @@ mod tests {
         } else {
             assert!(loopback.unwrap_err().to_string().contains("HTTPS"));
         }
+    }
+
+    #[test]
+    fn github_actions_service_host_accepts_regional_single_label_hosts() {
+        for host in [
+            "pipelines.actions.githubusercontent.com",
+            "pipelinesghubeus14.actions.githubusercontent.com",
+            "BROKER.ACTIONS.GITHUBUSERCONTENT.COM",
+        ] {
+            assert!(
+                is_github_actions_service_host(host),
+                "expected GitHub Actions host to be accepted: {host}"
+            );
+        }
+
+        for host in [
+            "actions.githubusercontent.com",
+            "pipelinesghubeus14.actions.githubusercontent.com.evil.example",
+            "nested.pipelinesghubeus14.actions.githubusercontent.com",
+            "-pipelines.actions.githubusercontent.com",
+            "pipelines-.actions.githubusercontent.com",
+        ] {
+            assert!(
+                !is_github_actions_service_host(host),
+                "expected non-service host to be rejected: {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_service_validation_accepts_regional_actions_hosts() {
+        let url = validate_known_service_url(
+            "https://pipelinesghubeus14.actions.githubusercontent.com/tenant",
+            "ServerUrl",
+            &["pipelines.actions.githubusercontent.com"],
+        )
+        .unwrap();
+        assert_eq!(
+            url.host_str(),
+            Some("pipelinesghubeus14.actions.githubusercontent.com")
+        );
     }
 
     #[test]
