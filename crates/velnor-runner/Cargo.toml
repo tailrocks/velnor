@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.265"
+version = "0.1.266"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -24,7 +24,7 @@ path = "src/bin/velnor-guest-image.rs"
 
 # Debian packaging (cargo-deb).
 # The unified release.yml (on tag) handles:
-#   cargo zigbuild --release --locked --target $TGT
+#   mbx zigbuild --release --locked --target $TGT
 #   cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"
 # This produces target/<triple>/debian/velnor-runner_<ver>_<arch>.deb .
 #
