@@ -43,6 +43,10 @@ const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 const VELNOR_WORKFLOW_SOURCE_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
+const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
+    "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
+    "package", "publish", "run", "test", "zigbuild",
+];
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
 const VELNOR_POLICY_PROVIDER_WORKFLOW: &str = "velnor-workflow-policy.yml";
 const VELNOR_RELEASE_WORKFLOW_TEMPLATE: &str = include_str!("../templates/velnor-release.yml");
@@ -2455,7 +2459,269 @@ fn mbxify_cargo_command(command: &str) -> String {
             format!("{MR_BOXINGTON_ENABLED_ENV}=1 {command}")
         };
     }
-    command.replace("cargo ", "mbx ")
+    mbxify_cargo_invocations(command).0
+}
+
+fn is_mr_boxington_cargo_subcommand(token: &str) -> bool {
+    MR_BOXINGTON_CARGO_SUBCOMMANDS.contains(&token)
+}
+
+fn next_shell_token(input: &str, start: usize) -> Option<(usize, usize)> {
+    let start = start
+        + input[start..]
+            .bytes()
+            .take_while(u8::is_ascii_whitespace)
+            .count();
+    let first = *input.as_bytes().get(start)?;
+    if matches!(first, b'\'' | b'"') {
+        let mut index = start + 1;
+        while index < input.len() {
+            if input.as_bytes()[index] == first {
+                return Some((start, index + 1));
+            }
+            index += 1;
+        }
+        return None;
+    }
+    let end = start
+        + input[start..]
+            .bytes()
+            .take_while(|byte| !byte.is_ascii_whitespace())
+            .count();
+    Some((start, end))
+}
+
+fn is_word_boundary_before(input: &str, index: usize) -> bool {
+    input
+        .as_bytes()
+        .get(index.wrapping_sub(1))
+        .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_' && *byte != b'-')
+}
+
+fn is_cargo_token(input: &str, index: usize) -> bool {
+    input
+        .get(index..index + "cargo".len())
+        .is_some_and(|token| token == "cargo")
+        && is_word_boundary_before(input, index)
+        && input
+            .as_bytes()
+            .get(index + "cargo".len())
+            .is_some_and(u8::is_ascii_whitespace)
+}
+
+fn is_mbx_token(input: &str, index: usize) -> bool {
+    input
+        .get(index..index + "mbx".len())
+        .is_some_and(|token| token == "mbx")
+        && is_word_boundary_before(input, index)
+        && input
+            .as_bytes()
+            .get(index + "mbx".len())
+            .is_some_and(u8::is_ascii_whitespace)
+}
+
+fn mbxify_rustup_cargo_invocations(input: &str) -> (String, bool) {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while let Some(relative_start) = input[cursor..].find("rustup run ") {
+        let start = cursor + relative_start;
+        if !is_word_boundary_before(input, start) {
+            cursor = start + "rustup".len();
+            continue;
+        }
+        let toolchain_start = start + "rustup run ".len();
+        let Some((toolchain_start, toolchain_end)) = next_shell_token(input, toolchain_start)
+        else {
+            cursor = toolchain_start;
+            continue;
+        };
+        let Some((cargo_start, cargo_end)) = next_shell_token(input, toolchain_end) else {
+            cursor = toolchain_end;
+            continue;
+        };
+        if !is_cargo_token(input, cargo_start) {
+            cursor = cargo_end;
+            continue;
+        }
+        let Some((subcommand_start, subcommand_end)) = next_shell_token(input, cargo_end) else {
+            cursor = cargo_end;
+            continue;
+        };
+        let subcommand = &input[subcommand_start..subcommand_end];
+        if !is_mr_boxington_cargo_subcommand(subcommand) {
+            cursor = subcommand_end;
+            continue;
+        }
+        output.push_str(&input[cursor..start]);
+        output.push_str("mbx +");
+        output.push_str(&input[toolchain_start..toolchain_end]);
+        cursor = cargo_end;
+        changed = true;
+    }
+    output.push_str(&input[cursor..]);
+    (output, changed)
+}
+
+fn mbxify_cargo_invocations(input: &str) -> (String, bool) {
+    let (input, rustup_changed) = mbxify_rustup_cargo_invocations(input);
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut changed = rustup_changed;
+    while let Some(relative_start) = input[cursor..].find("cargo") {
+        let start = cursor + relative_start;
+        if !is_cargo_token(&input, start) {
+            output.push_str(&input[cursor..start + "cargo".len()]);
+            cursor = start + "cargo".len();
+            continue;
+        }
+        let cargo_end = start + "cargo".len();
+        let Some((subcommand_start, subcommand_end)) = next_shell_token(&input, cargo_end) else {
+            output.push_str(&input[cursor..]);
+            return (output, changed);
+        };
+        let subcommand = &input[subcommand_start..subcommand_end];
+        output.push_str(&input[cursor..start]);
+        if is_mr_boxington_cargo_subcommand(subcommand) {
+            output.push_str("mbx");
+            changed = true;
+        } else {
+            output.push_str("cargo");
+        }
+        cursor = cargo_end;
+    }
+    output.push_str(&input[cursor..]);
+    (output, changed)
+}
+
+const STATIC_MR_BOXINGTON_STEP: &str = r"      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+";
+
+fn static_workflow_job_ranges(lines: &[String]) -> Vec<(usize, usize)> {
+    let Some(jobs_start) = lines.iter().position(|line| {
+        line.trim_end_matches(['\n', '\r']) == "jobs:"
+            && line.chars().take_while(char::is_ascii_whitespace).count() == 0
+    }) else {
+        return Vec::new();
+    };
+    let job_starts = lines
+        .iter()
+        .enumerate()
+        .skip(jobs_start + 1)
+        .take_while(|(_, line)| {
+            let trimmed = line.trim();
+            trimmed.is_empty()
+                || line
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_whitespace())
+        })
+        .filter_map(|(index, line)| {
+            let trimmed = line.trim();
+            let indentation = line.len() - line.trim_start().len();
+            (indentation == 2 && trimmed.ends_with(':') && !trimmed.starts_with('-'))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    job_starts
+        .iter()
+        .enumerate()
+        .map(|(index, &start)| {
+            let end = job_starts.get(index + 1).copied().unwrap_or(lines.len());
+            (start, end)
+        })
+        .collect()
+}
+
+fn line_has_mbx_cargo_invocation(line: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(relative_start) = line[cursor..].find("mbx") {
+        let start = cursor + relative_start;
+        if is_mbx_token(line, start) {
+            let mbx_end = start + "mbx".len();
+            let Some((token_start, token_end)) = next_shell_token(line, mbx_end) else {
+                return false;
+            };
+            let token = &line[token_start..token_end];
+            if let Some(toolchain) = token.strip_prefix('+') {
+                if !toolchain.is_empty()
+                    && next_shell_token(line, token_end).is_some_and(|(start, end)| {
+                        is_mr_boxington_cargo_subcommand(&line[start..end])
+                    })
+                {
+                    return true;
+                }
+            } else if is_mr_boxington_cargo_subcommand(token) {
+                return true;
+            }
+        }
+        cursor = start + "mbx".len();
+    }
+    false
+}
+
+fn static_workflow_step_start(line: &str) -> bool {
+    line.len() - line.trim_start().len() == 6 && line.trim_start().starts_with("- ")
+}
+
+fn ensure_static_mr_boxington_steps(lines: &mut Vec<String>) {
+    let ranges = static_workflow_job_ranges(lines);
+    let mut insertions = Vec::new();
+    for (job_start, job_end) in ranges {
+        if !lines[job_start..job_end]
+            .iter()
+            .any(|line| line.contains("jdx/mr-boxington-action@"))
+            && lines[job_start..job_end]
+                .iter()
+                .any(|line| line_has_mbx_cargo_invocation(line))
+        {
+            let Some(steps_start) = (job_start..job_end).find(|&index| {
+                let line = &lines[index];
+                line.len() - line.trim_start().len() == 4 && line.trim() == "steps:"
+            }) else {
+                continue;
+            };
+            let step_starts = (steps_start + 1..job_end)
+                .filter(|&index| static_workflow_step_start(&lines[index]))
+                .collect::<Vec<_>>();
+            let insert_at = step_starts
+                .iter()
+                .enumerate()
+                .find_map(|(index, &step_start)| {
+                    let step_end = step_starts.get(index + 1).copied().unwrap_or(job_end);
+                    lines[step_start..step_end]
+                        .iter()
+                        .any(|line| line.contains("actions/checkout@"))
+                        .then_some(step_end)
+                })
+                .or_else(|| step_starts.first().copied())
+                .unwrap_or(steps_start + 1);
+            insertions.push((insert_at, STATIC_MR_BOXINGTON_STEP.to_owned()));
+        }
+    }
+    for (index, step) in insertions.into_iter().rev() {
+        lines.insert(index, step);
+    }
+}
+
+fn refresh_static_mr_boxington_commands(template: &str) -> String {
+    let mut lines = template
+        .split_inclusive('\n')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for line in &mut lines {
+        line.clone_from(&mbxify_cargo_invocations(line).0);
+    }
+    ensure_static_mr_boxington_steps(&mut lines);
+    lines.concat()
 }
 
 fn github_docker_cache_command(command: &str, write_cache: bool) -> String {
@@ -4589,6 +4855,7 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
 
 fn render_static_template(template: &str) -> String {
     let template = template.replace("__VELNOR_WORKFLOW_SOURCE_REV__", VELNOR_WORKFLOW_SOURCE_REV);
+    let template = refresh_static_mr_boxington_commands(&template);
     format!(
         "{GENERATED_HEADER}{}",
         refresh_velnor_action_pins(&refresh_velnor_source_pins(&template))
@@ -4928,6 +5195,7 @@ fn render_preview(config: &ProjectConfig) -> String {
             canonical_lane(config)
         ),
     )
+    .replace("run: cargo build ", "run: mbx build ")
 }
 
 fn github_expression(expression: &str) -> String {
@@ -5100,10 +5368,11 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     for package in &release.packages {
         let _ = writeln!(
             output,
-            "          cargo publish --locked --package {}",
+            "          mbx publish --locked --package {}",
             shell_quote(package)
         );
     }
+    output = output.replace("cargo package ", "mbx package ");
     let _ = writeln!(
         output,
         "# Release tags are cut from the protected {} branch.",
@@ -5199,6 +5468,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Verify archive checksums\n",
         "      - name: Verify artifact provenance\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          for artifact in dist/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done\n      - name: Verify archive checksums\n",
     );
+    output = output.replace("run: cargo build ", "run: mbx build ");
     if !config.default_branch.is_empty() {
         // Keep the branch policy visible in generated release metadata.
         let _ = writeln!(
@@ -8489,6 +8759,20 @@ path-only = { path = "../path-only" }
             mbxify_cargo_command("cargo-deny --version"),
             "cargo-deny --version"
         );
+    }
+
+    #[test]
+    fn static_templates_route_rust_commands_through_mr_boxington() {
+        let template = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v7\n      - run: |\n          cargo test --locked\n          rustup run \"${MSRV}\" cargo check --locked\n          cargo install --locked --path .\n";
+
+        let rendered = render_static_template(template);
+        assert!(rendered.starts_with(GENERATED_HEADER));
+        assert!(rendered.contains("jdx/mr-boxington-action@"));
+        assert!(rendered.contains("run: |\n          mbx test --locked"));
+        assert!(rendered.contains("mbx +\"${MSRV}\" check --locked"));
+        assert!(rendered.contains("cargo install --locked --path ."));
+        assert!(!rendered.contains("cargo test"));
+        assert!(!rendered.contains("cargo check"));
     }
 
     #[test]
