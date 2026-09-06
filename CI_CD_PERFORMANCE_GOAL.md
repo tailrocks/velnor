@@ -675,9 +675,27 @@ Provider, queue, and coverage record:
 | Area | Evidence | State |
 | --- | --- | --- |
 | GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
-| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | current snapshot is 7.161 GiB; seven-day proof remains open |
+| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | 2026-09-06T22:34:07Z snapshot is 9.816 GiB; seven-day proof remains open |
 | Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
 | Required coverage | `ci-required` aggregates all 16 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
+
+### Recheck 2026-09-06T22:34:07Z
+
+- The direct [Actions cache API](https://api.github.com/repos/tailrocks/velnor/actions/caches?per_page=100)
+  query returned 94 entries and 10,540,285,132 bytes (9.816 GiB),
+  approximately 2.027 GiB above the 8-GiB ceiling. No cache key matched the
+  known `a1e07a28`, `v0.1.268`, or synthetic `feature` orphan patterns.
+- Post-#622 main run
+  [34063704171](https://github.com/tailrocks/velnor/actions/runs/34063704171)
+  remained `in_progress`; its full-scope plan had 10 failed Velnor jobs and
+  no terminal `ci-required` result at the snapshot. This is not passing
+  trusted-Velnor proof.
+- The subsequent main run
+  [34064088236](https://github.com/tailrocks/velnor/actions/runs/34064088236)
+  for `a4e4b56e` was still `pending`; the preceding run
+  [34064012437](https://github.com/tailrocks/velnor/actions/runs/34064012437)
+  was cancelled when main advanced. Neither supplies a passing full Velnor
+  result.
 
 ### Safety fixtures and remaining blockers
 
