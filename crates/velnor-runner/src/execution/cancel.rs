@@ -921,7 +921,10 @@ impl JobCancellation {
         // A target created after cancellation was requested is still a target:
         // terminate it now rather than leaking it because it lost a race.
         if self.is_cancelled() {
-            self.fan_out_once();
+            // Registration may happen from inside a running hook. Keep this
+            // pass non-blocking so a hook cannot wait on the fan-out thread
+            // that is currently invoking it.
+            self.fan_out_once_at(self.forced_deadline());
         }
         TargetRegistration {
             token: self.clone(),
@@ -1028,7 +1031,23 @@ impl JobCancellation {
     /// Public so the daemon-shutdown path can drive a synchronous fan-out and
     /// observe the outcome before it exits.
     pub fn fan_out_once(&self) {
-        self.fan_out_once_at(self.forced_deadline());
+        loop {
+            self.fan_out_once_at(self.forced_deadline());
+            let in_flight = !self
+                .0
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .in_flight
+                .is_empty();
+            if !in_flight {
+                return;
+            }
+            // `request` starts the initial pass asynchronously. A synchronous
+            // caller must not return while that pass still owns a target, or
+            // it can observe an incomplete outcome set.
+            std::thread::yield_now();
+        }
     }
 
     fn fan_out_once_at(&self, forced_deadline: Option<Instant>) {
@@ -1109,22 +1128,6 @@ impl JobCancellation {
                     },
                 )
             };
-            {
-                let mut registry = self
-                    .0
-                    .registry
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                registry.in_flight.remove(id);
-                if outcome.gone
-                    && registry
-                        .targets
-                        .iter()
-                        .any(|(registered_id, _)| registered_id == id)
-                {
-                    registry.terminated.insert(*id);
-                }
-            }
             if let Some(error) = outcome.error.as_deref() {
                 eprintln!(
                     "Cancellation could not terminate {}: {error}",
@@ -1136,11 +1139,28 @@ impl JobCancellation {
                     "cancellation fan-out target survived the termination ladder"
                 );
             }
+            let outcome_gone = outcome.gone;
             self.0
                 .outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(outcome);
+            // Publish the outcome before releasing `in_flight`: synchronous
+            // callers use that marker as the completion boundary.
+            let mut registry = self
+                .0
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.in_flight.remove(id);
+            if outcome_gone
+                && registry
+                    .targets
+                    .iter()
+                    .any(|(registered_id, _)| registered_id == id)
+            {
+                registry.terminated.insert(*id);
+            }
         }
     }
 }
