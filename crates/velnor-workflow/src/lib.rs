@@ -63,6 +63,8 @@ const VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE: &str =
     include_str!("../templates/release-package-signer.yml");
 const VELNOR_POLICY_PROVIDER_TEMPLATE: &str =
     include_str!("../templates/velnor-workflow-policy.yml");
+const APT_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
+const LEGACY_VELNOR_RUNNER_SELECTOR: &str = "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
 const RETIRED_WORKFLOW_PROVIDER_REPOSITORIES: &[&str] = &[
     "ChainArgos/velnor-actions",
     "jackin-project/velnor-actions",
@@ -1104,7 +1106,8 @@ fn scan_repository_with_default_branch(
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
     };
-    load_workflow_templates(root, apply_local_velnor_profile(root, config)?)
+    let config = load_workflow_templates(root, apply_local_velnor_profile(root, config)?)?;
+    Ok(apply_local_estate_runner_profile(root, config))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2654,6 +2657,19 @@ fn apply_local_velnor_profile(
     add_velnor_regeneration_gate(&mut config);
     enable_mr_boxington_commands(&mut config);
     Ok(config)
+}
+
+fn apply_local_estate_runner_profile(root: &Path, mut config: ProjectConfig) -> ProjectConfig {
+    let Some(repository) = local_github_repository(root) else {
+        return config;
+    };
+    if estate_profile(&repository)
+        .is_some_and(|profile| profile.profile == RepositoryProfile::AptRepository)
+    {
+        config.repository = repository;
+        config.profile = RepositoryProfile::AptRepository;
+    }
+    config
 }
 
 fn configure_velnor_docker_pr_target(config: &mut ProjectConfig) {
@@ -4386,6 +4402,7 @@ struct WorkflowIr {
     default_branch: String,
     github_runner: String,
     velnor_labels: Vec<String>,
+    velnor_runner_group: Option<&'static str>,
     runners: RunnerMode,
     tools: BTreeSet<ToolRequirement>,
     mise_rust: bool,
@@ -4476,6 +4493,7 @@ impl WorkflowIr {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
+            velnor_runner_group: velnor_runner_group(config),
             runners: config.runners,
             tools,
             mise_rust,
@@ -4884,7 +4902,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     fn runner_for(&self, lane: RunnerMode) -> String {
         match lane {
             RunnerMode::Github | RunnerMode::Both => yaml_scalar(&self.github_runner),
-            RunnerMode::Velnor => velnor_runner(&self.velnor_labels),
+            RunnerMode::Velnor => velnor_runner(&self.velnor_labels, self.velnor_runner_group),
         }
     }
 
@@ -5473,6 +5491,18 @@ fn render_static_template(template: &str) -> String {
     )
 }
 
+fn render_static_template_for_config(config: &ProjectConfig, template: &str) -> String {
+    let template = if let Some(group) = velnor_runner_group(config) {
+        let selector = format!(
+            "fromJSON('{{\"group\":\"{group}\",\"labels\":[\"self-hosted\",\"velnor-target-mvp\"]}}')"
+        );
+        template.replace(LEGACY_VELNOR_RUNNER_SELECTOR, &selector)
+    } else {
+        template.to_owned()
+    };
+    render_static_template(&template)
+}
+
 fn render_policy_provider(config: &ProjectConfig) -> String {
     let template = VELNOR_POLICY_PROVIDER_TEMPLATE.replace(
         "__VELNOR_GITHUB_RUNNER__",
@@ -5681,19 +5711,29 @@ fn release_runner(target: &str) -> &'static str {
     }
 }
 
-fn velnor_runner(labels: &[String]) -> String {
+fn velnor_runner(labels: &[String], group: Option<&str>) -> String {
     let labels = labels
         .iter()
         .map(|label| yaml_scalar(label))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("[{labels}]")
+    let labels = format!("[{labels}]");
+    group.map_or(labels.clone(), |group| {
+        format!("{{ group: {}, labels: {labels} }}", yaml_scalar(group))
+    })
+}
+
+fn velnor_runner_group(config: &ProjectConfig) -> Option<&'static str> {
+    (config.profile == RepositoryProfile::AptRepository
+        || config.repository == "tailrocks/velnor-apt"
+        || config.repository == "tailrocks/holla-apt")
+        .then_some(APT_VELNOR_RUNNER_GROUP)
 }
 
 fn configured_runner(config: &ProjectConfig, lane: RunnerMode) -> String {
     match lane {
         RunnerMode::Github | RunnerMode::Both => yaml_scalar(&config.github_runner),
-        RunnerMode::Velnor => velnor_runner(&config.velnor_labels),
+        RunnerMode::Velnor => velnor_runner(&config.velnor_labels, velnor_runner_group(config)),
     }
 }
 
@@ -6525,7 +6565,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
         let content = config
             .workflow_templates
             .get(workflow_file)
-            .map(|template| render_static_template(template))
+            .map(|template| render_static_template_for_config(config, template))
             .or_else(|| match workflow_file.as_str() {
                 "ci-pr.yml" => Some(workflow.render_nested(WorkflowKind::PullRequest)),
                 "ci-policy.yml" => Some(render_policy_entrypoint()),
@@ -6557,7 +6597,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
-            render_static_template(template),
+            render_static_template_for_config(config, template),
         );
     }
     if !config.adopted_workflow_surface {
@@ -6857,7 +6897,10 @@ fn report_unit_runners(config: &ProjectConfig, unit: &Unit) -> String {
             if unit.kind == UnitKind::Swift {
                 "velnor: skipped (Apple unit requires macOS)".to_owned()
             } else {
-                format!("velnor: {}", velnor_runner(&config.velnor_labels))
+                format!(
+                    "velnor: {}",
+                    velnor_runner(&config.velnor_labels, velnor_runner_group(config))
+                )
             }
         }
         RunnerMode::Both => {
@@ -6867,7 +6910,7 @@ fn report_unit_runners(config: &ProjectConfig, unit: &Unit) -> String {
                 format!(
                     "github: {}; velnor: {}",
                     config.github_runner,
-                    velnor_runner(&config.velnor_labels)
+                    velnor_runner(&config.velnor_labels, velnor_runner_group(config))
                 )
             }
         }
@@ -10374,6 +10417,79 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!both.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert_ne!(github, velnor);
         assert_ne!(velnor, both);
+    }
+
+    #[test]
+    fn apt_runner_mode_selects_trusted_group_and_preserves_other_profiles() {
+        let apt = must_some(
+            ESTATE_PROFILES
+                .iter()
+                .find(|profile| profile.profile == RepositoryProfile::AptRepository),
+            "APT estate profile",
+        );
+        let apt_workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
+            apt,
+            RunnerMode::Velnor,
+            "main",
+        ))
+        .render(WorkflowKind::Main);
+        assert!(apt_workflow.contains(
+            "runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }"
+        ));
+
+        let apt_github_workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
+            apt,
+            RunnerMode::Github,
+            "main",
+        ))
+        .render(WorkflowKind::Main);
+        assert!(apt_github_workflow.contains("runs-on: ubuntu-24.04"));
+        assert!(!apt_github_workflow.contains("velnor-trusted"));
+
+        let generic = must(
+            scan_repository(&fixture_root(), RunnerMode::Velnor),
+            "scan generic fixture",
+        );
+        let generic_workflow = WorkflowIr::from_config(&generic).render(WorkflowKind::Main);
+        assert!(generic_workflow.contains("runs-on: [self-hosted, velnor-target-mvp]"));
+        assert!(!generic_workflow.contains("velnor-trusted"));
+    }
+
+    #[test]
+    fn apt_adopted_templates_migrate_legacy_velnor_selector() {
+        let mut apt = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for APT template migration",
+        );
+        apt.profile = RepositoryProfile::AptRepository;
+        apt.repository = "tailrocks/velnor-apt".to_owned();
+        apt.workflow_files = vec!["package-updater.yml".to_owned()];
+        apt.workflow_templates.insert(
+            "package-updater.yml".to_owned(),
+            format!(
+                "name: Package updater\njobs:\n  update:\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-24.04' || {LEGACY_VELNOR_RUNNER_SELECTOR} }}}}\n"
+            ),
+        );
+        apt.adopted_workflow_surface = true;
+
+        let generated = generated_files(&apt);
+        let rendered = must_some(
+            generated.get(&PathBuf::from(".github/workflows/package-updater.yml")),
+            "generated APT package updater",
+        );
+        assert!(rendered.contains(
+            "fromJSON('{\"group\":\"velnor-trusted\",\"labels\":[\"self-hosted\",\"velnor-target-mvp\"]}')"
+        ));
+        assert!(!rendered.contains(LEGACY_VELNOR_RUNNER_SELECTOR));
+
+        apt.profile = RepositoryProfile::Generic;
+        apt.repository.clear();
+        let preserved = generated_files(&apt);
+        let rendered = must_some(
+            preserved.get(&PathBuf::from(".github/workflows/package-updater.yml")),
+            "generated generic package updater",
+        );
+        assert!(rendered.contains(LEGACY_VELNOR_RUNNER_SELECTOR));
     }
 
     #[test]
