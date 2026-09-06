@@ -1584,7 +1584,11 @@ fn inspect_runner(
     let mut resolving = BTreeSet::new();
     let analysis = analyze_runner(value, matrix, &mut resolving);
     if analysis.invalid {
-        policy_failure(path, "runs-on must contain only string labels", failures);
+        policy_failure(
+            path,
+            "runs-on must contain only static labels or a static runner-group mapping",
+            failures,
+        );
     }
     if analysis.dynamic {
         policy_failure(
@@ -1651,14 +1655,24 @@ fn analyze_runner(
             result
         }
         Value::Mapping(mapping) => {
-            let mut result = RunnerAnalysis {
-                dynamic: true,
-                ..RunnerAnalysis::default()
+            let mut result = RunnerAnalysis::default();
+            let Some(group) = mapping_value(mapping, "group") else {
+                return RunnerAnalysis {
+                    invalid: true,
+                    ..result
+                };
             };
-            if let Some(labels) = mapping_value(mapping, "labels") {
-                result.merge(analyze_runner(labels, matrix, resolving));
-            } else {
-                result.invalid = true;
+            match group {
+                Value::String(group) if !group.is_empty() && !group.contains("${{") => {}
+                Value::String(_) => result.dynamic = true,
+                _ => result.invalid = true,
+            }
+            for (key, value) in mapping {
+                match key.as_str() {
+                    "group" => {}
+                    "labels" => result.merge(analyze_runner(value, matrix, resolving)),
+                    _ => result.invalid = true,
+                }
             }
             result
         }
@@ -2615,6 +2629,55 @@ jobs:
 ";
         let root = policy_fixture("matrix-trusted", workflow, "github")?;
         assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_static_runner_group_mapping_with_trusted_gate() -> Result<(), Box<dyn Error>>
+    {
+        let workflow = r"
+name: Group
+on: push
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on:
+      group: velnor-trusted
+      labels: [self-hosted, velnor-target-mvp]
+";
+        let root = policy_fixture("runner-group-trusted", workflow, "github")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_dynamic_or_unknown_runner_group_mapping() -> Result<(), Box<dyn Error>> {
+        let dynamic = r"
+name: Dynamic group
+on: push
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on:
+      group: ${{ inputs.group }}
+      labels: [self-hosted, velnor-target-mvp]
+";
+        let root = policy_fixture("runner-group-dynamic", dynamic, "github")?;
+        assert!(!run_policy(root)?);
+
+        let unknown = r"
+name: Unknown group key
+on: push
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on:
+      group: velnor-trusted
+      labels: [self-hosted, velnor-target-mvp]
+      environment: production
+";
+        let root = policy_fixture("runner-group-unknown-key", unknown, "github")?;
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
