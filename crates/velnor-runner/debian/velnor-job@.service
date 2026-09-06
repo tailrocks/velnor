@@ -19,6 +19,5 @@ TimeoutStartSec=0
 TimeoutStopSec=600
 User=root
 StateDirectory=velnor
-RuntimeDirectory=velnor
 WorkingDirectory=/var/lib/velnor
 ReadWritePaths=/var/lib/velnor /run/velnor /var/log/velnor /var/cache/velnor

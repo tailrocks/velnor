@@ -432,7 +432,7 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     lease_socket_dir().join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
 }
 
-/// Prefer systemd `RuntimeDirectory` (`/run/velnor`): host-visible, not
+/// Prefer the package-owned `/run/velnor` tmpfiles path: host-visible, not
 /// remapped by `PrivateTmp`. Tests and unprivileged checkouts cannot create
 /// that dir; they fall back to `$TMPDIR/velnor-lease`, still outside the
 /// daemon's private `/tmp/vdl-*` path that dockerd never sees.
