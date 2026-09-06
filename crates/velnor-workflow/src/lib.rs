@@ -5482,6 +5482,8 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
     if !config.adopted_workflow_surface {
         files.extend(config.units.iter().map(nested_unit_workflow_file));
     }
+    files.sort();
+    files.dedup();
     files
 }
 
@@ -10279,6 +10281,17 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(actionlint.contains("    - self-hosted\n"));
         assert!(actionlint.contains("    - ubuntu-24.04\n"));
         assert!(actionlint.contains("    - velnor-target-mvp\n"));
+    }
+
+    #[test]
+    fn generated_project_config_is_stable_when_workflow_discovery_order_changes() {
+        let mut config = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for workflow ordering",
+        );
+        let expected = config.toml();
+        config.workflow_files.reverse();
+        assert_eq!(config.toml(), expected);
     }
 
     #[test]
