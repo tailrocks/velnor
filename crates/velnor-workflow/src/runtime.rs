@@ -477,9 +477,139 @@ fn scope_name(scope: Scope) -> &'static str {
 
 #[cfg(test)]
 mod runner_lane_tests {
-    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
-    use std::path::Path;
+    use super::{
+        collect_manifests, expand_affected_units, read_config, selection_for_diff, CiUnit,
+        RunnerLane, Scope,
+    };
+    use std::collections::BTreeSet;
+    use std::error::Error;
+    use std::fs;
 
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn run_git(root: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn temporary_git_repository(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("velnor-runtime-{name}-{nonce}"));
+        fs::create_dir_all(&root)?;
+        let _ = run_git(&root, &["init", "--quiet"])?;
+        let _ = run_git(
+            &root,
+            &["config", "user.email", "velnor-tests@example.invalid"],
+        )?;
+        let _ = run_git(&root, &["config", "user.name", "Velnor tests"])?;
+        Ok(root)
+    }
+
+    fn copy_current_project_config(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
+        let destination = root.join(".github/ci/project.toml");
+        let Some(parent) = destination.parent() else {
+            return Err("project config has no parent directory".into());
+        };
+        fs::create_dir_all(parent)?;
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/ci/project.toml");
+        fs::copy(source, &destination)?;
+        Ok(destination)
+    }
+
+    fn commit(root: &Path, message: &str) -> Result<String, Box<dyn Error>> {
+        let _ = run_git(root, &["add", "--all"])?;
+        let _ = run_git(root, &["commit", "--quiet", "-m", message])?;
+        run_git(root, &["rev-parse", "HEAD"])
+    }
+
+    fn selected_ids(selection: &super::UnitSelection<'_>) -> BTreeSet<String> {
+        selection.units.iter().map(|unit| unit.id.clone()).collect()
+    }
+
+    #[test]
+    fn cargo_lock_only_change_selects_exact_version_bump_allowlist() -> Result<(), Box<dyn Error>> {
+        let root = temporary_git_repository("cargo-lock-allowlist")?;
+        let config_path = copy_current_project_config(&root)?;
+        fs::write(
+            root.join("Cargo.lock"),
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )?;
+        let base = commit(&root, "base")?;
+        fs::write(
+            root.join("Cargo.lock"),
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.1\"\n",
+        )?;
+        let head = commit(&root, "lock bump")?;
+
+        let config = read_config(&config_path)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from([
+            "docker".to_owned(),
+            "rust-velnor-bench".to_owned(),
+            "rust-velnor-runner".to_owned(),
+            "rust-velnorctl".to_owned(),
+        ]);
+        assert_eq!(selected_ids(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn single_crate_change_selects_exact_target_and_transitive_closure(
+    ) -> Result<(), Box<dyn Error>> {
+        let root = temporary_git_repository("single-crate-closure")?;
+        let config_path = copy_current_project_config(&root)?;
+        fs::create_dir_all(root.join("crates/velnor-client/src"))?;
+        fs::write(
+            root.join("crates/velnor-client/src/lib.rs"),
+            "pub fn fixture() {}\n",
+        )?;
+        let base = commit(&root, "base")?;
+        fs::write(
+            root.join("crates/velnor-client/src/lib.rs"),
+            "pub fn fixture() { let _ = 1; }\n",
+        )?;
+        let head = commit(&root, "client change")?;
+
+        let config = read_config(&config_path)?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = BTreeSet::from([
+            "docker".to_owned(),
+            "rust-velnor-model".to_owned(),
+            "rust-velnor-render".to_owned(),
+            "rust-velnor-client".to_owned(),
+            "rust-velnor-control".to_owned(),
+            "rust-velnor-runner".to_owned(),
+            "rust-velnor-tools".to_owned(),
+            "rust-velnorctl".to_owned(),
+            "rust-production-topology".to_owned(),
+        ]);
+        let expected_full = BTreeSet::from([
+            "docker".to_owned(),
+            "rust-velnor-client".to_owned(),
+            "rust-velnor-tools".to_owned(),
+            "rust-velnorctl".to_owned(),
+            "rust-production-topology".to_owned(),
+        ]);
+        assert_eq!(selected_ids(&selection), expected);
+        assert_eq!(selection.full_units, expected_full);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
     #[test]
     fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
         assert_eq!(RunnerLane::from_execution_backend(None), RunnerLane::Github);
