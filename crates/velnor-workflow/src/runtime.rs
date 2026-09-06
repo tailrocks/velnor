@@ -1766,7 +1766,24 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let release_gate = format!(
         "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
     );
-    value == ci_gate || value == release_gate
+    value == ci_gate
+        || value == release_gate
+        || value
+            .strip_suffix(&format!("&&{ci_gate}"))
+            .is_some_and(is_safe_trusted_gate_conjunction)
+        || value
+            .strip_prefix(&format!("{ci_gate}&&"))
+            .is_some_and(is_safe_trusted_gate_conjunction)
+        || value
+            .strip_suffix(&format!("&&{release_gate}"))
+            .is_some_and(is_safe_trusted_gate_conjunction)
+        || value
+            .strip_prefix(&format!("{release_gate}&&"))
+            .is_some_and(is_safe_trusted_gate_conjunction)
+}
+
+fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
+    !value.is_empty() && !value.contains("||") && !value.contains("github.ref")
 }
 
 fn policy_failure(path: &Path, message: &str, failures: &mut usize) {
@@ -2646,6 +2663,19 @@ jobs:
       labels: [self-hosted, velnor-target-mvp]
 ";
         let root = policy_fixture("runner-group-trusted", workflow, "github")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Group with lane guard
+on: push
+jobs:
+  verify:
+    if: ${{ inputs.consumer_repository != '' && inputs.lane == 'velnor' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on:
+      group: velnor-trusted
+      labels: [self-hosted, velnor-target-mvp]
+";
+        let root = policy_fixture("runner-group-trusted-with-conjunction", workflow, "github")?;
         assert!(run_policy(root)?);
         Ok(())
     }

@@ -5491,16 +5491,187 @@ fn render_static_template(template: &str) -> String {
     )
 }
 
-fn render_static_template_for_config(config: &ProjectConfig, template: &str) -> String {
+fn render_static_template_for_config(
+    config: &ProjectConfig,
+    workflow_file: &str,
+    template: &str,
+) -> String {
+    let template =
+        if workflow_file == "package-updater.yml" && velnor_runner_group(config).is_some() {
+            render_apt_package_updater_template(template, &config.default_branch)
+        } else if workflow_file == "package-update.yml" && velnor_runner_group(config).is_some() {
+            render_apt_package_update_template(config, template)
+        } else {
+            template.to_owned()
+        };
     let template = if let Some(group) = velnor_runner_group(config) {
         let selector = format!(
             "fromJSON('{{\"group\":\"{group}\",\"labels\":[\"self-hosted\",\"velnor-target-mvp\"]}}')"
         );
         template.replace(LEGACY_VELNOR_RUNNER_SELECTOR, &selector)
     } else {
-        template.to_owned()
+        template
     };
     render_static_template(&template)
+}
+
+fn render_apt_package_updater_template(template: &str, default_branch: &str) -> String {
+    let Some((prefix, jobs)) = template.split_once("\n  verify:\n") else {
+        return template.to_owned();
+    };
+    let Some((verify_body, mutate_body)) = jobs.split_once("\n  mutate:\n") else {
+        return template.to_owned();
+    };
+    let trusted_gate = apt_velnor_trusted_gate(default_branch);
+    let verify_velnor = render_apt_package_updater_job(
+        "verify-velnor",
+        verify_body,
+        AptPackageUpdaterJob::Verify,
+        AptPackageUpdaterLane::Velnor,
+        &trusted_gate,
+    );
+    let verify_github = render_apt_package_updater_job(
+        "verify-github",
+        verify_body,
+        AptPackageUpdaterJob::Verify,
+        AptPackageUpdaterLane::Github,
+        &trusted_gate,
+    );
+    let mutate_velnor = render_apt_package_updater_job(
+        "mutate-velnor",
+        mutate_body,
+        AptPackageUpdaterJob::Mutate,
+        AptPackageUpdaterLane::Velnor,
+        &trusted_gate,
+    );
+    let mutate_github = render_apt_package_updater_job(
+        "mutate-github",
+        mutate_body,
+        AptPackageUpdaterJob::Mutate,
+        AptPackageUpdaterLane::Github,
+        &trusted_gate,
+    );
+    format!("{prefix}\n{verify_velnor}\n{verify_github}\n{mutate_velnor}\n{mutate_github}")
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AptPackageUpdaterJob {
+    Verify,
+    Mutate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AptPackageUpdaterLane {
+    Github,
+    Velnor,
+}
+
+fn render_apt_package_updater_job(
+    id: &str,
+    body: &str,
+    job: AptPackageUpdaterJob,
+    lane: AptPackageUpdaterLane,
+    trusted_gate: &str,
+) -> String {
+    let lane_name = match lane {
+        AptPackageUpdaterLane::Github => "github",
+        AptPackageUpdaterLane::Velnor => "velnor",
+    };
+    let trusted_condition = if lane == AptPackageUpdaterLane::Velnor {
+        format!(" && {trusted_gate}")
+    } else {
+        String::new()
+    };
+    let mut body = body.to_owned();
+    match job {
+        AptPackageUpdaterJob::Verify => {
+            body = body.replace(
+                "    if: ${{ inputs.consumer-repository != '' }}",
+                &format!(
+                    "    if: ${{{{ inputs.consumer-repository != '' && inputs.lane == '{lane_name}'{trusted_condition} }}}}"
+                ),
+            );
+        }
+        AptPackageUpdaterJob::Mutate => {
+            body = body.replace(
+                "    needs: verify",
+                &format!("    needs: verify-{lane_name}"),
+            );
+            body = body.replace(
+                "    if: ${{ needs.verify.outputs.available == 'true' && inputs.writer }}",
+                &format!(
+                    "    if: ${{{{ needs.verify-{lane_name}.outputs.available == 'true' && inputs.writer{trusted_condition} }}}}"
+                ),
+            );
+        }
+    }
+    format!(
+        "  {id}:\n{}",
+        replace_apt_package_updater_runner(&body, lane, id)
+    )
+}
+
+fn replace_apt_package_updater_runner(
+    body: &str,
+    lane: AptPackageUpdaterLane,
+    job_id: &str,
+) -> String {
+    let mut output = String::with_capacity(body.len() + 96);
+    let mut replaced = false;
+    for segment in body.split_inclusive('\n') {
+        let runner_line = segment.strip_suffix('\n').unwrap_or(segment);
+        if runner_line.trim_start().starts_with("runs-on:")
+            && runner_line.contains("${{")
+            && runner_line.contains("inputs.lane")
+        {
+            match lane {
+                AptPackageUpdaterLane::Github => output.push_str("    runs-on: ubuntu-26.04"),
+                AptPackageUpdaterLane::Velnor => output.push_str(
+                    "    runs-on:\n      group: velnor-trusted\n      labels: [self-hosted, velnor-target-mvp]",
+                ),
+            }
+            if segment.ends_with('\n') {
+                output.push('\n');
+            }
+            replaced = true;
+        } else {
+            output.push_str(segment);
+        }
+    }
+    debug_assert!(replaced, "APT package updater runner missing in {job_id}");
+    output
+}
+
+fn render_apt_package_update_template(config: &ProjectConfig, template: &str) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut replaced = false;
+    for segment in template.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        if line.trim_start().starts_with("runs-on:")
+            && line.contains("${{")
+            && line.contains("inputs.lanes")
+            && line.contains("velnor")
+        {
+            let indentation = &line[..line.len() - line.trim_start().len()];
+            output.push_str(indentation);
+            output.push_str("runs-on: ");
+            output.push_str(&yaml_scalar(&config.github_runner));
+            if segment.ends_with('\n') {
+                output.push('\n');
+            }
+            replaced = true;
+        } else {
+            output.push_str(segment);
+        }
+    }
+    debug_assert!(replaced, "APT package update barrier runner missing");
+    output
+}
+
+fn apt_velnor_trusted_gate(default_branch: &str) -> String {
+    format!(
+        "github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+    )
 }
 
 fn render_policy_provider(config: &ProjectConfig) -> String {
@@ -6565,7 +6736,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
         let content = config
             .workflow_templates
             .get(workflow_file)
-            .map(|template| render_static_template_for_config(config, template))
+            .map(|template| render_static_template_for_config(config, workflow_file, template))
             .or_else(|| match workflow_file.as_str() {
                 "ci-pr.yml" => Some(workflow.render_nested(WorkflowKind::PullRequest)),
                 "ci-policy.yml" => Some(render_policy_entrypoint()),
@@ -6597,7 +6768,7 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
     for (name, template) in &config.workflow_templates {
         files.insert(
             PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name),
-            render_static_template_for_config(config, template),
+            render_static_template_for_config(config, name, template),
         );
     }
     if !config.adopted_workflow_surface {
@@ -10490,6 +10661,67 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "generated generic package updater",
         );
         assert!(rendered.contains(LEGACY_VELNOR_RUNNER_SELECTOR));
+    }
+
+    #[test]
+    fn apt_package_updater_splits_lanes_into_static_runner_jobs() {
+        let mut apt = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for APT package updater lane split",
+        );
+        apt.profile = RepositoryProfile::AptRepository;
+        apt.repository = "tailrocks/velnor-apt".to_owned();
+        apt.workflow_files = vec!["package-updater.yml".to_owned()];
+        let dynamic_runner =
+            "fromJSON('{\"group\":\"velnor-trusted\",\"labels\":[\"self-hosted\",\"velnor-target-mvp\"]}')";
+        apt.workflow_templates.insert(
+            "package-updater.yml".to_owned(),
+            format!(
+                "name: Package updater\njobs:\n  verify:\n    if: ${{{{ inputs.consumer-repository != '' }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    outputs:\n      available: ${{{{ steps.poll.outputs.available }}}}\n    steps:\n      - run: echo verify\n  mutate:\n    needs: verify\n    if: ${{{{ needs.verify.outputs.available == 'true' && inputs.writer }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    steps:\n      - run: echo mutate\n"
+            ),
+        );
+        apt.adopted_workflow_surface = true;
+
+        let generated = generated_files(&apt);
+        let rendered = must_some(
+            generated.get(&PathBuf::from(".github/workflows/package-updater.yml")),
+            "generated static APT package updater",
+        );
+        assert!(rendered.contains("  verify-velnor:"));
+        assert!(rendered.contains("  verify-github:"));
+        assert!(rendered.contains("  mutate-velnor:"));
+        assert!(rendered.contains("  mutate-github:"));
+        assert!(rendered.contains(
+            "    runs-on:\n      group: velnor-trusted\n      labels: [self-hosted, velnor-target-mvp]"
+        ));
+        assert!(rendered.contains("    runs-on: ubuntu-26.04"));
+        assert!(rendered.contains("github.ref == 'refs/heads/main'"));
+        assert!(!rendered.contains("runs-on: ${{ inputs.lane"));
+    }
+
+    #[test]
+    fn apt_package_update_barrier_is_hosted_and_lane_neutral() {
+        let mut apt = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for APT package update barrier",
+        );
+        apt.profile = RepositoryProfile::AptRepository;
+        apt.repository = "tailrocks/velnor-apt".to_owned();
+        apt.workflow_files = vec!["package-update.yml".to_owned()];
+        apt.workflow_templates.insert(
+            "package-update.yml".to_owned(),
+            "name: Package update\njobs:\n  package-update-required:\n    runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && 'ubuntu-26.04' || fromJSON('{\"group\":\"velnor-trusted\"}')) }}\n".to_owned(),
+        );
+        apt.adopted_workflow_surface = true;
+
+        let generated = generated_files(&apt);
+        let rendered = must_some(
+            generated.get(&PathBuf::from(".github/workflows/package-update.yml")),
+            "generated hosted APT package update barrier",
+        );
+        assert!(rendered.contains("runs-on: ubuntu-24.04"));
+        assert!(!rendered.contains("runs-on: ${{"));
+        assert!(!rendered.contains("velnor-trusted"));
     }
 
     #[test]
