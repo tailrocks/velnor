@@ -33,18 +33,14 @@ const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .gith
 const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
-// Transition pin: f15ff2e publishes the provider workflow on the current
-// default branch. After this generator change merges, repin through a second
-// generator-only change to that merge commit; never pin a reusable workflow to
-// the commit that introduces it.
 // pull_request_target can only call the policy workflow from a revision that
-// is already reachable from the base repository. Keep the provider on the
-// mainline provider commit; the hosted runtime pin remains independent.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "f15ff2e8449a34f77f04746fa461a349bad22e79";
+// is already reachable from the base repository. Keep both provider and
+// hosted-runtime pins on the same stable mainline commit.
+const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "31aef64ac948a8197f4c86eb0794db3039be75c8";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
