@@ -1179,10 +1179,7 @@ async fn reconcile_remote_registrations(
 
     if !registered.is_empty() {
         let remote_ids = match client.list_runners(&scope, pat).await {
-            Ok(runners) => runners
-                .into_iter()
-                .map(|runner| runner.id)
-                .collect::<Option<HashSet<_>>>(),
+            Ok(runners) => remote_runner_ids(runners.into_iter().map(|runner| runner.id)),
             Err(error) => {
                 if let Some(quota) = crate::protocol::github_api_quota_status(&error) {
                     pacing.hold_rest_until(
@@ -1230,6 +1227,13 @@ async fn reconcile_remote_registrations(
         );
     }
     Ok(())
+}
+
+/// Return a complete remote identity set, or no evidence at all when the
+/// listing contains an entry without an id. Partial identity evidence must
+/// never make reconciliation delete a valid local registration.
+fn remote_runner_ids(runners: impl IntoIterator<Item = Option<i64>>) -> Option<HashSet<i64>> {
+    runners.into_iter().collect()
 }
 
 fn load_local_runner_config(slot_dir: &Path) -> anyhow::Result<Option<config::StoredRunnerConfig>> {
@@ -3922,6 +3926,13 @@ mod tests {
         .await;
 
         assert!(matches!(result, Ok(Ok(()))));
+    }
+
+    #[test]
+    fn remote_runner_ids_require_complete_identity_evidence() {
+        let ids = remote_runner_ids([Some(7), Some(8)]);
+        assert_eq!(ids, Some(HashSet::from([7, 8])));
+        assert!(remote_runner_ids([Some(7), None]).is_none());
     }
 
     #[cfg(feature = "test-support")]
