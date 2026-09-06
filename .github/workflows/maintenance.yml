@@ -80,7 +80,7 @@ jobs:
           headroom="$((MAX_BYTES - total))"
           jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
             --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
             > "$RUNNER_TEMP/cache-budget/summary.json"
           cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish cache budget snapshot
