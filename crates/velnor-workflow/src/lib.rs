@@ -2460,14 +2460,12 @@ fn github_docker_cache_command(command: &str, write_cache: bool) -> String {
     let Some(arguments) = command.strip_prefix("docker build ") else {
         return command.to_owned();
     };
-    let cached_build = "docker buildx build --load --cache-from type=gha,scope=velnor-docker";
-    if write_cache {
-        format!(
-            "if [[ \"${{CI_CACHE_WRITE:-false}}\" == \"true\" ]]; then {cached_build} --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true {arguments}; else {cached_build} {arguments}; fi"
-        )
-    } else {
-        format!("{cached_build} {arguments}")
-    }
+    let cache_to = write_cache
+        .then_some(" --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true");
+    format!(
+        "docker buildx build --load --cache-from type=gha,scope=velnor-docker{} {arguments}",
+        cache_to.unwrap_or_default()
+    )
 }
 
 fn velnor_docker_command(command: &str) -> String {
@@ -3999,13 +3997,11 @@ impl WorkflowIr {
                 unit.id
             );
         }
-        let cache_write_env = self.cache_write_env(lane, unit, cache_save);
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
-            cache_write_env,
             yaml_scalar(&unit.id)
         );
         if cache_save
@@ -4045,28 +4041,6 @@ impl WorkflowIr {
 
     fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
         output.push_str(&workflow_runtime_download(lane));
-    }
-
-    fn cache_write_env(&self, lane: RunnerMode, unit: &Unit, cache_save: bool) -> String {
-        if lane == RunnerMode::Github
-            && cache_save
-            && unit.github_full_commands.as_ref().is_some_and(|commands| {
-                commands
-                    .iter()
-                    .any(|command| command.contains("CI_CACHE_WRITE"))
-            })
-        {
-            format!("\n          CI_CACHE_WRITE: {}", self.cache_write_value())
-        } else {
-            String::new()
-        }
-    }
-
-    fn cache_write_value(&self) -> String {
-        format!(
-            "${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}') }}}}",
-            self.default_branch, self.default_branch
-        )
     }
 
     fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -4228,13 +4202,11 @@ impl WorkflowIr {
                     unit.id,
                 );
             }
-            let cache_write_env = self.cache_write_env(lane, unit, cache_save);
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
                 verify_name,
                 yaml_scalar(&unit.id),
-                cache_write_env,
                 yaml_scalar(&unit.id),
             );
             if cache_save
@@ -8223,12 +8195,9 @@ path-only = { path = "../path-only" }
         assert!(github_full_commands
             .iter()
             .any(|command| command.contains("--cache-to type=gha")));
-        assert!(github_full_commands
+        assert!(!github_full_commands
             .iter()
-            .any(|command| command.contains("${CI_CACHE_WRITE:-false}")));
-        assert!(github_full_commands
-            .iter()
-            .any(|command| command.contains("if [[ \"${CI_CACHE_WRITE:-false}\" == \"true\" ]]")));
+            .any(|command| command.contains("CI_CACHE_WRITE")));
         let velnor_commands =
             must_some(docker.velnor_pr_commands.as_ref(), "Velnor Docker commands");
         assert!(velnor_commands
@@ -8244,12 +8213,11 @@ path-only = { path = "../path-only" }
         assert!(toml.contains("velnor_pr_commands"));
         assert!(toml.contains("velnor_full_commands"));
         assert!(!toml.contains("CI_RUNNER_LANE"));
-        assert!(toml.contains("CI_CACHE_WRITE"));
+        assert!(!toml.contains("CI_CACHE_WRITE"));
         let docker_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(docker, WorkflowKind::Main);
         assert!(!docker_workflow.contains("CI_RUNNER_LANE"));
-        assert!(docker_workflow.contains("CI_CACHE_WRITE: ${{ github.event_name == 'push'"));
-        assert!(docker_workflow.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(!docker_workflow.contains("CI_CACHE_WRITE"));
         assert!(!docker_workflow
             .split_once("\n  velnor:")
             .map_or("", |(_, lane)| lane)
