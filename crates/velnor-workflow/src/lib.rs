@@ -8084,6 +8084,9 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("target/$TARGET/release/velnor-guest-agent"));
         assert!(release_workflow.contains("Normalize downloaded workflow binaries"));
         assert!(release_workflow.contains("crazy-max/ghaction-github-runtime@"));
+        assert!(release_workflow.contains("dist/microvm/guest-agent.sha256"));
+        assert!(release_workflow.contains("guest-image/velnor-guest-agent"));
+        assert!(release_workflow.contains("packaged guest-agent does not match guest-image artifact"));
         assert!(!release_workflow.contains("sccache"));
         assert!(!release_workflow.contains("actions/cache"));
 
