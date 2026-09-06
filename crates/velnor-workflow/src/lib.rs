@@ -5607,15 +5607,11 @@ fn render_apt_package_updater_job(
     }
     format!(
         "  {id}:\n{}",
-        replace_apt_package_updater_runner(&body, lane, id)
+        replace_apt_package_updater_runner(&body, lane)
     )
 }
 
-fn replace_apt_package_updater_runner(
-    body: &str,
-    lane: AptPackageUpdaterLane,
-    job_id: &str,
-) -> String {
+fn replace_apt_package_updater_runner(body: &str, lane: AptPackageUpdaterLane) -> String {
     let mut output = String::with_capacity(body.len() + 96);
     let mut replaced = false;
     for segment in body.split_inclusive('\n') {
@@ -5638,7 +5634,12 @@ fn replace_apt_package_updater_runner(
             output.push_str(segment);
         }
     }
-    debug_assert!(replaced, "APT package updater runner missing in {job_id}");
+    // A generated workflow can be adopted again. In that case the runner
+    // selector is already static, so preserve it instead of treating the
+    // absence of a replacement as a malformed source template.
+    if !replaced {
+        return body.to_owned();
+    }
     output
 }
 
@@ -5664,7 +5665,12 @@ fn render_apt_package_update_template(config: &ProjectConfig, template: &str) ->
             output.push_str(segment);
         }
     }
-    debug_assert!(replaced, "APT package update barrier runner missing");
+    // A generated workflow can be adopted again. In that case the barrier
+    // selector is already static, so preserve it instead of panicking while
+    // checking an otherwise valid generated file.
+    if !replaced {
+        return template.to_owned();
+    }
     output
 }
 
@@ -10722,6 +10728,11 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(rendered.contains("runs-on: ubuntu-24.04"));
         assert!(!rendered.contains("runs-on: ${{"));
         assert!(!rendered.contains("velnor-trusted"));
+        assert_eq!(
+            render_apt_package_update_template(&apt, rendered),
+            rendered.as_str(),
+            "adopting an already generated APT barrier must be idempotent"
+        );
     }
 
     #[test]
