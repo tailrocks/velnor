@@ -6137,10 +6137,6 @@ jobs:
             '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
             > "$RUNNER_TEMP/cache-budget/summary.json"
           cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
-          if (( total > MAX_BYTES )); then
-            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
-            exit 1
-          fi
       - name: Publish cache budget snapshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -6148,6 +6144,16 @@ jobs:
           path: ${{ runner.temp }}/cache-budget
           if-no-files-found: error
           retention-days: 14
+      - name: Enforce cache budget
+        env:
+          MAX_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
+          if (( total > MAX_BYTES )); then
+            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
+            exit 1
+          fi
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
@@ -10591,6 +10597,20 @@ path-only = { path = "../path-only" }
             .is_some_and(|content| {
                 content.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}"))
             }));
+        let maintenance = must_some(
+            files.get(&PathBuf::from(".github/workflows/maintenance.yml")),
+            "generated maintenance workflow",
+        );
+        assert!(
+            maintenance
+                .find("name: Publish cache budget snapshot")
+                .is_some_and(|publish| {
+                    maintenance
+                        .find("name: Enforce cache budget")
+                        .is_some_and(|enforce| publish < enforce)
+                }),
+            "cache evidence must be published before an over-budget failure"
+        );
     }
 
     #[test]

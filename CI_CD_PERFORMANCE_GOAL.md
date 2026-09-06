@@ -464,6 +464,20 @@ not present.
 
 ### Safety fixtures and remaining blockers
 
+- Commit `4df3da27` removes the blanket `src/lib.rs` watch edge. The checked
+  configuration matches a generator edit to exactly `docker`,
+  `rust-velnor-workflow`, and `rust-production-topology`; `runtime.rs` remains
+  watched by every unit. This prevents generator-only edits from selecting all
+  15 verification units while retaining the image, regeneration, and workspace
+  safety gates.
+- Local proof after that change: `cargo test --locked -p velnor-workflow` passed
+  133 tests; `cargo check --workspace --all-targets --locked` passed; the
+  generator `--check` passed; and `mise run test-release-feature-boundary`
+  passed by observing the intended release-profile `test-support` rejection.
+- The maintenance generator now uploads each cache snapshot before enforcing
+  the 8-GiB limit. Over-budget days therefore remain observable as artifacts
+  and still fail the budget gate.
+
 - Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
   `rust-velnor-runner`, `rust-velnorctl`.
 - Single-crate `velnor-client` full IDs:
@@ -480,10 +494,11 @@ not present.
   `ci-rust-production-topology.yml`; its Velnor command is
   `mbx check --workspace --all-targets --locked` plus
   `mise run test-release-feature-boundary`.
-- Remaining unmet items: new job image release/deployment, live passing Velnor
-  main proof, comparable warm affected PR, exact/prefix restore rates after the
-  fix, Docker ≤4m proof, seven-day ≤8-GiB snapshots, and the required
-  provider/queue/coverage proof table. Do not claim achievement.
+- Remaining unmet items: PR #602 CI completion, new job image
+  release/deployment, live passing Velnor main proof, comparable warm affected
+  PR, exact/prefix restore rates after the fix, Docker ≤4m proof, seven-day
+  ≤8-GiB snapshots, and the required provider/queue/coverage proof table. Do
+  not claim achievement.
 
 ## 9. Context (changelog, not work items)
 
