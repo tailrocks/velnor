@@ -1293,6 +1293,8 @@ fn analyze_rust_manifests(
             ));
         }
         let cache_key_files = vec![
+            ".cargo/**".to_owned(),
+            "Cargo.toml".to_owned(),
             manifest_path.clone(),
             "Cargo.lock".to_owned(),
             "rust-toolchain.toml".to_owned(),
@@ -1354,7 +1356,11 @@ fn analyze_rust_manifests(
             full_commands: commands,
             depends_on: Vec::new(),
             cache: Some(CacheSpec {
-                key_files: vec!["Cargo.toml".to_owned(), "Cargo.lock".to_owned()],
+                key_files: vec![
+                    ".cargo/**".to_owned(),
+                    "Cargo.toml".to_owned(),
+                    "Cargo.lock".to_owned(),
+                ],
                 paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
             }),
             tool_version: None,
@@ -2724,6 +2730,7 @@ fn unit_with_dependencies(mut unit: Unit, dependencies: &[&str]) -> Unit {
 fn cargo_cache() -> CacheSpec {
     CacheSpec {
         key_files: vec![
+            ".cargo/**".to_owned(),
             "Cargo.toml".to_owned(),
             "Cargo.lock".to_owned(),
             "rust-toolchain.toml".to_owned(),
@@ -3891,7 +3898,7 @@ impl WorkflowIr {
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             ActionPin::Checkout.reference()
         );
-        Self::render_workflow_runtime_setup(output, lane);
+        Self::render_workflow_runtime_download(output, lane);
         self.render_tool_provisioning(output, lane, unit);
         if !self.uses_mr_boxington(unit)
             && let Some(cache) = &unit.cache
@@ -3963,6 +3970,10 @@ impl WorkflowIr {
         output.push_str(&workflow_runtime_setup(lane));
     }
 
+    fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_download(lane));
+    }
+
     fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
@@ -3974,6 +3985,7 @@ impl WorkflowIr {
             VELNOR_WORKFLOW_SOURCE_REV,
             VELNOR_WORKFLOW_SOURCE_REV,
         );
+        output.push_str(&workflow_runtime_artifact_upload());
     }
 
     fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -4103,7 +4115,7 @@ impl WorkflowIr {
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 ActionPin::Checkout.reference(),
             );
-            Self::render_workflow_runtime_setup(output, lane);
+            Self::render_workflow_runtime_download(output, lane);
             self.render_tool_provisioning(output, lane, unit);
             if !self.uses_mr_boxington(unit)
                 && let Some(cache) = &unit.cache
@@ -5113,6 +5125,24 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
     } else {
         String::new()
     }
+}
+
+fn workflow_runtime_download(lane: RunnerMode) -> String {
+    if lane == RunnerMode::Github {
+        format!(
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime\n          path: .velnor-workflow-runtime\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
+            ActionPin::DownloadArtifact.reference()
+        )
+    } else {
+        String::new()
+    }
+}
+
+fn workflow_runtime_artifact_upload() -> String {
+    format!(
+        "      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime\n          path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found: error\n          retention-days: 1\n",
+        ActionPin::UploadArtifact.reference()
+    )
 }
 
 fn trusted_release_runner_gate(default_branch: &str) -> String {
@@ -8053,6 +8083,7 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("--target \"$TARGET\""));
         assert!(release_workflow.contains("target/$TARGET/release/velnor-guest-agent"));
         assert!(release_workflow.contains("Normalize downloaded workflow binaries"));
+        assert!(release_workflow.contains("crazy-max/ghaction-github-runtime@"));
         assert!(!release_workflow.contains("sccache"));
         assert!(!release_workflow.contains("actions/cache"));
 

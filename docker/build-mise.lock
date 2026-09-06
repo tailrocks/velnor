@@ -11,17 +11,19 @@ specifiers = ["1.98.1"]
 components = "clippy,rustfmt"
 targets = "aarch64-apple-darwin,aarch64-unknown-linux-gnu,x86_64-apple-darwin,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl"
 
-[[tools.sccache]]
-version = "0.16.0"
-backend = "aqua:mozilla/sccache"
-specifiers = ["0.16.0"]
+[[tools.mr-boxington]]
+version = "1.8.3"
+backend = "github:jdx/mr-boxington"
+specifiers = ["1.8.3"]
 
-[tools.sccache."platforms.linux-arm64"]
-checksum = "sha256:f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784"
-url = "https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-aarch64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/mozilla/sccache/releases/assets/452060468"
+[tools.mr-boxington."platforms.linux-arm64"]
+checksum = "sha256:c8c0e6ac85afcf17f7143df127337d8ee8fdc22f879bf812081d8958ee253937"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.8.3/mbx-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/546079709"
+provenance = "github-attestations"
 
-[tools.sccache."platforms.linux-x64"]
-checksum = "sha256:aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588"
-url = "https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/mozilla/sccache/releases/assets/452060682"
+[tools.mr-boxington."platforms.linux-x64"]
+checksum = "sha256:62d122a4103ca286ef86a5c8429d21404f60e795345b8c853a9da0a18ef6dbde"
+url = "https://github.com/jdx/mr-boxington/releases/download/v1.8.3/mbx-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/jdx/mr-boxington/releases/assets/546079720"
+provenance = "github-attestations"

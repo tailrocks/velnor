@@ -401,6 +401,8 @@ jobs:
           done
 
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Expose GitHub Actions runtime
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
         with:
           cleanup: false
@@ -479,6 +481,8 @@ jobs:
     env:
       CACHE_LANE: GitHub
       CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      VELNOR_RELEASE_BUILD: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -496,9 +500,12 @@ jobs:
           git checkout --detach "$SOURCE_COMMIT"
           [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
+      - name: Install mold linker
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          install_args: "rust"
+          install_args: "rust zig cargo:cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Mr. Boxington
@@ -537,8 +544,7 @@ jobs:
           # velnor-sudo-exception: GitHub-hosted release build installs required OS packages.
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
-            mmdebstrap debootstrap arch-test qemu-user-static binfmt-support \
-            gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+            mmdebstrap debootstrap arch-test qemu-user-static binfmt-support
           sudo update-binfmts --enable qemu-aarch64
           test -x /usr/bin/qemu-aarch64-static
           arch-test arm64
@@ -561,7 +567,8 @@ jobs:
         run: |
           set -euo pipefail
           agent="target/$TARGET/release/velnor-guest-agent"
-          mbx build -p velnor-runner --bin velnor-guest-agent --locked --release --target "$TARGET"
+          mbx zigbuild -p velnor-runner --bin velnor-guest-agent \
+            --locked --release --features release-build --target "$TARGET"
           test -x "$agent"
           case "$TARGET" in
             aarch64-unknown-linux-gnu)
@@ -596,6 +603,8 @@ jobs:
           DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" dist/microvm/rootfs.ext4 >/dev/null
           cmp -- "$agent_dump" "$agent"
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -604,6 +613,8 @@ jobs:
             dist/microvm/vmlinux
             dist/microvm/rootfs.ext4
             dist/microvm/rootfs.sha256
+            dist/microvm/velnor-guest-agent
+            dist/microvm/guest-agent.sha256
 
   build:
     needs: [identity, release_gate, metadata, guest-image]
@@ -682,7 +693,7 @@ jobs:
           # The deb also ships velnor-tools and velnor-workflow, so build those
           # packages explicitly without inventing a feature they do not own.
           mbx zigbuild -p velnor-runner \
-            --bin velnor-runner --bin velnor-guest-agent \
+            --bin velnor-runner \
             --release --locked --features release-build --target "${{ matrix.target }}"
           mbx zigbuild -p velnorctl \
             --release --locked --features release-build --target "${{ matrix.target }}"
@@ -748,6 +759,14 @@ jobs:
           tar -xzf firecracker.tgz -C extracted
           cp "extracted/${fc_member}" crates/velnor-runner/release/microvm/firecracker
           cp "extracted/${jailer_member}" crates/velnor-runner/release/microvm/jailer
+          test -s guest-image/velnor-guest-agent || { echo "::error::guest-image missing guest-agent" >&2; exit 1; }
+          test -s guest-image/guest-agent.sha256 || { echo "::error::guest-image missing guest-agent checksum" >&2; exit 1; }
+          guest_agent_sha256="$(awk '{print $1}' guest-image/guest-agent.sha256)"
+          [ "${#guest_agent_sha256}" -eq 64 ] || { echo "::error::guest-agent digest has invalid length" >&2; exit 1; }
+          actual_guest_agent_sha256="$(sha256sum guest-image/velnor-guest-agent | awk '{print $1}')"
+          [ "$actual_guest_agent_sha256" = "$guest_agent_sha256" ] || { echo "::error::downloaded guest-agent digest mismatch" >&2; exit 1; }
+          install -Dm0755 guest-image/velnor-guest-agent "target/${TARGET}/release/velnor-guest-agent"
+          cmp -- "target/${TARGET}/release/velnor-guest-agent" guest-image/velnor-guest-agent
           cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
           test -s guest-image/vmlinux || { echo "::error::guest-image missing vmlinux" >&2; exit 1; }
           test -s guest-image/rootfs.ext4 || { echo "::error::guest-image missing rootfs.ext4" >&2; exit 1; }
@@ -756,7 +775,8 @@ jobs:
           [ "${#rootfs_sha256}" -eq 64 ] || { echo "::error::guest rootfs digest has invalid length" >&2; exit 1; }
           actual_rootfs_sha256="$(sha256sum guest-image/rootfs.ext4 | awk '{print $1}')"
           [ "$actual_rootfs_sha256" = "$rootfs_sha256" ] || { echo "::error::downloaded guest rootfs digest mismatch" >&2; exit 1; }
-          guest_agent_sha256="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
+          packaged_guest_agent_sha256="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
+          [ "$packaged_guest_agent_sha256" = "$guest_agent_sha256" ] || { echo "::error::packaged guest-agent does not match guest-image artifact" >&2; exit 1; }
           cp guest-image/vmlinux crates/velnor-runner/release/microvm/vmlinux
           cp guest-image/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
           chmod 0755 \
@@ -772,7 +792,7 @@ jobs:
           mbx run -p velnor-runner --bin velnor-guest-image --locked -- \
             stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
             --rootfs-sha256 "$rootfs_sha256" \
-            --guest-agent-sha256 "$guest_agent_sha256"
+            --guest-agent-sha256 "$packaged_guest_agent_sha256"
           kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
           rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
           case "$kernel$rootfs" in
