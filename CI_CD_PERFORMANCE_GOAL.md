@@ -462,13 +462,15 @@ deleted by exact ID and re-listed absent. The current account exceeds the
 8-GiB acceptance ceiling. The required seven consecutive daily snapshots are
 not present.
 
-### Recheck 2026-09-06T19:14:14Z
+### Recheck 2026-09-06T19:18:05Z
 
-- Release [v0.1.272](https://github.com/tailrocks/velnor/releases/tag/v0.1.272)
-  now exists. The published job image is also present at
+- Tag `v0.1.272` exists. The [release workflow](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  has published the job image, but the GitHub Release record is not yet
+  present (`gh api .../releases/tags/v0.1.272` returns 404); the amd64 and
+  arm64 package jobs are still running. The image is present at
   `ghcr.io/tailrocks/velnor-job-ubuntu:0.1.272`, OCI index
   `sha256:3d5167b2617bca2fae535a152b78b8fbb46631deafd2c1203305c9eaaa0274d2`;
-  this proves publication, not fleet activation.
+  this proves image publication, not fleet activation.
 - The package contract keeps activation separate: the Debian `postinst` does
   not restart the fleet; an operator must run `velnorctl release activate`.
   Therefore live passing Velnor main proof remains OPEN.
