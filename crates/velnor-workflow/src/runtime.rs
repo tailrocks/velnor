@@ -2275,8 +2275,62 @@ mod tests {
         Ok((root, base, head))
     }
 
+    fn current_project_selection_git_fixture(
+        name: &str,
+        changed: &str,
+        base_contents: &str,
+        head_contents: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-current-project-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<String, Box<dyn Error>> {
+            let output = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "git command failed: {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+
+        let config = root.join(".github/ci/project.toml");
+        std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/ci/project.toml"),
+            &config,
+        )?;
+
+        let changed_path = root.join(changed);
+        std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
+        std::fs::write(&changed_path, base_contents)?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = init(&["rev-parse", "HEAD"])?;
+
+        std::fs::write(changed_path, head_contents)?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = init(&["rev-parse", "HEAD"])?;
+        Ok((root, base, head))
+    }
+
     fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
         units.into_iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    fn selected_id_set(selection: &UnitSelection<'_>) -> BTreeSet<String> {
+        selection.units.iter().map(|unit| unit.id.clone()).collect()
     }
 
     #[test]
@@ -2473,6 +2527,73 @@ mod tests {
                 .map(str::to_owned)
                 .collect()
         );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_project_cargo_lock_only_change_selects_exact_allowlist_units(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture(
+            "cargo-lock-only",
+            "Cargo.lock",
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+            "[[package]]\nname = \"fixture\"\nversion = \"0.1.1\"\n",
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected = [
+            "docker",
+            "rust-velnor-bench",
+            "rust-velnor-runner",
+            "rust-velnorctl",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(selected_id_set(&selection), expected);
+        assert_eq!(selection.full_units, expected);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn current_project_velnor_client_change_selects_exact_dependency_closure(
+    ) -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = current_project_selection_git_fixture(
+            "velnor-client-source",
+            "crates/velnor-client/src/lib.rs",
+            "pub fn fixture() {}\n",
+            "pub fn fixture() { let _ = 1; }\n",
+        )?;
+        let config = read_config(&root.join(".github/ci/project.toml"))?;
+        let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        let expected_selected = [
+            "docker",
+            "rust-velnor-client",
+            "rust-velnor-control",
+            "rust-velnor-model",
+            "rust-velnor-render",
+            "rust-velnor-runner",
+            "rust-velnor-tools",
+            "rust-velnorctl",
+            "rust-production-topology",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let expected_full = [
+            "docker",
+            "rust-velnor-client",
+            "rust-velnor-tools",
+            "rust-velnorctl",
+            "rust-production-topology",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(selected_id_set(&selection), expected_selected);
+        assert_eq!(selection.full_units, expected_full);
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
