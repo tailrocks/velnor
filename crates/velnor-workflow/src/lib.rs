@@ -37,11 +37,11 @@ const VELNOR_POLICY_WORKFLOW: &str =
 // default branch. After this generator change merges, repin through a second
 // generator-only change to that merge commit; never pin a reusable workflow to
 // the commit that introduces it.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "a1cbfcbe5ab179032e37125f0383cdcae8183c8c";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "6e6653a54f3ed64f6188af10c8417e7df9c1b8d1";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "a1cbfcbe5ab179032e37125f0383cdcae8183c8c";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "6e6653a54f3ed64f6188af10c8417e7df9c1b8d1";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";

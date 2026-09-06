@@ -3337,7 +3337,7 @@ the hardened runtime.
 
 Section 37's pre-cycle policy pin is historical. The current base-owned
 reusable workflow uses the generator's transition pin
-`a1cbfcbe5ab179032e37125f0383cdcae8183c8c`; it installs
+`6e6653a54f3ed64f6188af10c8417e7df9c1b8d1`; it installs
 the generic-input runtime at `8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0`.
 Generated entrypoints and advisory calls pass the workflow's own full SHA as
 `policy-revision`, which the installed runtime validates. This removes the
