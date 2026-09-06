@@ -31,9 +31,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@07d083181537b3b51c98e35879ffc16bd7f9b288
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@de3f79fe2cb2d493e95023abfbbcd51a48d77346
         with:
-          rev: 07d083181537b3b51c98e35879ffc16bd7f9b288
+          rev: de3f79fe2cb2d493e95023abfbbcd51a48d77346
       - name: Select affected units
         id: plan
         env:
@@ -46,7 +46,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-07d083181537b3b51c98e35879ffc16bd7f9b288
+          name: velnor-workflow-runtime-de3f79fe2cb2d493e95023abfbbcd51a48d77346
           path: ~/.cargo/bin/velnor-workflow
           if-no-files-found: error
           retention-days: 7
@@ -59,9 +59,9 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07d083181537b3b51c98e35879ffc16bd7f9b288
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@de3f79fe2cb2d493e95023abfbbcd51a48d77346
     with:
-      policy-revision: 07d083181537b3b51c98e35879ffc16bd7f9b288
+      policy-revision: de3f79fe2cb2d493e95023abfbbcd51a48d77346
     permissions:
       contents: read
   group-unit-bun-velnor:

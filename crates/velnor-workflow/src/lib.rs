@@ -36,11 +36,11 @@ const VELNOR_POLICY_WORKFLOW: &str =
 // pull_request_target can only call the policy workflow from a revision that
 // is already reachable from the base repository. Keep both provider and
 // hosted-runtime pins on the same stable mainline commit.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "de3f79fe2cb2d493e95023abfbbcd51a48d77346";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "de3f79fe2cb2d493e95023abfbbcd51a48d77346";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
