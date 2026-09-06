@@ -677,19 +677,25 @@ pub(crate) fn run_units_with_selection_file(
         ));
     }
     let full_units = selection.full_units;
-    let selected = match only_unit {
+    let selected = select_units_for_job(selected, only_unit)?;
+    run_layers(root, &selected, scope, &full_units)
+}
+
+fn select_units_for_job<'a>(
+    selected: Vec<&'a CiUnit>,
+    only_unit: Option<&str>,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    match only_unit {
         Some(id) => {
             if !selected.iter().any(|unit| unit.id == id) {
-                return Ok(());
+                return Err(GeneratorError::usage(format!(
+                    "CI selection artifact does not include requested unit `{id}`"
+                )));
             }
-            selected
-                .into_iter()
-                .filter(|unit| unit.id == id)
-                .collect::<Vec<_>>()
+            Ok(selected.into_iter().filter(|unit| unit.id == id).collect())
         }
-        None => selected,
-    };
-    run_layers(root, &selected, scope, &full_units)
+        None => Ok(selected),
+    }
 }
 
 struct UnitSelection<'a> {
@@ -2309,6 +2315,19 @@ mod tests {
         );
         std::fs::remove_file(path)?;
         Ok(())
+    }
+
+    #[test]
+    fn unselected_unit_fails_closed_instead_of_succeeding_as_a_noop() {
+        let config = selection_config();
+        let selected = config.unit.iter().collect::<Vec<_>>();
+        let result = super::select_units_for_job(selected, Some("not-selected"));
+        assert!(
+            result.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("does not include requested unit `not-selected`")),
+            "an unselected unit must fail closed with a useful error: {result:?}"
+        );
     }
 
     #[test]
