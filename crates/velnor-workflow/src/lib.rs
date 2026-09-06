@@ -2646,9 +2646,28 @@ fn apply_local_velnor_profile(
         });
     }
     apply_velnor_watch_graph(root, &mut config)?;
+    configure_velnor_docker_pr_target(&mut config);
     add_velnor_regeneration_gate(&mut config);
     enable_mr_boxington_commands(&mut config);
     Ok(config)
+}
+
+fn configure_velnor_docker_pr_target(config: &mut ProjectConfig) {
+    for unit in config
+        .units
+        .iter_mut()
+        .filter(|unit| unit.kind == UnitKind::Docker && unit.root == ".")
+    {
+        for command in &mut unit.pr_commands {
+            let Some(arguments) = command.strip_prefix("docker build ") else {
+                continue;
+            };
+            if !arguments.contains("--file 'Dockerfile'") {
+                continue;
+            }
+            *command = format!("docker build --target ci {arguments}");
+        }
+    }
 }
 
 fn add_velnor_regeneration_gate(config: &mut ProjectConfig) {
@@ -9313,6 +9332,36 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 .chain(&unit.full_commands)
                 .all(|command| !command.contains("cargo test --workspace")));
         }
+    }
+
+    #[test]
+    fn velnor_docker_pr_validation_stops_before_release_stage() {
+        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let mut config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        config.units.push(catalog_unit(
+            "docker",
+            "Docker",
+            UnitKind::Docker,
+            &["Dockerfile"],
+            &["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"],
+            &["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"],
+            None,
+        ));
+
+        configure_velnor_docker_pr_target(&mut config);
+
+        let docker = must_some(
+            config.units.iter().find(|unit| unit.id == "docker"),
+            "Docker unit",
+        );
+        assert_eq!(
+            docker.pr_commands,
+            vec!["docker build --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+        );
+        assert_eq!(
+            docker.full_commands,
+            vec!["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+        );
     }
 
     #[expect(

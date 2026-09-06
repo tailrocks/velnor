@@ -51,9 +51,9 @@ label = "Docker"
 kind = "docker"
 root = "."
 watch = [".cargo/**", ".dockerignore", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/velnor-bench/Cargo.toml", "crates/velnor-client/**", "crates/velnor-client/Cargo.toml", "crates/velnor-control/**", "crates/velnor-control/Cargo.toml", "crates/velnor-model/**", "crates/velnor-model/Cargo.toml", "crates/velnor-render/**", "crates/velnor-render/Cargo.toml", "crates/velnor-runner/**", "crates/velnor-runner/Cargo.toml", "crates/velnor-tools/**", "crates/velnor-tools/Cargo.toml", "crates/velnor-workflow/**", "crates/velnor-workflow/Cargo.toml", "crates/velnor-workflow/src/runtime.rs", "crates/velnorctl/**", "crates/velnorctl/Cargo.toml", "docker/**", "docker/build-mise.lock", "docker/build-mise.toml", "fleet/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "tools/unit-collector/**", "tools/unit-collector/Cargo.toml"]
-github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_pr_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 [[unit]]

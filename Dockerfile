@@ -98,6 +98,22 @@ COPY crates/velnor-workflow ./crates/velnor-workflow
 COPY crates/velnor-tools ./crates/velnor-tools
 COPY microvm ./microvm
 COPY tools/unit-collector ./tools/unit-collector
+
+# Pull-request Docker validation stops here. It validates the locked build
+# toolchain, dependency fetch, and complete source context without rebuilding
+# the release binaries for every Rust source edit. Full/default builds below
+# remain the release-image guardrail used by trusted main and release flows.
+RUN cd /opt/mise/config \
+    && mise exec -- mbx --version | grep -F '1.8.3' \
+    && test -f /src/Cargo.lock \
+    && test -f /src/crates/velnor-workflow/src/lib.rs \
+    && touch /tmp/velnor-ci-inputs-validated
+
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS ci
+COPY --from=build /tmp/velnor-ci-inputs-validated /usr/local/share/velnor/ci-inputs-validated
+RUN test -f /usr/local/share/velnor/ci-inputs-validated
+
+FROM build AS release
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/mbx \
@@ -117,10 +133,10 @@ RUN apt-get update \
         git \
         jq \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/velnorctl /usr/local/bin/velnorctl
-COPY --from=build /src/target/release/velnor-runner /usr/local/bin/velnor-runner
-COPY --from=build /src/target/release/velnor-tools /usr/local/bin/velnor-tools
-COPY --from=build /src/target/release/velnor-workflow /usr/local/bin/velnor-workflow
+COPY --from=release /src/target/release/velnorctl /usr/local/bin/velnorctl
+COPY --from=release /src/target/release/velnor-runner /usr/local/bin/velnor-runner
+COPY --from=release /src/target/release/velnor-tools /usr/local/bin/velnor-tools
+COPY --from=release /src/target/release/velnor-workflow /usr/local/bin/velnor-workflow
 RUN install -d -m 0755 /usr/local/share/velnor \
     && sha256sum /usr/local/bin/velnor-workflow \
         > /usr/local/share/velnor/velnor-workflow.sha256 \
