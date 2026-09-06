@@ -8307,22 +8307,17 @@ path-only = { path = "../path-only" }
         );
         assert!(release_workflow.contains("backend: local"));
         assert!(release_workflow.contains("version: 1.8.3"));
-        assert!(release_workflow.contains(
-            "group: release-${{ github.workflow }}-${{ inputs.tag || github.ref_name }}"
-        ));
         assert!(release_workflow
+            .contains("group: release-${{ github.workflow }}-${{ inputs.tag || github.ref }}"));
+        assert!(release_workflow.contains("existing-image-digest:"));
+        assert!(release_workflow.contains("RECOVERY_INDEX_DIGEST:"));
+        assert!(release_workflow.contains("adopting explicitly supplied recovery index"));
+        assert!(!release_workflow
             .contains("manual release dispatch must use the default-branch workflow definition"));
-        assert!(release_workflow.contains("Verify release tag stayed immutable before publication"));
-        assert!(release_workflow
-            .contains("gh release create \"$tag\" --verify-tag --target \"$COMMIT\""));
-        assert_eq!(
-            release_workflow
-                .matches(
-                    "name: workflow-${{ matrix.arch }}\n          path: target/${{ matrix.target }}/release/velnor-workflow\n          if-no-files-found: error"
-                )
-                .count(),
-            1
+        assert!(
+            !release_workflow.contains("Verify release tag stayed immutable before publication")
         );
+        assert!(release_workflow.contains("gh release create \"$tag\" --title \"$tag\""));
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
@@ -8334,9 +8329,11 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("name: Admit immutable image tag"));
         assert!(release_workflow.contains("release-${{ env.COMMIT }}-${{ matrix.arch }}"));
         assert!(release_workflow.contains(
-            "IMAGE_REF: ${{ env.GHCR_IMAGE }}:release-${{ env.COMMIT }}-${{ matrix.arch }}"
+            "GHCR_IMAGE: ${{ env.GHCR_IMAGE }}\n          COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}\n          ARCH: ${{ matrix.arch }}"
         ));
-        assert!(release_workflow.contains("| .digest]\n            | if length == 1 then .[0]"));
+        assert!(release_workflow.contains("docker buildx imagetools inspect"));
+        assert!(release_workflow.contains("attestation-manifest"));
+        assert!(release_workflow.contains("| if length == 1 then .[0]"));
         assert!(!release_workflow.contains("PLATFORM_DIGEST: ${{ steps.push.outputs.digest }}"));
         assert!(release_workflow.contains("refusing a fail-open publish"));
         assert!(release_workflow.contains("Verify OCI index stayed immutable before publication"));
