@@ -98,22 +98,22 @@ jobs:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-bench:
     name: "Rust · velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && needs['group-unit-rust-velnor-runner'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
-    needs: [plan, policy, group-unit-rust-velnor-model, group-unit-rust-velnor-runner]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-bench.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-client:
     name: "Rust · velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-client.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-control:
     name: "Rust · velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-control.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
@@ -126,22 +126,22 @@ jobs:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-render:
     name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
-    needs: [plan, policy, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-render.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-runner:
     name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-control'].result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
-    needs: [plan, policy, group-unit-rust-velnor-control, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-runner.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnor-tools:
     name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-client'].result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
-    needs: [plan, policy, group-unit-rust-velnor-client, group-unit-rust-velnor-model]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnor-tools.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
@@ -154,8 +154,8 @@ jobs:
       scope: ${{ needs.plan.outputs.scope }}
   group-unit-rust-velnorctl:
     name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs['group-unit-rust-velnor-client'].result == 'success' && needs['group-unit-rust-velnor-control'].result == 'success' && needs['group-unit-rust-velnor-model'].result == 'success' && needs['group-unit-rust-velnor-render'].result == 'success' && needs['group-unit-rust-velnor-runner'].result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
-    needs: [plan, policy, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner]
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
+    needs: [plan, policy]
     uses: ./.github/workflows/ci-rust-velnorctl.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}

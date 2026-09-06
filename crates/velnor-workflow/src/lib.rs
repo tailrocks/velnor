@@ -3838,12 +3838,6 @@ impl WorkflowIr {
             if include_policy {
                 needs.push("policy".to_owned());
             }
-            needs.extend(unit.depends_on.iter().map(|dependency| {
-                self.units
-                    .iter()
-                    .find(|candidate| candidate.id == *dependency)
-                    .map_or_else(|| unit_group_job_id(unit), unit_group_job_id)
-            }));
             let id = unit_group_job_id(unit);
             let name = sidebar_group_name(unit);
             let mut conditions = vec![
@@ -3853,17 +3847,6 @@ impl WorkflowIr {
             if include_policy {
                 conditions.push("needs.policy.result == 'success'".to_owned());
             }
-            conditions.extend(unit.depends_on.iter().map(|dependency| {
-                format!(
-                    "needs['{}'].result == 'success'",
-                    unit_group_job_id(
-                        self.units
-                            .iter()
-                            .find(|candidate| candidate.id == *dependency)
-                            .unwrap_or(unit)
-                    )
-                )
-            }));
             conditions.push(format!(
                 "contains(format(',{{0}},', needs.plan.outputs.units), ',{},')",
                 unit.id
@@ -4627,16 +4610,15 @@ fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
 
 #[allow(dead_code)]
 fn unit_needs(lane: RunnerMode, unit: &Unit, include_policy: bool) -> Vec<String> {
+    // Cargo resolves and builds each unit's prerequisites itself. Keeping
+    // dependency jobs out of `needs` lets independent hosted and Velnor jobs
+    // start together; ci-required still aggregates every selected result.
+    let _ = (lane, unit);
     let mut needs = vec!["plan".to_owned()];
     if include_policy {
         needs.push("policy".to_owned());
     }
     needs.push(unit_group_job_id(unit));
-    needs.extend(
-        unit.depends_on
-            .iter()
-            .map(|dependency| unit_job_id(lane, dependency)),
-    );
     needs
 }
 
@@ -8473,6 +8455,9 @@ path-only = { path = "../path-only" }
             assert!(!sidebar_name.contains(" / "));
             assert!(root.contains(&format!("name: {}", yaml_scalar(&sidebar_name))));
         }
+        assert!(root.lines().all(|line| {
+            !(line.contains("needs['group-unit-") && line.contains("result == 'success'"))
+        }));
         assert!(root.contains(&format!(
             "uses: ./.github/workflows/{}",
             nested_unit_workflow_file(rust_unit)
