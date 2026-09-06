@@ -369,6 +369,7 @@ snapshot + one measured CI run. Never disable a check to gain speed.
 
 Re-verification 2026-09-06 ~10:20Z: 4 more subagents (goal-accuracy audit,
 open-PRs analysis, CI re-measurement, adversarial critique).
+
 - Baselines: §1 cold numbers reconfirmed to ±9s, but EXPIRED by #582
   (09:53Z); new warm reference run 34026137664. Critical path flipped
   Rust → Docker (11m46s). Rust warm via exact GHA hits (dev ~19s).
