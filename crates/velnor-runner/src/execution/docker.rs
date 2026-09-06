@@ -265,7 +265,6 @@ fn systemd_slice_state(
                 "show".into(),
                 "--property=LoadState".into(),
                 "--property=CPUQuotaPerSecUSec".into(),
-                "--value".into(),
                 slice.into(),
             ],
         )
@@ -280,15 +279,27 @@ fn systemd_slice_state(
             result.code, result.stderr
         )));
     }
-    let mut values = result.stdout.lines();
-    let load_state = values.next().unwrap_or_default().trim().to_string();
-    let quota = values.next().unwrap_or_default().trim().to_string();
-    if load_state.is_empty() || quota.is_empty() || values.next().is_some() {
+
+    // `systemctl --value` does not preserve the requested property order on
+    // every systemd version. Parse named fields so the probe is order-safe.
+    let mut load_state = None;
+    let mut quota = None;
+    for line in result.stdout.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "LoadState" => load_state = Some(value.trim().to_string()),
+            "CPUQuotaPerSecUSec" => quota = Some(value.trim().to_string()),
+            _ => {}
+        }
+    }
+    let (Some(load_state), Some(quota)) = (load_state, quota) else {
         return Err(ExecutionError::DockerPreflight(format!(
             "systemd slice state probe for {slice} returned malformed output {:?}",
             result.stdout.trim()
         )));
-    }
+    };
     Ok((load_state, quota))
 }
 

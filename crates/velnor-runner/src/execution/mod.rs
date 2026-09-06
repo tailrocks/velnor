@@ -675,17 +675,16 @@ impl CommandRunner for RecordingCommands {
             }
         } else if program == "systemctl"
             && args.first().is_some_and(|arg| arg == "show")
-            && args.len() == 5
+            && args.len() == 4
             && args[1] == "--property=LoadState"
             && args[2] == "--property=CPUQuotaPerSecUSec"
-            && args[3] == "--value"
-            && args[4] == crate::docker_lease::JOB_CGROUP_PARENT
+            && args[3] == crate::docker_lease::JOB_CGROUP_PARENT
         {
             let quota = self
                 .docker_cgroup_quota
                 .as_ref()
-                .map_or_else(|| "950ms\n".into(), |quota| quota.stdout.clone());
-            result.stdout = format!("loaded\n{quota}");
+                .map_or_else(|| "950ms".into(), |quota| quota.stdout.trim().to_string());
+            result.stdout = format!("CPUQuotaPerSecUSec={quota}\nLoadState=loaded\n");
             if let Some(quota) = &self.docker_cgroup_quota {
                 result.code = quota.code;
                 if !quota.stderr.is_empty() {
