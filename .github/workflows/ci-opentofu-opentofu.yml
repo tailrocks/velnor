@@ -26,7 +26,7 @@ jobs:
         with:
           rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=07750dcaaff8173ef622a081142ff25855e4bf5e" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f15ff2e8449a34f77f04746fa461a349bad22e79" >> "$GITHUB_ENV"
       - name: Set up OpenTofu
         uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
         with:
@@ -48,6 +48,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          CI_RUNNER_LANE: github
+          CI_CACHE_WRITE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit opentofu
       - name: Save OpenTofu cache
         if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
@@ -88,5 +90,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          CI_RUNNER_LANE: velnor
+          CI_CACHE_WRITE: false
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit opentofu
 

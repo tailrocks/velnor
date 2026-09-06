@@ -185,7 +185,7 @@ fn render_review(frame: &mut Frame<'_>, app: &mut App, system: &DesignSystem, ar
     ];
     if selected != total {
         lines.push(Line::from(Span::styled(
-            "! Partial selection disables release and preview workflows",
+            "! Partial selection disables release, signer, and preview workflows",
             system.style(Role::Warning),
         )));
     }
@@ -640,6 +640,7 @@ mod tests {
                 dry_run: false,
                 check: false,
                 force: false,
+                adopt: false,
                 plain: false,
             },
             receiver,
@@ -681,6 +682,8 @@ mod tests {
             release_reason: "not configured".to_owned(),
             release: None,
             units: vec![unit],
+            workflow_templates: BTreeMap::new(),
+            adopted_workflow_surface: false,
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));

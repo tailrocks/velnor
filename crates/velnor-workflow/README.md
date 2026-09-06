@@ -9,17 +9,21 @@ generated `run.sh`, `policy.sh`, and `release.sh` helpers:
 
 ```sh
 velnor-workflow REPOSITORY --runners both --plain
+velnor-workflow REPOSITORY --adopt --runners both --plain
 velnor-workflow plan --config .github/ci/project.toml
 velnor-workflow run --config .github/ci/project.toml --scope affected
 velnor-workflow test-crates --config .github/ci/project.toml
 velnor-workflow policy --workflow-root . \
-  --approved-policy-revision 07750dcaaff8173ef622a081142ff25855e4bf5e
+  --approved-policy-revision f15ff2e8449a34f77f04746fa461a349bad22e79
 velnor-workflow release verify-tag
 ```
 
 Project commands remain explicit shell command strings in the checked-in TOML;
 the binary owns selection, dependency ordering, policy, release validation,
-and workflow file ownership. The ownership sidecar keeps the historical path
+and every `.github/workflows/*.{yml,yaml}` file it emits. `--adopt` is the
+reviewed migration switch for an existing workflow surface: it snapshots each
+reviewed body under `.github/ci/workflow-templates/`, then renders the workflow
+from that generator-owned template. The ownership sidecar keeps the historical path
 `.github/ci/.github-actions-generator-state` for safe adoption of older trees.
 
 Generated jobs install the runtime through the versioned composite action

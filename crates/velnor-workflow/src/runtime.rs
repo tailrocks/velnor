@@ -335,6 +335,13 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         Some(value) => Scope::parse(&value)?,
         None => Scope::Full,
     };
+    let root = env::current_dir()
+        .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+    let units = selected_units(&root, &config, scope)?
+        .into_iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     if let Some(output) = env::var_os("GITHUB_OUTPUT") {
         let output_path = PathBuf::from(output);
         let mut file = fs::OpenOptions::new()
@@ -344,9 +351,11 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "units={units}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
     }
     println!("scope={}", scope_name(scope));
-    let _ = config;
+    println!("units={units}");
     Ok(())
 }
 
@@ -643,7 +652,13 @@ pub(crate) fn test_crates(
             continue;
         }
         println!("::group::cargo tests: {}", manifest.display());
-        let mut command = Command::new(cargo_program.unwrap_or_else(|| Path::new("cargo")));
+        let default_cargo =
+            if env::var(super::MR_BOXINGTON_ENABLED_ENV).is_ok_and(|value| value == "1") {
+                Path::new("mbx")
+            } else {
+                Path::new("cargo")
+            };
+        let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
         command
             .arg(if nextest { "nextest" } else { "test" })
             .arg(if nextest { "run" } else { "--all-features" });
@@ -1426,7 +1441,7 @@ mod tests {
     use super::*;
 
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
-    const POLICY_REVISION: &str = "07750dcaaff8173ef622a081142ff25855e4bf5e";
+    const POLICY_REVISION: &str = "f15ff2e8449a34f77f04746fa461a349bad22e79";
 
     fn policy_fixture(
         name: &str,
@@ -1444,7 +1459,7 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e\n    with:\n      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e\n    permissions:\n      contents: read\n",
+            format!("name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@{POLICY_REVISION}\n    with:\n      policy-revision: {POLICY_REVISION}\n    permissions:\n      contents: read\n"),
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -1505,9 +1520,9 @@ name: Policy caller
 on: pull_request
 jobs:
   policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
 ";
         let root = policy_fixture("approved-policy", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -1558,9 +1573,9 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07750dcaaff8173ef622a081142ff25855e4bf5e
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@f15ff2e8449a34f77f04746fa461a349bad22e79
     with:
-      policy-revision: 07750dcaaff8173ef622a081142ff25855e4bf5e
+      policy-revision: f15ff2e8449a34f77f04746fa461a349bad22e79
     permissions:
       contents: read
 ";
