@@ -638,37 +638,35 @@ pub(crate) fn run_units(
             "trusted events require full CI scope",
         ));
     }
-    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map(PathBuf::from);
-    let (selected, full_units) = if let Some(path) = selection_file {
-        let selection = read_selection_file(&path)?;
-        validate_selection_sha(&selection)?;
-        if selection.scope != scope {
-            return Err(GeneratorError::usage(format!(
-                "CI selection artifact scope mismatch: plan={} job={}",
-                scope_name(selection.scope),
-                scope_name(scope)
-            )));
-        }
-        let selected = ordered_units(&config.unit, Some(&selection.units))?;
-        if selected.len() != selection.units.len() {
-            return Err(GeneratorError::usage(
-                "CI selection artifact names an unknown unit",
-            ));
-        }
-        if selection
-            .full_units
-            .iter()
-            .any(|unit| !selection.units.contains(unit))
-        {
-            return Err(GeneratorError::usage(
-                "CI selection artifact marks an unselected unit as full",
-            ));
-        }
-        (selected, selection.full_units)
-    } else {
-        let selection = selection_for_current_diff(root, &config, scope)?;
-        (selection.units, selection.full_units)
-    };
+    let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
+        || root.join(".velnor-ci-selection/velnor-ci-selection"),
+        PathBuf::from,
+    );
+    let selection = read_selection_file(&selection_file)?;
+    validate_selection_sha(&selection)?;
+    if selection.scope != scope {
+        return Err(GeneratorError::usage(format!(
+            "CI selection artifact scope mismatch: plan={} job={}",
+            scope_name(selection.scope),
+            scope_name(scope)
+        )));
+    }
+    let selected = ordered_units(&config.unit, Some(&selection.units))?;
+    if selected.len() != selection.units.len() {
+        return Err(GeneratorError::usage(
+            "CI selection artifact names an unknown unit",
+        ));
+    }
+    if selection
+        .full_units
+        .iter()
+        .any(|unit| !selection.units.contains(unit))
+    {
+        return Err(GeneratorError::usage(
+            "CI selection artifact marks an unselected unit as full",
+        ));
+    }
+    let full_units = selection.full_units;
     let selected = match only_unit {
         Some(id) => {
             if !selected.iter().any(|unit| unit.id == id) {
@@ -682,16 +680,6 @@ pub(crate) fn run_units(
         None => selected,
     };
     run_layers(root, &selected, scope, &full_units)
-}
-
-fn selection_for_current_diff<'a>(
-    root: &Path,
-    config: &'a CiConfig,
-    scope: Scope,
-) -> Result<UnitSelection<'a>, GeneratorError> {
-    let base = env::var("BASE_SHA").unwrap_or_default();
-    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    selection_for_diff(root, config, scope, &base, &head)
 }
 
 struct UnitSelection<'a> {

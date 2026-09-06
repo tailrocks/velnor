@@ -9655,6 +9655,19 @@ path-only = { path = "../path-only" }
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
             "write config",
         );
+        let selection_dir = root.join(".velnor-ci-selection");
+        let selection = selection_dir.join("velnor-ci-selection");
+        must(
+            fs::create_dir_all(&selection_dir),
+            "create selection directory",
+        );
+        must(
+            fs::write(
+                &selection,
+                "version=1\nbase_sha=\nhead_sha=HEAD\nscope=full\nunits=a,b,c\nfull_units=a,b,c\n",
+            ),
+            "write selection artifact",
+        );
         must(
             runtime::run_units(
                 &root,
