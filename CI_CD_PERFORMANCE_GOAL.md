@@ -158,90 +158,95 @@ changed). Everything else skips with zero runner cost (already true:
 unselected reusable calls are scheduler-skipped, `steps=[]`).
 
 D1. Scope engine (`crates/velnor-workflow/src/runtime.rs`):
+
 - Single resolution: plan computes the unit list once; unit jobs consume
     it verbatim (pass allowlist through). Fail closed on SHA mismatch;
     log no-ops as `::warning::` with both SHAs. Eliminates the
     plan/job double-read + shallow-checkout silent-full path (keep
     `fetch-depth: 0` on plan only).
-  - `merge_group` → `full` (one-line change in `scope_for_event_values`).
+- `merge_group` → `full` (one-line change in `scope_for_event_values`).
     Required BEFORE any narrowing.
-  - Empty diff → empty selection (vacuous pass), not `Err`.
-  - Three-dot diff `base...head` instead of two-dot.
-  - KEEP fail-closed fallbacks exactly as coded: empty/zero base → full,
+- Empty diff → empty selection (vacuous pass), not `Err`.
+- Three-dot diff `base...head` instead of two-dot.
+- KEEP fail-closed fallbacks exactly as coded: empty/zero base → full,
     git failure → full, any `.github/` path → full, any unmatched file →
     full. Never allowlist the unmatched fallback — it is the only guard
     for `debian/**`, `fleet/**`, `schemas/**` until D2 watches land.
-  - Remove the dead prebuilt `GlobSet` / per-file `Glob` recompile.
+- Remove the dead prebuilt `GlobSet` / per-file `Glob` recompile.
 
 D2. Watch graph (`crates/velnor-workflow/src/lib.rs` + `project.toml`):
-  - Docker: replace `crates/**` + `tools/**` with Dockerfile-parsed inputs
-    + packaged crates (`velnor-runner`, `velnorctl`, `velnor-tools`,
+
+- Docker: replace `crates/**` + `tools/**` with Dockerfile-parsed inputs
+    and packaged crates (`velnor-runner`, `velnorctl`, `velnor-tools`,
     `velnor-workflow`) + their `depends_on` closure; extend watch to
     `docker/**` (covers `job-*.Dockerfile`, currently → full fallback).
-  - Generator: replace the all-15 `crates/velnor-workflow/**` blanket with
+- Generator: replace the all-15 `crates/velnor-workflow/**` blanket with
     classification — selection-logic diffs fan out; template-only diffs
     select `rust-velnor-workflow` + regen-idempotence gate + one consumer
     per changed template shape. Narrowing to "workflow unit only" alone
     is UNSAFE (runtime binary executes every job).
-  - Docs: watch real docs (`content/docs/**/*.mdx`, root `*.md`), drop
+- Docs: watch real docs (`content/docs/**/*.mdx`, root `*.md`), drop
     repo-wide `**/*.md` + nonexistent `docs/**`/`mkdocs.yml`.
-  - Add missing watches: `debian/**` → runner+ctl; `schemas/**` →
+- Add missing watches: `debian/**` → runner+ctl; `schemas/**` →
     model+dependents; `fleet/**` → tools+runner; `microvm/**` → ctl;
     `velnor-tools` += `crates/velnor-runner/src/manifest.rs`
     (`include_str!` edge). Teach the generator to parse `include_str!`
     and fail when a target is watch-uncovered.
-  - Opentofu: exclude `**/tests/fixtures/**`. Bun: narrow `**` globs to
+- Opentofu: exclude `**/tests/fixtures/**`. Bun: narrow `**` globs to
     `src/**`, `scripts/**`, package files.
-  - KEEP `Cargo.lock` + root `Cargo.toml` + toolchain/mise/`.cargo/**` in
+- KEEP `Cargo.lock` + root `Cargo.toml` + toolchain/mise/`.cargo/**` in
     all rust + docker + policy watches (feature unification H3, version
     embedding H7, build-script identity H1). Bun/docs/opentofu skip on
     Rust-only diffs is SOUND.
-  - Codify broad-impact now: root `[lints]`/rustflags edits = all rust
+- Codify broad-impact now: root `[lints]`/rustflags edits = all rust
     units (no such vector exists today; the rule must predate it).
-  - `Dockerfile` + `docker/build-mise.*` edits also run at least
+- `Dockerfile` + `docker/build-mise.*` edits also run at least
     `rust-velnor-workflow` (all jobs download its runtime).
-  - Introduce prerequisite-vs-target tiers: dependency-pulled units run
+- Introduce prerequisite-vs-target tiers: dependency-pulled units run
     build-only `cargo check`, full fmt+clippy+nextest only for directly
     matched units + dependents. (Single-crate PR: ~7 full suites → 2–3.)
 
 D3. Cache (budgets + behavior):
-  - Immediately: delete the 7 orphaned per-commit mbx entries (~2.14 GiB,
+
+- Immediately: delete the 7 orphaned per-commit mbx entries (~2.14 GiB,
     suffix `-a1e07a28…`) → usage back under 10 GiB:
     `gh cache delete <id> --repo tailrocks/velnor` per orphan id.
     Account for Docker buildkit (~4.1 GiB) + 10 stable mbx entries
     (~5.1 GiB) in a standing budget; alert on >8 GiB.
-  - PR restore-only is UPSTREAM-DESIGNED (not a bug): warmth flows main →
+- PR restore-only is UPSTREAM-DESIGNED (not a bug): warmth flows main →
     PR via prefix `restore-keys`. After orphans are gone, prove one warm
     PR run (≥90% restores, zero `Downloading crates`) before any other
     cache redesign.
-  - Fix mise 17s/job (pre-bake/pin toolchain or repair mise cache),
+- Fix mise 17s/job (pre-bake/pin toolchain or repair mise cache),
     cache nextest+mold binaries (keyed by version), keep runtime
     prebuilt-download direction for `setup-velnor-workflow`.
-  - Docker PR: scoped `--cache-to` write path or main-only release build
+- Docker PR: scoped `--cache-to` write path or main-only release build
     (PR validates Dockerfile cheaply). PR must stop full-recompiling
     `Dockerfile:50-54` per `.rs` change.
 
 D4. Topology + queue:
-  - Unwedge `velnor-target-mvp` (scale/fix runners) or move Velnor jobs to
+
+- Unwedge `velnor-target-mvp` (scale/fix runners) or move Velnor jobs to
     a non-gating workflow: 15 forever-queued jobs hold main + Nightly
     pending indefinitely.
-  - Nightly: narrow scope, add `ci-required`-equivalent + alerting (red
+- Nightly: narrow scope, add `ci-required`-equivalent + alerting (red
     blocks nobody today).
-  - Kill dual codegen per job (shared check artifacts or single
+- Kill dual codegen per job (shared check artifacts or single
     `check --tests`), then shard the R5 slow tests with nextest
     partitioning.
 
 D5. Safety nets that MUST exist before narrowing (status):
-  - Main full runs: EXISTS (forced full on push). Keep.
-  - Nightly full + alerting: ADD (see D4).
-  - `merge_group` full: MISSING — D1 one-liner, merge-blocking.
-  - Single resolution + no silent no-op: MISSING — D1, merge-blocking.
-  - Version-bump allowlist (unit + dependents; lockfile stays broad):
+
+- Main full runs: EXISTS (forced full on push). Keep.
+- Nightly full + alerting: ADD (see D4).
+- `merge_group` full: MISSING — D1 one-liner, merge-blocking.
+- Single resolution + no silent no-op: MISSING — D1, merge-blocking.
+- Version-bump allowlist (unit + dependents; lockfile stays broad):
     ADD with fixture tests.
-  - Production-topology gate (`cargo check --workspace --all-targets`
+- Production-topology gate (`cargo check --workspace --all-targets`
     default features + release-feature boundary from `mise.toml:42-52`):
     wire into CI; per-crate `--all-features` green is not shippable (H2).
-  - `include_str!` coverage test: ADD (see D2).
+- `include_str!` coverage test: ADD (see D2).
 
 ## 5. Plan (in order, smallest correct change first)
 
