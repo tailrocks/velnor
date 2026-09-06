@@ -543,6 +543,39 @@ not present.
   restarted after this commit; merge and the resulting main seed run remain
   OPEN.
 
+### Recheck 2026-09-06T19:42:55Z
+
+- Force-cancel completed stale run `34052819660` at 19:38:57Z. Main run
+  [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  then started. Planning correctly emitted `scope=full` and all 16 units for
+  the `.github` generator change; this is not a comparable affected-only
+  timing run.
+- Main GitHub client job
+  [101546935816](https://github.com/tailrocks/velnor/actions/runs/34054859439/job/101546935816)
+  ran object mode with the legacy custom key, found no reusable MBX cache, and
+  saved a 118,110,510-byte object payload under the old key at 19:42:03Z.
+  This directly proves the payload transition and the key-collision risk; no
+  `objects-v2` cache exists yet. PR #610 remains required.
+- The cache account after that save was 99 entries and 10,770,774,211 bytes
+  (10.031 GiB); MBX entries were 6,623,344,468 bytes (6.168 GiB). The budget
+  and seven-day log remain OPEN.
+
+### Recheck 2026-09-06T19:46:33Z
+
+- After release completion, all 41 exact `v0.1.272` tag-ref cache IDs were
+  deleted (2,619,884,756 bytes) and re-listed absent. The stale pre-object
+  client target cache ID `7390109877` was then deleted and re-listed absent.
+  The resulting listing is 60 entries and 8,382,573,976 bytes (7.807 GiB),
+  below the 8-GiB ceiling; no `a1e07a28` orphan remains. This is one snapshot,
+  not the required seven-day series. No `objects-v2` entry exists yet.
+- Main run [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  is not green at this snapshot. Failures are separately evidenced as Docker
+  Velnor daemon EOF (job `101546935693`), transient GitHub Rust-toolchain
+  download reset (job `101546935851`), and Velnor runner test resource
+  exhaustion in `supervised_controller_capacity_is_exact_for_one_and_four`
+  (job `101546935834`). Remaining jobs are still running; no passing Velnor
+  main proof is claimed.
+
 Provider, queue, and coverage record:
 
 | Area | Evidence | State |
