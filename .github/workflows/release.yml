@@ -14,8 +14,9 @@ name: Release
 #
 # This workflow holds NO APT credential and performs NO consumer write/dispatch
 # (N6): tailrocks/velnor-apt pulls the published record itself and verifies it
-# before reprepro. Assets are never clobbered — an existing tag/asset is a
-# success only on an exact digest match, otherwise the run fails.
+# before reprepro. Assets and versioned OCI tags are never clobbered — an
+# existing tag/asset is reused only after an exact digest match, otherwise the
+# run fails. New image bytes use commit-scoped staging tags.
 on:
   push:
     tags:
@@ -424,8 +425,68 @@ jobs:
           path: target/${{ matrix.target }}/release/velnor-workflow
           if-no-files-found: error
 
+  image-admission:
+    needs: [identity, release_gate]
+    name: Admit immutable image tag
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      existing: ${{ steps.inspect.outputs.existing }}
+      index_digest: ${{ steps.inspect.outputs.index_digest }}
+    steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        with:
+          cleanup: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect version tag without mutation
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GHCR_IMAGE: ghcr.io/tailrocks/velnor-job-ubuntu
+          VERSION: ${{ needs.identity.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="${GHCR_IMAGE}:${VERSION}"
+          error_file="$(mktemp)"
+          if docker buildx imagetools inspect "$ref" --format '{{json .}}' > image.json 2>"$error_file"; then
+            index_digest="$(jq -er '.manifest.digest' image.json)"
+            case "$index_digest" in
+              sha256:[0-9a-fA-F]*) ;;
+              *) echo "::error::existing image tag $ref returned an invalid index digest" >&2; exit 1 ;;
+            esac
+            if ! gh release view "v${VERSION}" --repo "$REPOSITORY" >/dev/null 2>&1; then
+              echo "::error::OCI tag $ref already exists without a matching GitHub release; refusing to adopt unknown bytes" >&2
+              exit 1
+            fi
+            {
+              echo "existing=true"
+              echo "index_digest=$index_digest"
+            } >> "$GITHUB_OUTPUT"
+          elif grep -Eiq 'manifest unknown|no such manifest|not found|name unknown' "$error_file"; then
+            {
+              echo "existing=false"
+              echo "index_digest="
+            } >> "$GITHUB_OUTPUT"
+          else
+            cat "$error_file" >&2
+            echo "::error::could not determine whether OCI tag $ref exists; refusing a fail-open publish" >&2
+            exit 1
+          fi
+
   image-platform:
-    needs: [identity, release_gate, metadata, workflow]
+    needs: [identity, release_gate, metadata, workflow, image-admission]
+    if: ${{ needs.image-admission.outputs.existing != 'true' }}
     name: Build ${{ matrix.arch }} GHCR image
     timeout-minutes: 60
     strategy:
@@ -515,7 +576,10 @@ jobs:
             mise_github_token=${{ github.token }}
           build-args: |
             VELNOR_IMAGE_VERSION=${{ needs.identity.outputs.version }}
-          tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}-${{ matrix.arch }}
+          # Version tags are admitted and promoted only by the image job below.
+          # These commit-scoped tags are disposable staging references and can
+          # never overwrite a consumer-facing version tag.
+          tags: ${{ env.GHCR_IMAGE }}:release-${{ env.COMMIT }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.version=${{ needs.identity.outputs.version }}
             org.opencontainers.image.revision=${{ needs.release_gate.outputs.default_branch_commit }}
@@ -539,7 +603,8 @@ jobs:
           path: image-${{ matrix.arch }}.digest
 
   image:
-    needs: [identity, release_gate, metadata, image-platform]
+    if: ${{ always() && needs.identity.result == 'success' && needs.release_gate.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') }}
+    needs: [identity, release_gate, metadata, image-platform, image-admission]
     name: Assemble one multi-platform GHCR image
     timeout-minutes: 15
     runs-on: ubuntu-24.04
@@ -556,6 +621,7 @@ jobs:
       COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: ${{ needs.image-admission.outputs.existing != 'true' }}
         with:
           pattern: image-platform-*
           path: image-artifacts
@@ -577,22 +643,41 @@ jobs:
         env:
           AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest
           ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest
+          IMAGE_ALREADY_EXISTS: ${{ needs.image-admission.outputs.existing }}
+          EXPECTED_EXISTING_INDEX_DIGEST: ${{ needs.image-admission.outputs.index_digest }}
         run: |
           set -euo pipefail
-          for path in "$AMD64_DIGEST_FILE" "$ARM64_DIGEST_FILE"; do
-            test -s "$path"
-            digest="$(tr -d '[:space:]' < "$path")"
-            case "$digest" in
-              sha256:[0-9a-fA-F]*) ;;
-              *) echo "::error::invalid platform digest in $path" >&2; exit 1 ;;
-            esac
-          done
-          amd64_digest="$(tr -d '[:space:]' < "$AMD64_DIGEST_FILE")"
-          arm64_digest="$(tr -d '[:space:]' < "$ARM64_DIGEST_FILE")"
-          docker buildx imagetools create \
-            --tag "${GHCR_IMAGE}:${VERSION}" \
-            "${GHCR_IMAGE}@${amd64_digest}" \
-            "${GHCR_IMAGE}@${arm64_digest}"
+          if [ "$IMAGE_ALREADY_EXISTS" = true ]; then
+            docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" --format '{{json .}}' > image-digests.json
+            index_digest="$(jq -er '.manifest.digest' image-digests.json)"
+            [ "$index_digest" = "$EXPECTED_EXISTING_INDEX_DIGEST" ] || {
+              echo "::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission" >&2
+              exit 1
+            }
+          else
+            for path in "$AMD64_DIGEST_FILE" "$ARM64_DIGEST_FILE"; do
+              test -s "$path"
+              digest="$(tr -d '[:space:]' < "$path")"
+              case "$digest" in
+                sha256:[0-9a-fA-F]*) ;;
+                *) echo "::error::invalid platform digest in $path" >&2; exit 1 ;;
+              esac
+            done
+            amd64_digest="$(tr -d '[:space:]' < "$AMD64_DIGEST_FILE")"
+            arm64_digest="$(tr -d '[:space:]' < "$ARM64_DIGEST_FILE")"
+            docker buildx imagetools create \
+              --tag "${GHCR_IMAGE}:${VERSION}" \
+              "${GHCR_IMAGE}:release-${COMMIT}-amd64" \
+              "${GHCR_IMAGE}:release-${COMMIT}-arm64"
+            docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" --format '{{json .}}' > image-digests.json
+            jq -e --arg amd "$amd64_digest" --arg arm "$arm64_digest" '
+              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == "amd64") and
+              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == "arm64")
+            ' image-digests.json >/dev/null || {
+              echo "::error::version tag does not reference both newly built platform digests" >&2
+              exit 1
+            }
+          fi
           docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" --format '{{json .}}' > image-digests.json
           index_digest="$(jq -er '.manifest.digest' image-digests.json)"
           case "$index_digest" in
@@ -1054,6 +1139,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      packages: read
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
@@ -1224,6 +1310,29 @@ jobs:
             }
           done
 
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        with:
+          cleanup: false
+
+      - name: Log in to GHCR for immutable image verification
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify OCI index stayed immutable before publication
+        env:
+          EXPECTED_INDEX_DIGEST: ${{ needs.image.outputs.index_digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" --format '{{json .}}' > published-image.json
+          published_index="$(jq -er '.manifest.digest' published-image.json)"
+          [ "$published_index" = "$EXPECTED_INDEX_DIGEST" ] || {
+            echo "::error::OCI version tag moved from $EXPECTED_INDEX_DIGEST to $published_index before release publication" >&2
+            exit 1
+          }
+
       - name: Create release once — no clobber, record-verified idempotency
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1290,6 +1399,11 @@ jobs:
               || { echo "::error::published record/manifest incoherent" >&2; exit 1; }
             [ "$(jq -r '.build.manifest_sha256' "$tmp/release-record.json")" = "$MANIFEST_SHA256" ] \
               || { echo "::error::published record manifest != manifest compiled from $COMMIT" >&2; exit 1; }
+            expected_oci_index="$(jq -er '.oci_index_digest' "$tmp/release-record.json")"
+            [ "$expected_oci_index" = "$INDEX_DIGEST" ] \
+              || { echo "::error::published record OCI index != current release image" >&2; exit 1; }
+            [ "$(jq -r '.oci_image_ref' "$tmp/release-record.json")" = "${GHCR_IMAGE}@${expected_oci_index}" ] \
+              || { echo "::error::published record OCI reference is not digest-pinned" >&2; exit 1; }
             # Every published package asset must match the record's digests.
             (cd "$tmp" && sha256sum --check --strict SHA256SUMS)
             for arch in amd64 arm64; do
