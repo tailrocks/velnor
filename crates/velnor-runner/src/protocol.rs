@@ -7057,7 +7057,7 @@ mod tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 3);
         let create = String::from_utf8_lossy(&requests[0]);
-        assert!(create.contains("\"version\":7"));
+        assert!(create.contains("\"version\":4"));
         assert!(create.contains("\"mime_type\":{\"value\":\"application/zip\"}"));
         let finalize = String::from_utf8_lossy(&requests[2]);
         assert!(finalize.contains("\"hash\":{"));
