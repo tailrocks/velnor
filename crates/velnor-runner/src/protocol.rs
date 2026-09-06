@@ -4987,6 +4987,19 @@ struct FinalizeArtifactResponse {
     artifact_id: WireU64,
 }
 
+#[derive(Debug, Serialize)]
+struct FinalizeArtifactRequest<'a> {
+    #[serde(rename = "workflow_run_backend_id")]
+    workflow_run_backend_id: &'a str,
+    #[serde(rename = "workflow_job_run_backend_id")]
+    workflow_job_run_backend_id: &'a str,
+    name: &'a str,
+    size: String,
+    // google.protobuf.StringValue uses a JSON string in protobuf JSON. Keep
+    // this field typed as String so the wrapper-object shape cannot reappear.
+    hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct DeleteArtifactResponse {
     ok: Option<bool>,
@@ -5319,13 +5332,13 @@ fn upload_artifact_with_zip_builder(
 
     // 3. FinalizeArtifact.
     let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
-    let finalize_body = serde_json::to_string(&serde_json::json!({
-        "workflow_run_backend_id": plan_id,
-        "workflow_job_run_backend_id": job_id,
-        "name": name,
-        "size": zip_size.to_string(),
-        "hash": {"value": format!("sha256:{zip_hash}")}
-    }))
+    let finalize_body = serde_json::to_string(&FinalizeArtifactRequest {
+        workflow_run_backend_id: plan_id,
+        workflow_job_run_backend_id: job_id,
+        name,
+        size: zip_size.to_string(),
+        hash: format!("sha256:{zip_hash}"),
+    })
     .context("serialize FinalizeArtifact")?;
     let finalize_text = results_service_post(
         &client,
@@ -7059,8 +7072,7 @@ mod tests {
         assert!(create.contains("\"version\":7"));
         assert!(create.contains("\"mime_type\":\"application/zip\""));
         let finalize = String::from_utf8_lossy(&requests[2]);
-        assert!(finalize.contains("\"hash\":{"));
-        assert!(finalize.contains("sha256:"));
+        assert!(finalize.contains("\"hash\":\"sha256:"));
     }
 
     #[cfg(feature = "test-support")]
