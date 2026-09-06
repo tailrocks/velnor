@@ -19,7 +19,7 @@ Required checks on `main` (ruleset 19573071): `DCO` + `ci-required` only.
 legal today. Reviews required: 0. No merge queue exists (API 404), so the
 `merge_group` trigger in `ci-pr.yml` never fires — any `merge_group`
 prescription below is dead code until a queue is enabled (or the trigger
-is deleted). `ci-required` needs plan + all 15 group-unit callers;
+is deleted). `ci-required` needs plan + all 16 group-unit callers;
 skipped-unselected counts as pass. Re-verify via
 `gh api repos/tailrocks/velnor/rulesets/19573071 --jq .rules`.
 All lanes are `ubuntu-24.04` (+ self-hosted Velnor); no macOS/Windows.
@@ -461,6 +461,129 @@ The 43 old `v0.1.268` entries and 52 synthetic feature-branch entries were
 deleted by exact ID and re-listed absent. The current account exceeds the
 8-GiB acceptance ceiling. The required seven consecutive daily snapshots are
 not present.
+
+### Recheck 2026-09-06T19:18:05Z
+
+- Tag `v0.1.272` exists. The [release workflow](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  has published the job image, but the GitHub Release record is not yet
+  present (`gh api .../releases/tags/v0.1.272` returns 404); the amd64 and
+  arm64 package jobs are still running. The image is present at
+  `ghcr.io/tailrocks/velnor-job-ubuntu:0.1.272`, OCI index
+  `sha256:3d5167b2617bca2fae535a152b78b8fbb46631deafd2c1203305c9eaaa0274d2`;
+  this proves image publication, not fleet activation.
+- The package contract keeps activation separate: the Debian `postinst` does
+  not restart the fleet; an operator must run `velnorctl release activate`.
+  Therefore live passing Velnor main proof remains OPEN.
+- PR [#607](https://github.com/tailrocks/velnor/pull/607) changes hosted
+  Mr. Boxington lanes to `github-cache-mode: objects`; run
+  [34053795798](https://github.com/tailrocks/velnor/actions/runs/34053795798)
+  completed successfully at 19:18:02Z, including `ci-required`; all Velnor
+  callers were skipped by the existing trust gate. It is not a comparable
+  warm affected run: generated `.github` changes force full selection, and the
+  branch is not merged or followed by a main cache-save run.
+- The last successful affected release-bump run before the object-cache
+  change, [34052912769](https://github.com/tailrocks/velnor/actions/runs/34052912769),
+  gives the required restore split for the three MBX-bearing Rust jobs:
+  exact-key hits `0/3 (0%)`, prefix restores `3/3 (100%)`, combined usable
+  restores `3/3 (100%)`. The Docker job uses BuildKit rather than MBX and is
+  excluded from this MBX rate. This is warm-prefix evidence only: its branch
+  and cache-generation keys differ from a post-change main run, so it does not
+  satisfy the comparable warm affected PR item.
+- A fresh two-page cache listing contained 106 entries and
+  12,919,364,637 bytes (12.032 GiB); no `a1e07a28` orphan key remained.
+  Budget and seven-day evidence are still OPEN.
+
+### Recheck 2026-09-06T19:26:50Z
+
+- PR [#607](https://github.com/tailrocks/velnor/pull/607) merged at
+  19:25:36Z as `40b7a5d1`. Its trusted main push,
+  [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439),
+  was still pending with no jobs at this snapshot. Therefore object-mode main
+  cache saving and a post-change warm PR remain unproven.
+- Release run [34053258476](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  remains in progress. Both package jobs completed binary compilation and are
+  staging the pinned Firecracker assets; the GitHub Release API still returns
+  404 for `v0.1.272`. No fleet activation occurred.
+- The cache account remains 106 entries and 12,919,364,637 bytes (12.032 GiB).
+  Main-ref caches account for 10,299,479,881 bytes (9.592 GiB); tag-scoped
+  `v0.1.272` caches account for 2,619,884,756 bytes (2.440 GiB). No deletion
+  is safe while the release and the first object-mode main save are active.
+
+### Recheck 2026-09-06T19:33:06Z
+
+- Release run [34053258476](https://github.com/tailrocks/velnor/actions/runs/34053258476)
+  completed successfully at 19:30:24Z. The [GitHub Release for `v0.1.272`](https://github.com/tailrocks/velnor/releases/tag/v0.1.272)
+  is published with 14 assets, including both amd64/arm64 tarballs and debs,
+  manifests, checksums, and signatures. This proves publication, not fleet
+  activation.
+- The pinned [Mr. Boxington action documentation](https://github.com/jdx/mr-boxington-action/blob/7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777/README.md#github-actions-cache)
+  says `objects` omits the Cargo registry and exports an object closure; its
+  [pinned implementation](https://github.com/jdx/mr-boxington-action/blob/7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777/dist/index.js)
+  skips saving when the custom primary key is an exact hit. The current
+  generated custom key was unchanged across the target-to-object transition,
+  so PR #607 could not create a new object payload. Follow-up PR
+  [#610](https://github.com/tailrocks/velnor/pull/610) adds the `objects-v2`
+  marker to every hosted MBX key and prefix. Its checks are pending; no
+  object-v2 cache exists yet.
+- Main run [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  remains pending with no jobs. The cache listing still has zero `objects-v2`
+  entries and 12,919,364,637 bytes total (12.032 GiB), so post-fix warm proof
+  and budget headroom remain OPEN.
+
+### Recheck 2026-09-06T19:37:44Z
+
+- The superseded main run [34052819660](https://github.com/tailrocks/velnor/actions/runs/34052819660)
+  (head `f9e75cb2`, created 18:47:13Z) still holds the main concurrency group
+  with 11 queued Velnor jobs. A run-cancel request was submitted at 19:34:35Z
+  and the run remains queued; direct deletion returned HTTP 403. This is an
+  external queue-owner blocker, not evidence of a passing main run.
+- PR #610 now also sets `cancel-in-progress: true` for generated main and
+  nightly workflows. It preserves the full trusted Velnor caller set while
+  ensuring a newer push cancels a superseded capacity-starved run. Its checks
+  restarted after this commit; merge and the resulting main seed run remain
+  OPEN.
+
+### Recheck 2026-09-06T19:42:55Z
+
+- Force-cancel completed stale run `34052819660` at 19:38:57Z. Main run
+  [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  then started. Planning correctly emitted `scope=full` and all 16 units for
+  the `.github` generator change; this is not a comparable affected-only
+  timing run.
+- Main GitHub client job
+  [101546935816](https://github.com/tailrocks/velnor/actions/runs/34054859439/job/101546935816)
+  ran object mode with the legacy custom key, found no reusable MBX cache, and
+  saved a 118,110,510-byte object payload under the old key at 19:42:03Z.
+  This directly proves the payload transition and the key-collision risk; no
+  `objects-v2` cache exists yet. PR #610 remains required.
+- The cache account after that save was 99 entries and 10,770,774,211 bytes
+  (10.031 GiB); MBX entries were 6,623,344,468 bytes (6.168 GiB). The budget
+  and seven-day log remain OPEN.
+
+### Recheck 2026-09-06T19:46:33Z
+
+- After release completion, all 41 exact `v0.1.272` tag-ref cache IDs were
+  deleted (2,619,884,756 bytes) and re-listed absent. The stale pre-object
+  client target cache ID `7390109877` was then deleted and re-listed absent.
+  The resulting listing is 60 entries and 8,382,573,976 bytes (7.807 GiB),
+  below the 8-GiB ceiling; no `a1e07a28` orphan remains. This is one snapshot,
+  not the required seven-day series. No `objects-v2` entry exists yet.
+- Main run [34054859439](https://github.com/tailrocks/velnor/actions/runs/34054859439)
+  is not green at this snapshot. Failures are separately evidenced as Docker
+  Velnor daemon EOF (job `101546935693`), transient GitHub Rust-toolchain
+  download reset (job `101546935851`), and Velnor runner test resource
+  exhaustion in `supervised_controller_capacity_is_exact_for_one_and_four`
+  (job `101546935834`). Remaining jobs are still running; no passing Velnor
+  main proof is claimed.
+
+Provider, queue, and coverage record:
+
+| Area | Evidence | State |
+| --- | --- | --- |
+| GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
+| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | over the 8-GiB target |
+| Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
+| Required coverage | `ci-required` aggregates all 16 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
 
 ### Safety fixtures and remaining blockers
 
