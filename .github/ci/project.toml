@@ -13,7 +13,7 @@ limitations = ["Cargo deny license checks are skipped because deny.toml declares
 [workflow]
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
-files = ["ci-apt.yml", "ci-code.yml", "ci-fixture.yml", "ci-native.yml", "ci-tap.yml", "ci.yml", "fanout-smoke.yml", "fleet-audit.yml", "owner-fanout-canary.yml", "package-signer.yml", "package-updater.yml", "release-check.yml", "ci-docs-docs.yml", "ci-rust-policy.yml", "ci-rust-velnor-actions-generator.yml"]
+files = ["ci-apt.yml", "ci-code.yml", "ci-fixture.yml", "ci-native.yml", "ci-tap.yml", "ci.yml", "fanout-smoke.yml", "fleet-audit.yml", "owner-fanout-canary.yml", "package-signer.yml", "package-updater.yml", "release-check.yml"]
 
 [release]
 enabled = false
@@ -25,8 +25,10 @@ label = "Documentation"
 kind = "docs"
 root = "."
 watch = ["**/*.md", "mkdocs.yml", "docs/**"]
-pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
-full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+github_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+github_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+velnor_pr_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
+velnor_full_commands = ["npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\""]
 [unit.cache]
 key_files = ["package-lock.json", "bun.lock"]
 paths = ["~/.npm"]
@@ -37,10 +39,12 @@ label = "Rust dependency policy"
 kind = "rust"
 root = "."
 watch = ["Cargo.toml", "Cargo.lock", "deny.toml", ".cargo/deny.toml", "audit.toml", ".cargo/audit.toml"]
-pr_commands = ["cargo deny check advisories bans sources"]
-full_commands = ["cargo deny check advisories bans sources"]
+github_pr_commands = ["cargo deny check advisories bans sources"]
+github_full_commands = ["cargo deny check advisories bans sources"]
+velnor_pr_commands = ["cargo deny check advisories bans sources"]
+velnor_full_commands = ["cargo deny check advisories bans sources"]
 [unit.cache]
-key_files = ["Cargo.toml", "Cargo.lock"]
+key_files = [".cargo/**", "Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
 
 [[unit]]
@@ -49,8 +53,10 @@ label = "Rust crate (velnor-actions-generator)"
 kind = "rust"
 root = "crates/velnor-actions-generator"
 watch = ["crates/velnor-actions-generator/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain", ".cargo/**", "crates/velnor-actions-generator/**/*.rs", "crates/velnor-actions-generator/src/**", "crates/velnor-actions-generator/tests/**", "crates/velnor-actions-generator/examples/**", "crates/velnor-actions-generator/benches/**", "Cargo.toml"]
-pr_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
-full_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
+github_pr_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
+github_full_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
+velnor_pr_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
+velnor_full_commands = ["cd -- 'crates/velnor-actions-generator' && cargo fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-actions-generator' && cargo clippy --locked --all-targets --all-features --package 'velnor-actions-generator' -- -D warnings", "cd -- 'crates/velnor-actions-generator' && cargo test --locked --all-features --package 'velnor-actions-generator'"]
 [unit.cache]
-key_files = ["crates/velnor-actions-generator/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
+key_files = [".cargo/**", "Cargo.toml", "crates/velnor-actions-generator/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rust-toolchain"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
