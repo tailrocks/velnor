@@ -8073,7 +8073,7 @@ path-only = { path = "../path-only" }
         reason = "the generator contract test keeps all workflow assertions together"
     )]
     #[test]
-    fn velnor_rust_lanes_use_mbx_and_skip_duplicate_caches() {
+    fn velnor_rust_lanes_use_mbx_and_release_native_builds() {
         let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
         config.units.push(catalog_unit(
@@ -8148,25 +8148,18 @@ path-only = { path = "../path-only" }
         let release_workflow = render_release(&config, release);
         assert_eq!(
             release_workflow.matches("jdx/mr-boxington-action@").count(),
-            3
+            0
         );
-        assert!(release_workflow.contains("backend: local"));
-        assert!(release_workflow.contains("version: 1.8.3"));
-        assert!(release_workflow.contains("mbx build"));
-        assert!(release_workflow.contains("mbx zigbuild"));
-        assert!(release_workflow.contains("mbx run"));
-        assert!(release_workflow.contains("target: aarch64-unknown-linux-gnu"));
-        assert!(release_workflow.contains("--target \"$TARGET\""));
-        assert!(release_workflow.contains("target/$TARGET/release/velnor-guest-agent"));
-        assert!(release_workflow.contains("Normalize downloaded workflow binaries"));
-        assert!(release_workflow.contains("crazy-max/ghaction-github-runtime@"));
-        assert!(release_workflow.contains("dist/microvm/guest-agent.sha256"));
-        assert!(release_workflow.contains("guest-image/velnor-guest-agent"));
-        assert!(
-            release_workflow.contains("packaged guest-agent does not match guest-image artifact")
-        );
-        assert!(!release_workflow.contains("sccache"));
-        assert!(!release_workflow.contains("actions/cache"));
+        assert!(release_workflow.contains("cargo build -q -p velnor-runner"));
+        assert!(release_workflow.contains("cargo build -p velnor-runner --bin velnor-guest-agent"));
+        assert!(release_workflow.contains("cargo zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("cargo run -p velnor-runner --bin velnor-guest-image"));
+        assert!(release_workflow.contains("runner: ubuntu-24.04-arm"));
+        assert!(release_workflow.contains("gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu"));
+        assert!(release_workflow.contains("Normalize workflow binary mode after artifact download"));
+        assert!(release_workflow.contains("sccache"));
+        assert!(release_workflow.contains("actions/cache@"));
+        assert!(!release_workflow.contains("docker/setup-qemu-action@"));
 
         let docker = must_some(
             config
@@ -9320,10 +9313,14 @@ path-only = { path = "../path-only" }
             );
         }
 
-        assert!(files
-            .get(&PathBuf::from(".github/workflows/release.yml"))
-            .is_some_and(|content| content
-                .contains("docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8")));
+        let release = must_some(
+            files.get(&PathBuf::from(".github/workflows/release.yml")),
+            "generated release workflow",
+        );
+        assert!(release.contains("image-platform:"));
+        assert!(release.contains("runner: ubuntu-24.04-arm"));
+        assert!(release.contains("docker buildx imagetools create"));
+        assert!(!release.contains("docker/setup-qemu-action@"));
         assert!(files
             .get(&PathBuf::from(".github/workflows/ci-docker-docker.yml"))
             .is_some_and(|content| content.contains(ActionPin::GithubRuntime.reference())));
