@@ -34,9 +34,10 @@ const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/set
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 // pull_request_target can only call the policy workflow from a revision that
-// is already reachable from the base repository. Keep both provider and
-// hosted-runtime pins on the same stable mainline commit.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "de3f79fe2cb2d493e95023abfbbcd51a48d77346";
+// the base branch already trusts. Keep this provider pin on the last stable
+// mainline revision during a PR; advance it only after the implementation is
+// merged and reachable from the default branch.
+const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
@@ -8307,7 +8308,7 @@ mod tests {
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
         assert!(workflow.contains("name: velnor-workflow-runtime"));
-        assert_eq!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
+        assert_ne!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
         assert!(!workflow.contains("cargo install --locked --git"));
         let policy = render_policy_provider(&config);
         assert!(policy.contains(ActionPin::MrBoxington.reference()));

@@ -15,8 +15,8 @@ permissions:
 jobs:
   policy:
     name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@de3f79fe2cb2d493e95023abfbbcd51a48d77346
+    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07d083181537b3b51c98e35879ffc16bd7f9b288
     with:
-      policy-revision: de3f79fe2cb2d493e95023abfbbcd51a48d77346
+      policy-revision: 07d083181537b3b51c98e35879ffc16bd7f9b288
     permissions:
       contents: read
