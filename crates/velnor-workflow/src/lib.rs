@@ -4509,7 +4509,10 @@ fn workflow_file_names(config: &ProjectConfig) -> Vec<String> {
 }
 
 fn render_static_template(template: &str) -> String {
-    format!("{GENERATED_HEADER}{template}")
+    format!(
+        "{GENERATED_HEADER}{}",
+        template.replace("__VELNOR_WORKFLOW_SOURCE_REV__", VELNOR_WORKFLOW_SOURCE_REV)
+    )
 }
 
 fn known_legacy_template(relative: &Path) -> Option<&'static str> {
@@ -7340,7 +7343,13 @@ mod tests {
             format!("uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}");
         assert!(workflow.contains(&setup_reference));
         assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
+        assert!(workflow.contains("name: Publish Velnor workflow runtime"));
+        assert!(workflow.contains("name: Download Velnor workflow runtime"));
+        assert!(workflow.contains("name: velnor-workflow-runtime"));
         assert!(!workflow.contains("cargo install --locked --git"));
+        let policy = render_static_template(VELNOR_POLICY_PROVIDER_TEMPLATE);
+        assert!(policy.contains(ActionPin::MrBoxington.reference()));
+        assert!(policy.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}")));
     }
 
     #[test]
@@ -8086,7 +8095,9 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("crazy-max/ghaction-github-runtime@"));
         assert!(release_workflow.contains("dist/microvm/guest-agent.sha256"));
         assert!(release_workflow.contains("guest-image/velnor-guest-agent"));
-        assert!(release_workflow.contains("packaged guest-agent does not match guest-image artifact"));
+        assert!(
+            release_workflow.contains("packaged guest-agent does not match guest-image artifact")
+        );
         assert!(!release_workflow.contains("sccache"));
         assert!(!release_workflow.contains("actions/cache"));
 
@@ -8864,10 +8875,8 @@ path-only = { path = "../path-only" }
         ))
         .render(WorkflowKind::Main);
         assert!(workflow.contains("~/.cargo/registry"));
-        assert!(
-            workflow.contains("hashFiles('Cargo.lock'")
-                || workflow.contains("hashFiles('Cargo.toml'")
-        );
+        assert!(workflow.contains("hashFiles(") && workflow.contains("Cargo.lock"));
+        assert!(workflow.contains(".cargo/**"));
         assert!(!workflow.contains("~/.npm"));
         assert!(!workflow.contains("~/.gradle/caches"));
         assert!(!workflow.contains("~/.terraform.d/plugin-cache"));
@@ -9221,9 +9230,9 @@ path-only = { path = "../path-only" }
             .get(&PathBuf::from(
                 ".github/workflows/velnor-workflow-policy.yml"
             ))
-            .is_some_and(
-                |content| content.contains("--rev 8090fefd146795f1455e36a55c932b90eb58f730")
-            ));
+            .is_some_and(|content| {
+                content.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}"))
+            }));
     }
 
     #[test]

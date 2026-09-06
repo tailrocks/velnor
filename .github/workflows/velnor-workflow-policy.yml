@@ -34,6 +34,15 @@ jobs:
           # Static policy validation only; fork head checkout is intentional.
           allow-unsafe-pr-checkout: true
 
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-c3a38b5ffffb844ab0dffc730a67f953b6af9eb7
+          restore-keys: |
+            velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install pinned Velnor workflow runtime
         env:
           CARGO_HOME: ${{ runner.temp }}/velnor-workflow-cargo-home
@@ -50,7 +59,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 8090fefd146795f1455e36a55c932b90eb58f730 \
+            --rev c3a38b5ffffb844ab0dffc730a67f953b6af9eb7 \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
