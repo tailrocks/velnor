@@ -576,12 +576,61 @@ not present.
   (job `101546935834`). Remaining jobs are still running; no passing Velnor
   main proof is claimed.
 
+### Recheck 2026-09-06T20:43:36Z
+
+- PR [#613](https://github.com/tailrocks/velnor/pull/613) merged as
+  [`856b6828`](https://github.com/tailrocks/velnor/commit/856b682816dd3ddf1a883dad4cfb4c09a3b2bef8).
+  Main run [34057542111](https://github.com/tailrocks/velnor/actions/runs/34057542111)
+  completed with failure. GitHub-hosted lanes passed, but trusted Velnor lanes
+  failed: Docker hit a socket EOF (job `101553332050`), the runner test hit a
+  resource failure (job `101553332055`), control hit a `store.locked` timeout
+  (job `101553332179`), and trusted render and production-topology jobs also
+  failed. `ci-required` failed. This is not passing Velnor-main proof.
+- Full main run
+  [34056790469](https://github.com/tailrocks/velnor/actions/runs/34056790469)
+  was cancelled. Its 12 hosted MBX lanes nevertheless recorded exact
+  `objects-v2` hits **12/12** and prefix restores **0/12**. This was a full
+  main run, not a comparable affected PR; it is cache evidence only.
+- Maintenance run
+  [34057770250](https://github.com/tailrocks/velnor/actions/runs/34057770250)
+  passed. Artifact
+  [9996489380](https://github.com/tailrocks/velnor/actions/runs/34057770250/artifacts/9996489380)
+  captured 108 caches, 6,871,639,711 bytes (6.400 GiB), and no `a1e07a28`
+  orphan, but its `captured_at` field was `null`. The source binding bug was
+  fixed in PR #614; this historical artifact does not prove timestamped
+  seven-day coverage.
+- After deleting the 12 exact pre-`856b6828` `objects-v2` cache IDs and
+  re-listing them absent, the cache inventory at this timestamp is 69 caches,
+  7,689,040,738 bytes (7.161 GiB), 12 current `objects-v2` entries, zero
+  legacy MBX entries, and zero `a1e07a28` entries. This is one under-budget
+  snapshot, not the required seven-day series.
+- GitHub Docker job
+  [101553332021](https://github.com/tailrocks/velnor/actions/runs/34057542111/job/101553332021)
+  passed from 20:26:46Z to 20:41:39Z (14m53s). The `<=4m` Docker target
+  remains unmet. Release run
+  [34057444318](https://github.com/tailrocks/velnor/actions/runs/34057444318)
+  and v0.1.273 fleet activation remain unproven.
+- There is still no `ci-velnor.yml` split. Generated workflows remain
+  combined: PR callers are GitHub-only through the trust gate, while main and
+  nightly retain full trusted Velnor coverage.
+
+Owner/deadline register for the remaining proof:
+
+| Unmet item | Owner | Deadline |
+| --- | --- | --- |
+| Passing trusted Velnor main proof and Docker/runner/control/render/production-topology failures | unassigned | no due date |
+| Comparable post-`objects-v2` affected PR, separate exact/prefix rates, and SLO timing | unassigned | no due date |
+| Seven consecutive daily cache snapshots at or below 8 GiB | unassigned | no due date |
+| Provider → queue timestamp → coverage evidence for remaining costs | unassigned | no due date |
+| Release-run proof | unassigned | no due date |
+| v0.1.273 fleet activation | Velnor fleet operator (the documented activation role) | no due date |
+
 Provider, queue, and coverage record:
 
 | Area | Evidence | State |
 | --- | --- | --- |
 | GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
-| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | over the 8-GiB target |
+| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | current snapshot is 7.161 GiB; seven-day proof remains open |
 | Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
 | Required coverage | `ci-required` aggregates all 16 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
 
@@ -653,8 +702,8 @@ Provider, queue, and coverage record:
   current generated config emits the valid per-unit `fmt`, `clippy`, and
   `nextest` commands. A synchronized rerun remains required.
 - Remaining unmet items: new job image release/deployment, live passing Velnor
-  main proof, comparable warm affected PR, exact/prefix restore rates after
-  the fix, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
+  main proof, comparable post-`objects-v2` warm affected PR, exact/prefix
+  restore rates on that comparable PR, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
   provider/queue/coverage proof table, and synchronized PR #603 validation. Do
   not claim achievement.
 
