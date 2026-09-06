@@ -6,6 +6,12 @@ on:
       scope:
         required: true
         type: string
+      selection-artifact:
+        required: true
+        type: string
+
+env:
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   github:
@@ -20,7 +26,7 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime
+          name: velnor-workflow-runtime-de3f79fe2cb2d493e95023abfbbcd51a48d77346
           path: .velnor-workflow-runtime
       - name: Add Velnor workflow runtime to PATH
         shell: bash
@@ -28,6 +34,11 @@ jobs:
           set -euo pipefail
           install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Download Velnor CI selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.selection-artifact }}
+          path: .velnor-ci-selection
       - name: Expose GitHub Actions runtime
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
@@ -37,8 +48,9 @@ jobs:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: docker
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docker
 
   velnor:
@@ -51,6 +63,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Download Velnor CI selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.selection-artifact }}
+          path: .velnor-ci-selection
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Run Docker checks
@@ -58,7 +75,8 @@ jobs:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: docker
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
         run: velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docker
 

@@ -4,13 +4,13 @@ run-name: CI / PR · ${{ github.event_name }} · ${{ github.ref_name }}
 
 on:
   pull_request:
-  merge_group:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -20,6 +20,7 @@ jobs:
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       units: ${{ steps.plan.outputs.units }}
+      full_units: ${{ steps.plan.outputs.full_units }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -28,22 +29,30 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@07d083181537b3b51c98e35879ffc16bd7f9b288
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@de3f79fe2cb2d493e95023abfbbcd51a48d77346
         with:
-          rev: 07d083181537b3b51c98e35879ffc16bd7f9b288
+          rev: de3f79fe2cb2d493e95023abfbbcd51a48d77346
       - name: Select affected units
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
         run: velnor-workflow plan --config .github/ci/project.toml
 
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime
+          name: velnor-workflow-runtime-de3f79fe2cb2d493e95023abfbbcd51a48d77346
           path: ~/.cargo/bin/velnor-workflow
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish Velnor CI selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-ci-selection
+          path: ${{ runner.temp }}/velnor-ci-selection
           if-no-files-found: error
           retention-days: 1
   group-unit-bun-velnor:
@@ -53,6 +62,7 @@ jobs:
     uses: ./.github/workflows/ci-bun-velnor.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-docker:
     name: "Docker · Docker"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
@@ -60,6 +70,7 @@ jobs:
     uses: ./.github/workflows/ci-docker-docker.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-docs:
     name: "Documentation · Documentation"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
@@ -67,6 +78,7 @@ jobs:
     uses: ./.github/workflows/ci-docs-docs.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-opentofu:
     name: "OpenTofu · OpenTofu"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
@@ -74,6 +86,7 @@ jobs:
     uses: ./.github/workflows/ci-opentofu-opentofu.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-policy:
     name: "Rust · Rust dependency policy"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
@@ -81,6 +94,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-policy.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-unit-collector:
     name: "Rust · unit-collector"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
@@ -88,6 +102,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-unit-collector.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-bench:
     name: "Rust · velnor-bench"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
@@ -95,6 +110,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-bench.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-client:
     name: "Rust · velnor-client"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
@@ -102,6 +118,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-client.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-control:
     name: "Rust · velnor-control"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
@@ -109,6 +126,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-control.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-model:
     name: "Rust · velnor-model"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
@@ -116,6 +134,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-model.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-render:
     name: "Rust · velnor-render"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
@@ -123,6 +142,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-render.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-runner:
     name: "Rust · velnor-runner"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
@@ -130,6 +150,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-runner.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-tools:
     name: "Rust · velnor-tools"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
@@ -137,6 +158,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-tools.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnor-workflow:
     name: "Rust · velnor-workflow"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
@@ -144,6 +166,7 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnor-workflow.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnorctl:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
@@ -151,10 +174,19 @@ jobs:
     uses: ./.github/workflows/ci-rust-velnorctl.yml
     with:
       scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
+  group-unit-rust-production-topology:
+    name: "Rust · Rust production topology"
+    if: ${{ always() && needs.plan.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-rust-production-topology.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnorctl]
+    needs: [plan, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnorctl, group-unit-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -345,5 +377,17 @@ jobs:
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "$selected" == *",rust-production-topology,"* ]]; then
+            result="${{ needs['group-unit-rust-production-topology'].result }}"
+            case "$result" in
+              success) ;;
+              *) echo "selected CI unit rust-production-topology did not pass: $result" >&2; exit 1 ;;
+            esac
+          else
+            case "$result" in
+              success|skipped) ;;
+              *) echo "unselected CI unit rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi

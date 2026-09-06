@@ -34,14 +34,19 @@ const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/set
 const VELNOR_POLICY_WORKFLOW: &str =
     "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 // pull_request_target can only call the policy workflow from a revision that
-// is already reachable from the base repository. Keep both provider and
-// hosted-runtime pins on the same stable mainline commit.
+// the base branch already trusts. Keep this provider pin on the last stable
+// mainline revision during a PR; advance it only after the implementation is
+// merged and reachable from the default branch.
 const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "de3f79fe2cb2d493e95023abfbbcd51a48d77346";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
+const MOLD_VERSION: &str = "2.42.0";
+const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
+const MOLD_AARCH64_SHA256: &str =
+    "3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
     "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
@@ -562,6 +567,7 @@ pub struct ProjectConfig {
     verified: bool,
     workflow_files: Vec<String>,
     notes: Vec<String>,
+    version_bump_units: Vec<String>,
     default_branch: String,
     runners: RunnerMode,
     github_runner: String,
@@ -612,6 +618,9 @@ impl ProjectConfig {
         write_toml_array(&mut output, "files", &generated_workflows);
         if !self.notes.is_empty() {
             write_toml_array(&mut output, "notes", &self.notes);
+        }
+        if !self.version_bump_units.is_empty() {
+            write_toml_array(&mut output, "version_bump_units", &self.version_bump_units);
         }
         output.push('\n');
         output.push_str("[release]\n");
@@ -1079,6 +1088,7 @@ fn scan_repository_with_default_branch(
         verified: true,
         workflow_files: default_workflow_files(),
         notes: Vec::new(),
+        version_bump_units: Vec::new(),
         default_branch: default_branch.to_owned(),
         runners,
         github_runner: "ubuntu-24.04".to_owned(),
@@ -1090,7 +1100,7 @@ fn scan_repository_with_default_branch(
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
     };
-    load_workflow_templates(root, apply_local_velnor_profile(root, config))
+    load_workflow_templates(root, apply_local_velnor_profile(root, config)?)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1275,7 +1285,7 @@ fn analyze_rust_manifests(
                 shell_quote("Cargo.toml")
             ),
             format!(
-                "{command_prefix}cargo clippy {cargo_lock_flag} --all-targets --all-features {package_selector} -- -D warnings"
+                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets --all-features {package_selector} -- -D warnings"
             ),
             test_command,
         ];
@@ -1331,6 +1341,9 @@ fn analyze_rust_manifests(
                 manifest.features.len()
             ));
         }
+        watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        watch.sort();
+        watch.dedup();
         let cache_key_files = vec![
             ".cargo/**".to_owned(),
             "Cargo.toml".to_owned(),
@@ -1461,6 +1474,60 @@ fn analyze_rust_manifests(
     result.limitations.sort();
     result.limitations.dedup();
     Ok(result)
+}
+
+fn include_str_paths(
+    root: &Path,
+    files: &[String],
+    file_set: &BTreeSet<String>,
+    package_root: &str,
+) -> Result<Vec<String>, GeneratorError> {
+    let prefix = path_prefix(package_root);
+    let mut targets = BTreeSet::new();
+    for source in files.iter().filter(|file| {
+        has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
+    }) {
+        let source_contents = fs::read_to_string(root.join(source))
+            .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
+        let mut cursor = 0;
+        while let Some(relative) = source_contents[cursor..].find("include_str!") {
+            let start = cursor + relative + "include_str!".len();
+            let remainder = source_contents[start..].trim_start();
+            let Some(argument) = remainder.strip_prefix('(') else {
+                cursor = start;
+                continue;
+            };
+            let Some(end) = argument.find(')') else {
+                return Err(GeneratorError::usage(format!(
+                    "unterminated include_str! in {}",
+                    root.join(source).display()
+                )));
+            };
+            let literal = argument[..end].trim();
+            let included = serde_json::from_str::<String>(literal).map_err(|error| {
+                GeneratorError::usage(format!(
+                    "include_str! must use a plain string literal in {}: {error}",
+                    root.join(source).display()
+                ))
+            })?;
+            let target = resolve_repo_path(&parent_path(source), &included).ok_or_else(|| {
+                GeneratorError::usage(format!(
+                    "include_str! escapes the repository from {}: {included}",
+                    root.join(source).display()
+                ))
+            })?;
+            if !file_set.contains(&target) {
+                return Err(GeneratorError::usage(format!(
+                    "include_str! target does not exist: {} -> {}",
+                    root.join(source).display(),
+                    target
+                )));
+            }
+            targets.insert(target);
+            cursor = start + argument[..end].len() + 1;
+        }
+    }
+    Ok(targets.into_iter().collect())
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2351,14 +2418,17 @@ fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
     files
 }
 
-fn apply_local_velnor_profile(root: &Path, mut config: ProjectConfig) -> ProjectConfig {
+fn apply_local_velnor_profile(
+    root: &Path,
+    mut config: ProjectConfig,
+) -> Result<ProjectConfig, GeneratorError> {
     if local_github_repository(root).as_deref() != Some("tailrocks/velnor") {
         enable_mr_boxington_commands(&mut config);
-        return config;
+        return Ok(config);
     }
     let Some(profile) = estate_profile("tailrocks/velnor") else {
         enable_mr_boxington_commands(&mut config);
-        return config;
+        return Ok(config);
     };
     let release = profile.verified.then(|| release_spec(profile)).flatten();
     profile.repository.clone_into(&mut config.repository);
@@ -2372,8 +2442,285 @@ fn apply_local_velnor_profile(root: &Path, mut config: ProjectConfig) -> Project
         "Release is fail-closed until source, artifact, registry, provenance, and credential contracts are verified.".to_owned()
     };
     config.release = release;
+    config.version_bump_units = vec![
+        "docker".to_owned(),
+        "rust-velnor-bench".to_owned(),
+        "rust-velnor-runner".to_owned(),
+        "rust-velnorctl".to_owned(),
+    ];
+    if !config
+        .units
+        .iter()
+        .any(|unit| unit.id == "rust-production-topology")
+    {
+        config.units.push(Unit {
+            id: "rust-production-topology".to_owned(),
+            label: "Rust production topology".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            watch: vec![
+                ".cargo/**".to_owned(),
+                "Cargo.toml".to_owned(),
+                "Cargo.lock".to_owned(),
+                "crates/**".to_owned(),
+                "docker/**".to_owned(),
+                "microvm/**".to_owned(),
+                "mise.lock".to_owned(),
+                "mise.toml".to_owned(),
+                "rust-toolchain".to_owned(),
+                "rust-toolchain.toml".to_owned(),
+                "tools/**".to_owned(),
+            ],
+            pr_commands: vec![
+                "cargo check --workspace --all-targets --locked".to_owned(),
+                "mise run test-release-feature-boundary".to_owned(),
+            ],
+            full_commands: vec![
+                "cargo check --workspace --all-targets --locked".to_owned(),
+                "mise run test-release-feature-boundary".to_owned(),
+            ],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: Some(CacheSpec {
+                key_files: vec!["Cargo.toml".to_owned(), "Cargo.lock".to_owned()],
+                paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
+            }),
+            tool_version: None,
+        });
+    }
+    apply_velnor_watch_graph(root, &mut config)?;
+    add_velnor_regeneration_gate(&mut config);
     enable_mr_boxington_commands(&mut config);
-    config
+    Ok(config)
+}
+
+fn add_velnor_regeneration_gate(config: &mut ProjectConfig) {
+    let Some(unit) = config
+        .units
+        .iter_mut()
+        .find(|unit| unit.id == "rust-velnor-workflow")
+    else {
+        return;
+    };
+    // The workflow crate owns the checked-in templates and generated caller
+    // surface. Run the generator in check mode from the repository root so a
+    // template-only edit cannot pass without regenerating its consumers.
+    let command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..";
+    if !unit
+        .pr_commands
+        .iter()
+        .any(|candidate| candidate == command)
+    {
+        unit.pr_commands.insert(0, command.to_owned());
+    }
+    if !unit
+        .full_commands
+        .iter()
+        .any(|candidate| candidate == command)
+    {
+        unit.full_commands.insert(0, command.to_owned());
+    }
+}
+
+fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    let files = repository_files(root)?;
+    let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+    let docker_watch = docker_watch_paths(root, &config.units)?;
+    let common_runtime_inputs = [
+        "crates/velnor-workflow/src/lib.rs",
+        "crates/velnor-workflow/src/runtime.rs",
+    ];
+    for unit in &mut config.units {
+        if unit.kind == UnitKind::Docker && unit.root == "." {
+            unit.watch.clone_from(&docker_watch);
+        }
+        match unit.id.as_str() {
+            "bun-velnor" => {
+                unit.watch = vec![
+                    "package.json".to_owned(),
+                    "bun.lock".to_owned(),
+                    "bun.lockb".to_owned(),
+                    "package-lock.json".to_owned(),
+                    "src/**".to_owned(),
+                    "scripts/**".to_owned(),
+                ];
+                unit.watch.extend(
+                    files
+                        .iter()
+                        .filter(|file| {
+                            parent_path(file) == "."
+                                && (file.ends_with(".config.js")
+                                    || file.ends_with(".config.ts")
+                                    || file.as_str() == "tsconfig.json")
+                        })
+                        .cloned(),
+                );
+            }
+            "docs" => {
+                unit.watch = vec!["content/docs/**/*.mdx".to_owned(), "*.md".to_owned()];
+            }
+            "opentofu" => {
+                unit.watch = files
+                    .iter()
+                    .filter(|file| {
+                        !is_test_support_path(file)
+                            && (has_extension(file, "tf")
+                                || has_extension(file, "tofu")
+                                || file.rsplit('/').next() == Some(".terraform.lock.hcl"))
+                    })
+                    .cloned()
+                    .collect();
+            }
+            _ => {}
+        }
+        if matches!(unit.kind, UnitKind::Rust | UnitKind::Docker) {
+            unit.watch.extend([
+                ".cargo/**".to_owned(),
+                "Cargo.toml".to_owned(),
+                "Cargo.lock".to_owned(),
+                "rust-toolchain.toml".to_owned(),
+                "rust-toolchain".to_owned(),
+                "mise.toml".to_owned(),
+                "mise.lock".to_owned(),
+            ]);
+        }
+        unit.watch
+            .extend(common_runtime_inputs.iter().map(|path| (*path).to_owned()));
+        if unit.id == "rust-velnor-workflow" {
+            unit.watch.extend([
+                "crates/velnor-workflow/templates/**".to_owned(),
+                "crates/velnor-workflow/README.md".to_owned(),
+            ]);
+        }
+        if unit.id == "rust-velnor-runner" {
+            unit.watch.extend([
+                "crates/velnor-workflow/templates/velnor-release.yml".to_owned(),
+                "microvm/**".to_owned(),
+                "tools/unit-collector/**".to_owned(),
+            ]);
+        }
+        if unit.id == "rust-velnorctl" {
+            unit.watch.push("microvm/**".to_owned());
+        }
+        if unit.id == "rust-velnor-model" {
+            for prefix in ["schema/", "schemas/"] {
+                if file_set.iter().any(|file| file.starts_with(prefix)) {
+                    unit.watch.push(format!("{prefix}**"));
+                }
+            }
+        }
+        if matches!(unit.kind, UnitKind::Rust | UnitKind::Docker)
+            && file_set.iter().any(|file| file.starts_with("fleet/"))
+        {
+            unit.watch.push("fleet/**".to_owned());
+        }
+        unit.watch.sort();
+        unit.watch.dedup();
+    }
+    Ok(())
+}
+
+fn docker_watch_paths(root: &Path, units: &[Unit]) -> Result<Vec<String>, GeneratorError> {
+    let files = repository_files(root)?;
+    let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+    let mut watch = BTreeSet::from([
+        ".dockerignore".to_owned(),
+        "Cargo.lock".to_owned(),
+        "Cargo.toml".to_owned(),
+        "Dockerfile".to_owned(),
+        "docker/**".to_owned(),
+        "mise.lock".to_owned(),
+        "mise.toml".to_owned(),
+        "rust-toolchain".to_owned(),
+        "rust-toolchain.toml".to_owned(),
+        ".cargo/**".to_owned(),
+    ]);
+    for dockerfile in files.iter().filter(|file| {
+        !is_test_support_path(file)
+            && parent_path(file) == "."
+            && file
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("Dockerfile"))
+    }) {
+        let contents = fs::read_to_string(root.join(dockerfile)).map_err(|error| {
+            GeneratorError::io("read Dockerfile", &root.join(dockerfile), &error)
+        })?;
+        for line in contents.lines() {
+            let tokens = line
+                .split_whitespace()
+                .take_while(|token| !token.starts_with('#'))
+                .collect::<Vec<_>>();
+            let Some(command) = tokens.first().map(|token| token.to_ascii_uppercase()) else {
+                continue;
+            };
+            if !matches!(command.as_str(), "COPY" | "ADD")
+                || tokens.iter().any(|token| token.starts_with("--from="))
+            {
+                continue;
+            }
+            let sources = tokens
+                .iter()
+                .skip(1)
+                .filter(|token| !token.starts_with("--"))
+                .take(tokens.len().saturating_sub(2))
+                .map(|token| token.trim_matches(['\'', '"']))
+                .collect::<Vec<_>>();
+            for source in sources {
+                if source.starts_with('/') || source.contains('$') || source.contains("://") {
+                    continue;
+                }
+                let source = source.trim_start_matches("./").trim_end_matches('/');
+                if source.is_empty() || source == "." {
+                    return Err(GeneratorError::usage(format!(
+                        "Dockerfile source is too broad for affected CI: {dockerfile}"
+                    )));
+                }
+                if file_set.contains(source) {
+                    watch.insert(source.to_owned());
+                } else if file_set
+                    .iter()
+                    .any(|file| file.starts_with(&format!("{source}/")))
+                {
+                    watch.insert(format!("{source}/**"));
+                } else {
+                    return Err(GeneratorError::usage(format!(
+                        "Dockerfile COPY/ADD source does not exist: {dockerfile}: {source}"
+                    )));
+                }
+            }
+        }
+    }
+    let seeds = [
+        "rust-velnor-runner",
+        "rust-velnorctl",
+        "rust-velnor-tools",
+        "rust-velnor-workflow",
+    ]
+    .into_iter()
+    .filter(|id| units.iter().any(|unit| unit.id == *id))
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let mut closure = seeds.clone();
+    let mut pending = seeds.into_iter().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        if let Some(unit) = units.iter().find(|unit| unit.id == id) {
+            for dependency in &unit.depends_on {
+                if closure.insert(dependency.clone()) {
+                    pending.push(dependency.clone());
+                }
+            }
+        }
+    }
+    for unit in units.iter().filter(|unit| closure.contains(&unit.id)) {
+        if unit.root != "." {
+            watch.insert(format!("{}/**", unit.root));
+        }
+    }
+    Ok(watch.into_iter().collect())
 }
 
 fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -2391,20 +2738,6 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
                 .map(|command| mbxify_cargo_command(command))
                 .collect();
         } else if is_velnor && unit.kind == UnitKind::Docker {
-            if unit.root == "." {
-                unit.watch = vec![
-                    "Dockerfile".to_owned(),
-                    ".dockerignore".to_owned(),
-                    "Cargo.toml".to_owned(),
-                    "Cargo.lock".to_owned(),
-                    "rust-toolchain.toml".to_owned(),
-                    "docker/build-mise.toml".to_owned(),
-                    "docker/build-mise.lock".to_owned(),
-                    "crates/**".to_owned(),
-                    "microvm/**".to_owned(),
-                    "tools/**".to_owned(),
-                ];
-            }
             let github_pr_commands = unit
                 .pr_commands
                 .iter()
@@ -2430,23 +2763,12 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
             unit.velnor_pr_commands = Some(velnor_pr_commands);
             unit.velnor_full_commands = Some(velnor_full_commands);
         }
-        if is_velnor {
-            // Every generated unit installs and invokes this runtime. Treat
-            // generator/runtime changes as broad-impact changes instead of
-            // only selecting the workflow crate's own unit. Add this after
-            // the Docker-specific watch replacement above.
-            unit.watch.push("crates/velnor-workflow/**".to_owned());
-            if unit.id == "rust-velnor-runner" {
-                // The runner embeds these inputs in its release artifacts.
-                unit.watch.push("microvm/**".to_owned());
-            }
-        }
         unit.watch.sort();
         unit.watch.dedup();
     }
     if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
         config.notes.push(format!(
-            "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION} by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with stable per-unit keys (exact hits reuse the cache; a new entry is saved only when dependency inputs change). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."
+            "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION} by default on both lanes. GitHub-hosted jobs use its GitHub cache backend with stable per-unit keys (exact hits reuse the cache; a new entry is saved only when dependency inputs change). Velnor jobs use an explicit local-backend setup step against the image/runner-provided local store."
         ));
     }
 }
@@ -3549,6 +3871,7 @@ fn catalog_config_with_default_branch(
         verified: profile.verified,
         workflow_files: estate_workflow_files(profile),
         notes,
+        version_bump_units: Vec::new(),
         default_branch: default_branch.to_owned(),
         runners,
         github_runner: "ubuntu-24.04".to_owned(),
@@ -3941,7 +4264,7 @@ impl WorkflowIr {
             WorkflowKind::PullRequest => (
                 "CI",
                 "CI / PR",
-                "on:\n  pull_request:\n  merge_group:".to_owned(),
+                "on:\n  pull_request:".to_owned(),
                 "true",
             ),
             WorkflowKind::Main => (
@@ -3956,22 +4279,27 @@ impl WorkflowIr {
             WorkflowKind::Nightly => (
                 "Nightly",
                 "Nightly",
-                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:".to_owned(),
+                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
+                    .to_owned(),
                 "false",
             ),
         };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  contents: read\n\n"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
         );
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
+            || self.mise_rust
         {
             output.push_str("env:\n");
             if self.tools.contains(&ToolRequirement::Sccache) {
                 output.push_str(
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
+            }
+            if self.mise_rust {
+                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if self.tools.contains(&ToolRequirement::OpenTofu) {
                 output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
@@ -4059,7 +4387,7 @@ impl WorkflowIr {
             WorkflowKind::PullRequest => (
                 "CI",
                 "CI / PR",
-                "on:\n  pull_request:\n  merge_group:".to_owned(),
+                "on:\n  pull_request:".to_owned(),
                 "true",
             ),
             WorkflowKind::Main => (
@@ -4074,21 +4402,30 @@ impl WorkflowIr {
             WorkflowKind::Nightly => (
                 "Nightly",
                 "Nightly",
-                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:".to_owned(),
+                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
+                    .to_owned(),
                 "false",
             ),
         };
         let _ = writeln!(
             output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  contents: read\n\njobs:"
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
         );
         self.render_plan(&mut output, RunnerMode::Github, false);
         if kind != WorkflowKind::PullRequest {
             Self::render_policy(&mut output, RunnerMode::Github, false);
         }
         self.render_nested_unit_callers(&mut output, kind != WorkflowKind::PullRequest);
-        if kind != WorkflowKind::Nightly {
-            self.render_nested_required(&mut output, kind != WorkflowKind::PullRequest);
+        if kind == WorkflowKind::Nightly {
+            self.render_nested_required(&mut output, true, "nightly-required", true);
+            self.render_nightly_alert(&mut output);
+        } else {
+            self.render_nested_required(
+                &mut output,
+                kind != WorkflowKind::PullRequest,
+                "ci-required",
+                false,
+            );
         }
         while output.ends_with("\n\n") {
             output.pop();
@@ -4117,16 +4454,22 @@ impl WorkflowIr {
             ));
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}",
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
                 yaml_scalar(&name),
                 conditions.join(" && "),
                 needs.join(", "),
-                nested_unit_workflow_file(unit)
+                nested_unit_workflow_file(unit),
             );
         }
     }
 
-    fn render_nested_required(&self, output: &mut String, include_policy: bool) {
+    fn render_nested_required(
+        &self,
+        output: &mut String,
+        include_policy: bool,
+        check_name: &str,
+        simulate_failure: bool,
+    ) {
         let units = self.units.iter().map(unit_group_job_id).collect::<Vec<_>>();
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
@@ -4135,10 +4478,17 @@ impl WorkflowIr {
         needs.extend(units);
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: ci-required\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
+            "  {check_name}:\n    name: {check_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
             needs.join(", "),
             yaml_scalar(&self.github_runner)
         );
+        if simulate_failure {
+            let simulate = github_expression("inputs.simulate_failure");
+            let _ = writeln!(
+                output,
+                "          if [[ \"{simulate}\" == true ]]; then\n            echo \"nightly red-to-signal simulation requested\" >&2\n            exit 1\n          fi"
+            );
+        }
         for job in needs
             .iter()
             .filter(|job| matches!(job.as_str(), "plan" | "policy"))
@@ -4164,11 +4514,25 @@ impl WorkflowIr {
         }
     }
 
+    fn render_nightly_alert(&self, output: &mut String) {
+        let _ = writeln!(
+            output,
+            "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ always() }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
+            yaml_scalar(&self.github_runner)
+        );
+        let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
+Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
+        let good_body = r#"          body="$(printf '%s\n%s\n' \
+            "nightly-required result: $NIGHTLY_RESULT" \
+            "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")""#;
+        *output = output.replace(bad_body, good_body);
+    }
+
     fn render_nested_unit(&self, unit: &Unit, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      scope:\n        required: true\n        type: string",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string",
             yaml_scalar(&sidebar_group_name(unit))
         );
         self.render_workflow_env(&mut output, unit);
@@ -4189,12 +4553,18 @@ impl WorkflowIr {
 
     fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
-        if tools.contains(&ToolRequirement::Sccache) || tools.contains(&ToolRequirement::OpenTofu) {
+        if tools.contains(&ToolRequirement::Sccache)
+            || tools.contains(&ToolRequirement::OpenTofu)
+            || self.mise_rust
+        {
             output.push_str("\nenv:\n");
             if tools.contains(&ToolRequirement::Sccache) {
                 output.push_str(
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
+            }
+            if self.mise_rust {
+                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
                 output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
@@ -4230,7 +4600,10 @@ impl WorkflowIr {
             ActionPin::Checkout.reference()
         );
         Self::render_workflow_runtime_download(output, lane);
-        self.render_tool_provisioning(output, lane, unit);
+        output.push_str(&workflow_selection_artifact_download(Some(
+            "${{ inputs.selection-artifact }}",
+        )));
+        self.render_tool_provisioning(output, lane, unit, cache_save);
         if !self.uses_mr_boxington(unit)
             && let Some(cache) = &unit.cache
         {
@@ -4249,7 +4622,7 @@ impl WorkflowIr {
         }
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
             yaml_scalar(&unit.id)
@@ -4297,7 +4670,7 @@ impl WorkflowIr {
         let gate = self.trusted_runner_gate(runners, trusted);
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n      full_units: ${{{{ steps.plan.outputs.full_units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             ActionPin::Checkout.reference(),
             VELNOR_WORKFLOW_SETUP_ACTION,
@@ -4305,6 +4678,7 @@ impl WorkflowIr {
             VELNOR_WORKFLOW_SOURCE_REV,
         );
         output.push_str(&workflow_runtime_artifact_upload());
+        output.push_str(&workflow_selection_artifact_upload());
     }
 
     fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -4435,7 +4809,8 @@ impl WorkflowIr {
                 ActionPin::Checkout.reference(),
             );
             Self::render_workflow_runtime_download(output, lane);
-            self.render_tool_provisioning(output, lane, unit);
+            output.push_str(&workflow_selection_artifact_download(None));
+            self.render_tool_provisioning(output, lane, unit, cache_save);
             if !self.uses_mr_boxington(unit)
                 && let Some(cache) = &unit.cache
             {
@@ -4454,7 +4829,7 @@ impl WorkflowIr {
             }
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
                 verify_name,
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
@@ -4558,12 +4933,18 @@ impl WorkflowIr {
         tools
     }
 
-    fn render_tool_provisioning(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
+    fn render_tool_provisioning(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        unit: &Unit,
+        cache_save: bool,
+    ) {
         let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
         if tools.contains(&ToolRequirement::Mise) {
             let _ = writeln!(
                 output,
-                "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust\n          cache: true",
+                "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust aqua:nextest-rs/nextest/cargo-nextest\n          cache: true",
                 ActionPin::Mise.reference()
             );
         }
@@ -4657,7 +5038,7 @@ impl WorkflowIr {
                 ActionPin::Node.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Nextest) {
+        if tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
@@ -4693,11 +5074,15 @@ impl WorkflowIr {
             );
         }
         if tools.contains(&ToolRequirement::Mold) {
-            let _ = writeln!(
-                output,
-                "      - name: Set up mold\n        uses: {}\n        with:\n          make-default: true",
-                ActionPin::Mold.reference()
-            );
+            if lane == RunnerMode::Github {
+                output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
+            } else {
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up mold\n        uses: {}\n        with:\n          make-default: true",
+                    ActionPin::Mold.reference()
+                );
+            }
         }
         if tools.contains(&ToolRequirement::DockerBuildx) {
             if lane == RunnerMode::Github {
@@ -5273,7 +5658,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 ActionPin::Checkout.reference()
             );
             WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
-            workflow.render_tool_provisioning(&mut output, lane, unit);
+            workflow.render_tool_provisioning(&mut output, lane, unit, false);
             if !workflow.uses_mr_boxington(unit)
                 && let Some(cache) = &unit.cache
             {
@@ -5585,7 +5970,7 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
 fn workflow_runtime_download(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime\n          path: .velnor-workflow-runtime\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}\n          path: .velnor-workflow-runtime\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -5595,9 +5980,42 @@ fn workflow_runtime_download(lane: RunnerMode) -> String {
 
 fn workflow_runtime_artifact_upload() -> String {
     format!(
-        "      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime\n          path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found: error\n          retention-days: 1\n",
+        "      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}\n          path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
+}
+
+fn workflow_selection_artifact_download(name: Option<&str>) -> String {
+    let name = name.unwrap_or("velnor-ci-selection");
+    format!(
+        "      - name: Download Velnor CI selection\n        uses: {}\n        with:\n          name: {name}\n          path: .velnor-ci-selection\n",
+        ActionPin::DownloadArtifact.reference()
+    )
+}
+
+fn workflow_selection_artifact_upload() -> String {
+    format!(
+        "      - name: Publish Velnor CI selection\n        uses: {}\n        with:\n          name: velnor-ci-selection\n          path: ${{{{ runner.temp }}}}/velnor-ci-selection\n          if-no-files-found: error\n          retention-days: 1\n",
+        ActionPin::UploadArtifact.reference()
+    )
+}
+
+fn hosted_mold_setup(default_branch: &str, cache_save: bool) -> String {
+    let mut output = format!(
+        "      - name: Restore mold {MOLD_VERSION} cache\n        id: mold-cache\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n      - name: Set up mold {MOLD_VERSION}\n        shell: bash\n        env:\n          MOLD_VERSION: {MOLD_VERSION}\n        run: |\n          set -euo pipefail\n          case \"$(uname -m)\" in\n            x86_64) mold_arch=x86_64; expected='{MOLD_X86_64_SHA256}' ;;\n            aarch64) mold_arch=aarch64; expected='{MOLD_AARCH64_SHA256}' ;;\n            *) echo \"unsupported mold architecture: $(uname -m)\" >&2; exit 1 ;;\n          esac\n          cache_dir=\"$HOME/.cache/velnor/mold/$MOLD_VERSION\"\n          archive=\"$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n          mkdir -p \"$cache_dir\"\n          if [[ ! -s \"$archive\" ]]; then\n            temporary=\"$archive.download\"\n            trap 'rm -f \"$temporary\"' EXIT\n            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \\\n              --output \"$temporary\" \\\n              \"https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz\"\n            printf '%s  %s\\n' \"$expected\" \"$temporary\" | sha256sum --check --strict\n            mv \"$temporary\" \"$archive\"\n            trap - EXIT\n          fi\n          printf '%s  %s\\n' \"$expected\" \"$archive\" | sha256sum --check --strict\n          if [[ \"$(id -u)\" -eq 0 ]]; then\n            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          else\n            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf \"$archive\"\n            sudo ln -sf /usr/local/bin/mold \"$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)\"\n          fi\n          mold --version | grep -F \"$MOLD_VERSION\"\n",
+        ActionPin::CacheRestore.reference()
+    );
+    if cache_save {
+        let trusted = format!(
+            "((github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}'))"
+        );
+        let _ = writeln!(
+            output,
+            "      - name: Save mold {MOLD_VERSION} cache\n        if: ({trusted}) && steps.mold-cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: ~/.cache/velnor/mold/{MOLD_VERSION}\n          key: velnor-mold-{MOLD_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}",
+            ActionPin::CacheSave.reference()
+        );
+    }
+    output
 }
 
 fn trusted_release_runner_gate(default_branch: &str) -> String {
@@ -5638,6 +6056,8 @@ run-name: Maintenance · ${{ github.event_name }}
 on:
   pull_request:
     types: [closed]
+  schedule:
+    - cron: '31 3 * * *'
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -5688,6 +6108,43 @@ jobs:
           ' _ "$GITHUB_REPOSITORY"; then
             echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
           fi
+  cache-budget:
+    name: Cache budget snapshot
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Snapshot Actions cache account
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cache-budget"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
+            > "$RUNNER_TEMP/cache-budget/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-budget/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-budget/entries.json"
+          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-budget/entries.json")"
+          headroom="$((MAX_BYTES - total))"
+          jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
+            > "$RUNNER_TEMP/cache-budget/summary.json"
+          cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          if (( total > MAX_BYTES )); then
+            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
+            exit 1
+          fi
+      - name: Publish cache budget snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-budget-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-budget
+          if-no-files-found: error
+          retention-days: 14
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
@@ -7850,13 +8307,28 @@ mod tests {
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
         assert!(workflow.contains("name: velnor-workflow-runtime"));
-        assert_eq!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
+        assert_ne!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
         assert!(!workflow.contains("cargo install --locked --git"));
         let policy = render_policy_provider(&config);
         assert!(policy.contains(ActionPin::MrBoxington.reference()));
         assert!(policy.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
         assert!(!policy.contains("runs-on: ubuntu-26.04"));
+    }
+
+    #[test]
+    fn velnor_workflow_regeneration_gate_compiles_checked_out_generator() {
+        let config = must(
+            scan_repository_with_default_branch(&repository_root(), RunnerMode::Github, "main"),
+            "scan Velnor repository for regeneration gate",
+        );
+        assert!(config.units.iter().any(|unit| {
+            unit.id == "rust-velnor-workflow"
+                && unit.pr_commands.iter().any(|command| {
+                    command
+                        == "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
+                })
+        }));
     }
 
     #[test]
@@ -8534,7 +9006,7 @@ path-only = { path = "../path-only" }
             .contains(&"mise-rust-toolchain".to_owned()));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
         assert!(workflow.contains("name: Set up Mise Rust toolchain"));
-        assert!(workflow.contains("install_args: rust"));
+        assert!(workflow.contains("install_args: rust aqua:nextest-rs/nextest/cargo-nextest"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -8657,16 +9129,22 @@ path-only = { path = "../path-only" }
         let velnor_lane = workflow
             .split_once("\n  velnor:")
             .map_or("", |(_, lane)| lane);
+        let github_lane = workflow
+            .split_once("\n  velnor:")
+            .map_or(workflow.as_str(), |(lane, _)| lane);
         // Velnor lane reuses the image-pinned mbx against the
         // runner-provided local store: no download, no cache transport.
         assert!(velnor_lane.contains("jdx/mr-boxington-action@"));
         assert!(velnor_lane.contains("backend: local"));
+        assert!(!velnor_lane.contains("actions/cache"));
         assert!(!velnor_lane.contains("backend: github"));
         assert!(!velnor_lane.contains("cache-key:"));
         assert!(!velnor_lane.contains("version: 1.8.3"));
         assert!(!velnor_lane.contains("save-on-workflow-dispatch"));
+        assert!(github_lane.contains("actions/cache/restore@"));
+        assert!(github_lane.contains("sha256sum --check --strict"));
+        assert!(!github_lane.contains(ActionPin::Mold.reference()));
         assert!(!workflow.contains("sccache"));
-        assert!(!workflow.contains("actions/cache"));
         let policy = must_some(
             config.units.iter().find(|unit| unit.id == "rust-policy"),
             "reviewed Rust policy unit",
@@ -9153,6 +9631,7 @@ path-only = { path = "../path-only" }
             verified: true,
             workflow_files: Vec::new(),
             notes: Vec::new(),
+            version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
@@ -9176,12 +9655,30 @@ path-only = { path = "../path-only" }
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
             "write config",
         );
+        let selection_dir = root.join(".velnor-ci-selection");
+        let selection = selection_dir.join("velnor-ci-selection");
         must(
-            runtime::run_units(
+            fs::create_dir_all(&selection_dir),
+            "create selection directory",
+        );
+        must(
+            fs::write(
+                &selection,
+                format!(
+                    "version=1\nbase_sha={}\nhead_sha={}\nscope=full\nunits=a,b,c\nfull_units=a,b,c\n",
+                    std::env::var("BASE_SHA").unwrap_or_default(),
+                    std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+                ),
+            ),
+            "write selection artifact",
+        );
+        must(
+            runtime::run_units_with_selection_file(
                 &root,
                 &root.join(".github/ci/project.toml"),
                 runtime::Scope::Full,
                 None,
+                &selection,
             ),
             "run parallel units",
         );
@@ -9292,7 +9789,8 @@ path-only = { path = "../path-only" }
         let main = generator.render(WorkflowKind::Main);
         assert!(pr.contains("name: CI\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
-        assert!(pr.contains("merge_group:"));
+        assert!(!pr.contains("merge_group:"));
+        assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("  ci-required:\n    name: ci-required"));
         assert!(!pr.contains("branches: [main]"));
         assert!(main.contains("name: CI\nrun-name: CI / main"));
@@ -9304,6 +9802,11 @@ path-only = { path = "../path-only" }
         assert!(nightly.contains("workflow_dispatch:"));
         assert!(!nightly.contains("pull_request:"));
         assert!(!nightly.contains("name: ci-required"));
+
+        let nested_nightly = generator.render_nested(WorkflowKind::Nightly);
+        assert!(nested_nightly.contains("name: nightly-required"));
+        assert!(nested_nightly.contains("name: Nightly red-to-signal"));
+        assert!(nested_nightly.contains("inputs.simulate_failure"));
         assert_eq!(
             must(
                 runtime::scope_for_event_values("push", None),
@@ -9909,6 +10412,7 @@ path-only = { path = "../path-only" }
             "ci-pr.yml",
             "ci-release-package-signer.yml",
             "ci-rust-policy.yml",
+            "ci-rust-production-topology.yml",
             "ci-rust-unit-collector.yml",
             "ci-rust-velnor-bench.yml",
             "ci-rust-velnor-client.yml",
@@ -9964,7 +10468,7 @@ path-only = { path = "../path-only" }
             config.units.iter().all(|unit| unit
                 .watch
                 .iter()
-                .any(|path| path == "crates/velnor-workflow/**")),
+                .any(|path| path == "crates/velnor-workflow/src/runtime.rs")),
             "missing runtime watch: {:?}",
             config
                 .units
@@ -9972,7 +10476,7 @@ path-only = { path = "../path-only" }
                 .filter(|unit| !unit
                     .watch
                     .iter()
-                    .any(|path| path == "crates/velnor-workflow/**"))
+                    .any(|path| path == "crates/velnor-workflow/src/runtime.rs"))
                 .map(|unit| &unit.id)
                 .collect::<Vec<_>>()
         );
@@ -10919,7 +11423,7 @@ path-only = { path = "../path-only" }
         let nightly = workflow.render(WorkflowKind::Nightly);
 
         assert!(pr.contains("pull_request:"));
-        assert!(pr.contains("merge_group:"));
+        assert!(!pr.contains("merge_group:"));
         assert!(pr.contains("runs-on: ubuntu-24.04"));
         assert!(pr.contains("runs-on: [self-hosted, velnor-target-mvp]"));
         assert!(pr.contains("  github-"));
