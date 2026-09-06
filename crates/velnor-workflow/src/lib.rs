@@ -1516,7 +1516,7 @@ fn include_str_paths(
                     root.join(source).display()
                 ))
             })?;
-            if !file_set.contains(&target) {
+            if !file_set.contains(&target) && !static_github_input_exists(root, &target)? {
                 return Err(GeneratorError::usage(format!(
                     "include_str! target does not exist: {} -> {}",
                     root.join(source).display(),
@@ -1528,6 +1528,26 @@ fn include_str_paths(
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+fn static_github_input_exists(root: &Path, target: &str) -> Result<bool, GeneratorError> {
+    if !target.starts_with(".github/")
+        || target == ".github/UNIFIED-ACTIONS.md"
+        || target.starts_with(".github/ci/")
+        || target.starts_with(".github/workflows/")
+    {
+        return Ok(false);
+    }
+    let path = root.join(target);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(GeneratorError::io(
+            "inspect include_str target",
+            &path,
+            &error,
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -8871,6 +8891,94 @@ path-only = { path = "../path-only" }
                 .any(|limitation| limitation.contains("treated as test fixtures")),
             "fixture exclusion is recorded"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scanner_tracks_static_github_include_str_inputs() {
+        let root = temporary_repository("static-github-include-str");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/fixtures")),
+            "create static GitHub input directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write manifest",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "pub const FIXTURE: &str = include_str!(\"../.github/fixtures/input.json\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            fs::write(root.join(".github/fixtures/input.json"), "{}\n"),
+            "write static GitHub input",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan static GitHub include_str repository",
+        );
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.id == "rust-fixture"),
+            "generated fixture unit",
+        );
+        assert!(
+            unit.watch
+                .iter()
+                .any(|path| path == ".github/fixtures/input.json"),
+            "static GitHub include_str input must be watched: {:?}",
+            unit.watch
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scanner_does_not_treat_generated_github_output_as_include_str_input() {
+        let root = temporary_repository("generated-github-include-str");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create generated GitHub output directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write manifest",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "pub const WORKFLOW: &str = include_str!(\"../.github/workflows/ci.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            fs::write(root.join(".github/workflows/ci.yml"), GENERATED_HEADER),
+            "write generated GitHub output",
+        );
+
+        let error = must_some(
+            scan_repository(&root, RunnerMode::Github).err(),
+            "generated GitHub output must not satisfy include_str",
+        );
+        assert!(error
+            .to_string()
+            .contains("include_str! target does not exist"));
         let _ = fs::remove_dir_all(root);
     }
 
