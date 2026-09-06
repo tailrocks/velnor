@@ -421,11 +421,14 @@ Status remains `NOT ACHIEVED`.
 | Run | Selection | Queue | Wall | Result |
 | --- | --- | ---: | ---: | --- |
 | [34026137664](https://github.com/tailrocks/velnor/actions/runs/34026137664) | warm affected GitHub baseline | 3s (09:58:57→09:59:00Z) | 12m09s (09:58:57→10:11:06Z) | green |
+| [34060546581](https://github.com/tailrocks/velnor/actions/runs/34060546581) | post-`objects-v2` affected PR #616: 9 units, 5 full | 0s run queue; 3s to Planning | 5m49s (21:16:15→21:22:04Z) | green; Docker 59s, Rust runner 5m30s |
 | [34042229133](https://github.com/tailrocks/velnor/actions/runs/34042229133) | affected output, but generator diff made all 16 units full | 3s (15:24:55→15:24:58Z) | 13m08s | green; not comparable after |
 | [34044939215](https://github.com/tailrocks/velnor/actions/runs/34044939215) | main full run after v0.1.270 | 4m28s (16:17:01→16:21:29Z) | 21m12s (→16:38:13Z) | red; old Velnor image/runtime contract |
 
-No comparable post-change warm affected PR exists yet. Queue is reported
-separately; SLO comparison remains open.
+PR #616 is the first post-`objects-v2` affected run, but it is not a matched
+before/after pair: its base tree and cache-generation keys differ from the
+pre-change baseline. Queue is reported separately; the matched §8(1) table
+and all-§1-SLO comparison remain open.
 
 PR [#602](https://github.com/tailrocks/velnor/pull/602) keeps GitHub and Velnor
 callers in the same generated reusable workflows. The source fix makes setup
@@ -614,15 +617,54 @@ not present.
   combined: PR callers are GitHub-only through the trust gate, while main and
   nightly retain full trusted Velnor coverage.
 
+### Recheck 2026-09-06T21:22:05Z
+
+- PR [#616](https://github.com/tailrocks/velnor/pull/616) run
+  [34060546581](https://github.com/tailrocks/velnor/actions/runs/34060546581)
+  completed successfully. Planning job `101560175339` emitted exactly
+  `docker,rust-velnor-model,rust-velnor-render,rust-production-topology,
+  rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnorctl,
+  rust-velnor-bench`; its `full_units` set was exactly
+  `docker,rust-production-topology,rust-velnor-bench,rust-velnor-runner,
+  rust-velnorctl`. All 13 required checks passed; all nine Velnor lanes were
+  skipped by the trusted-only PR gate.
+- Queue is separate: the run-level queue was 0s; Planning began 3s after run
+  creation. Planning start `21:16:15Z` to `ci-required` green at `21:22:04Z`
+  was 5m49s, inside the 6m PR-gate target. This is a post-`objects-v2`
+  affected run, but not a matched before/after pair because its base tree and
+  cache-generation keys differ from the pre-change reference.
+- The eight selected Rust/GitHub jobs each logged an exact
+  `velnor-mbx-objects-v2-*` cache hit: exact `8/8 (100%)`, prefix `0/8 (0%)`.
+  Docker is excluded from this MBX rate because it uses BuildKit/GHA scope
+  cache, not an MBX key. The Docker job
+  [101560205383](https://github.com/tailrocks/velnor/actions/runs/34060546581/job/101560205383)
+  ran `59s` (`21:16:30Z`–`21:17:29Z`; check step `43.811s`), inside the 4m
+  Docker target. The runner job
+  [101560205470](https://github.com/tailrocks/velnor/actions/runs/34060546581/job/101560205470)
+  passed all 1,694 tests in `5m30s`, which is 30s over the 5m Rust-runner
+  target. Therefore this run supplies strong cache and Docker evidence but
+  does not close all §1 SLOs.
+- Release run
+  [34057444318](https://github.com/tailrocks/velnor/actions/runs/34057444318)
+  completed successfully at `20:56:33Z`; the GitHub Release for
+  [v0.1.273](https://github.com/tailrocks/velnor/releases/tag/v0.1.273)
+  exists with 14 assets. Publication is proven; `velnorctl release activate`
+  and a passing trusted-Velnor main run remain unproven.
+- Main run
+  [34059251300](https://github.com/tailrocks/velnor/actions/runs/34059251300)
+  completed failure. Trusted Docker job `101557238687` hit Docker-socket EOF;
+  trusted runner `101557238801` and control `101557238923` lost runner
+  communication; `ci-required` job `101558904566` failed. This is not passing
+  Velnor-main proof.
+
 Owner/deadline register for the remaining proof:
 
 | Unmet item | Owner | Deadline |
 | --- | --- | --- |
 | Passing trusted Velnor main proof and Docker/runner/control/render/production-topology failures | unassigned | no due date |
-| Comparable post-`objects-v2` affected PR, separate exact/prefix rates, and SLO timing | unassigned | no due date |
+| Matched before/after post-`objects-v2` PR pair, plus all §1 SLOs (PR #616 runner is 5m30s) | unassigned | no due date |
 | Seven consecutive daily cache snapshots at or below 8 GiB | unassigned | no due date |
 | Provider → queue timestamp → coverage evidence for remaining costs | unassigned | no due date |
-| Release-run proof | unassigned | no due date |
 | v0.1.273 fleet activation | Velnor fleet operator (the documented activation role) | no due date |
 
 Provider, queue, and coverage record:
@@ -701,11 +743,11 @@ Provider, queue, and coverage record:
   `3a71275d` and invoked obsolete `mbx check --locked --no-deps` commands;
   current generated config emits the valid per-unit `fmt`, `clippy`, and
   `nextest` commands. A synchronized rerun remains required.
-- Remaining unmet items: new job image release/deployment, live passing Velnor
-  main proof, comparable post-`objects-v2` warm affected PR, exact/prefix
-  restore rates on that comparable PR, Docker ≤4m proof, seven-day ≤8-GiB snapshots, the required
-  provider/queue/coverage proof table, and synchronized PR #603 validation. Do
-  not claim achievement.
+- Remaining unmet items: live passing Velnor main proof, a matched
+  before/after post-`objects-v2` warm affected-PR pair, all §1 SLOs (PR #616
+  misses the Rust-runner target by 30s), seven-day ≤8-GiB snapshots, the
+  required provider/queue/coverage proof table, v0.1.273 fleet activation, and
+  synchronized PR #603 validation. Do not claim achievement.
 
 ## 9. Context (changelog, not work items)
 
