@@ -1241,7 +1241,7 @@ jobs:
             # matches the digests inside that record. Never clobber (N-immutable).
             tmp="$(mktemp -d)"
             for name in release-record.json release-record.json.sha256 \
-                        manifest.json manifest.json.sha256 SHA256SUMS \
+                        release-manifest.json manifest.json manifest.json.sha256 SHA256SUMS \
                         "velnor-runner-${VERSION}-amd64.tar.gz" "velnor-runner-${VERSION}-amd64.tar.gz.sha256" \
                         "velnor-runner-${VERSION}-arm64.tar.gz" "velnor-runner-${VERSION}-arm64.tar.gz.sha256" \
                         "velnor-runner-${VERSION}-amd64.deb" "velnor-runner-${VERSION}-amd64.deb.sha256" \

@@ -1284,6 +1284,8 @@ fn analyze_rust_manifests(
             "Cargo.lock".to_owned(),
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
+            "mise.toml".to_owned(),
+            "mise.lock".to_owned(),
             ".cargo/**".to_owned(),
             format!("{prefix}**/*.rs"),
             format!("{prefix}src/**"),
@@ -4307,7 +4309,13 @@ impl WorkflowIr {
             let (_, key_files) = unit.cache.as_ref().map_or_else(
                 || {
                     rendered_cache_values(&CacheSpec {
-                        key_files: vec!["Cargo.lock".to_owned(), "rust-toolchain.toml".to_owned()],
+                        key_files: vec![
+                            "Cargo.lock".to_owned(),
+                            "rust-toolchain.toml".to_owned(),
+                            "rust-toolchain".to_owned(),
+                            "mise.toml".to_owned(),
+                            "mise.lock".to_owned(),
+                        ],
                         paths: Vec::new(),
                     })
                 },
@@ -5862,7 +5870,7 @@ fn generation_reasons(config: &ProjectConfig) -> Vec<String> {
     let mut reasons = Vec::new();
     if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
         reasons.push(
-            "Rust manifests become one job per crate; local dependency edges become job needs, so independent crates run in parallel.".to_owned(),
+            "Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.".to_owned(),
         );
     }
     if config

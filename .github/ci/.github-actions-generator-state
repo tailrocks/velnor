@@ -1,6 +1,6 @@
 # Generated ownership state; do not edit.
 schema = 1
-.github/ci/project.toml	2f8c52dbba243afe
+.github/ci/project.toml	031944f5a7032390
 .github/workflows/ci-bun-velnor.yml	6398971ce07eaa8d
 .github/workflows/ci-docker-docker.yml	061be13371884302
 .github/workflows/ci-docs-docs.yml	12cd1b038f0ca0ec
@@ -22,5 +22,5 @@ schema = 1
 .github/workflows/ci-rust-velnorctl.yml	4d5d083cc5268afc
 .github/workflows/maintenance.yml	606324159965431c
 .github/workflows/nightly.yml	1981306efd327ad7
-.github/workflows/release.yml	f047901531256d75
+.github/workflows/release.yml	060125d6113f1374
 .github/workflows/velnor-workflow-policy.yml	9712bbc75d39fa82
