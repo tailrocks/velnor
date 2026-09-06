@@ -121,6 +121,10 @@ impl GithubPacing {
         now >= self.next_probe
     }
 
+    fn rest_requests_allowed(&self, now: tokio::time::Instant) -> bool {
+        self.rest_hold_until.is_none_or(|deadline| now >= deadline)
+    }
+
     /// Record a probe outcome and schedule the next probe. Rate-limited
     /// probes hold this controller's fleet until the reported reset epoch.
     fn record_probe(
@@ -725,7 +729,9 @@ async fn reconcile_once(
 
     observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
-    if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
+    if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL
+        && pacing.rest_requests_allowed(tokio::time::Instant::now())
+    {
         *last_registration_reconcile = Instant::now();
         let reconciliation = run_bounded_remote_reconciliation(
             reconcile_remote_registrations(args, journal, jobs, pacing),
@@ -4205,6 +4211,15 @@ mod tests {
         // No retry before the reset window, even after the normal 60s floor.
         assert!(!pacing.probe_due(now + GITHUB_PROBE_MAX_BACKOFF));
         assert!(pacing.probe_due(now + Duration::from_secs(3700)));
+    }
+
+    #[test]
+    fn pacing_rate_limit_blocks_registration_reconciliation_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.record_probe(now, true, Some(0), Some(epoch_now() + 3500));
+        assert!(!pacing.rest_requests_allowed(now + GITHUB_PROBE_MAX_BACKOFF));
+        assert!(pacing.rest_requests_allowed(now + Duration::from_secs(3700)));
     }
 
     #[test]
