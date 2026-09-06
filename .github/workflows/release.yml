@@ -354,17 +354,24 @@ jobs:
             manifest.json
             velnor-release-tool
 
-  image:
+  image-platform:
     needs: [identity, release_gate, metadata, build]
-    name: Build + push one multi-platform GHCR image
+    name: Build ${{ matrix.arch }} GHCR image
     timeout-minutes: 60
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      index_digest: ${{ steps.push.outputs.digest }}
-      manifest_sha256: ${{ needs.metadata.outputs.manifest_sha256 }}
     env:
       CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
@@ -392,19 +399,8 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: release-metadata
-
-      - name: Download amd64 workflow binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: workflow-amd64
-          path: release-binaries/amd64
-
-      - name: Download arm64 workflow binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: workflow-arm64
-          path: release-binaries/arm64
+          name: workflow-${{ matrix.arch }}
+          path: release-binaries/${{ matrix.arch }}
 
       - name: Normalize workflow binary mode after artifact download
         run: |
@@ -412,14 +408,11 @@ jobs:
           # Artifact archives preserve bytes but do not reliably preserve the
           # executable bit. Restore it at the artifact-to-build-context
           # boundary before Docker validates and copies the release binary.
-          for arch in amd64 arm64; do
-            binary="release-binaries/${arch}/velnor-workflow"
-            test -f "$binary"
-            chmod 0755 "$binary"
-            test -x "$binary"
-          done
+          binary="release-binaries/${{ matrix.arch }}/velnor-workflow"
+          test -f "$binary"
+          chmod 0755 "$binary"
+          test -x "$binary"
 
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
         with:
           cleanup: false
@@ -432,42 +425,116 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + push (immutable digest captured)
+      - name: Build + push platform image
         id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/job-ubuntu.Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          # GHCR is the durable cross-release cache. Keep the GitHub cache as
-          # a best-effort compatibility secondary until Velnor owns CacheService.
+          # Each native builder owns a disjoint cache ref. Sharing one cache
+          # ref between concurrent amd64/arm64 exports races the cache index.
           cache-from: |
-            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache
-            type=gha,scope=velnor-job-ubuntu
+            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }}
+            type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }}
           cache-to: |
-            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache,mode=max
-            type=gha,scope=velnor-job-ubuntu,mode=max,ignore-error=true
+            type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+            type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }},mode=max,ignore-error=true
           secrets: |
             mise_github_token=${{ github.token }}
           build-args: |
             VELNOR_IMAGE_VERSION=${{ needs.identity.outputs.version }}
-          tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}
+          tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.version=${{ needs.identity.outputs.version }}
             org.opencontainers.image.revision=${{ needs.release_gate.outputs.default_branch_commit }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
             org.velnor.manifest-sha256=${{ needs.metadata.outputs.manifest_sha256 }}
 
-      - name: Capture per-platform digests
+      - name: Record platform digest
         env:
-          INDEX_DIGEST: ${{ steps.push.outputs.digest }}
+          PLATFORM_DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          # Record the index digest and each platform digest as an artifact the
-          # record-assembly job consumes.
-          docker buildx imagetools inspect "${GHCR_IMAGE}@${INDEX_DIGEST}" --format '{{json .}}' > image-digests.json
-          echo "$INDEX_DIGEST" > image-index.digest
+          case "$PLATFORM_DIGEST" in
+            sha256:[0-9a-fA-F]*) ;;
+            *) echo "::error::build-push did not return a platform digest" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$PLATFORM_DIGEST" > "image-${{ matrix.arch }}.digest"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: image-platform-${{ matrix.arch }}
+          path: image-${{ matrix.arch }}.digest
+
+  image:
+    needs: [identity, release_gate, metadata, image-platform]
+    name: Assemble one multi-platform GHCR image
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      index_digest: ${{ steps.push.outputs.index_digest }}
+      manifest_sha256: ${{ needs.metadata.outputs.manifest_sha256 }}
+    env:
+      GHCR_IMAGE: ghcr.io/tailrocks/velnor-job-ubuntu
+      SOURCE_URL: https://github.com/tailrocks/velnor
+      VERSION: ${{ needs.identity.outputs.version }}
+      COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: image-platform-*
+          path: image-artifacts
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        with:
+          cleanup: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble and inspect immutable image index
+        id: push
+        env:
+          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest
+          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest
+        run: |
+          set -euo pipefail
+          for path in "$AMD64_DIGEST_FILE" "$ARM64_DIGEST_FILE"; do
+            test -s "$path"
+            digest="$(tr -d '[:space:]' < "$path")"
+            case "$digest" in
+              sha256:[0-9a-fA-F]*) ;;
+              *) echo "::error::invalid platform digest in $path" >&2; exit 1 ;;
+            esac
+          done
+          amd64_digest="$(tr -d '[:space:]' < "$AMD64_DIGEST_FILE")"
+          arm64_digest="$(tr -d '[:space:]' < "$ARM64_DIGEST_FILE")"
+          docker buildx imagetools create \
+            --tag "${GHCR_IMAGE}:${VERSION}" \
+            "${GHCR_IMAGE}@${amd64_digest}" \
+            "${GHCR_IMAGE}@${arm64_digest}"
+          docker buildx imagetools inspect "${GHCR_IMAGE}:${VERSION}" --format '{{json .}}' > image-digests.json
+          index_digest="$(jq -er '.manifest.digest' image-digests.json)"
+          case "$index_digest" in
+            sha256:[0-9a-fA-F]*) ;;
+            *) echo "::error::manifest inspection did not return an index digest" >&2; exit 1 ;;
+          esac
+          printf 'index_digest=%s\n' "$index_digest" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$index_digest" > image-index.digest
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-metadata
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
