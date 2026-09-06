@@ -1994,7 +1994,7 @@ fn validate_jit_runner_identity(
             decoded.settings.agent_name
         );
     }
-    if !runner.ephemeral || !decoded.settings.ephemeral {
+    if runner.ephemeral == Some(false) || !decoded.settings.ephemeral {
         bail!("GitHub JIT identity is not ephemeral");
     }
     let requested_labels: BTreeSet<&str> = requested_labels.iter().map(String::as_str).collect();
@@ -13975,7 +13975,7 @@ mod tests {
                 kind: Some("custom".into()),
             }],
             runner_group_id: None,
-            ephemeral: true,
+            ephemeral: Some(true),
         };
         let mut settings = crate::protocol::DecodedJitRunnerSettings {
             agent_id: Some(42),
@@ -14006,6 +14006,30 @@ mod tests {
             &decoded,
         )
         .is_ok());
+
+        let mut omitted_ephemeral = runner.clone();
+        omitted_ephemeral.ephemeral = None;
+        assert!(validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &omitted_ephemeral,
+            &decoded,
+        )
+        .is_ok());
+
+        let mut explicit_non_ephemeral = runner.clone();
+        explicit_non_ephemeral.ephemeral = Some(false);
+        let error = validate_jit_runner_identity(
+            "velnor-slot-1",
+            &["velnor".into()],
+            3,
+            &explicit_non_ephemeral,
+            &decoded,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not ephemeral"), "{error}");
 
         let mut extra_label = runner.clone();
         extra_label
