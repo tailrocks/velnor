@@ -2369,8 +2369,7 @@ mod tests {
         let rendered = rendered(&prepared);
         let backend = rendered
             .iter()
-            .filter(|argument| argument.starts_with("VELNOR_EXECUTION_BACKEND="))
-            .next_back();
+            .rfind(|argument| argument.starts_with("VELNOR_EXECUTION_BACKEND="));
         assert_eq!(backend, Some(&"VELNOR_EXECUTION_BACKEND=docker".to_owned()));
     }
 
