@@ -5603,6 +5603,10 @@ fn render_apt_package_updater_job(
                     "    if: ${{{{ needs.verify-{lane_name}.outputs.available == 'true' && inputs.writer{trusted_condition} }}}}"
                 ),
             );
+            // The mutate body can consume more than the availability output.
+            // Rewrite every remaining dependency reference after renaming the
+            // verify job so split lanes cannot retain a dangling needs.verify.
+            body = body.replace("needs.verify.", &format!("needs.verify-{lane_name}."));
         }
     }
     format!(
@@ -10683,7 +10687,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         apt.workflow_templates.insert(
             "package-updater.yml".to_owned(),
             format!(
-                "name: Package updater\njobs:\n  verify:\n    if: ${{{{ inputs.consumer-repository != '' }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    outputs:\n      available: ${{{{ steps.poll.outputs.available }}}}\n    steps:\n      - run: echo verify\n  mutate:\n    needs: verify\n    if: ${{{{ needs.verify.outputs.available == 'true' && inputs.writer }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    steps:\n      - run: echo mutate\n"
+                "name: Package updater\njobs:\n  verify:\n    if: ${{{{ inputs.consumer-repository != '' }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    outputs:\n      available: ${{{{ steps.poll.outputs.available }}}}\n      identity: ${{{{ steps.poll.outputs.identity }}}}\n    steps:\n      - run: echo verify\n  mutate:\n    needs: verify\n    if: ${{{{ needs.verify.outputs.available == 'true' && inputs.writer }}}}\n    runs-on: ${{{{ inputs.lane == 'github' && 'ubuntu-26.04' || {dynamic_runner} }}}}\n    steps:\n      - run: echo mutate\n        env:\n          IDENTITY: ${{{{ needs.verify.outputs.identity }}}}\n"
             ),
         );
         apt.adopted_workflow_surface = true;
@@ -10703,6 +10707,9 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(rendered.contains("    runs-on: ubuntu-26.04"));
         assert!(rendered.contains("github.ref == 'refs/heads/main'"));
         assert!(!rendered.contains("runs-on: ${{ inputs.lane"));
+        assert!(!rendered.contains("needs.verify."));
+        assert!(rendered.contains("needs.verify-velnor.outputs.identity"));
+        assert!(rendered.contains("needs.verify-github.outputs.identity"));
     }
 
     #[test]
