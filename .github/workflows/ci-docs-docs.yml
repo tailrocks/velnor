@@ -23,7 +23,7 @@ jobs:
         with:
           rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=12da6232672f039e42c21fe9dff00085856ef92d" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=07750dcaaff8173ef622a081142ff25855e4bf5e" >> "$GITHUB_ENV"
       - name: Restore Documentation cache
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

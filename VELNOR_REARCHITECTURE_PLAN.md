@@ -3336,7 +3336,7 @@ the hardened runtime.
 ## 40. Policy pair correction — workflow `12da623`
 
 Section 37's pre-cycle policy pin is historical. The current base-owned
-reusable workflow is `12da6232672f039e42c21fe9dff00085856ef92d`; it installs
+reusable workflow is `07750dcaaff8173ef622a081142ff25855e4bf5e`; it installs
 the generic-input runtime at `8859e3c537cfc2d6e44a92d0c4c0f7ca071e92e0`.
 Generated entrypoints and advisory calls pass the workflow's own full SHA as
 `policy-revision`, which the installed runtime validates. This removes the
