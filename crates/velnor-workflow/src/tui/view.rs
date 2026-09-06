@@ -435,8 +435,9 @@ fn unit_details(
         lines.push(Line::from(format!("Tool  {version}")));
     }
     match runners {
-        crate::RunnerMode::Github => append_lane_details(&mut lines, unit, runners, system),
-        crate::RunnerMode::Velnor => append_lane_details(&mut lines, unit, runners, system),
+        crate::RunnerMode::Github | crate::RunnerMode::Velnor => {
+            append_lane_details(&mut lines, unit, runners, system);
+        }
         crate::RunnerMode::Both => {
             append_lane_details(&mut lines, unit, crate::RunnerMode::Github, system);
             lines.push(Line::from(""));
