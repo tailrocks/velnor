@@ -530,6 +530,19 @@ not present.
   entries and 12,919,364,637 bytes total (12.032 GiB), so post-fix warm proof
   and budget headroom remain OPEN.
 
+### Recheck 2026-09-06T19:37:44Z
+
+- The superseded main run [34052819660](https://github.com/tailrocks/velnor/actions/runs/34052819660)
+  (head `f9e75cb2`, created 18:47:13Z) still holds the main concurrency group
+  with 11 queued Velnor jobs. A run-cancel request was submitted at 19:34:35Z
+  and the run remains queued; direct deletion returned HTTP 403. This is an
+  external queue-owner blocker, not evidence of a passing main run.
+- PR #610 now also sets `cancel-in-progress: true` for generated main and
+  nightly workflows. It preserves the full trusted Velnor caller set while
+  ensuring a newer push cancels a superseded capacity-starved run. Its checks
+  restarted after this commit; merge and the resulting main seed run remain
+  OPEN.
+
 Provider, queue, and coverage record:
 
 | Area | Evidence | State |
