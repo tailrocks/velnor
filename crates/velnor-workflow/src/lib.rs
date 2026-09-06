@@ -8372,8 +8372,7 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("gcc-aarch64-linux-gnu"));
-        assert!(release_workflow.contains("MBX_DISABLE=1 mbx zigbuild -p velnor-runner"));
-        assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("cargo zigbuild -p velnor-runner"));
         assert!(release_workflow
             .contains("mbx run -p velnor-runner --bin velnor-guest-image --locked --release --"));
         assert!(release_workflow.contains("workflow:\n    needs: [identity, release_gate]"));
