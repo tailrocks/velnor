@@ -31,7 +31,11 @@ use super::watchdog::{feed_after_cycle, LocalCycle};
 /// Bound live JIT requests during startup/recovery without making the GitHub
 /// API a burst target. This matches the bounded configure path.
 const JIT_REGISTRATION_CONCURRENCY: usize = 4;
-const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Reconcile remote registration membership at most once per minute. The
+/// reconciliation uses one paginated fleet listing per controller, not one
+/// request per registered slot, so multi-slot fleets do not exhaust the
+/// shared GitHub token budget.
+const REGISTRATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// Completion-marker and orphan-outbox scans are recovery work, not a steady
 /// state tick. The first cycle runs them immediately; retries are bounded.
 const OUTBOX_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
@@ -65,8 +69,8 @@ const RATE_LIMIT_HEADROOM_REMAINING: u64 = 100;
 /// deliberately short (5s doubling) — only sustained failures grow long.
 const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
 
-/// Fleet-wide REST pacing for the shared PAT, owned by the controller.
-/// Read-only probes and JIT registration retries draw from the same budget:
+/// Controller-local REST pacing for the shared PAT.
+/// Read-only probes and JIT registration retries in this controller draw from the same budget:
 /// when GitHub reports exhaustion (403/429 with rate-limit headers), every
 /// paced call holds until the reset epoch, so a quota storm cannot feed on
 /// its own retries. Health degrades visibly (`github_reachable: false`)
@@ -75,7 +79,7 @@ const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
 struct GithubPacing {
     next_probe: tokio::time::Instant,
     probe_failures: u32,
-    /// Fleet-wide hold on JIT registration while the shared PAT is exhausted.
+    /// Controller-wide hold on JIT registration while the shared PAT is exhausted.
     /// Independent of per-slot retry: a quota 403/429 must not let proven
     /// unregistered slots keep calling `jit_configure_one_slot`.
     rest_hold_until: Option<tokio::time::Instant>,
@@ -117,8 +121,12 @@ impl GithubPacing {
         now >= self.next_probe
     }
 
+    fn rest_requests_allowed(&self, now: tokio::time::Instant) -> bool {
+        self.rest_hold_until.is_none_or(|deadline| now >= deadline)
+    }
+
     /// Record a probe outcome and schedule the next probe. Rate-limited
-    /// probes hold the whole fleet until the reported reset epoch.
+    /// probes hold this controller's fleet until the reported reset epoch.
     fn record_probe(
         &mut self,
         now: tokio::time::Instant,
@@ -174,7 +182,7 @@ impl GithubPacing {
         self.registration_retry.remove(slot_id);
     }
 
-    /// Fleet-wide REST hold until the GitHub reset epoch. Same duration
+    /// Controller-wide REST hold until the GitHub reset epoch. Same duration
     /// formula as a rate-limited probe: jittered remaining window, or the
     /// probe backoff ceiling when GitHub omitted the reset header (429).
     fn hold_rest_until(&mut self, now: tokio::time::Instant, reset_epoch: Option<u64>) {
@@ -721,7 +729,9 @@ async fn reconcile_once(
 
     observe_github_and_routing(args, journal, pacing, remote_deadline).await?;
 
-    if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL {
+    if last_registration_reconcile.elapsed() >= REGISTRATION_RECONCILE_INTERVAL
+        && pacing.rest_requests_allowed(tokio::time::Instant::now())
+    {
         *last_registration_reconcile = Instant::now();
         let reconciliation = run_bounded_remote_reconciliation(
             reconcile_remote_registrations(args, journal, jobs, pacing),
@@ -1140,6 +1150,7 @@ async fn reconcile_remote_registrations(
         .unwrap_or_else(|| args.state_dir.clone());
     let slot_count = exec.slots;
     let mut lost = Vec::new();
+    let mut registered = Vec::new();
     for slot in state.slots.iter().filter(|slot| slot.registered) {
         let index = slot_index_from_id(&slot.slot_id);
         let slot_dir = crate::runner::daemon_slot_config_dir(&config_base, index, slot_count);
@@ -1163,8 +1174,12 @@ async fn reconcile_remote_registrations(
             lost.push((slot.slot_id.clone(), slot.generation));
             continue;
         };
-        let remote = match client.get_runner(&scope, pat, local_id).await {
-            Ok(remote) => remote,
+        registered.push((slot.slot_id.clone(), slot.generation, local_id));
+    }
+
+    if !registered.is_empty() {
+        let remote_ids = match client.list_runners(&scope, pat).await {
+            Ok(runners) => remote_runner_ids(runners.into_iter().map(|runner| runner.id)),
             Err(error) => {
                 if let Some(quota) = crate::protocol::github_api_quota_status(&error) {
                     pacing.hold_rest_until(
@@ -1172,17 +1187,23 @@ async fn reconcile_remote_registrations(
                         quota.reset_epoch_or_retry_after(epoch_now()),
                     );
                 }
-                eprintln!(
-                    "registration reconciliation lookup failed for runner id {local_id}: {error:#}"
-                );
-                continue;
+                eprintln!("registration reconciliation listing failed: {error:#}");
+                None
             }
         };
-        if remote.is_none() {
-            // Registration loss invalidates the broker worker even while it
-            // owns a job. The durable event releases admission first; the
-            // worker remains journal-owned until normal teardown reconciles it.
-            lost.push((slot.slot_id.clone(), slot.generation));
+        if let Some(remote_ids) = remote_ids {
+            for (slot_id, generation, local_id) in registered {
+                if !remote_ids.contains(&local_id) {
+                    // Registration loss invalidates the broker worker even while it
+                    // owns a job. The durable event releases admission first; the
+                    // worker remains journal-owned until normal teardown reconciles it.
+                    lost.push((slot_id, generation));
+                }
+            }
+        } else {
+            eprintln!(
+                "registration reconciliation skipped: runner listing did not provide numeric identities"
+            );
         }
     }
 
@@ -1206,6 +1227,13 @@ async fn reconcile_remote_registrations(
         );
     }
     Ok(())
+}
+
+/// Return a complete remote identity set, or no evidence at all when the
+/// listing contains an entry without an id. Partial identity evidence must
+/// never make reconciliation delete a valid local registration.
+fn remote_runner_ids(runners: impl IntoIterator<Item = Option<i64>>) -> Option<HashSet<i64>> {
+    runners.into_iter().collect()
 }
 
 fn load_local_runner_config(slot_dir: &Path) -> anyhow::Result<Option<config::StoredRunnerConfig>> {
@@ -3454,6 +3482,15 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners/7"))
             .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 0,
+                "runners": []
+            })))
             .mount(&server)
             .await;
 
@@ -3891,6 +3928,13 @@ mod tests {
         assert!(matches!(result, Ok(Ok(()))));
     }
 
+    #[test]
+    fn remote_runner_ids_require_complete_identity_evidence() {
+        let ids = remote_runner_ids([Some(7), Some(8)]);
+        assert_eq!(ids, Some(HashSet::from([7, 8])));
+        assert!(remote_runner_ids([Some(7), None]).is_none());
+    }
+
     #[cfg(feature = "test-support")]
     async fn reconciliation_lookup_error_pacing(
         status: u16,
@@ -3905,7 +3949,7 @@ mod tests {
                 response.insert_header(*name, value.clone())
             });
         Mock::given(method("GET"))
-            .and(path("/api/v3/orgs/tailrocks/actions/runners/7"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
             .respond_with(response)
             .mount(&server)
             .await;
@@ -4178,6 +4222,15 @@ mod tests {
         // No retry before the reset window, even after the normal 60s floor.
         assert!(!pacing.probe_due(now + GITHUB_PROBE_MAX_BACKOFF));
         assert!(pacing.probe_due(now + Duration::from_secs(3700)));
+    }
+
+    #[test]
+    fn pacing_rate_limit_blocks_registration_reconciliation_until_reset() {
+        let mut pacing = GithubPacing::default();
+        let now = tokio::time::Instant::now();
+        pacing.record_probe(now, true, Some(0), Some(epoch_now() + 3500));
+        assert!(!pacing.rest_requests_allowed(now + GITHUB_PROBE_MAX_BACKOFF));
+        assert!(pacing.rest_requests_allowed(now + Duration::from_secs(3700)));
     }
 
     #[test]

@@ -3020,6 +3020,51 @@ fn is_mbx_token(input: &str, index: usize) -> bool {
             .is_some_and(u8::is_ascii_whitespace)
 }
 
+fn is_shell_command_separator(token: &str) -> bool {
+    matches!(token, "&&" | "||" | "|" | ";" | "&")
+}
+
+fn strip_mbx_no_deps(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut mbx_pending_subcommand = false;
+    let mut mbx_check_or_clippy = false;
+    while let Some((start, end)) = next_shell_token(input, cursor) {
+        if input[cursor..start].contains('\n') {
+            mbx_pending_subcommand = false;
+            mbx_check_or_clippy = false;
+        }
+        let token = &input[start..end];
+        if mbx_check_or_clippy && token == "--no-deps" {
+            // Mr. Boxington's check and clippy wrappers intentionally do not
+            // expose Cargo's `--no-deps` option.
+            cursor = end;
+        } else {
+            output.push_str(&input[cursor..end]);
+            cursor = end;
+        }
+
+        if is_shell_command_separator(token) {
+            mbx_pending_subcommand = false;
+            mbx_check_or_clippy = false;
+        } else if mbx_check_or_clippy {
+            // Keep the state until the shell command ends so flags can be
+            // removed regardless of their position in the invocation.
+        } else if mbx_pending_subcommand {
+            if matches!(token, "check" | "clippy") {
+                mbx_pending_subcommand = false;
+                mbx_check_or_clippy = true;
+            } else if !token.starts_with('+') || token.len() == 1 {
+                mbx_pending_subcommand = false;
+            }
+        } else if token == "mbx" {
+            mbx_pending_subcommand = true;
+        }
+    }
+    output.push_str(&input[cursor..]);
+    output
+}
+
 fn mbxify_rustup_cargo_invocations(input: &str) -> (String, bool) {
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
@@ -3091,7 +3136,9 @@ fn mbxify_cargo_invocations(input: &str) -> (String, bool) {
         cursor = cargo_end;
     }
     output.push_str(&input[cursor..]);
-    (output, changed)
+    let normalized = strip_mbx_no_deps(&output);
+    let changed = changed || normalized != output;
+    (normalized, changed)
 }
 
 const STATIC_MR_BOXINGTON_STEP: &str = r"      - name: Set up Mr. Boxington
@@ -9675,6 +9722,14 @@ const INCLUDED: &str = include_str!("fixture.txt");
     #[test]
     fn mbx_command_rewrite_routes_all_supported_cargo_commands() {
         assert_eq!(mbxify_cargo_command("cargo fmt --all"), "mbx fmt --all");
+        assert_eq!(
+            mbxify_cargo_command("cargo clippy --locked --no-deps --all-targets"),
+            "mbx clippy --locked --all-targets"
+        );
+        assert_eq!(
+            mbxify_cargo_command("cargo clippy --no-deps && cargo check --no-deps"),
+            "mbx clippy && mbx check"
+        );
         assert_eq!(
             mbxify_cargo_command("cargo zigbuild -p velnor-runner"),
             "mbx zigbuild -p velnor-runner"
