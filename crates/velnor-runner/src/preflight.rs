@@ -430,13 +430,13 @@ mod tests {
                 "[Slice]\nCPUQuota=95%\n"
             } else if program == "systemctl"
                 && args.first().is_some_and(|arg| arg == "show")
-                && args.len() == 5
+                && args.len() == 4
                 && args.get(1).is_some_and(|arg| arg == "--property=LoadState")
                 && args
                     .get(2)
                     .is_some_and(|arg| arg == "--property=CPUQuotaPerSecUSec")
             {
-                "loaded\n950ms\n"
+                "CPUQuotaPerSecUSec=950ms\nLoadState=loaded\n"
             } else {
                 ""
             };
