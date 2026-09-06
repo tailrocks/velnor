@@ -47,6 +47,7 @@ const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
     "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
     "package", "publish", "run", "test", "update", "zigbuild",
 ];
+const DIRECT_CARGO_ENV: &str = "VELNOR_DIRECT_CARGO=1 ";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
 const VELNOR_POLICY_PROVIDER_WORKFLOW: &str = "velnor-workflow-policy.yml";
 const VELNOR_RELEASE_WORKFLOW_TEMPLATE: &str = include_str!("../templates/velnor-release.yml");
@@ -2582,7 +2583,9 @@ fn mbxify_cargo_invocations(input: &str) -> (String, bool) {
         };
         let subcommand = &input[subcommand_start..subcommand_end];
         output.push_str(&input[cursor..start]);
-        if is_mr_boxington_cargo_subcommand(subcommand) {
+        if is_mr_boxington_cargo_subcommand(subcommand)
+            && !input[..start].ends_with(DIRECT_CARGO_ENV)
+        {
             output.push_str("mbx");
             changed = true;
         } else {
@@ -8642,8 +8645,10 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
         assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
         assert!(release_workflow.contains("gcc-aarch64-linux-gnu"));
-        assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
-        assert!(!release_workflow.contains("cargo zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("cargo zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("cargo zigbuild -p velnorctl"));
+        assert!(!release_workflow.contains("mbx zigbuild -p velnor-runner"));
+        assert!(!release_workflow.contains("mbx zigbuild -p velnorctl"));
         assert!(release_workflow
             .contains("mbx run -p velnor-runner --bin velnor-guest-image --locked --release --"));
         assert!(release_workflow.contains("workflow:\n    needs: [identity, release_gate]"));
@@ -8750,6 +8755,14 @@ path-only = { path = "../path-only" }
         assert_eq!(
             mbxify_cargo_command("cargo zigbuild -p velnor-runner"),
             "mbx zigbuild -p velnor-runner"
+        );
+        assert_eq!(
+            mbxify_cargo_command("VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner"),
+            "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner"
+        );
+        assert_eq!(
+            mbxify_cargo_command("VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl"),
+            "VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl"
         );
         assert_eq!(
             mbxify_cargo_command("cd -- 'crates/app' && cargo nextest run"),

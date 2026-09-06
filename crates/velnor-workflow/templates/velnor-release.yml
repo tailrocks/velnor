@@ -956,12 +956,14 @@ jobs:
           # release-build is a feature of velnor-runner and velnorctl only.
           # The deb also ships velnor-tools and velnor-workflow, so build those
           # packages explicitly without inventing a feature they do not own.
-          # Keep every Rust release package behind the pinned Mr. Boxington
-          # toolchain and cache path, including this C-native package.
-          mbx zigbuild -p velnor-runner \
+          # aws-lc-sys emits glibc ISO C23 references that the MBX target
+          # overlay's Zig linker cannot resolve. Build both C-native release
+          # binaries directly with cargo-zigbuild; MBX remains enabled for
+          # the other release packages below.
+          VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnor-runner \
             --bin velnor-runner \
             --release --locked --features release-build --target "${{ matrix.target }}"
-          mbx zigbuild -p velnorctl \
+          VELNOR_DIRECT_CARGO=1 cargo zigbuild -p velnorctl \
             --release --locked --features release-build --target "${{ matrix.target }}"
           mbx zigbuild -p velnor-tools \
             --release --locked --target "${{ matrix.target }}"
