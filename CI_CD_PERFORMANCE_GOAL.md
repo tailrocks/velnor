@@ -478,6 +478,25 @@ not present.
   the 8-GiB limit. Over-budget days therefore remain observable as artifacts
   and still fail the budget gate.
 
+- Commit `c266ce93` replaced the generator's naive `include_str!` search with
+  a lexical scanner that ignores comments, ordinary/raw strings, and char
+  literals; the workflow test suite and generated-output check pass. Commit
+  `6fb75a7a` then records static `.github` inputs without reintroducing
+  generated-file fanout.
+- Commit `9a88b708` adds a Docker `ci` target after source validation and makes
+  PR Docker commands stop at that target; release/default builds still compile
+  the shipped binaries. Local `docker buildx build --target ci` and full builds
+  pass. Remote run [34048737638](https://github.com/tailrocks/velnor/actions/runs/34048737638)
+  passed Docker job `101528745154` in `1m16s` (`55s` for the Docker check),
+  but it was not a comparable affected-only run.
+- Commit `d0315e34` closes the runner cancellation fan-out race by making the
+  public synchronous fan-out wait for the in-flight marker to clear. The
+  targeted regression test and the full local `velnor-runner` suite pass
+  (`1690` passed, `1` ignored). Remote run
+  [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813)
+  passed `velnor-runner` job `101530695572` in `3m12s`; the PR run was still
+  waiting on `velnorctl` when this entry was written.
+
 - Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
   `rust-velnor-runner`, `rust-velnorctl`.
 - Single-crate `velnor-client` full IDs:
