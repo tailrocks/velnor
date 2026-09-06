@@ -14,7 +14,7 @@ limitations = ["Manifests nested under tests/ or benches/ directories are treate
 [workflow]
 github_runner = "ubuntu-24.04"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
-files = ["ci-main.yml", "ci-policy.yml", "ci-pr.yml", "ci-release-package-signer.yml", "maintenance.yml", "nightly.yml", "release.yml", "velnor-workflow-policy.yml", "ci-bun-velnor.yml", "ci-docker-docker.yml", "ci-docs-docs.yml", "ci-opentofu-opentofu.yml", "ci-rust-policy.yml", "ci-rust-unit-collector.yml", "ci-rust-velnor-bench.yml", "ci-rust-velnor-client.yml", "ci-rust-velnor-control.yml", "ci-rust-velnor-model.yml", "ci-rust-velnor-render.yml", "ci-rust-velnor-runner.yml", "ci-rust-velnor-tools.yml", "ci-rust-velnor-workflow.yml", "ci-rust-velnorctl.yml"]
+files = ["ci-pr.yml", "ci-policy.yml", "ci-main.yml", "release.yml", "ci-release-package-signer.yml", "velnor-workflow-policy.yml", "nightly.yml", "maintenance.yml", "ci-bun-velnor.yml", "ci-docker-docker.yml", "ci-docs-docs.yml", "ci-opentofu-opentofu.yml", "ci-rust-policy.yml", "ci-rust-unit-collector.yml", "ci-rust-velnor-bench.yml", "ci-rust-velnor-client.yml", "ci-rust-velnor-control.yml", "ci-rust-velnor-model.yml", "ci-rust-velnor-render.yml", "ci-rust-velnor-runner.yml", "ci-rust-velnor-tools.yml", "ci-rust-velnor-workflow.yml", "ci-rust-velnorctl.yml"]
 notes = ["Rust verification uses Mr. Boxington 1.8.3; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store."]
 
 [release]
@@ -51,7 +51,7 @@ kind = "docker"
 root = "."
 watch = [".dockerignore", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/**", "crates/velnor-workflow/**", "docker/build-mise.lock", "docker/build-mise.toml", "microvm/**", "rust-toolchain.toml", "tools/**"]
 github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-github_full_commands = ["if [[ \"${CI_CACHE_WRITE:-false}\" == \"true\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'; else docker buildx build --load --cache-from type=gha,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile '.'; fi"]
+github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 velnor_pr_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
