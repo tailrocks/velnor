@@ -14,6 +14,8 @@ idiomatic_version_file_enable_tools = ["rust"]
 # mise version-file setting above. Every other entry is an exact mise pin.
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.143"
 "cargo:cargo-deny" = "0.20.2"
+"aqua:opentofu/opentofu" = "1.12.6"
+"aqua:oven-sh/bun" = "1.4.0"
 "github:fornwall/rust-script" = "0.36.0"
 just = "1.58.0"
 protoc = "36.1"

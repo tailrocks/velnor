@@ -1489,34 +1489,17 @@ fn include_str_paths(
     }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
-        let mut cursor = 0;
-        while let Some(relative) = source_contents[cursor..].find("include_str!") {
-            let start = cursor + relative + "include_str!".len();
-            let remainder = source_contents[start..].trim_start();
-            let Some(argument) = remainder.strip_prefix('(') else {
-                cursor = start;
-                continue;
-            };
-            let Some(end) = argument.find(')') else {
-                return Err(GeneratorError::usage(format!(
-                    "unterminated include_str! in {}",
-                    root.join(source).display()
-                )));
-            };
-            let literal = argument[..end].trim();
-            let included = serde_json::from_str::<String>(literal).map_err(|error| {
-                GeneratorError::usage(format!(
-                    "include_str! must use a plain string literal in {}: {error}",
-                    root.join(source).display()
-                ))
-            })?;
+        let included_paths = parse_include_str_literals(&source_contents).map_err(|error| {
+            GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
+        })?;
+        for included in included_paths {
             let target = resolve_repo_path(&parent_path(source), &included).ok_or_else(|| {
                 GeneratorError::usage(format!(
                     "include_str! escapes the repository from {}: {included}",
                     root.join(source).display()
                 ))
             })?;
-            if !file_set.contains(&target) {
+            if !file_set.contains(&target) && !static_github_input_exists(root, &target)? {
                 return Err(GeneratorError::usage(format!(
                     "include_str! target does not exist: {} -> {}",
                     root.join(source).display(),
@@ -1524,10 +1507,181 @@ fn include_str_paths(
                 )));
             }
             targets.insert(target);
-            cursor = start + argument[..end].len() + 1;
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
+    const MACRO: &str = "include_str!";
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut included = Vec::new();
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
+            cursor = skip_line_comment(bytes, cursor + 2);
+            continue;
+        }
+        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
+            cursor = skip_block_comment(bytes, cursor + 2);
+            continue;
+        }
+        if let Some(end) = skip_raw_string(bytes, cursor) {
+            cursor = end;
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            cursor = skip_quoted_literal(bytes, cursor, b'"')
+                .map_err(|error| format!("{error} at byte {cursor}"))?;
+            continue;
+        }
+        if bytes[cursor] == b'\'' && is_char_literal_start(bytes, cursor) {
+            cursor = skip_quoted_literal(bytes, cursor, b'\'')
+                .map_err(|error| format!("{error} at byte {cursor}"))?;
+            continue;
+        }
+
+        if bytes[cursor..].starts_with(MACRO.as_bytes())
+            && (cursor == 0 || !is_rust_identifier_byte(bytes[cursor - 1]))
+        {
+            let mut argument = cursor + MACRO.len();
+            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
+                argument += 1;
+            }
+            if bytes.get(argument) != Some(&b'(') {
+                cursor += MACRO.len();
+                continue;
+            }
+            argument += 1;
+            while bytes.get(argument).is_some_and(u8::is_ascii_whitespace) {
+                argument += 1;
+            }
+            if bytes.get(argument) != Some(&b'"') {
+                return Err("include_str! must use a plain string literal".to_owned());
+            }
+            let literal_end = skip_quoted_literal(bytes, argument, b'"')
+                .map_err(|error| format!("{error} at byte {argument}"))?;
+            let literal = &source[argument..literal_end];
+            let value = serde_json::from_str::<String>(literal).map_err(|error| {
+                format!("include_str! must use a plain string literal: {error}")
+            })?;
+            let mut close = literal_end;
+            while bytes.get(close).is_some_and(u8::is_ascii_whitespace) {
+                close += 1;
+            }
+            if bytes.get(close) != Some(&b')') {
+                return Err("unterminated include_str!".to_owned());
+            }
+            included.push(value);
+            cursor = close + 1;
+            continue;
+        }
+        cursor += 1;
+    }
+    Ok(included)
+}
+
+fn is_rust_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    let mut depth = 1;
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            depth += 1;
+            cursor += 2;
+        } else if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+            depth -= 1;
+            cursor += 2;
+            if depth == 0 {
+                return cursor;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn skip_raw_string(bytes: &[u8], cursor: usize) -> Option<usize> {
+    let (hash_start, content_start) = match bytes.get(cursor..) {
+        Some([b'r', rest @ ..]) => (
+            cursor + 1,
+            cursor + 1 + rest.iter().take_while(|byte| **byte == b'#').count(),
+        ),
+        Some([b'b', b'r', rest @ ..]) => (
+            cursor + 2,
+            cursor + 2 + rest.iter().take_while(|byte| **byte == b'#').count(),
+        ),
+        _ => return None,
+    };
+    if bytes.get(content_start) != Some(&b'"') {
+        return None;
+    }
+    let hashes = content_start - hash_start;
+    let mut end = content_start + 1;
+    while end < bytes.len() {
+        if bytes[end] == b'"'
+            && bytes
+                .get(end + 1..end + 1 + hashes)
+                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
+        {
+            return Some(end + 1 + hashes);
+        }
+        end += 1;
+    }
+    Some(bytes.len())
+}
+
+fn is_char_literal_start(bytes: &[u8], cursor: usize) -> bool {
+    match bytes.get(cursor + 1) {
+        Some(b'\\') => true,
+        Some(byte) if *byte != b'\'' && *byte != b'\n' => bytes.get(cursor + 2) == Some(&b'\''),
+        _ => false,
+    }
+}
+
+fn skip_quoted_literal(bytes: &[u8], mut cursor: usize, delimiter: u8) -> Result<usize, String> {
+    cursor += 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = cursor.saturating_add(2),
+            character if character == delimiter => return Ok(cursor + 1),
+            b'\n' if delimiter == b'\'' => {
+                return Err(format!("unterminated quoted literal at byte {cursor}"));
+            }
+            _ => cursor += 1,
+        }
+    }
+    Err(format!("unterminated quoted literal at byte {cursor}"))
+}
+
+fn static_github_input_exists(root: &Path, target: &str) -> Result<bool, GeneratorError> {
+    if !target.starts_with(".github/")
+        || target == ".github/UNIFIED-ACTIONS.md"
+        || target.starts_with(".github/ci/")
+        || target.starts_with(".github/workflows/")
+    {
+        return Ok(false);
+    }
+    let path = root.join(target);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(GeneratorError::io(
+            "inspect include_str target",
+            &path,
+            &error,
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2492,9 +2646,28 @@ fn apply_local_velnor_profile(
         });
     }
     apply_velnor_watch_graph(root, &mut config)?;
+    configure_velnor_docker_pr_target(&mut config);
     add_velnor_regeneration_gate(&mut config);
     enable_mr_boxington_commands(&mut config);
     Ok(config)
+}
+
+fn configure_velnor_docker_pr_target(config: &mut ProjectConfig) {
+    for unit in config
+        .units
+        .iter_mut()
+        .filter(|unit| unit.kind == UnitKind::Docker && unit.root == ".")
+    {
+        for command in &mut unit.pr_commands {
+            let Some(arguments) = command.strip_prefix("docker build ") else {
+                continue;
+            };
+            if !arguments.contains("--file 'Dockerfile'") {
+                continue;
+            }
+            *command = format!("docker build --target ci {arguments}");
+        }
+    }
 }
 
 fn add_velnor_regeneration_gate(config: &mut ProjectConfig) {
@@ -2529,10 +2702,15 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
     let files = repository_files(root)?;
     let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
     let docker_watch = docker_watch_paths(root, &config.units)?;
-    let common_runtime_inputs = [
-        "crates/velnor-workflow/src/lib.rs",
-        "crates/velnor-workflow/src/runtime.rs",
-    ];
+    // `runtime.rs` executes in every generated job, so its selection and
+    // command-contract changes are broad-impact. `lib.rs` is the generator
+    // and already belongs to the workflow crate plus the Docker image that
+    // packages the runtime. Keeping it out of this common list prevents a
+    // generator-only edit from selecting every verification unit; stale
+    // generated output is then caught by the workflow unit's regeneration
+    // gate, while changed generated `.github/**` output still fails closed to
+    // full selection in the runtime.
+    let common_runtime_inputs = ["crates/velnor-workflow/src/runtime.rs"];
     for unit in &mut config.units {
         if unit.kind == UnitKind::Docker && unit.root == "." {
             unit.watch.clone_from(&docker_watch);
@@ -4940,8 +5118,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         unit: &Unit,
         cache_save: bool,
     ) {
+        // The Velnor job image is the toolchain boundary for self-hosted jobs.
+        // Hosted setup actions either are not admitted by Velnor or would
+        // redundantly download tools already pinned in that image. Keep
+        // transport/setup actions lane-specific instead of rendering one
+        // action surface and hoping the runner can ignore the other lane.
+        let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
-        if tools.contains(&ToolRequirement::Mise) {
+        if github_lane && tools.contains(&ToolRequirement::Mise) {
             let _ = writeln!(
                 output,
                 "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust aqua:nextest-rs/nextest/cargo-nextest\n          cache: true",
@@ -5000,7 +5184,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 );
             }
         }
-        if tools.contains(&ToolRequirement::Bun) {
+        if github_lane && tools.contains(&ToolRequirement::Bun) {
             if let Some(bun_version) = unit.tool_version.as_deref() {
                 let _ = writeln!(
                     output,
@@ -5015,7 +5199,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 );
             }
         }
-        if tools.contains(&ToolRequirement::Node) {
+        if github_lane && tools.contains(&ToolRequirement::Node) {
             let cache_manager = "npm";
             let cache_dependency_path = unit.cache.as_ref().and_then(|cache| {
                 cache
@@ -5038,67 +5222,57 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 ActionPin::Node.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
+        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::CargoDeny) {
+        if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-deny\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::CargoAudit) {
+        if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-audit\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
                 ActionPin::RustTool.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Gradle) {
+        if github_lane && tools.contains(&ToolRequirement::Gradle) {
             let _ = writeln!(
                 output,
                 "      - name: Set up Gradle\n        uses: {}",
                 ActionPin::Gradle.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Sccache) {
+        if github_lane && tools.contains(&ToolRequirement::Sccache) {
             let _ = writeln!(
                 output,
                 "      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0",
                 ActionPin::Sccache.reference()
             );
         }
-        if tools.contains(&ToolRequirement::Mold) {
-            if lane == RunnerMode::Github {
-                output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
-            } else {
-                let _ = writeln!(
-                    output,
-                    "      - name: Set up mold\n        uses: {}\n        with:\n          make-default: true",
-                    ActionPin::Mold.reference()
-                );
-            }
+        if github_lane && tools.contains(&ToolRequirement::Mold) {
+            output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
         }
-        if tools.contains(&ToolRequirement::DockerBuildx) {
-            if lane == RunnerMode::Github {
-                let _ = writeln!(
-                    output,
-                    "      - name: Expose GitHub Actions runtime\n        uses: {}",
-                    ActionPin::GithubRuntime.reference()
-                );
-            }
+        if github_lane && tools.contains(&ToolRequirement::DockerBuildx) {
+            let _ = writeln!(
+                output,
+                "      - name: Expose GitHub Actions runtime\n        uses: {}",
+                ActionPin::GithubRuntime.reference()
+            );
             let _ = writeln!(
                 output,
                 "      - name: Set up Docker Buildx\n        uses: {}",
                 ActionPin::DockerBuildx.reference()
             );
         }
-        if tools.contains(&ToolRequirement::OpenTofu) {
+        if github_lane && tools.contains(&ToolRequirement::OpenTofu) {
             let _ = writeln!(
                 output,
                 "      - name: Set up OpenTofu\n        uses: {}\n        with:\n          tofu_version: {}\n          tofu_wrapper: false",
@@ -5106,7 +5280,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 OPEN_TOFU_VERSION,
             );
         }
-        if tools.contains(&ToolRequirement::Homebrew) {
+        if github_lane && tools.contains(&ToolRequirement::Homebrew) {
             output.push_str(
                 "      - name: Prepare Linuxbrew path\n        shell: bash\n        run: |\n          set -euo pipefail\n          if command -v brew >/dev/null 2>&1; then\n            exit 0\n          fi\n          linuxbrew_bin=/home/linuxbrew/.linuxbrew/bin\n          linuxbrew_sbin=/home/linuxbrew/.linuxbrew/sbin\n          if [[ ! -x \"$linuxbrew_bin/brew\" ]]; then\n            printf '%s\\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2\n            exit 1\n          fi\n          [[ -n \"${GITHUB_PATH:-}\" ]] || { printf '%s\\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }\n          printf '%s\\n%s\\n' \"$linuxbrew_bin\" \"$linuxbrew_sbin\" >> \"$GITHUB_PATH\"\n",
             );
@@ -6134,10 +6308,6 @@ jobs:
             '{captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
             > "$RUNNER_TEMP/cache-budget/summary.json"
           cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
-          if (( total > MAX_BYTES )); then
-            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
-            exit 1
-          fi
       - name: Publish cache budget snapshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -6145,6 +6315,16 @@ jobs:
           path: ${{ runner.temp }}/cache-budget
           if-no-files-found: error
           retention-days: 14
+      - name: Enforce cache budget
+        env:
+          MAX_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
+          if (( total > MAX_BYTES )); then
+            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
+            exit 1
+          fi
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
@@ -8865,6 +9045,114 @@ path-only = { path = "../path-only" }
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn scanner_tracks_static_github_include_str_inputs() {
+        let root = temporary_repository("static-github-include-str");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/fixtures")),
+            "create static GitHub input directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write manifest",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "pub const FIXTURE: &str = include_str!(\"../.github/fixtures/input.json\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            fs::write(root.join(".github/fixtures/input.json"), "{}\n"),
+            "write static GitHub input",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan static GitHub include_str repository",
+        );
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.id == "rust-fixture"),
+            "generated fixture unit",
+        );
+        assert!(
+            unit.watch
+                .iter()
+                .any(|path| path == ".github/fixtures/input.json"),
+            "static GitHub include_str input must be watched: {:?}",
+            unit.watch
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scanner_does_not_treat_generated_github_output_as_include_str_input() {
+        let root = temporary_repository("generated-github-include-str");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create generated GitHub output directory",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write manifest",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "pub const WORKFLOW: &str = include_str!(\"../.github/workflows/ci.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            fs::write(root.join(".github/workflows/ci.yml"), GENERATED_HEADER),
+            "write generated GitHub output",
+        );
+
+        let error = must_some(
+            scan_repository(&root, RunnerMode::Github).err(),
+            "generated GitHub output must not satisfy include_str",
+        );
+        assert!(error
+            .to_string()
+            .contains("include_str! target does not exist"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn include_str_parser_ignores_comments_and_other_literals() {
+        let source = r##"
+// include_str!("missing-line-comment")
+/* include_str!("missing-block-comment") */
+const TEXT: &str = "an apostrophe's include_str!(\"missing-string\")";
+const RAW: &str = r#"include_str!("missing-raw-string")"#;
+const CHARACTER: char = '\'';
+const INCLUDED: &str = include_str!("fixture.txt");
+"##;
+
+        assert_eq!(
+            must(
+                parse_include_str_literals(source),
+                "parse include_str literals"
+            ),
+            vec!["fixture.txt"]
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the workspace fixture keeps all evidence assertions together"
@@ -9046,6 +9334,36 @@ path-only = { path = "../path-only" }
         }
     }
 
+    #[test]
+    fn velnor_docker_pr_validation_stops_before_release_stage() {
+        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let mut config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        config.units.push(catalog_unit(
+            "docker",
+            "Docker",
+            UnitKind::Docker,
+            &["Dockerfile"],
+            &["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"],
+            &["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"],
+            None,
+        ));
+
+        configure_velnor_docker_pr_target(&mut config);
+
+        let docker = must_some(
+            config.units.iter().find(|unit| unit.id == "docker"),
+            "Docker unit",
+        );
+        assert_eq!(
+            docker.pr_commands,
+            vec!["docker build --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+        );
+        assert_eq!(
+            docker.full_commands,
+            vec!["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+        );
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the generator contract test keeps all workflow assertions together"
@@ -9141,6 +9459,9 @@ path-only = { path = "../path-only" }
         assert!(!velnor_lane.contains("cache-key:"));
         assert!(!velnor_lane.contains("version: 1.8.3"));
         assert!(!velnor_lane.contains("save-on-workflow-dispatch"));
+        assert!(!velnor_lane.contains(ActionPin::Mise.reference()));
+        assert!(!velnor_lane.contains(ActionPin::RustTool.reference()));
+        assert!(!velnor_lane.contains(ActionPin::Mold.reference()));
         assert!(github_lane.contains("actions/cache/restore@"));
         assert!(github_lane.contains("sha256sum --check --strict"));
         assert!(!github_lane.contains(ActionPin::Mold.reference()));
@@ -9152,6 +9473,10 @@ path-only = { path = "../path-only" }
         let policy_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(policy, WorkflowKind::Main);
         assert!(policy_workflow.contains("name: Set up cargo-deny"));
+        let policy_velnor_lane = policy_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane);
+        assert!(!policy_velnor_lane.contains(ActionPin::RustTool.reference()));
         let collector = must_some(
             config
                 .units
@@ -9162,6 +9487,10 @@ path-only = { path = "../path-only" }
         let collector_workflow =
             WorkflowIr::from_config(&config).render_nested_unit(collector, WorkflowKind::Main);
         assert!(collector_workflow.contains("name: Set up cargo-nextest"));
+        let collector_velnor_lane = collector_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane);
+        assert!(!collector_velnor_lane.contains(ActionPin::RustTool.reference()));
 
         let release = must_some(config.release.as_ref(), "Velnor release contract");
         let release_workflow = render_release(&config, release);
@@ -9290,6 +9619,52 @@ path-only = { path = "../path-only" }
             .split_once("\n  velnor:")
             .map_or("", |(_, lane)| lane)
             .contains(ActionPin::GithubRuntime.reference()));
+        assert!(!docker_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::DockerBuildx.reference()));
+
+        config.units.push(catalog_unit(
+            "bun-velnor",
+            "Bun package",
+            UnitKind::Bun,
+            &["package.json", "bun.lock"],
+            &["bun install --frozen-lockfile"],
+            &["bun install --frozen-lockfile"],
+            None,
+        ));
+        let bun = must_some(
+            config.units.iter().find(|unit| unit.id == "bun-velnor"),
+            "reviewed Bun unit",
+        );
+        let bun_workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(bun, WorkflowKind::Main);
+        assert!(bun_workflow.contains(ActionPin::Bun.reference()));
+        assert!(!bun_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::Bun.reference()));
+
+        config.units.push(catalog_unit(
+            "opentofu",
+            "OpenTofu",
+            UnitKind::OpenTofu,
+            &["**/*.tf"],
+            &["tofu validate"],
+            &["tofu validate"],
+            None,
+        ));
+        let opentofu = must_some(
+            config.units.iter().find(|unit| unit.id == "opentofu"),
+            "reviewed OpenTofu unit",
+        );
+        let opentofu_workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(opentofu, WorkflowKind::Main);
+        assert!(opentofu_workflow.contains(ActionPin::OpenTofuSetup.reference()));
+        assert!(!opentofu_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::OpenTofuSetup.reference()));
 
         let parent = WorkflowIr::from_config(&config).render_nested(WorkflowKind::PullRequest);
         assert!(parent.contains("units: ${{ steps.plan.outputs.units }}"));
@@ -10480,6 +10855,23 @@ path-only = { path = "../path-only" }
                 .map(|unit| &unit.id)
                 .collect::<Vec<_>>()
         );
+        let generator_path = "crates/velnor-workflow/src/lib.rs";
+        let generator_watchers = config
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern)
+                        .is_ok_and(|glob| glob.compile_matcher().is_match(generator_path))
+                })
+            })
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            generator_watchers,
+            vec!["docker", "rust-velnor-workflow", "rust-production-topology"],
+            "generator edits must not fan out to every verification unit"
+        );
         for name in expected {
             let path = PathBuf::from(".github/workflows").join(name);
             let content = must_some(files.get(&path), "generated current workflow");
@@ -10514,6 +10906,20 @@ path-only = { path = "../path-only" }
             .is_some_and(|content| {
                 content.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}"))
             }));
+        let maintenance = must_some(
+            files.get(&PathBuf::from(".github/workflows/maintenance.yml")),
+            "generated maintenance workflow",
+        );
+        assert!(
+            maintenance
+                .find("name: Publish cache budget snapshot")
+                .is_some_and(|publish| {
+                    maintenance
+                        .find("name: Enforce cache budget")
+                        .is_some_and(|enforce| publish < enforce)
+                }),
+            "cache evidence must be published before an over-budget failure"
+        );
     }
 
     #[test]

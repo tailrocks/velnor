@@ -412,6 +412,94 @@ open-PRs analysis, CI re-measurement, adversarial critique).
    "achieved". Confession does not count as completion either: externally
    blocked items (e.g. R6 runner capacity) stay OPEN with owner + date.
 
+## 8a. Live evidence log (2026-09-06)
+
+Status remains `NOT ACHIEVED`.
+
+### Comparable timing and topology
+
+| Run | Selection | Queue | Wall | Result |
+| --- | --- | ---: | ---: | --- |
+| [34026137664](https://github.com/tailrocks/velnor/actions/runs/34026137664) | warm affected GitHub baseline | 3s (09:58:57→09:59:00Z) | 12m09s (09:58:57→10:11:06Z) | green |
+| [34042229133](https://github.com/tailrocks/velnor/actions/runs/34042229133) | affected output, but generator diff made all 16 units full | 3s (15:24:55→15:24:58Z) | 13m08s | green; not comparable after |
+| [34044939215](https://github.com/tailrocks/velnor/actions/runs/34044939215) | main full run after v0.1.270 | 4m28s (16:17:01→16:21:29Z) | 21m12s (→16:38:13Z) | red; old Velnor image/runtime contract |
+
+No comparable post-change warm affected PR exists yet. Queue is reported
+separately; SLO comparison remains open.
+
+PR [#602](https://github.com/tailrocks/velnor/pull/602) keeps GitHub and Velnor
+callers in the same generated reusable workflows. The source fix makes setup
+actions lane-specific: Velnor keeps checkout, artifact download, cache restore,
+and local Mr. Boxington only; the image owns Bun, OpenTofu, Rust tools, mold,
+and Buildx. Generated output has no `ci-velnor.yml` split.
+
+The failed main run is diagnostic evidence, not a passing measurement:
+
+- Velnor policy rejected `taiki-e/install-action` (job `101519120940`).
+- Velnor OpenTofu rejected `opentofu/setup-opentofu` (job `101519121014`).
+- Velnor Bun rejected `oven-sh/setup-bun` (job `101519121223`).
+- Velnor Docker reached `docker/setup-buildx-action` and failed to connect to
+  `/var/run/docker.sock` (job `101519120966`).
+- Velnor Documentation executed, then the deployed image binary rejected
+  generated `version_bump_units` at `.github/ci/project.toml:19` (job
+  `101519121135`). This proves the job-image `velnor-workflow` binary is older
+  than the checked-in generator; a new image release is required before live
+  Velnor proof.
+
+Five Velnor runners are currently online and idle:
+`velnor-dogfood-slot-1`, `-2`, `-3`, `-4-next-2695994-10`, and `-5` (runner
+API checked 2026-09-06T16:46:14Z). Capacity is no longer the immediate blocker.
+
+### Cache snapshots
+
+| Captured UTC | Entries | Bytes | GiB | Orphan state |
+| --- | ---: | ---: | ---: | --- |
+| 2026-09-06T15:57:33Z | 11 | 5,488,621,339 | 5.112 | old tag/feature refs re-listed absent |
+| 2026-09-06T16:46:14Z | 51 | 10,004,871,521 | 9.318 | no old tag/feature refs; main Docker/mbx caches present |
+
+The 43 old `v0.1.268` entries and 52 synthetic feature-branch entries were
+deleted by exact ID and re-listed absent. The current account exceeds the
+8-GiB acceptance ceiling. The required seven consecutive daily snapshots are
+not present.
+
+### Safety fixtures and remaining blockers
+
+- Commit `4df3da27` removes the blanket `src/lib.rs` watch edge. The checked
+  configuration matches a generator edit to exactly `docker`,
+  `rust-velnor-workflow`, and `rust-production-topology`; `runtime.rs` remains
+  watched by every unit. This prevents generator-only edits from selecting all
+  15 verification units while retaining the image, regeneration, and workspace
+  safety gates.
+- Local proof after that change: `cargo test --locked -p velnor-workflow` passed
+  133 tests; `cargo check --workspace --all-targets --locked` passed; the
+  generator `--check` passed; and `mise run test-release-feature-boundary`
+  passed by observing the intended release-profile `test-support` rejection.
+- The maintenance generator now uploads each cache snapshot before enforcing
+  the 8-GiB limit. Over-budget days therefore remain observable as artifacts
+  and still fail the budget gate.
+
+- Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
+  `rust-velnor-runner`, `rust-velnorctl`.
+- Single-crate `velnor-client` full IDs:
+  `docker`, `rust-velnor-client`, `rust-velnor-tools`, `rust-velnorctl`,
+  `rust-production-topology`; prerequisite IDs:
+  `rust-velnor-model`, `rust-velnor-control`, `rust-velnor-render`,
+  `rust-velnor-runner`.
+- Nightly synthetic red run
+  [34043106625](https://github.com/tailrocks/velnor/actions/runs/34043106625)
+  failed `nightly-required`, passed red-to-signal, opened issue #599, and the
+  synthetic issue was closed during cleanup. Velnor jobs were correctly
+  skipped on the feature ref.
+- Production topology is generated as
+  `ci-rust-production-topology.yml`; its Velnor command is
+  `mbx check --workspace --all-targets --locked` plus
+  `mise run test-release-feature-boundary`.
+- Remaining unmet items: PR #602 CI completion, new job image
+  release/deployment, live passing Velnor main proof, comparable warm affected
+  PR, exact/prefix restore rates after the fix, Docker ≤4m proof, seven-day
+  ≤8-GiB snapshots, and the required provider/queue/coverage proof table. Do
+  not claim achievement.
+
 ## 9. Context (changelog, not work items)
 
 - #557 runner-arch merge: historical baseline only.
