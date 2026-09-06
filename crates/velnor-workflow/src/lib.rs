@@ -2509,7 +2509,7 @@ fn add_velnor_regeneration_gate(config: &mut ProjectConfig) {
     // The workflow crate owns the checked-in templates and generated caller
     // surface. Run the generator in check mode from the repository root so a
     // template-only edit cannot pass without regenerating its consumers.
-    let command = "cd -- 'crates/velnor-workflow' && velnor-workflow --plain --check ../..";
+    let command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..";
     if !unit
         .pr_commands
         .iter()
@@ -8315,6 +8315,21 @@ mod tests {
         assert!(policy.contains(&format!("--rev {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(policy.contains("runs-on: ubuntu-24.04"));
         assert!(!policy.contains("runs-on: ubuntu-26.04"));
+    }
+
+    #[test]
+    fn velnor_workflow_regeneration_gate_compiles_checked_out_generator() {
+        let config = must(
+            scan_repository_with_default_branch(&repository_root(), RunnerMode::Github, "main"),
+            "scan Velnor repository for regeneration gate",
+        );
+        assert!(config.units.iter().any(|unit| {
+            unit.id == "rust-velnor-workflow"
+                && unit.pr_commands.iter().any(|command| {
+                    command
+                        == "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
+                })
+        }));
     }
 
     #[test]
