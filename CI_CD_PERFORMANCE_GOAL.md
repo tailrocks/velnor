@@ -496,6 +496,11 @@ not present.
   [34049482813](https://github.com/tailrocks/velnor/actions/runs/34049482813)
   passed `velnor-runner` job `101530695572` in `3m12s`; the PR run was still
   waiting on `velnorctl` when this entry was written.
+- Commit `32ce5a37` corrects Results Service artifact JSON: protobuf
+  `StringValue` uses the JSON primitive string form and the current artifact
+  protocol version is 7. The focused wire-shape and feature-gated upload tests
+  pass; the live v0.1.270 fixture probe proved the prior object-shaped field
+  still returned Results Service HTTP 400 `malformed`.
 
 - Cargo.lock allowlist IDs: `docker`, `rust-velnor-bench`,
   `rust-velnor-runner`, `rust-velnorctl`.
