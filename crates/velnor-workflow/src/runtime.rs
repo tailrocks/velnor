@@ -430,15 +430,25 @@ fn selected_units<'a>(
     config: &'a CiConfig,
     scope: Scope,
 ) -> Result<Vec<&'a CiUnit>, GeneratorError> {
+    let base = env::var("BASE_SHA").unwrap_or_default();
+    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
+    selected_units_for_diff(root, config, scope, &base, &head)
+}
+
+fn selected_units_for_diff<'a>(
+    root: &Path,
+    config: &'a CiConfig,
+    scope: Scope,
+    base: &str,
+    head: &str,
+) -> Result<Vec<&'a CiUnit>, GeneratorError> {
     if scope == Scope::Full {
         return ordered_units(&config.unit, None);
     }
-    let base = env::var("BASE_SHA").unwrap_or_default();
-    let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
     if base.is_empty() || base.chars().all(|character| character == '0') {
         return ordered_units(&config.unit, None);
     }
-    let Some(changed) = git_changed_files(root, &base, &head)? else {
+    let Some(changed) = git_changed_files(root, base, head)? else {
         return ordered_units(&config.unit, None);
     };
     if changed.is_empty() {
@@ -1472,6 +1482,134 @@ mod tests {
         let result = enforce_policy_with_revision(&root, POLICY_REVISION).is_ok();
         std::fs::remove_dir_all(root)?;
         Ok(result)
+    }
+
+    fn selection_config() -> CiConfig {
+        let unit = |id: &str, watch: &[&str], depends_on: &[&str]| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: "rust".to_owned(),
+            root: ".".to_owned(),
+            watch: watch.iter().map(|value| (*value).to_owned()).collect(),
+            pr_commands: vec!["true".to_owned()],
+            full_commands: vec!["true".to_owned()],
+            depends_on: depends_on.iter().map(|value| (*value).to_owned()).collect(),
+            tool_version: None,
+            cache: None,
+        };
+        CiConfig {
+            schema: 1,
+            repository: "example/repository".to_owned(),
+            profile: "rust-workspace".to_owned(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "github".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit("base", &["crates/base/**"], &[]),
+                unit("app", &["crates/app/**"], &["base"]),
+                unit("consumer", &["crates/consumer/**"], &["app"]),
+                unit("docs", &["docs/**"], &[]),
+            ],
+        }
+    }
+
+    fn selection_git_fixture(
+        name: &str,
+        changed: &str,
+    ) -> Result<(std::path::PathBuf, String, String), Box<dyn Error>> {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-selection-{name}-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let init = |args: &[&str]| -> Result<(), Box<dyn Error>> {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()?;
+            assert!(status.success(), "git command failed: {args:?}");
+            Ok(())
+        };
+        init(&["init", "-q"])?;
+        init(&["config", "user.email", "test@example.invalid"])?;
+        init(&["config", "user.name", "Velnor test"])?;
+        for path in [
+            "crates/base/src/lib.rs",
+            "crates/app/src/lib.rs",
+            "crates/consumer/src/lib.rs",
+            "docs/index.md",
+        ] {
+            let path = root.join(path);
+            let parent = path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "fixture parent")
+            })?;
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(path, "initial\n")?;
+        }
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "base"])?;
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        let changed_path = root.join(changed);
+        let parent = changed_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "changed parent")
+        })?;
+        std::fs::create_dir_all(parent)?;
+        std::fs::write(changed_path, "changed\n")?;
+        init(&["add", "."])?;
+        init(&["commit", "-qm", "change"])?;
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .current_dir(&root)
+                .args(["rev-parse", "HEAD"])
+                .output()?
+                .stdout,
+        )?
+        .trim()
+        .to_owned();
+        Ok((root, base, head))
+    }
+
+    fn selected_ids(units: Vec<&CiUnit>) -> Vec<&str> {
+        units.into_iter().map(|unit| unit.id.as_str()).collect()
+    }
+
+    #[test]
+    fn affected_selection_expands_dependency_and_dependent_closure() -> Result<(), Box<dyn Error>> {
+        let (root, base, head) = selection_git_fixture("closure", "crates/base/src/lib.rs")?;
+        let config = selection_config();
+        let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+        assert_eq!(selected_ids(units), vec!["base", "app", "consumer"]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn affected_selection_falls_back_to_full_for_global_or_unmatched_changes(
+    ) -> Result<(), Box<dyn Error>> {
+        for (name, changed) in [
+            ("github", ".github/workflows/ci.yml"),
+            ("unmatched", "README.md"),
+        ] {
+            let (root, base, head) = selection_git_fixture(name, changed)?;
+            let config = selection_config();
+            let units = selected_units_for_diff(&root, &config, Scope::Affected, &base, &head)?;
+            assert_eq!(selected_ids(units), vec!["base", "app", "consumer", "docs"]);
+            std::fs::remove_dir_all(root)?;
+        }
+        Ok(())
     }
 
     #[test]

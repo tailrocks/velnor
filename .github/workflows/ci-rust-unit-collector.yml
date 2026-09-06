@@ -19,9 +19,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c3a38b5ffffb844ab0dffc730a67f953b6af9eb0
         with:
-          rev: 05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd
+          rev: c3a38b5ffffb844ab0dffc730a67f953b6af9eb0
       - name: Set trusted workflow policy revision
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f15ff2e8449a34f77f04746fa461a349bad22e79" >> "$GITHUB_ENV"
       - name: Set up Mise Rust toolchain
@@ -34,6 +34,9 @@ jobs:
         with:
           backend: github
           version: 1.8.3
+          cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('tools/unit-collector/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}-${{ github.sha }}
+          restore-keys: |
+            velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('tools/unit-collector/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}-
           save-on-workflow-dispatch: true
       - name: Set up cargo-nextest
         uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2.87.3

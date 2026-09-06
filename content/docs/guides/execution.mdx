@@ -78,11 +78,13 @@ docker/bake-action                   docker/setup-qemu-action
 hadolint/hadolint-action             sigstore/cosign-installer
 ```
 
-A smaller set is fetched and executed generically, at pinned commit SHAs with a
-closed input surface: `tailrocks/velnor-actions` (specific subpaths),
-`jackin-project/jackin-role-action`, `fsfe/reuse-action` (a Docker action), and
-`jdx/mr-boxington-action` (a Node action). Two reusable workflows are admitted
-the same way.
+`velnor-workflow` generates the workflow files and local reusable-workflow calls
+in the repository. Velnor does not fetch a workflow provider at runtime. The
+remaining fetched action surfaces use pinned commit SHAs and closed input
+surfaces: `jackin-project/jackin-role-action`, `fsfe/reuse-action` (a Docker
+action), and `jdx/mr-boxington-action` (a Node action). The admitted
+server-expanded reusable workflow is the pinned `jackin-project/jackin-role-action`
+publish workflow.
 
 Beyond the allowlist, admission also checks: refs must be full 40-character
 commit SHAs, except for a named set of legacy tags retained for existing
@@ -199,7 +201,7 @@ resources.
 
 #### Docker Rust acceleration
 
-The default job image pins Mr Boxington (`mbx`) 1.7.0 and runs
+The default job image pins Mr Boxington (`mbx`) 1.8.3 and runs
 `mbx setup --yes` while building the image. The generated Cargo launcher is
 first on `PATH`, so workflow steps continue to invoke plain `cargo`; those
 commands transparently enter Mr Boxington. There is no default

@@ -849,7 +849,9 @@ pub async fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
 pub fn generate_policies_from_ledger(ledger: &ReleaseRefLedger) -> Result<Vec<OrgPolicy>> {
     let mut by_org: BTreeMap<&str, Vec<&ReleaseRefEntry>> = BTreeMap::new();
     for entry in &ledger.entries {
-        if !approved_entry_is_currently_admitted(entry)? {
+        // Defense in depth: a stale in-memory or externally supplied ledger
+        // must not reselect any mirror of the retired workflow provider.
+        if is_retired_workflow_provider(entry) || !approved_entry_is_currently_admitted(entry)? {
             continue;
         }
         by_org.entry(entry.owner.as_str()).or_default().push(entry);
@@ -880,6 +882,14 @@ pub fn generate_policies_from_ledger(ledger: &ReleaseRefLedger) -> Result<Vec<Or
         bail!("field 'entries': value must be non-empty");
     }
     Ok(policies)
+}
+
+fn is_retired_workflow_provider(entry: &ReleaseRefEntry) -> bool {
+    entry.repository == "velnor-actions"
+        && matches!(
+            entry.owner.as_str(),
+            "ChainArgos" | "jackin-project" | "tailrocks"
+        )
 }
 
 /// Mutation [`fleet_generate`] performs for one organization's policy file.

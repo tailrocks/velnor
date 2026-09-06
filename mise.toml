@@ -69,11 +69,10 @@ if grep -q -- "-p velnor-tools.*--features release-build" "$workflow"; then
   echo "release:check: velnor-tools must not receive velnor-runner's release-build feature" >&2
   exit 1
 fi
-grep -q "uses: ./.github/workflows/ci-release-package-signer.yml" "$workflow"
-if grep -q "tailrocks/velnor-actions/.github/workflows/package-signer.yml@" "$workflow"; then
-  echo "release:check: package signing must use the local policy-approved reusable workflow" >&2
+grep -q "uses: ./.github/workflows/ci-release-package-signer.yml" "$workflow" || {
+  echo "release:check: package signing must use the Velnor-owned local reusable workflow" >&2
   exit 1
-fi
+}
 test -f .github/workflows/ci-release-package-signer.yml
 grep -q "apt-get install" "$docs"
 """
@@ -147,7 +146,7 @@ echo "fleet-publisher-acceptance: passed production publisher path and publicati
 """
 
 [tasks.audit-ci]
-description = "Enforce the offline estate CI workflow contract"
+description = "Enforce the offline Velnor-owned generated workflow contract"
 run = "cargo run -p velnor-tools --locked --quiet -- audit-ci --offline --repository-name tailrocks/velnor"
 
 [tasks.audit-ci-estate]

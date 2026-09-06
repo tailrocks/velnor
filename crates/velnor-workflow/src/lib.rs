@@ -41,7 +41,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "f15ff2e8449a34f77f04746fa461a349bad22e
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "05ff9b8e8a12b12f135d1fd312ac852bb8dbdccd";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "c3a38b5ffffb844ab0dffc730a67f953b6af9eb0";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MR_BOXINGTON_ENABLED_ENV: &str = "VELNOR_WORKFLOW_MBX";
 const VELNOR_RELEASE_PACKAGE_SIGNER_WORKFLOW: &str = "ci-release-package-signer.yml";
@@ -51,6 +51,11 @@ const VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE: &str =
     include_str!("../templates/release-package-signer.yml");
 const VELNOR_POLICY_PROVIDER_TEMPLATE: &str =
     include_str!("../templates/velnor-workflow-policy.yml");
+const RETIRED_WORKFLOW_PROVIDER_REPOSITORIES: &[&str] = &[
+    "ChainArgos/velnor-actions",
+    "jackin-project/velnor-actions",
+    "tailrocks/velnor-actions",
+];
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +74,7 @@ pub enum ActionPin {
     Sccache,
     MrBoxington,
     Mold,
+    GithubRuntime,
     DockerBuildx,
     DockerLogin,
     DockerQemu,
@@ -129,6 +135,10 @@ impl ActionPin {
             }
             // rui314/setup-mold v1 (current v1 tag)
             Self::Mold => "rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1",
+            // crazy-max/ghaction-github-runtime v4.0.0
+            Self::GithubRuntime => {
+                "crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0"
+            }
             // docker/login-action v4
             Self::DockerLogin => {
                 "docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0"
@@ -393,7 +403,6 @@ enum RepositoryProfile {
     AgentContent,
     OpenTofu,
     CompositeAction,
-    WorkflowGeneratorSource,
     PolyglotMonorepo,
     DockerFleet,
     RustWorkspaceRelease,
@@ -418,7 +427,6 @@ impl RepositoryProfile {
             Self::AgentContent => "agent-content",
             Self::OpenTofu => "opentofu",
             Self::CompositeAction => "composite-action",
-            Self::WorkflowGeneratorSource => "workflow-generator-source",
             Self::PolyglotMonorepo => "polyglot-monorepo",
             Self::DockerFleet => "docker-fleet",
             Self::RustWorkspaceRelease => "rust-workspace-release",
@@ -2118,12 +2126,6 @@ const ESTATE_PROFILES: &[EstateProfile] = &[
         release: Some(ReleaseKind::AgentImage),
     },
     EstateProfile {
-        repository: "jackin-project/velnor-actions",
-        profile: RepositoryProfile::WorkflowGeneratorSource,
-        verified: true,
-        release: None,
-    },
-    EstateProfile {
         repository: "tailrocks/cloudflare-tofu",
         profile: RepositoryProfile::OpenTofuRust,
         verified: true,
@@ -2357,6 +2359,17 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
                 .map(|command| velnor_docker_cache_command(command))
                 .collect();
         }
+        // Every generated unit installs and invokes this runtime. Treat
+        // generator/runtime changes as broad-impact changes instead of only
+        // selecting the workflow crate's own unit. Add this after the
+        // Docker-specific watch replacement above.
+        unit.watch.push("crates/velnor-workflow/**".to_owned());
+        if unit.id == "rust-velnor-runner" {
+            // The runner embeds these inputs in its release artifacts.
+            unit.watch.push("microvm/**".to_owned());
+        }
+        unit.watch.sort();
+        unit.watch.dedup();
     }
     config.notes.push(format!(
         "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION}; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store."
@@ -2381,6 +2394,78 @@ fn velnor_docker_cache_command(command: &str) -> String {
     format!(
             "if [[ \"${{CI_RUNNER_LANE:-github}}\" == \"github\" && \"${{CI_CACHE_WRITE:-false}}\" == \"true\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true {arguments}; elif [[ \"${{CI_RUNNER_LANE:-github}}\" == \"github\" ]]; then docker buildx build --load --cache-from type=gha,scope=velnor-docker {arguments}; else docker buildx build --load {arguments}; fi"
     )
+}
+
+fn reject_retired_workflow_provider_reference(
+    path: &Path,
+    content: &str,
+) -> Result<(), GeneratorError> {
+    let contains_reference = match serde_yaml::from_str::<serde_yaml::Value>(content) {
+        Ok(document) => yaml_contains_retired_workflow_provider(&document),
+        Err(_) => content
+            .lines()
+            .filter_map(workflow_uses_value)
+            .any(is_retired_workflow_provider_reference),
+    };
+    if contains_reference {
+        return Err(GeneratorError::usage(format!(
+            "workflow contains retired provider reference ({}): {}",
+            RETIRED_WORKFLOW_PROVIDER_REPOSITORIES.join(", "),
+            path.display(),
+        )));
+    }
+    Ok(())
+}
+
+fn yaml_contains_retired_workflow_provider(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => mapping.iter().any(|(key, value)| {
+            (key == "uses"
+                && value
+                    .as_str()
+                    .is_some_and(is_retired_workflow_provider_reference))
+                || yaml_contains_retired_workflow_provider(value)
+        }),
+        serde_yaml::Value::Sequence(sequence) => {
+            sequence.iter().any(yaml_contains_retired_workflow_provider)
+        }
+        serde_yaml::Value::Tagged(tagged) => {
+            yaml_contains_retired_workflow_provider(tagged.value())
+        }
+        serde_yaml::Value::Null
+        | serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Number(_)
+        | serde_yaml::Value::String(_) => false,
+    }
+}
+
+fn workflow_uses_value(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let line = line.strip_prefix('-').map_or(line, str::trim_start);
+    let (key, value) = line.split_once(':')?;
+    (key.trim() == "uses").then_some(value)
+}
+
+fn is_retired_workflow_provider_reference(value: &str) -> bool {
+    let value = value
+        .split_once('#')
+        .map_or(value, |(value, _)| value)
+        .trim()
+        .trim_matches(|character| matches!(character, '\'' | '"'));
+    let path = value.split_once('@').map_or(value, |(path, _)| path);
+    RETIRED_WORKFLOW_PROVIDER_REPOSITORIES
+        .iter()
+        .any(|repository| {
+            let repository_length = repository.len();
+            let Some(prefix) = path.get(..repository_length) else {
+                return false;
+            };
+            prefix.eq_ignore_ascii_case(repository)
+                && path
+                    .as_bytes()
+                    .get(repository_length)
+                    .is_none_or(|byte| *byte == b'/')
+        })
 }
 
 fn load_workflow_templates(
@@ -2417,6 +2502,7 @@ fn load_workflow_templates(
                 path.display()
             ))
         })?;
+        reject_retired_workflow_provider_reference(&path, body)?;
         names.push(name.to_owned());
         config
             .workflow_templates
@@ -2500,6 +2586,7 @@ fn adopt_existing_workflow_templates(
         let path = root.join(&output);
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow for adoption", &path, &error))?;
+        reject_retired_workflow_provider_reference(&path, &content)?;
         if already_adopted
             && content.starts_with(GENERATED_HEADER)
             && !config.workflow_templates.contains_key(&name)
@@ -2835,10 +2922,6 @@ fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
                 "find . -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n",
             ],
             None,
-        )],
-        RepositoryProfile::WorkflowGeneratorSource => vec![catalog_rust_unit(
-            "Generator",
-            "cargo check --workspace --locked --all-targets",
         )],
         RepositoryProfile::OpenTofu => vec![catalog_unit(
             "opentofu",
@@ -3697,26 +3780,35 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         needs.extend(units);
-        let statuses = needs
-            .iter()
-            .map(|job| {
-                if matches!(job.as_str(), "plan" | "policy") {
-                    format!("needs['{job}'].result == 'success'")
-                } else {
-                    format!(
-                        "(needs['{job}'].result == 'success' || needs['{job}'].result == 'skipped')"
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" && ");
-        let check_name = "ci-required";
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {check_name}\n    if: ${{{{ always() && {statuses} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All generated stack workflows passed\n        run: echo 'all generated CI stacks passed'",
+            "  ci-required:\n    name: ci-required\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
             needs.join(", "),
             yaml_scalar(&self.github_runner)
         );
+        for job in needs
+            .iter()
+            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
+        {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+            );
+        }
+        let selected = github_expression("needs.plan.outputs.units");
+        let _ = writeln!(output, "          selected=\",{selected},\"");
+        for unit in &self.units {
+            let job = unit_group_job_id(unit);
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+                "          if [[ \"$selected\" == *\",{}\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+                unit.id,
+                unit.id,
+                unit.id
+            );
+        }
     }
 
     fn render_nested_unit(&self, unit: &Unit, kind: WorkflowKind) -> String {
@@ -4132,9 +4224,26 @@ impl WorkflowIr {
             );
         }
         if tools.contains(&ToolRequirement::MrBoxington) && lane == RunnerMode::Github {
+            let (_, key_files) = unit.cache.as_ref().map_or_else(
+                || {
+                    rendered_cache_values(&CacheSpec {
+                        key_files: vec!["Cargo.lock".to_owned(), "rust-toolchain.toml".to_owned()],
+                        paths: Vec::new(),
+                    })
+                },
+                rendered_cache_values,
+            );
+            let cache_key = format!(
+                "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}-${{{{ github.sha }}}}",
+                unit.id,
+            );
+            let restore_key = format!(
+                "velnor-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}-",
+                unit.id,
+            );
             let _ = writeln!(
                 output,
-                "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          save-on-workflow-dispatch: true",
+                "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
                 ActionPin::MrBoxington.reference()
             );
         }
@@ -4219,6 +4328,13 @@ impl WorkflowIr {
             );
         }
         if tools.contains(&ToolRequirement::DockerBuildx) {
+            if lane == RunnerMode::Github {
+                let _ = writeln!(
+                    output,
+                    "      - name: Expose GitHub Actions runtime\n        uses: {}",
+                    ActionPin::GithubRuntime.reference()
+                );
+            }
             let _ = writeln!(
                 output,
                 "      - name: Set up Docker Buildx\n        uses: {}",
@@ -4258,7 +4374,7 @@ impl WorkflowIr {
         if include_policy {
             needs.push("policy".to_owned());
         }
-        let mut statuses = Vec::new();
+        let mut job_checks = Vec::new();
         for lane in lanes {
             for unit in self
                 .units
@@ -4267,29 +4383,47 @@ impl WorkflowIr {
             {
                 let id = unit_job_id(lane, &unit.id);
                 needs.push(id.clone());
-                let status = format!("needs['{id}'].result");
-                statuses.push(format!("({status} == 'success' || {status} == 'skipped')"));
+                job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
             }
         }
-        let status_condition = if statuses.is_empty() {
-            "true".to_owned()
-        } else {
-            statuses.join(" && ")
-        };
         let gate = if runners == RunnerMode::Velnor && trusted {
             format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && {status_condition}",
+                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
                 self.default_branch
             )
         } else {
-            format!("always() && {status_condition}")
+            "always()".to_owned()
         };
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: All unit jobs passed\n        run: echo 'all generated CI units passed'",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        shell: bash\n        run: |",
             needs.join(", "),
             yaml_scalar(&self.github_runner),
         );
+        for job in needs
+            .iter()
+            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
+        {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+            );
+        }
+        let selected = github_expression("needs.plan.outputs.units");
+        let _ = writeln!(output, "          selected=\",{selected},\"");
+        for (unit, job, allow_selected_skip) in job_checks {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let selected_case = if allow_selected_skip {
+                "success|skipped"
+            } else {
+                "success"
+            };
+            let _ = writeln!(
+                output,
+                "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            );
+        }
     }
 }
 
@@ -7811,9 +7945,13 @@ path-only = { path = "../path-only" }
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the generator contract test keeps all workflow assertions together"
+    )]
     #[test]
     fn velnor_rust_lanes_use_mbx_and_skip_duplicate_caches() {
-       let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
         config.units.push(catalog_unit(
             "rust-policy",
@@ -7850,12 +7988,14 @@ path-only = { path = "../path-only" }
             .iter()
             .any(|command| command.contains(MR_BOXINGTON_ENABLED_ENV)));
         assert!(config.toml().contains("Mr. Boxington 1.8.3"));
-
         let workflow =
             WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
         assert!(workflow.contains(ActionPin::MrBoxington.reference()));
         assert!(workflow.contains("backend: github"));
         assert!(workflow.contains("version: 1.8.3"));
+        assert!(workflow
+            .contains("cache-key: velnor-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust"));
+        assert!(workflow.contains("restore-keys: |"));
         assert_eq!(workflow.matches("jdx/mr-boxington-action@").count(), 1);
         assert!(!workflow
             .split_once("\n  velnor:")
@@ -7881,6 +8021,20 @@ path-only = { path = "../path-only" }
             WorkflowIr::from_config(&config).render_nested_unit(collector, WorkflowKind::Main);
         assert!(collector_workflow.contains("name: Set up cargo-nextest"));
 
+        let release = must_some(config.release.as_ref(), "Velnor release contract");
+        let release_workflow = render_release(&config, release);
+        assert_eq!(
+            release_workflow.matches("jdx/mr-boxington-action@").count(),
+            3
+        );
+        assert!(release_workflow.contains("backend: local"));
+        assert!(release_workflow.contains("version: 1.8.3"));
+        assert!(release_workflow.contains("mbx build"));
+        assert!(release_workflow.contains("mbx zigbuild"));
+        assert!(release_workflow.contains("mbx run"));
+        assert!(!release_workflow.contains("sccache"));
+        assert!(!release_workflow.contains("actions/cache"));
+
         let docker = must_some(
             config
                 .units
@@ -7896,11 +8050,18 @@ path-only = { path = "../path-only" }
             .pr_commands
             .iter()
             .any(|command| command.contains("type=gha,scope=velnor-docker")));
+        let docker_workflow =
+            WorkflowIr::from_config(&config).render_nested_unit(docker, WorkflowKind::Main);
+        assert!(docker_workflow.contains(ActionPin::GithubRuntime.reference()));
+        assert!(!docker_workflow
+            .split_once("\n  velnor:")
+            .map_or("", |(_, lane)| lane)
+            .contains(ActionPin::GithubRuntime.reference()));
 
         let parent = WorkflowIr::from_config(&config).render_nested(WorkflowKind::PullRequest);
         assert!(parent.contains("units: ${{ steps.plan.outputs.units }}"));
         assert!(parent.contains("contains(format(',{0},', needs.plan.outputs.units)"));
-        assert!(parent.contains("result == 'skipped'"));
+        assert!(parent.contains("case \"$result\" in\n              success|skipped)"));
     }
 
     #[test]
@@ -8784,6 +8945,94 @@ path-only = { path = "../path-only" }
     }
 
     #[test]
+    fn generator_owned_template_rejects_retired_provider_but_allows_fixture_repository() {
+        let root = temporary_repository("retired-provider-template");
+        let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
+        must(
+            fs::create_dir_all(must_some(template.parent(), "template parent")),
+            "create workflow template directory",
+        );
+        for repository in RETIRED_WORKFLOW_PROVIDER_REPOSITORIES {
+            let retired = format!(
+                "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: {repository}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+            );
+            must(
+                fs::write(&template, retired),
+                "write retired provider template",
+            );
+            let error = must_some(
+                scan_repository(&root, RunnerMode::Github).err(),
+                "reject retired provider template",
+            );
+            assert!(
+                error.to_string().contains("retired provider reference"),
+                "{repository}: {error}"
+            );
+        }
+
+        let fixture = format!(
+            "{GENERATED_HEADER}name: tailrocks/velnor-actions-fixture\njobs:\n  call:\n    uses: tailrocks/velnor-actions-fixture/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+        );
+        must(fs::write(&template, fixture), "write fixture template");
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "allow fixture repository template",
+        );
+        assert!(config
+            .workflow_templates
+            .get("ci.yml")
+            .is_some_and(|body| body.contains("tailrocks/velnor-actions-fixture")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn adopted_workflow_rejects_retired_provider_but_allows_fixture_repository() {
+        let root = temporary_repository("retired-provider-adoption");
+        let workflow = root.join(".github/workflows/ci.yml");
+        must(
+            fs::create_dir_all(must_some(workflow.parent(), "workflow parent")),
+            "create workflow directory",
+        );
+        for repository in RETIRED_WORKFLOW_PROVIDER_REPOSITORIES {
+            let retired = format!(
+                "name: CI\njobs:\n  call:\n    uses: {repository}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+            );
+            must(
+                fs::write(&workflow, retired),
+                "write retired provider workflow",
+            );
+            let config = must(
+                scan_repository(&root, RunnerMode::Github),
+                "scan adoption repository",
+            );
+            let error = must_some(
+                adopt_existing_workflow_templates(&root, config).err(),
+                "reject retired provider adoption",
+            );
+            assert!(
+                error.to_string().contains("retired provider reference"),
+                "{repository}: {error}"
+            );
+        }
+
+        let fixture = "name: tailrocks/velnor-actions-fixture\njobs:\n  call:\n    uses: tailrocks/velnor-actions-fixture/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n";
+        must(fs::write(&workflow, fixture), "write fixture workflow");
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "rescan adoption repository",
+        );
+        let adopted = must(
+            adopt_existing_workflow_templates(&root, config),
+            "allow fixture repository adoption",
+        );
+        assert!(adopted
+            .workflow_templates
+            .get("ci.yml")
+            .is_some_and(|body| body.contains("tailrocks/velnor-actions-fixture")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn velnor_generator_owns_every_current_workflow() {
         let root = repository_root();
         let config = must(
@@ -8847,6 +9096,30 @@ path-only = { path = "../path-only" }
         assert_eq!(actual, expected);
         assert_eq!(generated, expected);
         assert_eq!(config.workflow_files.len(), 8);
+        let runner = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-velnor-runner"),
+            "generated Rust runner unit",
+        );
+        assert!(runner.watch.iter().any(|path| path == "microvm/**"));
+        assert!(
+            config.units.iter().all(|unit| unit
+                .watch
+                .iter()
+                .any(|path| path == "crates/velnor-workflow/**")),
+            "missing runtime watch: {:?}",
+            config
+                .units
+                .iter()
+                .filter(|unit| !unit
+                    .watch
+                    .iter()
+                    .any(|path| path == "crates/velnor-workflow/**"))
+                .map(|unit| &unit.id)
+                .collect::<Vec<_>>()
+        );
         for name in expected {
             let path = PathBuf::from(".github/workflows").join(name);
             let content = must_some(files.get(&path), "generated current workflow");
@@ -8860,6 +9133,9 @@ path-only = { path = "../path-only" }
             .get(&PathBuf::from(".github/workflows/release.yml"))
             .is_some_and(|content| content
                 .contains("docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8")));
+        assert!(files
+            .get(&PathBuf::from(".github/workflows/ci-docker-docker.yml"))
+            .is_some_and(|content| content.contains(ActionPin::GithubRuntime.reference())));
         assert!(files
             .get(&PathBuf::from(
                 ".github/workflows/ci-release-package-signer.yml"
@@ -9638,7 +9914,7 @@ path-only = { path = "../path-only" }
 
     #[test]
     fn estate_catalog_has_exact_profile_and_workflow_contracts() {
-        assert_eq!(ESTATE_PROFILES.len(), 33);
+        assert_eq!(ESTATE_PROFILES.len(), 32);
         let repositories = ESTATE_PROFILES
             .iter()
             .map(|profile| profile.repository)
