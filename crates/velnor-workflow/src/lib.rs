@@ -2351,9 +2351,11 @@ fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
 
 fn apply_local_velnor_profile(root: &Path, mut config: ProjectConfig) -> ProjectConfig {
     if local_github_repository(root).as_deref() != Some("tailrocks/velnor") {
+        enable_mr_boxington_commands(&mut config);
         return config;
     }
     let Some(profile) = estate_profile("tailrocks/velnor") else {
+        enable_mr_boxington_commands(&mut config);
         return config;
     };
     let release = profile.verified.then(|| release_spec(profile)).flatten();
@@ -2373,9 +2375,7 @@ fn apply_local_velnor_profile(root: &Path, mut config: ProjectConfig) -> Project
 }
 
 fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
-    if config.repository != "tailrocks/velnor" {
-        return;
-    }
+    let is_velnor = config.repository == "tailrocks/velnor";
     for unit in &mut config.units {
         if unit.kind == UnitKind::Rust {
             unit.pr_commands = unit
@@ -2388,7 +2388,7 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
                 .iter()
                 .map(|command| mbxify_cargo_command(command))
                 .collect();
-        } else if unit.kind == UnitKind::Docker {
+        } else if is_velnor && unit.kind == UnitKind::Docker {
             if unit.root == "." {
                 unit.watch = vec![
                     "Dockerfile".to_owned(),
@@ -2428,21 +2428,25 @@ fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
             unit.velnor_pr_commands = Some(velnor_pr_commands);
             unit.velnor_full_commands = Some(velnor_full_commands);
         }
-        // Every generated unit installs and invokes this runtime. Treat
-        // generator/runtime changes as broad-impact changes instead of only
-        // selecting the workflow crate's own unit. Add this after the
-        // Docker-specific watch replacement above.
-        unit.watch.push("crates/velnor-workflow/**".to_owned());
-        if unit.id == "rust-velnor-runner" {
-            // The runner embeds these inputs in its release artifacts.
-            unit.watch.push("microvm/**".to_owned());
+        if is_velnor {
+            // Every generated unit installs and invokes this runtime. Treat
+            // generator/runtime changes as broad-impact changes instead of
+            // only selecting the workflow crate's own unit. Add this after
+            // the Docker-specific watch replacement above.
+            unit.watch.push("crates/velnor-workflow/**".to_owned());
+            if unit.id == "rust-velnor-runner" {
+                // The runner embeds these inputs in its release artifacts.
+                unit.watch.push("microvm/**".to_owned());
+            }
         }
         unit.watch.sort();
         unit.watch.dedup();
     }
-    config.notes.push(format!(
-        "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION}; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store."
-    ));
+    if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
+        config.notes.push(format!(
+            "Rust verification uses Mr. Boxington {MR_BOXINGTON_VERSION} by default; GitHub-hosted jobs use its GitHub cache backend and Velnor jobs use the image/runner-provided local store. Set MBX_DISABLE=1 for a plain-Cargo invocation."
+        ));
+    }
 }
 
 fn mbxify_cargo_command(command: &str) -> String {
@@ -3600,8 +3604,7 @@ enum WorkflowKind {
 impl WorkflowIr {
     fn from_config(config: &ProjectConfig) -> Self {
         let mut tools = BTreeSet::new();
-        let mr_boxington = config.repository == "tailrocks/velnor"
-            && config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+        let mr_boxington = config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
         if config
             .units
             .iter()
@@ -7396,7 +7399,7 @@ mod tests {
         assert_eq!(config.default_branch, "trunk");
         assert!(WorkflowIr::from_config(&config)
             .render(WorkflowKind::Main)
-            .contains("refs/heads/trunk"));
+            .contains("branches: [trunk]"));
     }
 
     #[test]
@@ -7970,11 +7973,11 @@ path-only = { path = "../path-only" }
         assert!(app_unit
             .pr_commands
             .iter()
-            .any(|command| command.contains("cargo nextest run") && command.contains("app")));
+            .any(|command| command.contains("mbx nextest run") && command.contains("app")));
         assert!(app_unit
             .pr_commands
             .iter()
-            .any(|command| command.contains("cargo nextest run") && !command.contains("--locked")));
+            .any(|command| command.contains("mbx nextest run") && !command.contains("--locked")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
         assert!(workflow.contains("name: Set up cargo-nextest"));
         assert!(workflow.contains("tool: nextest"));
@@ -7986,7 +7989,7 @@ path-only = { path = "../path-only" }
         assert!(policy_unit
             .pr_commands
             .iter()
-            .any(|command| command == "cargo deny check advisories bans sources"));
+            .any(|command| command == "mbx deny check advisories bans sources"));
         assert!(config
             .analysis
             .detected
@@ -8172,6 +8175,8 @@ path-only = { path = "../path-only" }
         assert!(release_workflow.contains("mbx run -p velnor-runner --bin velnor-guest-image"));
         assert!(release_workflow.contains("runner: ubuntu-24.04-arm"));
         assert!(release_workflow.contains("target: aarch64-unknown-linux-gnu"));
+        assert!(release_workflow.contains("GUEST_ARCH: ${{ matrix.arch }}"));
+        assert!(release_workflow.contains("if [ \"$GUEST_ARCH\" = \"x86_64\" ]"));
         assert!(release_workflow.contains("dist/microvm/velnor-guest-agent"));
         assert!(release_workflow.contains("guest-image missing guest-agent"));
         assert!(release_workflow.contains(
@@ -8816,7 +8821,8 @@ path-only = { path = "../path-only" }
         assert!(both.contains("  velnor-"));
         assert!(both.contains("runs-on: ubuntu-24.04"));
         assert!(both.contains("runs-on: [self-hosted, velnor-target-mvp]"));
-        assert!(both.contains("name: Save \"Rust crate (fixture)\" cache"));
+        assert!(both.contains(ActionPin::MrBoxington.reference()));
+        assert!(!both.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert_ne!(github, velnor);
         assert_ne!(velnor, both);
     }
@@ -8997,8 +9003,11 @@ path-only = { path = "../path-only" }
             "scan Rust repository",
         ))
         .render(WorkflowKind::Main);
-        assert!(workflow.contains("~/.cargo/registry"));
-        assert!(workflow.contains("hashFiles(") && workflow.contains("Cargo.lock"));
+        assert!(workflow.contains(ActionPin::MrBoxington.reference()));
+        assert!(workflow.contains("backend: github"));
+        assert!(workflow.contains("cache-key: velnor-mbx-1.8.3-"));
+        assert!(!workflow.contains("~/.cargo/registry"));
+        assert!(!workflow.contains("name: Save \"Rust crate (fixture)\" cache"));
         assert!(workflow.contains(".cargo/**"));
         assert!(!workflow.contains("~/.npm"));
         assert!(!workflow.contains("~/.gradle/caches"));

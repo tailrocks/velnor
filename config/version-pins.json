@@ -41,50 +41,6 @@
         {
           "file": "crates/velnor-runner/src/executor.rs",
           "pattern": "sccache v?(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-policy.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-unit-collector.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-bench.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-client.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-control.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-model.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-render.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-runner.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-tools.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnor-workflow.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
-        },
-        {
-          "file": ".github/workflows/ci-rust-velnorctl.yml",
-          "pattern": "version: v(?<version>[0-9][0-9.]*)"
         }
       ]
     },

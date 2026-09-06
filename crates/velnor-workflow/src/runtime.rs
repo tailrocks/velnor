@@ -439,7 +439,8 @@ fn scope_name(scope: Scope) -> &'static str {
 
 #[cfg(test)]
 mod runner_lane_tests {
-    use super::{CiUnit, RunnerLane, Scope};
+    use super::{collect_manifests, expand_affected_units, CiUnit, RunnerLane, Scope};
+    use std::path::Path;
 
     #[test]
     fn github_is_the_default_lane_and_velnor_backend_selects_velnor() {
@@ -498,6 +499,88 @@ mod runner_lane_tests {
             unit.commands(RunnerLane::Velnor, Scope::Full),
             &["velnor-full".to_owned()]
         );
+    }
+
+    #[test]
+    fn affected_closure_does_not_follow_dependents_of_added_prerequisites() {
+        let units = vec![
+            CiUnit {
+                id: "base".to_owned(),
+                label: "base".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["base".to_owned()],
+                github_full_commands: vec!["base".to_owned()],
+                velnor_pr_commands: vec!["base".to_owned()],
+                velnor_full_commands: vec!["base".to_owned()],
+                depends_on: Vec::new(),
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "changed".to_owned(),
+                label: "changed".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["changed".to_owned()],
+                github_full_commands: vec!["changed".to_owned()],
+                velnor_pr_commands: vec!["changed".to_owned()],
+                velnor_full_commands: vec!["changed".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "sibling".to_owned(),
+                label: "sibling".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["sibling".to_owned()],
+                github_full_commands: vec!["sibling".to_owned()],
+                velnor_pr_commands: vec!["sibling".to_owned()],
+                velnor_full_commands: vec!["sibling".to_owned()],
+                depends_on: vec!["base".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+            CiUnit {
+                id: "leaf".to_owned(),
+                label: "leaf".to_owned(),
+                kind: "rust".to_owned(),
+                root: ".".to_owned(),
+                watch: Vec::new(),
+                github_pr_commands: vec!["leaf".to_owned()],
+                github_full_commands: vec!["leaf".to_owned()],
+                velnor_pr_commands: vec!["leaf".to_owned()],
+                velnor_full_commands: vec!["leaf".to_owned()],
+                depends_on: vec!["changed".to_owned()],
+                tool_version: None,
+                cache: None,
+            },
+        ];
+        let selected = expand_affected_units(&units, ["changed".to_owned()].into_iter().collect());
+        assert_eq!(
+            selected,
+            ["base", "changed", "leaf"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn crate_test_collection_matches_scanner_fixture_exclusions() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut manifests = Vec::new();
+        assert!(collect_manifests(root, root, &mut manifests).is_ok());
+        assert!(manifests.iter().all(|path| {
+            path.strip_prefix(root).is_ok_and(|relative| {
+                !super::super::is_test_support_path(&relative.to_string_lossy())
+            })
+        }));
     }
 }
 
@@ -594,24 +677,44 @@ fn selected_units_for_diff<'a>(
             return ordered_units(&config.unit, None);
         }
     }
-    let mut expanded = true;
-    while expanded {
-        expanded = false;
-        for unit in &config.unit {
-            if selected.contains(&unit.id) {
-                for dependency in &unit.depends_on {
-                    expanded |= selected.insert(dependency.clone());
-                }
-            } else if unit
+    selected = expand_affected_units(&config.unit, selected);
+    ordered_units(&config.unit, Some(&selected))
+}
+
+/// Return the directed Cargo closure for changed units.
+///
+/// Dependents are seeded only from units matched by changed files. Their
+/// prerequisites are added after that reverse walk, so a prerequisite shared
+/// by an affected unit cannot pull in an unrelated sibling dependent.
+fn expand_affected_units(units: &[CiUnit], changed: BTreeSet<String>) -> BTreeSet<String> {
+    let mut affected = changed.clone();
+    let mut pending = changed.into_iter().collect::<Vec<_>>();
+    while let Some(changed_id) = pending.pop() {
+        for unit in units {
+            if unit
                 .depends_on
                 .iter()
-                .any(|dependency| selected.contains(dependency))
+                .any(|dependency| dependency == &changed_id)
+                && affected.insert(unit.id.clone())
             {
-                expanded |= selected.insert(unit.id.clone());
+                pending.push(unit.id.clone());
             }
         }
     }
-    ordered_units(&config.unit, Some(&selected))
+
+    let mut required = affected.clone();
+    let mut pending = affected.into_iter().collect::<Vec<_>>();
+    while let Some(unit_id) = pending.pop() {
+        let Some(unit) = units.iter().find(|unit| unit.id == unit_id) else {
+            continue;
+        };
+        for dependency in &unit.depends_on {
+            if required.insert(dependency.clone()) {
+                pending.push(dependency.clone());
+            }
+        }
+    }
+    required
 }
 
 fn git_changed_files(
@@ -821,7 +924,11 @@ fn collect_manifests(
                 continue;
             }
             collect_manifests(root, &path, manifests)?;
-        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml")
+            && relative
+                .to_str()
+                .is_none_or(|path| !super::is_test_support_path(path))
+        {
             manifests.push(path);
         }
     }

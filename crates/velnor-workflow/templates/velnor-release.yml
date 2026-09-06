@@ -560,6 +560,7 @@ jobs:
     env:
       CACHE_LANE: GitHub
       CARGO_INCREMENTAL: "0"
+      GUEST_ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -600,9 +601,13 @@ jobs:
           # velnor-sudo-exception: GitHub-hosted release build installs required OS packages.
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
-            mmdebstrap debootstrap arch-test qemu-user-static binfmt-support
-          sudo update-binfmts --enable qemu-aarch64
-          test -x /usr/bin/qemu-aarch64-static
+            mmdebstrap debootstrap arch-test
+          if [ "$GUEST_ARCH" = "x86_64" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              qemu-user-static binfmt-support
+            sudo update-binfmts --enable qemu-aarch64
+            test -x /usr/bin/qemu-aarch64-static
+          fi
           arch-test arm64
 
       - name: Download pinned kernel tarball
