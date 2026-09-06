@@ -37,7 +37,10 @@ const VELNOR_POLICY_WORKFLOW: &str =
 // default branch. After this generator change merges, repin through a second
 // generator-only change to that merge commit; never pin a reusable workflow to
 // the commit that introduces it.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "6e6653a54f3ed64f6188af10c8417e7df9c1b8d1";
+// pull_request_target can only call the policy workflow from a revision that
+// is already reachable from the base repository. Keep the provider on the
+// mainline provider commit; the hosted runtime pin remains independent.
+const VELNOR_POLICY_WORKFLOW_REV: &str = "f15ff2e8449a34f77f04746fa461a349bad22e79";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
