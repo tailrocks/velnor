@@ -9664,7 +9664,11 @@ path-only = { path = "../path-only" }
         must(
             fs::write(
                 &selection,
-                "version=1\nbase_sha=\nhead_sha=HEAD\nscope=full\nunits=a,b,c\nfull_units=a,b,c\n",
+                format!(
+                    "version=1\nbase_sha={}\nhead_sha={}\nscope=full\nunits=a,b,c\nfull_units=a,b,c\n",
+                    std::env::var("BASE_SHA").unwrap_or_default(),
+                    std::env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned()),
+                ),
             ),
             "write selection artifact",
         );
