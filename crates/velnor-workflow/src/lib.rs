@@ -8148,12 +8148,14 @@ path-only = { path = "../path-only" }
         let release_workflow = render_release(&config, release);
         assert_eq!(
             release_workflow.matches("jdx/mr-boxington-action@").count(),
-            0
+            3
         );
-        assert!(release_workflow.contains("cargo build -q -p velnor-runner"));
-        assert!(release_workflow.contains("cargo build -p velnor-runner --bin velnor-guest-agent"));
-        assert!(release_workflow.contains("cargo zigbuild -p velnor-runner"));
-        assert!(release_workflow.contains("cargo run -p velnor-runner --bin velnor-guest-image"));
+        assert!(release_workflow.contains("backend: local"));
+        assert!(release_workflow.contains("version: 1.8.3"));
+        assert!(release_workflow.contains("mbx build -q -p velnor-runner"));
+        assert!(release_workflow.contains("mbx build -p velnor-runner --bin velnor-guest-agent"));
+        assert!(release_workflow.contains("mbx zigbuild -p velnor-runner"));
+        assert!(release_workflow.contains("mbx run -p velnor-runner --bin velnor-guest-image"));
         assert!(release_workflow.contains("runner: ubuntu-24.04-arm"));
         assert!(release_workflow.contains("gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu"));
         assert!(release_workflow.contains("Normalize workflow binary mode after artifact download"));
