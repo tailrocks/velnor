@@ -12343,9 +12343,8 @@ async fn complete_acquired_job_outcome(
         }
         // Persist the Results Service blobs too: without them GitHub's native
         // job-log endpoint answers BlobNotFound for every cleanly failed job,
-        // hiding the rejection reason (homebrew-tablerock run 33344851591,
-        // velnor-actions run 33355064641). Best-effort — completion must not
-        // be blocked by a log upload.
+        // hiding the rejection reason (homebrew-tablerock run 33344851591).
+        // Best-effort — completion must not be blocked by a log upload.
         if let Some(client) = results_client_for_job(job) {
             if let Err(error) = upload_results_step_log_with_client(&client, job, &log).await {
                 tracing::warn!(
