@@ -621,7 +621,7 @@ not present.
   seven-day coverage.
 - After deleting the 12 exact pre-`856b6828` `objects-v2` cache IDs and
   re-listing them absent, the cache inventory at this timestamp is 69 caches,
-  7,689,040,738 bytes (7.161 GiB), 12 current `objects-v2` entries, zero
+  7,689,040,739 bytes (7.161 GiB), 12 current `objects-v2` entries, zero
   legacy MBX entries, and zero `a1e07a28` entries. This is one under-budget
   snapshot, not the required seven-day series.
 - GitHub Docker job
@@ -674,6 +674,51 @@ not present.
   communication; `ci-required` job `101558904566` failed. This is not passing
   Velnor-main proof.
 
+### Recheck 2026-09-06T22:06:17Z
+
+- A directly measured affected run,
+  [34061943793](https://github.com/tailrocks/velnor/actions/runs/34061943793),
+  was created and started at `21:43:54Z`; its run enqueue-to-start delta was
+  `0s`. Planning started at `21:43:57Z` and `ci-required` ran
+  `21:49:06Z`–`21:49:10Z`. This is run-level scheduling evidence, not proof
+  that every provider queue was empty.
+- Planning job `101563904382` resolved base
+  `967d696dc4e7a1eb508b8bd0149d9dc1db2fda37` and head
+  `e5ee968f8f4a4a74199bba445a592052bd31acf9` to
+  `scope=affected`, exactly
+  `docker,rust-velnor-runner,rust-velnorctl,rust-velnor-bench`, with the same
+  four `full_units`. The [selection artifact](https://github.com/tailrocks/velnor/actions/runs/34061943793/artifacts/9997746850)
+  records that exact set. Selected job starts were `21:44:12Z` for bench,
+  ctl, and runner, and `21:44:13Z` for Docker; their hosted job durations
+  were Docker `1m41s`, bench `1m44s`, ctl `2m35s`, and runner `4m51s`.
+  Job IDs are `101563938032`, `101563937996`, `101563938061`, and
+  `101563937975`. This is hosted provider/job timing evidence, not a matched
+  before/after proof and not Velnor-provider wait evidence.
+- A direct cache API sample at `22:06:17Z` returned 90 entries and
+  `10,524,480,411` bytes (`9.80 GiB`); a later read at `22:10:16Z` returned
+  95 entries and `10,659,238,979` bytes (`9.927 GiB`). Both exceed the
+  `8 GiB` ceiling. The mutable source is the [Actions cache API](https://api.github.com/repos/tailrocks/velnor/actions/caches?per_page=100);
+  the earlier `7.161 GiB` artifact remains one compliant sample, and seven
+  daily samples are still absent. The [Actions cache eviction limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy)
+  explain why this provider state is an independent constraint.
+- A runner API read at `22:10:17Z` returned five online, idle Velnor runners
+  with `self-hosted`/`velnor-target-mvp` labels. The [runner API](https://api.github.com/repos/tailrocks/velnor/actions/runners?per_page=100)
+  is a state observation only: it does not prove those runners served run
+  `34061943793` or establish that capacity caused another run's failures. The
+  [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners)
+  makes capacity and runner health a separate provider dependency; the
+  trusted main run remains required evidence.
+- The checked-in `ci-main.yml` `ci-required` fan-in has all 16 group-unit
+  callers in its `needs` list, and [`nightly-required` retains the same full
+  caller set](https://github.com/tailrocks/velnor/blob/120f223655587ab0bcf2530cd4b203e0375a9dca/.github/workflows/nightly.yml#L201-L205).
+  The source resolver maps `schedule`, `push`, and `workflow_dispatch` to
+  `full` scope ([runtime.rs](https://github.com/tailrocks/velnor/blob/120f223655587ab0bcf2530cd4b203e0375a9dca/crates/velnor-workflow/src/runtime.rs#L450-L465));
+  no live nightly run is claimed here. This is
+  the [required coverage contract](https://github.com/tailrocks/velnor/blob/120f223655587ab0bcf2530cd4b203e0375a9dca/.github/workflows/ci-main.yml#L195-L199),
+  not optional follow-up work. The [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners)
+  and the exact run/job timestamps above establish hosted timing evidence;
+  they do not prove Velnor provider wait or causality.
+
 Proposed owner/deadline register for the remaining proof. These assignments
 are follow-up commitments, not evidence that a blocker is cleared:
 
@@ -690,8 +735,8 @@ Provider, queue, and coverage record:
 
 | Area | Evidence | State |
 | --- | --- | --- |
-| GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); PR run 34053795798 reports job durations separately from the still-pending jobs | queue is external and must remain a separate metric |
-| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); direct listing above | 2026-09-06T22:34:07Z snapshot is 9.816 GiB; seven-day proof remains open |
+| GitHub-hosted queue/provider | [hosted-runner contract](https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners); run [34061943793](https://github.com/tailrocks/velnor/actions/runs/34061943793) and selected job IDs above; PR run 34053795798 reports job durations separately from the still-pending jobs | run 34061943793 enqueue-to-start was 0s; the queue is external and must remain a separate metric |
+| Actions cache provider | [cache eviction/limits](https://docs.github.com/en/actions/using-workflows/caching-dependencies-to-speed-up-workflows#usage-limits-and-eviction-policy); dated API samples above | samples at 9.80 and 9.927 GiB exceed 8 GiB; 2026-09-06T22:34:07Z snapshot is 9.816 GiB; seven-day proof remains open |
 | Velnor fleet | [self-hosted runner contract](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/about-self-hosted-runners); main jobs are trusted-only in generated callers | image published; activation and passing main run still open |
 | Required coverage | `ci-required` aggregates all 16 group-unit callers; `ci-main.yml` and `nightly.yml` use full scope | coverage retained; no `ci-velnor.yml` split |
 
@@ -783,7 +828,7 @@ Provider, queue, and coverage record:
 - Remaining unmet items: live passing Velnor main proof, a matched
   before/after post-`objects-v2` warm affected-PR pair, all §1 SLOs (PR #616
   misses the Rust-runner target by 30s), seven-day ≤8-GiB snapshots, the
-  required provider/queue/coverage proof table, v0.1.273 fleet activation, and
+  provider/queue/coverage proof table, v0.1.273 fleet activation, and
   synchronized PR #603 validation. Do not claim achievement.
 
 ### Recheck 2026-09-07 — remediation branch
