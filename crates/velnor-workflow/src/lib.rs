@@ -2789,6 +2789,8 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
             .extend(common_runtime_inputs.iter().map(|path| (*path).to_owned()));
         if unit.id == "rust-velnor-workflow" {
             unit.watch.extend([
+                "Dockerfile".to_owned(),
+                "docker/build-mise.*".to_owned(),
                 "crates/velnor-workflow/templates/**".to_owned(),
                 "crates/velnor-workflow/README.md".to_owned(),
             ]);
@@ -2810,7 +2812,7 @@ fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(
                 }
             }
         }
-        if matches!(unit.kind, UnitKind::Rust | UnitKind::Docker)
+        if matches!(unit.id.as_str(), "rust-velnor-runner" | "rust-velnor-tools")
             && file_set.iter().any(|file| file.starts_with("fleet/"))
         {
             unit.watch.push("fleet/**".to_owned());
@@ -11306,6 +11308,43 @@ const INCLUDED: &str = include_str!("fixture.txt");
             generator_watchers,
             vec!["docker", "rust-velnor-workflow", "rust-production-topology"],
             "generator edits must not fan out to every verification unit"
+        );
+        let workflow = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.id == "rust-velnor-workflow"),
+            "generated workflow unit",
+        );
+        for path in [
+            "Dockerfile",
+            "docker/build-mise.toml",
+            "docker/build-mise.lock",
+        ] {
+            assert!(
+                workflow.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern)
+                        .is_ok_and(|glob| glob.compile_matcher().is_match(path))
+                }),
+                "workflow runtime must watch {path}"
+            );
+        }
+        let fleet_watchers = config
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.watch.iter().any(|pattern| {
+                    globset::Glob::new(pattern).is_ok_and(|glob| {
+                        glob.compile_matcher().is_match("fleet/release-refs.toml")
+                    })
+                })
+            })
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fleet_watchers,
+            vec!["rust-velnor-runner", "rust-velnor-tools"],
+            "fleet inputs must not fan out to unrelated Rust units"
         );
         for name in expected {
             let path = PathBuf::from(".github/workflows").join(name);
