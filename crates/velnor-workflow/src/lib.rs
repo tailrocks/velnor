@@ -64,6 +64,8 @@ const VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE: &str =
     include_str!("../templates/release-package-signer.yml");
 const VELNOR_POLICY_PROVIDER_TEMPLATE: &str =
     include_str!("../templates/velnor-workflow-policy.yml");
+const VELNOR_SETUP_WORKFLOW_ACTION: &str =
+    include_str!("../templates/actions/setup-velnor-workflow/action.yml");
 const APT_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
 const LEGACY_VELNOR_RUNNER_SELECTOR: &str = "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
 const RETIRED_WORKFLOW_PROVIDER_REPOSITORIES: &[&str] = &[
@@ -2578,6 +2580,34 @@ fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
     }
     files.push("maintenance.yml".to_owned());
     files
+}
+
+/// A repository-local file the generator owns verbatim outside the workflow
+/// surface, such as a composite action consumed by the emitted workflows. The
+/// content is a pinned crate asset so the owned bytes stay reviewable in one
+/// place and flow through the same ownership state as every workflow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnedStaticFile {
+    path: &'static str,
+    content: &'static str,
+}
+
+const VELNOR_OWNED_STATIC_FILES: &[OwnedStaticFile] = &[OwnedStaticFile {
+    path: ".github/actions/setup-velnor-workflow/action.yml",
+    content: VELNOR_SETUP_WORKFLOW_ACTION,
+}];
+
+/// Extra owned files emitted alongside the workflow surface. Membership is
+/// code-owned catalog data like the workflow list; an unverified profile owns
+/// nothing.
+fn estate_owned_static_files(profile: &EstateProfile) -> &'static [OwnedStaticFile] {
+    if !profile.verified {
+        return &[];
+    }
+    match profile.repository {
+        "tailrocks/velnor" => VELNOR_OWNED_STATIC_FILES,
+        _ => &[],
+    }
 }
 
 fn apply_local_velnor_profile(
@@ -6843,6 +6873,11 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
             );
         }
     }
+    if let Some(profile) = estate_profile(&config.repository) {
+        for owned in estate_owned_static_files(profile) {
+            files.insert(PathBuf::from(owned.path), owned.content.to_owned());
+        }
+    }
     files
 }
 
@@ -7309,7 +7344,7 @@ fn plan_generated_write_with_options(
     adopt: bool,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root)?;
+    reject_managed_symlink_ancestors(root, files.keys())?;
     let preimages = files
         .keys()
         .map(|relative| {
@@ -7433,7 +7468,7 @@ fn apply_generated_write_plan(
     if !plan.has_drift() {
         return Ok(WriteOutcome::Unchanged);
     }
-    let _generation_lock = GenerationLock::acquire(root)?;
+    let _generation_lock = GenerationLock::acquire(root, files.keys())?;
     validate_plan_preimages(root, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
     // file exactly matches this renderer's output. `verify_generated_ownership`
@@ -7540,9 +7575,24 @@ fn reject_symlinked_output_root(root: &Path) -> Result<(), GeneratorError> {
 
 /// Generated paths are intentionally constrained beneath the target repository.
 /// Refuse a symlinked managed directory instead of letting normal filesystem
-/// resolution redirect a write outside that repository.
-fn reject_managed_symlink_ancestors(root: &Path) -> Result<(), GeneratorError> {
-    for relative in [".github", ".github/ci", ".github/workflows"] {
+/// resolution redirect a write outside that repository. The managed set is
+/// derived from the emitted paths so owned files outside `.github/workflows`
+/// (composite actions, workflow templates) get the same protection.
+fn reject_managed_symlink_ancestors<'a>(
+    root: &Path,
+    generated: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), GeneratorError> {
+    let mut managed = BTreeSet::from([PathBuf::from(".github")]);
+    for relative in generated {
+        managed.extend(
+            relative
+                .ancestors()
+                .skip(1)
+                .filter(|ancestor| ancestor.starts_with(".github"))
+                .map(Path::to_path_buf),
+        );
+    }
+    for relative in managed {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -7638,7 +7688,7 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
 
 fn validate_plan_preimages(root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root)?;
+    reject_managed_symlink_ancestors(root, plan.files.iter().map(|file| &file.path))?;
     let mut changed = Vec::new();
     for file in &plan.files {
         let current = capture_file_preimage(&root.join(&file.path), &file.path)?;
@@ -7901,11 +7951,14 @@ struct GenerationLock {
 }
 
 impl GenerationLock {
-    fn acquire(root: &Path) -> Result<Self, GeneratorError> {
+    fn acquire<'a>(
+        root: &Path,
+        generated: impl IntoIterator<Item = &'a PathBuf>,
+    ) -> Result<Self, GeneratorError> {
         reject_symlinked_output_root(root)?;
         fs::create_dir_all(root)
             .map_err(|error| GeneratorError::io("create output root", root, &error))?;
-        reject_managed_symlink_ancestors(root)?;
+        reject_managed_symlink_ancestors(root, generated)?;
         let directory = fs::File::open(root)
             .map_err(|error| GeneratorError::io("open output root for locking", root, &error))?;
         match directory.try_lock() {
@@ -11607,6 +11660,93 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
+    fn velnor_generation_owns_setup_workflow_action_verbatim() {
+        let root = repository_root();
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan Velnor repository for owned action",
+        );
+        let files = generated_files(&config);
+        let path = PathBuf::from(".github/actions/setup-velnor-workflow/action.yml");
+        let emitted = must_some(files.get(&path), "generated setup workflow action");
+        let checked_in = must(
+            fs::read_to_string(root.join(&path)),
+            "read checked-in setup workflow action",
+        );
+        assert_eq!(
+            emitted, &checked_in,
+            "embedded asset and checked-in composite action diverged"
+        );
+    }
+
+    #[test]
+    fn owned_static_files_flow_through_ownership_and_stale_deletion() {
+        let root = temporary_repository("owned-static-files");
+        let profile = must_some(estate_profile("tailrocks/velnor"), "velnor estate profile");
+        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        let files = generated_files(&config);
+        let action = PathBuf::from(".github/actions/setup-velnor-workflow/action.yml");
+        let action_content = must_some(files.get(&action), "owned action content");
+
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write generated layout with owned action",
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&action)),
+                "read written owned action"
+            ),
+            *action_content,
+        );
+        let ownership = must(
+            parse_ownership_state(
+                &root,
+                &capture_file_preimage(&root.join(OWNERSHIP_STATE), Path::new(OWNERSHIP_STATE))
+                    .unwrap_or(FilePreimage::Missing),
+            ),
+            "parse ownership state with owned action",
+        );
+        assert_eq!(
+            ownership
+                .as_ref()
+                .and_then(|state| state.get(&action))
+                .copied(),
+            Some(content_digest(action_content)),
+            "ownership state must cover the owned action"
+        );
+        assert!(matches!(
+            write_generated(&root, &files, false, true, false),
+            Ok(WriteOutcome::Unchanged)
+        ));
+
+        must(
+            fs::write(root.join(&action), "# manually changed\n"),
+            "modify owned action",
+        );
+        let error = must_some(
+            write_generated(&root, &files, false, false, false).err(),
+            "reject modified owned action",
+        );
+        assert!(error
+            .to_string()
+            .contains("manually modified generated file"));
+        must(
+            fs::write(root.join(&action), action_content),
+            "restore owned action",
+        );
+
+        let mut reduced = files.clone();
+        reduced.remove(&action);
+        must(
+            write_generated(&root, &reduced, false, false, false),
+            "remove exact stale owned action",
+        );
+        assert!(!root.join(&action).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn retired_provider_repository_can_scan_its_own_workflows() {
         let root = temporary_repository("retired-provider-self-scan");
         must(
@@ -11874,16 +12014,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
     #[test]
     fn generation_lock_serializes_mutating_writers() {
         let root = temporary_repository("generation-lock");
-        let first = must(GenerationLock::acquire(&root), "acquire first lock");
+        let first = must(GenerationLock::acquire(&root, []), "acquire first lock");
         let second = must_some(
-            GenerationLock::acquire(&root).err(),
+            GenerationLock::acquire(&root, []).err(),
             "reject concurrent generation lock",
         );
         assert!(second
             .to_string()
             .contains("another generation is in progress"));
         drop(first);
-        let third = GenerationLock::acquire(&root);
+        let third = GenerationLock::acquire(&root, []);
         assert!(third.is_ok());
         drop(third);
         let _ = fs::remove_dir_all(root);
@@ -12205,6 +12345,37 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[cfg(unix)]
     #[test]
+    fn generation_refuses_symlinked_owned_static_file_ancestor() {
+        let root = temporary_repository("symlinked-owned-static-ancestor");
+        let outside = temporary_repository("symlinked-owned-static-target");
+        let profile = must_some(estate_profile("tailrocks/velnor"), "velnor estate profile");
+        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        let files = generated_files(&config);
+        let actions = root.join(".github/actions");
+        must(
+            fs::create_dir_all(must_some(actions.parent(), "owned ancestor parent")),
+            "create owned ancestor parent",
+        );
+        must(
+            std::os::unix::fs::symlink(&outside, &actions),
+            "create owned static ancestor symlink",
+        );
+        let error = must_some(
+            write_generated(&root, &files, false, false, true).err(),
+            "symlinked owned static ancestor must be rejected",
+        );
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked managed directory"));
+        assert!(must(fs::read_dir(&outside), "read outside directory")
+            .next()
+            .is_none());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn generation_refuses_symlinked_output_root_ancestor() {
         let launch = temporary_repository("symlinked-output-launch");
         let outside = temporary_repository("symlinked-output-target");
@@ -12402,6 +12573,44 @@ const INCLUDED: &str = include_str!("fixture.txt");
                     .is_some_and(release_contract_complete));
             } else {
                 assert!(!actual_workflows.contains("release.yml"));
+            }
+        }
+    }
+
+    #[test]
+    fn estate_catalog_pins_owned_static_files() {
+        let owners = ESTATE_PROFILES
+            .iter()
+            .filter(|profile| !estate_owned_static_files(profile).is_empty())
+            .map(|profile| profile.repository)
+            .collect::<Vec<_>>();
+        assert_eq!(owners, ["tailrocks/velnor"]);
+
+        for profile in ESTATE_PROFILES {
+            let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+            let files = generated_files(&config);
+            let owned = estate_owned_static_files(profile);
+            if owned.is_empty() {
+                assert!(
+                    files
+                        .keys()
+                        .all(|path| !path.starts_with(".github/actions")),
+                    "unexpected owned static file: {}",
+                    profile.repository
+                );
+            }
+            for static_file in owned {
+                assert!(
+                    static_file.path.starts_with(".github/"),
+                    "owned static file escapes .github: {}",
+                    static_file.path
+                );
+                assert_eq!(
+                    files.get(Path::new(static_file.path)).map(String::as_str),
+                    Some(static_file.content),
+                    "owned static file missing from generated output: {}",
+                    static_file.path
+                );
             }
         }
     }
