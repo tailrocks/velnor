@@ -211,6 +211,7 @@ const MOLD_REFS: &[AllowedRef] = &[
     allowed("v1", "fixture transition until plan 041"),
 ];
 const RUST_CACHE_REFS: &[AllowedRef] = &[
+    allowed("6323deb102c322ba6fcbdcafc7e3dddab59af2b6", "v2.9.2"),
     allowed("42dc69e1aa15d09112580998cf2ef0119e2e91ae", "v2"),
     allowed("c19371144df3bb44fab255c43d04cbc2ab54d1c4", "v2"),
     allowed("e18b497796c12c097a38f9edb9d0641fb99eee32", "v2"),
@@ -225,10 +226,10 @@ const RUNTIME_REFS: &[AllowedRef] = &[
     allowed("04d248b84655b509d8c44dc1d6f990c879747487", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
-const GITHUB_SCRIPT_REFS: &[AllowedRef] = &[allowed(
-    "3a2844b7e9c422d3c10d287c895573f7108da1b3",
-    "v9.0.0",
-)];
+const GITHUB_SCRIPT_REFS: &[AllowedRef] = &[
+    allowed("3a2844b7e9c422d3c10d287c895573f7108da1b3", "v9.0.0"),
+    allowed("f28e40c7f34bde8b3046d885e986cb6290c5673b", "v7.1.0"),
+];
 const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     InputRule::Any("github-token"),
     InputRule::Literal(
@@ -236,10 +237,12 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
         &[
             "core.setOutput('docs-xtask', process.env.CONTRACT)",
             "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())",
+            "return { fixture: \"github-script-probe\" };",
         ],
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("39b914146caeff8cd512e61c8992f1d5913af85c", "v46.2.5"),
     allowed("5402b206248e5a8c8427a15102702eb9c1793efc", "v46.2.4"),
     allowed("0a7b68676027570f113b1d6e7b69b231b56167ab", "v46.2.3"),
     allowed("e09d604f8f803bb527bd8321ed5be06c460b8682", "v46.2.2"),
@@ -479,10 +482,10 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "actions/create-github-app-token",
         CreateGitHubAppToken,
-        &[allowed(
-            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
-            "v3.0.0"
-        )],
+        &[
+            allowed("bcd2ba49218906704ab6c1aa796996da409d3eb1", "v3.0.0"),
+            allowed("fee1f7d63c2ff003460e3d139729b119787bc349", "v2.2.2"),
+        ],
         &[
             InputRule::Any("client-id"),
             InputRule::Any("app-id"),
@@ -538,6 +541,7 @@ pub static ACTIONS: &[ActionCapability] = &[
         "actions/deploy-pages",
         DeployPages,
         &[
+            allowed("368f82528645a54fb793d4d04e342629a3f51346", "v5.0.1"),
             allowed("cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"),
             allowed("v5", "fixture transition until plan 041")
         ],
@@ -665,7 +669,10 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "docker/setup-qemu-action",
         SetupQemu,
-        &[allowed("96fe6ef7f33517b61c61be40b68a1882f3264fb8", "v4")],
+        &[
+            allowed("1f40c72289eff860ee54a304f1438e3cff362e0a", "v4.3.0"),
+            allowed("96fe6ef7f33517b61c61be40b68a1882f3264fb8", "v4"),
+        ],
         &[
             InputRule::Any("image"),
             InputRule::Any("platforms"),
