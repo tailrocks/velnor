@@ -28,10 +28,6 @@ reviewed migration switch for an existing workflow surface: it snapshots each
 reviewed body under `.github/ci/workflow-templates/`, then renders the workflow
 from that generator-owned template. The ownership sidecar keeps the historical path
 `.github/ci/.github-actions-generator-state` for safe adoption of older trees.
-Template loading and `--adopt` fail closed on active workflow references to any
-retired `ChainArgos/velnor-actions`, `jackin-project/velnor-actions`, or
-`tailrocks/velnor-actions` mirror; the distinct `tailrocks/velnor-actions-fixture`
-repository name remains valid fixture data.
 
 Generated jobs install the runtime through the versioned composite action
 (mise-action model: declare a revision, get the binary on PATH, cached)

@@ -64,13 +64,10 @@ const VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE: &str =
     include_str!("../templates/release-package-signer.yml");
 const VELNOR_POLICY_PROVIDER_TEMPLATE: &str =
     include_str!("../templates/velnor-workflow-policy.yml");
+const VELNOR_SETUP_WORKFLOW_ACTION: &str =
+    include_str!("../templates/actions/setup-velnor-workflow/action.yml");
 const APT_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
 const LEGACY_VELNOR_RUNNER_SELECTOR: &str = "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
-const RETIRED_WORKFLOW_PROVIDER_REPOSITORIES: &[&str] = &[
-    "ChainArgos/velnor-actions",
-    "jackin-project/velnor-actions",
-    "tailrocks/velnor-actions",
-];
 
 /// Immutable, reviewed action commits used by every emitted workflow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2580,6 +2577,34 @@ fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
     files
 }
 
+/// A repository-local file the generator owns verbatim outside the workflow
+/// surface, such as a composite action consumed by the emitted workflows. The
+/// content is a pinned crate asset so the owned bytes stay reviewable in one
+/// place and flow through the same ownership state as every workflow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnedStaticFile {
+    path: &'static str,
+    content: &'static str,
+}
+
+const VELNOR_OWNED_STATIC_FILES: &[OwnedStaticFile] = &[OwnedStaticFile {
+    path: ".github/actions/setup-velnor-workflow/action.yml",
+    content: VELNOR_SETUP_WORKFLOW_ACTION,
+}];
+
+/// Extra owned files emitted alongside the workflow surface. Membership is
+/// code-owned catalog data like the workflow list; an unverified profile owns
+/// nothing.
+fn estate_owned_static_files(profile: &EstateProfile) -> &'static [OwnedStaticFile] {
+    if !profile.verified {
+        return &[];
+    }
+    match profile.repository {
+        "tailrocks/velnor" => VELNOR_OWNED_STATIC_FILES,
+        _ => &[],
+    }
+}
+
 fn apply_local_velnor_profile(
     root: &Path,
     mut config: ProjectConfig,
@@ -3314,87 +3339,6 @@ fn velnor_docker_command(command: &str) -> String {
     format!("docker buildx build --load {arguments}")
 }
 
-fn reject_retired_workflow_provider_reference(
-    path: &Path,
-    content: &str,
-) -> Result<(), GeneratorError> {
-    let contains_reference = match serde_yaml::from_str::<serde_yaml::Value>(content) {
-        Ok(document) => yaml_contains_retired_workflow_provider(&document),
-        Err(_) => content
-            .lines()
-            .filter_map(workflow_uses_value)
-            .any(is_retired_workflow_provider_reference),
-    };
-    if contains_reference {
-        return Err(GeneratorError::usage(format!(
-            "workflow contains retired provider reference ({}): {}",
-            RETIRED_WORKFLOW_PROVIDER_REPOSITORIES.join(", "),
-            path.display(),
-        )));
-    }
-    Ok(())
-}
-
-fn is_retired_workflow_provider_repository(root: &Path) -> bool {
-    let Some(repository) = local_github_repository(root) else {
-        return false;
-    };
-    RETIRED_WORKFLOW_PROVIDER_REPOSITORIES
-        .iter()
-        .any(|candidate| *candidate == repository)
-}
-
-fn yaml_contains_retired_workflow_provider(value: &serde_yaml::Value) -> bool {
-    match value {
-        serde_yaml::Value::Mapping(mapping) => mapping.iter().any(|(key, value)| {
-            (key == "uses"
-                && value
-                    .as_str()
-                    .is_some_and(is_retired_workflow_provider_reference))
-                || yaml_contains_retired_workflow_provider(value)
-        }),
-        serde_yaml::Value::Sequence(sequence) => {
-            sequence.iter().any(yaml_contains_retired_workflow_provider)
-        }
-        serde_yaml::Value::Tagged(tagged) => {
-            yaml_contains_retired_workflow_provider(tagged.value())
-        }
-        serde_yaml::Value::Null
-        | serde_yaml::Value::Bool(_)
-        | serde_yaml::Value::Number(_)
-        | serde_yaml::Value::String(_) => false,
-    }
-}
-
-fn workflow_uses_value(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    let line = line.strip_prefix('-').map_or(line, str::trim_start);
-    let (key, value) = line.split_once(':')?;
-    (key.trim() == "uses").then_some(value)
-}
-
-fn is_retired_workflow_provider_reference(value: &str) -> bool {
-    let value = value
-        .split_once('#')
-        .map_or(value, |(value, _)| value)
-        .trim()
-        .trim_matches(|character| matches!(character, '\'' | '"'));
-    let path = value.split_once('@').map_or(value, |(path, _)| path);
-    RETIRED_WORKFLOW_PROVIDER_REPOSITORIES
-        .iter()
-        .any(|repository| {
-            let repository_length = repository.len();
-            let Some(prefix) = path.get(..repository_length) else {
-                return false;
-            };
-            prefix.eq_ignore_ascii_case(repository)
-                && path
-                    .as_bytes()
-                    .get(repository_length)
-                    .is_none_or(|byte| *byte == b'/')
-        })
-}
-
 fn load_workflow_templates(
     root: &Path,
     mut config: ProjectConfig,
@@ -3405,7 +3349,6 @@ fn load_workflow_templates(
     }
     let entries = fs::read_dir(&directory)
         .map_err(|error| GeneratorError::io("read workflow templates", &directory, &error))?;
-    let reject_retired_provider_references = !is_retired_workflow_provider_repository(root);
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
@@ -3430,9 +3373,6 @@ fn load_workflow_templates(
                 path.display()
             ))
         })?;
-        if reject_retired_provider_references {
-            reject_retired_workflow_provider_reference(&path, body)?;
-        }
         names.push(name.to_owned());
         config
             .workflow_templates
@@ -3504,7 +3444,6 @@ fn adopt_existing_workflow_templates(
 
     let local_velnor = config.repository == "tailrocks/velnor";
     let already_adopted = config.adopted_workflow_surface;
-    let reject_retired_provider_references = !is_retired_workflow_provider_repository(root);
     if !local_velnor && !already_adopted {
         config.workflow_files.clone_from(&existing);
     }
@@ -3517,9 +3456,6 @@ fn adopt_existing_workflow_templates(
         let path = root.join(&output);
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow for adoption", &path, &error))?;
-        if reject_retired_provider_references {
-            reject_retired_workflow_provider_reference(&path, &content)?;
-        }
         if already_adopted
             && content.starts_with(GENERATED_HEADER)
             && !config.workflow_templates.contains_key(&name)
@@ -6843,6 +6779,11 @@ fn generated_files(config: &ProjectConfig) -> BTreeMap<PathBuf, String> {
             );
         }
     }
+    if let Some(profile) = estate_profile(&config.repository) {
+        for owned in estate_owned_static_files(profile) {
+            files.insert(PathBuf::from(owned.path), owned.content.to_owned());
+        }
+    }
     files
 }
 
@@ -7309,7 +7250,7 @@ fn plan_generated_write_with_options(
     adopt: bool,
 ) -> Result<GeneratedWritePlan, GeneratorError> {
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root)?;
+    reject_managed_symlink_ancestors(root, files.keys())?;
     let preimages = files
         .keys()
         .map(|relative| {
@@ -7433,7 +7374,7 @@ fn apply_generated_write_plan(
     if !plan.has_drift() {
         return Ok(WriteOutcome::Unchanged);
     }
-    let _generation_lock = GenerationLock::acquire(root)?;
+    let _generation_lock = GenerationLock::acquire(root, files.keys())?;
     validate_plan_preimages(root, plan)?;
     // A pre-state version is safe to adopt only when every existing generated
     // file exactly matches this renderer's output. `verify_generated_ownership`
@@ -7540,9 +7481,24 @@ fn reject_symlinked_output_root(root: &Path) -> Result<(), GeneratorError> {
 
 /// Generated paths are intentionally constrained beneath the target repository.
 /// Refuse a symlinked managed directory instead of letting normal filesystem
-/// resolution redirect a write outside that repository.
-fn reject_managed_symlink_ancestors(root: &Path) -> Result<(), GeneratorError> {
-    for relative in [".github", ".github/ci", ".github/workflows"] {
+/// resolution redirect a write outside that repository. The managed set is
+/// derived from the emitted paths so owned files outside `.github/workflows`
+/// (composite actions, workflow templates) get the same protection.
+fn reject_managed_symlink_ancestors<'a>(
+    root: &Path,
+    generated: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), GeneratorError> {
+    let mut managed = BTreeSet::from([PathBuf::from(".github")]);
+    for relative in generated {
+        managed.extend(
+            relative
+                .ancestors()
+                .skip(1)
+                .filter(|ancestor| ancestor.starts_with(".github"))
+                .map(Path::to_path_buf),
+        );
+    }
+    for relative in managed {
         let path = root.join(relative);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -7638,7 +7594,7 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
 
 fn validate_plan_preimages(root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
     reject_symlinked_output_root(root)?;
-    reject_managed_symlink_ancestors(root)?;
+    reject_managed_symlink_ancestors(root, plan.files.iter().map(|file| &file.path))?;
     let mut changed = Vec::new();
     for file in &plan.files {
         let current = capture_file_preimage(&root.join(&file.path), &file.path)?;
@@ -7901,11 +7857,14 @@ struct GenerationLock {
 }
 
 impl GenerationLock {
-    fn acquire(root: &Path) -> Result<Self, GeneratorError> {
+    fn acquire<'a>(
+        root: &Path,
+        generated: impl IntoIterator<Item = &'a PathBuf>,
+    ) -> Result<Self, GeneratorError> {
         reject_symlinked_output_root(root)?;
         fs::create_dir_all(root)
             .map_err(|error| GeneratorError::io("create output root", root, &error))?;
-        reject_managed_symlink_ancestors(root)?;
+        reject_managed_symlink_ancestors(root, generated)?;
         let directory = fs::File::open(root)
             .map_err(|error| GeneratorError::io("open output root for locking", root, &error))?;
         match directory.try_lock() {
@@ -11247,94 +11206,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn generator_owned_template_rejects_retired_provider_but_allows_fixture_repository() {
-        let root = temporary_repository("retired-provider-template");
-        let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
-        must(
-            fs::create_dir_all(must_some(template.parent(), "template parent")),
-            "create workflow template directory",
-        );
-        for repository in RETIRED_WORKFLOW_PROVIDER_REPOSITORIES {
-            let retired = format!(
-                "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: {repository}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
-            );
-            must(
-                fs::write(&template, retired),
-                "write retired provider template",
-            );
-            let error = must_some(
-                scan_repository(&root, RunnerMode::Github).err(),
-                "reject retired provider template",
-            );
-            assert!(
-                error.to_string().contains("retired provider reference"),
-                "{repository}: {error}"
-            );
-        }
-
-        let fixture = format!(
-            "{GENERATED_HEADER}name: tailrocks/velnor-actions-fixture\njobs:\n  call:\n    uses: tailrocks/velnor-actions-fixture/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
-        );
-        must(fs::write(&template, fixture), "write fixture template");
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "allow fixture repository template",
-        );
-        assert!(config
-            .workflow_templates
-            .get("ci.yml")
-            .is_some_and(|body| body.contains("tailrocks/velnor-actions-fixture")));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn adopted_workflow_rejects_retired_provider_but_allows_fixture_repository() {
-        let root = temporary_repository("retired-provider-adoption");
-        let workflow = root.join(".github/workflows/ci.yml");
-        must(
-            fs::create_dir_all(must_some(workflow.parent(), "workflow parent")),
-            "create workflow directory",
-        );
-        for repository in RETIRED_WORKFLOW_PROVIDER_REPOSITORIES {
-            let retired = format!(
-                "name: CI\njobs:\n  call:\n    uses: {repository}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
-            );
-            must(
-                fs::write(&workflow, retired),
-                "write retired provider workflow",
-            );
-            let config = must(
-                scan_repository(&root, RunnerMode::Github),
-                "scan adoption repository",
-            );
-            let error = must_some(
-                adopt_existing_workflow_templates(&root, config).err(),
-                "reject retired provider adoption",
-            );
-            assert!(
-                error.to_string().contains("retired provider reference"),
-                "{repository}: {error}"
-            );
-        }
-
-        let fixture = "name: tailrocks/velnor-actions-fixture\njobs:\n  call:\n    uses: tailrocks/velnor-actions-fixture/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n";
-        must(fs::write(&workflow, fixture), "write fixture workflow");
-        let config = must(
-            scan_repository(&root, RunnerMode::Github),
-            "rescan adoption repository",
-        );
-        let adopted = must(
-            adopt_existing_workflow_templates(&root, config),
-            "allow fixture repository adoption",
-        );
-        assert!(adopted
-            .workflow_templates
-            .get("ci.yml")
-            .is_some_and(|body| body.contains("tailrocks/velnor-actions-fixture")));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn velnor_generator_owns_every_current_workflow() {
         let root = repository_root();
         let config = must(
@@ -11607,8 +11478,95 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn retired_provider_repository_can_scan_its_own_workflows() {
-        let root = temporary_repository("retired-provider-self-scan");
+    fn velnor_generation_owns_setup_workflow_action_verbatim() {
+        let root = repository_root();
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan Velnor repository for owned action",
+        );
+        let files = generated_files(&config);
+        let path = PathBuf::from(".github/actions/setup-velnor-workflow/action.yml");
+        let emitted = must_some(files.get(&path), "generated setup workflow action");
+        let checked_in = must(
+            fs::read_to_string(root.join(&path)),
+            "read checked-in setup workflow action",
+        );
+        assert_eq!(
+            emitted, &checked_in,
+            "embedded asset and checked-in composite action diverged"
+        );
+    }
+
+    #[test]
+    fn owned_static_files_flow_through_ownership_and_stale_deletion() {
+        let root = temporary_repository("owned-static-files");
+        let profile = must_some(estate_profile("tailrocks/velnor"), "velnor estate profile");
+        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        let files = generated_files(&config);
+        let action = PathBuf::from(".github/actions/setup-velnor-workflow/action.yml");
+        let action_content = must_some(files.get(&action), "owned action content");
+
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write generated layout with owned action",
+        );
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(&action)),
+                "read written owned action"
+            ),
+            *action_content,
+        );
+        let ownership = must(
+            parse_ownership_state(
+                &root,
+                &capture_file_preimage(&root.join(OWNERSHIP_STATE), Path::new(OWNERSHIP_STATE))
+                    .unwrap_or(FilePreimage::Missing),
+            ),
+            "parse ownership state with owned action",
+        );
+        assert_eq!(
+            ownership
+                .as_ref()
+                .and_then(|state| state.get(&action))
+                .copied(),
+            Some(content_digest(action_content)),
+            "ownership state must cover the owned action"
+        );
+        assert!(matches!(
+            write_generated(&root, &files, false, true, false),
+            Ok(WriteOutcome::Unchanged)
+        ));
+
+        must(
+            fs::write(root.join(&action), "# manually changed\n"),
+            "modify owned action",
+        );
+        let error = must_some(
+            write_generated(&root, &files, false, false, false).err(),
+            "reject modified owned action",
+        );
+        assert!(error
+            .to_string()
+            .contains("manually modified generated file"));
+        must(
+            fs::write(root.join(&action), action_content),
+            "restore owned action",
+        );
+
+        let mut reduced = files.clone();
+        reduced.remove(&action);
+        must(
+            write_generated(&root, &reduced, false, false, false),
+            "remove exact stale owned action",
+        );
+        assert!(!root.join(&action).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn estate_remote_repository_scans_and_adopts_its_own_workflows() {
+        let root = temporary_repository("estate-remote-self-scan");
         must(
             fs::create_dir_all(root.join(".git")),
             "create repository metadata directory",
@@ -11616,33 +11574,40 @@ const INCLUDED: &str = include_str!("fixture.txt");
         must(
             fs::write(
                 root.join(".git/config"),
-                "[remote \"origin\"]\n    url = git@github.com:tailrocks/velnor-actions.git\n",
+                "[remote \"origin\"]\n    url = git@github.com:tailrocks/holla-apt.git\n",
             ),
-            "write provider repository metadata",
+            "write repository remote metadata",
         );
-        let retired = format!(
-            "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: tailrocks/velnor-actions/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+        let self_hosted = format!(
+            "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: tailrocks/holla-apt/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
         );
         let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
         must(
             fs::create_dir_all(must_some(template.parent(), "template parent")),
-            "create provider template directory",
+            "create repository template directory",
         );
-        must(fs::write(&template, &retired), "write provider template");
+        must(
+            fs::write(&template, &self_hosted),
+            "write repository template",
+        );
         let workflow = root.join(".github/workflows/ci.yml");
         must(
             fs::create_dir_all(must_some(workflow.parent(), "workflow parent")),
-            "create provider workflow directory",
+            "create repository workflow directory",
         );
-        must(fs::write(&workflow, &retired), "write provider workflow");
+        must(
+            fs::write(&workflow, &self_hosted),
+            "write repository workflow",
+        );
 
         let config = must(
             scan_repository(&root, RunnerMode::Github),
-            "scan provider repository",
+            "scan remote-identified repository",
         );
+        assert_eq!(config.repository, "tailrocks/holla-apt");
         must(
             adopt_existing_workflow_templates(&root, config),
-            "adopt provider workflow",
+            "adopt self-referencing workflow",
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -11874,16 +11839,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
     #[test]
     fn generation_lock_serializes_mutating_writers() {
         let root = temporary_repository("generation-lock");
-        let first = must(GenerationLock::acquire(&root), "acquire first lock");
+        let first = must(GenerationLock::acquire(&root, []), "acquire first lock");
         let second = must_some(
-            GenerationLock::acquire(&root).err(),
+            GenerationLock::acquire(&root, []).err(),
             "reject concurrent generation lock",
         );
         assert!(second
             .to_string()
             .contains("another generation is in progress"));
         drop(first);
-        let third = GenerationLock::acquire(&root);
+        let third = GenerationLock::acquire(&root, []);
         assert!(third.is_ok());
         drop(third);
         let _ = fs::remove_dir_all(root);
@@ -12205,6 +12170,37 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[cfg(unix)]
     #[test]
+    fn generation_refuses_symlinked_owned_static_file_ancestor() {
+        let root = temporary_repository("symlinked-owned-static-ancestor");
+        let outside = temporary_repository("symlinked-owned-static-target");
+        let profile = must_some(estate_profile("tailrocks/velnor"), "velnor estate profile");
+        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        let files = generated_files(&config);
+        let actions = root.join(".github/actions");
+        must(
+            fs::create_dir_all(must_some(actions.parent(), "owned ancestor parent")),
+            "create owned ancestor parent",
+        );
+        must(
+            std::os::unix::fs::symlink(&outside, &actions),
+            "create owned static ancestor symlink",
+        );
+        let error = must_some(
+            write_generated(&root, &files, false, false, true).err(),
+            "symlinked owned static ancestor must be rejected",
+        );
+        assert!(error
+            .to_string()
+            .contains("refusing symlinked managed directory"));
+        assert!(must(fs::read_dir(&outside), "read outside directory")
+            .next()
+            .is_none());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn generation_refuses_symlinked_output_root_ancestor() {
         let launch = temporary_repository("symlinked-output-launch");
         let outside = temporary_repository("symlinked-output-target");
@@ -12402,6 +12398,44 @@ const INCLUDED: &str = include_str!("fixture.txt");
                     .is_some_and(release_contract_complete));
             } else {
                 assert!(!actual_workflows.contains("release.yml"));
+            }
+        }
+    }
+
+    #[test]
+    fn estate_catalog_pins_owned_static_files() {
+        let owners = ESTATE_PROFILES
+            .iter()
+            .filter(|profile| !estate_owned_static_files(profile).is_empty())
+            .map(|profile| profile.repository)
+            .collect::<Vec<_>>();
+        assert_eq!(owners, ["tailrocks/velnor"]);
+
+        for profile in ESTATE_PROFILES {
+            let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+            let files = generated_files(&config);
+            let owned = estate_owned_static_files(profile);
+            if owned.is_empty() {
+                assert!(
+                    files
+                        .keys()
+                        .all(|path| !path.starts_with(".github/actions")),
+                    "unexpected owned static file: {}",
+                    profile.repository
+                );
+            }
+            for static_file in owned {
+                assert!(
+                    static_file.path.starts_with(".github/"),
+                    "owned static file escapes .github: {}",
+                    static_file.path
+                );
+                assert_eq!(
+                    files.get(Path::new(static_file.path)).map(String::as_str),
+                    Some(static_file.content),
+                    "owned static file missing from generated output: {}",
+                    static_file.path
+                );
             }
         }
     }

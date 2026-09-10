@@ -1,0 +1,101 @@
+# Composite replacement for the former inline `cargo install` step, following
+# the jdx/mise-action model: declare a revision, get the binary on PATH,
+# cached. Source-build phase: installs velnor-workflow with cargo and caches
+# the result. Mainline CI publishes a revision-named runtime artifact; this
+# action consumes that artifact before falling back to the one-time bootstrap
+# source build needed to publish a revision for the first time.
+name: Set up Velnor workflow runtime
+description: Install the velnor-workflow binary with cache and toolchain-env isolation
+
+inputs:
+  rev:
+    description: Velnor git revision to install
+    required: false
+    default: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
+  cache:
+    description: Cache the installation with GitHub cache
+    required: false
+    default: 'true'
+  cache-key-prefix:
+    description: Prefix for the installation cache key
+    required: false
+    default: velnor-workflow-v1
+  github-token:
+    description: GitHub token for authenticated git access
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Restore runtime cache
+      id: cache
+      if: inputs.cache == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/git
+          ~/.cargo/registry
+          ~/.cargo/bin/velnor-workflow
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}
+
+    - name: Download prebuilt runtime from trusted mainline
+      id: prebuilt
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INSTALL_REV: ${{ inputs.rev }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        artifact_name="velnor-workflow-runtime-${INSTALL_REV}"
+        artifact_id="$(gh api --paginate \
+          "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
+          --jq '.artifacts[] | select(.expired == false and .workflow_run.head_branch == env.DEFAULT_BRANCH and .workflow_run.head_repository_id == .workflow_run.repository_id) | .id' \
+          | sed -n '1p')"
+        if [[ -z "$artifact_id" ]]; then
+          echo 'found=false' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        temporary="$(mktemp -d)"
+        trap 'rm -rf -- "$temporary"' EXIT
+        gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$temporary/runtime.zip"
+        unzip -q "$temporary/runtime.zip" -d "$temporary/runtime"
+        install -Dm0755 "$temporary/runtime/velnor-workflow" "$HOME/.cargo/bin/velnor-workflow"
+        echo 'found=true' >> "$GITHUB_OUTPUT"
+
+    - name: Install runtime from source
+      if: steps.cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.found != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INSTALL_REV: ${{ inputs.rev }}
+      run: |
+        set -euo pipefail
+        # Authenticate git for the install below (public repo; also covers
+        # anonymous rate limits and private dependency mirrors).
+        git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+        # Unset toolchain wrappers inherited from the caller job. The sccache
+        # setup step runs later in the job, so any inherited RUSTC_WRAPPER
+        # points at a binary that does not exist yet and breaks the build.
+        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL \
+          cargo install --locked --git https://github.com/tailrocks/velnor.git \
+            --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
+
+    - name: Add runtime to PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -x "$HOME/.cargo/bin/velnor-workflow"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Save runtime cache
+      if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/git
+          ~/.cargo/registry
+          ~/.cargo/bin/velnor-workflow
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}
