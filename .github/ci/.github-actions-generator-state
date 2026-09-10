@@ -2,7 +2,7 @@
 schema = 1
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
-.github/ci/project.toml	cb9fb8da1518fd75
+.github/ci/project.toml	9bc336c00623960a
 .github/workflows/ci-bun-velnor.yml	f8e6f17d708b646e
 .github/workflows/ci-docker-docker.yml	76af6b261f44aef1
 .github/workflows/ci-docs-docs.yml	3389ff2bb704b5e6

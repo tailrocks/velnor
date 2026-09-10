@@ -66,6 +66,19 @@ const VELNOR_POLICY_PROVIDER_TEMPLATE: &str =
     include_str!("../templates/velnor-workflow-policy.yml");
 const VELNOR_SETUP_WORKFLOW_ACTION: &str =
     include_str!("../templates/actions/setup-velnor-workflow/action.yml");
+const APT_CI_APT_WORKFLOW_TEMPLATE: &str = include_str!("../templates/apt/workflows/ci-apt.yml");
+const APT_CI_WORKFLOW_TEMPLATE: &str = include_str!("../templates/apt/workflows/ci.yml");
+const APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/apt/workflows/package-update.yml");
+const APT_PACKAGE_UPDATER_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/apt/workflows/package-updater.yml");
+const APT_PUBLISH_WORKFLOW_TEMPLATE: &str = include_str!("../templates/apt/workflows/publish.yml");
+const APT_RENOVATE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/apt/workflows/renovate.yml");
+const APT_RUN_GATE_ACTION: &str = include_str!("../templates/apt/actions/run-gate/action.yml");
+const APT_AGGREGATE_ACTION: &str = include_str!("../templates/apt/actions/aggregate/action.yml");
+const APT_CACHE_CONTRACT_ACTION: &str =
+    include_str!("../templates/apt/actions/cache-contract/action.yml");
 const APT_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
 const LEGACY_VELNOR_RUNNER_SELECTOR: &str = "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
 
@@ -2592,6 +2605,36 @@ const VELNOR_OWNED_STATIC_FILES: &[OwnedStaticFile] = &[OwnedStaticFile {
     content: VELNOR_SETUP_WORKFLOW_ACTION,
 }];
 
+const APT_OWNED_STATIC_FILES: &[OwnedStaticFile] = &[
+    OwnedStaticFile {
+        path: ".github/actions/aggregate/action.yml",
+        content: APT_AGGREGATE_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/cache-contract/action.yml",
+        content: APT_CACHE_CONTRACT_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/run-gate/action.yml",
+        content: APT_RUN_GATE_ACTION,
+    },
+];
+
+/// velnor-apt's complete workflow surface as `(workflow file, headerless
+/// template body)` crate assets. The generator renders these through
+/// `render_static_template_for_config`, so the repository's checked-in copies
+/// are outputs of this table, never inputs; wiping the surface and
+/// regenerating from scratch reproduces it through the standard ownership
+/// machinery.
+const APT_WORKFLOW_TEMPLATES: &[(&str, &str)] = &[
+    ("ci-apt.yml", APT_CI_APT_WORKFLOW_TEMPLATE),
+    ("ci.yml", APT_CI_WORKFLOW_TEMPLATE),
+    ("package-update.yml", APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE),
+    ("package-updater.yml", APT_PACKAGE_UPDATER_WORKFLOW_TEMPLATE),
+    ("publish.yml", APT_PUBLISH_WORKFLOW_TEMPLATE),
+    ("renovate.yml", APT_RENOVATE_WORKFLOW_TEMPLATE),
+];
+
 /// Extra owned files emitted alongside the workflow surface. Membership is
 /// code-owned catalog data like the workflow list; an unverified profile owns
 /// nothing.
@@ -2601,6 +2644,7 @@ fn estate_owned_static_files(profile: &EstateProfile) -> &'static [OwnedStaticFi
     }
     match profile.repository {
         "tailrocks/velnor" => VELNOR_OWNED_STATIC_FILES,
+        "tailrocks/velnor-apt" => APT_OWNED_STATIC_FILES,
         _ => &[],
     }
 }
@@ -2689,13 +2733,36 @@ fn apply_local_estate_runner_profile(root: &Path, mut config: ProjectConfig) -> 
     let Some(repository) = local_github_repository(root) else {
         return config;
     };
-    if estate_profile(&repository)
+    if !estate_profile(&repository)
         .is_some_and(|profile| profile.profile == RepositoryProfile::AptRepository)
     {
-        config.repository = repository;
-        config.profile = RepositoryProfile::AptRepository;
+        return config;
     }
+    // Only velnor-apt's surface is crate-owned catalog data today; holla-apt
+    // still adopts its checked-in templates until its own assets are absorbed.
+    if repository == "tailrocks/velnor-apt" {
+        seed_apt_owned_workflow_surface(&mut config);
+    }
+    config.profile = RepositoryProfile::AptRepository;
+    config.repository = repository;
     config
+}
+
+/// Seed velnor-apt's workflow surface from the crate assets so the checked-in
+/// copies under `.github` are pure outputs. This runs after
+/// `load_workflow_templates`, replacing anything the target repository
+/// contributed: the crate table is the single source of truth and a wiped
+/// `.github` regenerates from scratch.
+fn seed_apt_owned_workflow_surface(config: &mut ProjectConfig) {
+    config.workflow_templates = APT_WORKFLOW_TEMPLATES
+        .iter()
+        .map(|(name, body)| ((*name).to_owned(), (*body).to_owned()))
+        .collect();
+    config.workflow_files = APT_WORKFLOW_TEMPLATES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    config.adopted_workflow_surface = true;
 }
 
 fn configure_velnor_docker_pr_target(config: &mut ProjectConfig) {
@@ -12409,7 +12476,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .filter(|profile| !estate_owned_static_files(profile).is_empty())
             .map(|profile| profile.repository)
             .collect::<Vec<_>>();
-        assert_eq!(owners, ["tailrocks/velnor"]);
+        assert_eq!(owners, ["tailrocks/velnor", "tailrocks/velnor-apt"]);
 
         for profile in ESTATE_PROFILES {
             let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
@@ -12438,6 +12505,188 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 );
             }
         }
+    }
+
+    #[test]
+    fn apt_owned_templates_regenerate_the_complete_surface_from_scratch() {
+        let root = temporary_repository("apt-owned-surface");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor-apt.git\n",
+            ),
+            "write origin remote",
+        );
+        must(
+            fs::write(root.join("README.md"), "# apt\n"),
+            "write markdown surface",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan wiped apt repository",
+        );
+        assert_eq!(config.repository, "tailrocks/velnor-apt");
+        assert_eq!(config.profile, RepositoryProfile::AptRepository);
+        assert!(config.adopted_workflow_surface);
+        let expected_names = APT_WORKFLOW_TEMPLATES
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(config.workflow_files, expected_names);
+        assert_eq!(
+            config
+                .workflow_templates
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+
+        let files = generated_files(&config);
+        for (name, _) in APT_WORKFLOW_TEMPLATES {
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(name)),
+                "generated apt workflow",
+            );
+            let template = must_some(
+                files.get(&PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name)),
+                "regenerated apt workflow template",
+            );
+            assert_eq!(workflow, template, "workflow and template diverge: {name}");
+            assert!(workflow.starts_with(GENERATED_HEADER));
+            // The absorbed bytes are a fixpoint of the apt render pipeline:
+            // re-rendering the emitted body must reproduce it exactly, or the
+            // checked-in copies would drift on the first regeneration.
+            let rerendered = render_static_template_for_config(
+                &config,
+                name,
+                strip_workflow_generator_header(workflow),
+            );
+            assert_eq!(
+                &rerendered, workflow,
+                "apt template is not a render fixpoint: {name}"
+            );
+        }
+        // No estate-default or unit workflow leaks into the owned surface.
+        for unexpected in [
+            "ci-pr.yml",
+            "ci-policy.yml",
+            "ci-main.yml",
+            "nightly.yml",
+            "maintenance.yml",
+            "release.yml",
+            "ci-docs.yml",
+        ] {
+            assert!(
+                !files.contains_key(&PathBuf::from(".github/workflows").join(unexpected)),
+                "unexpected workflow in apt surface: {unexpected}"
+            );
+        }
+        for owned in APT_OWNED_STATIC_FILES {
+            assert_eq!(
+                files.get(Path::new(owned.path)).map(String::as_str),
+                Some(owned.content),
+                "apt owned composite missing from generated output: {}",
+                owned.path
+            );
+        }
+        let publish = must_some(
+            files.get(&PathBuf::from(".github/workflows/publish.yml")),
+            "generated apt publish workflow",
+        );
+        assert!(publish.contains("scripts/verify-release.sh"));
+        assert!(publish.contains("scripts/publication-previous.jq"));
+        assert!(!publish.contains(".github/scripts/"));
+        assert!(!publish.contains(".github/publication-previous.jq"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_owned_surface_rewrite_after_wipe_is_byte_identical() {
+        let root = temporary_repository("apt-owned-surface-wipe");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor-apt.git\n",
+            ),
+            "write origin remote",
+        );
+        must(
+            fs::write(root.join("README.md"), "# apt\n"),
+            "write markdown surface",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan apt repository",
+        );
+        let files = generated_files(&config);
+        must(
+            write_generated(&root, &files, false, false, false),
+            "generate apt surface",
+        );
+        must(
+            fs::remove_dir_all(root.join(".github")),
+            "wipe generated surface",
+        );
+
+        let rescan = must(
+            scan_repository(&root, RunnerMode::Both),
+            "rescan wiped apt repository",
+        );
+        let regenerated = generated_files(&rescan);
+        assert_eq!(
+            regenerated, files,
+            "wiped apt surface must regenerate byte for byte"
+        );
+        must(
+            write_generated(&root, &regenerated, false, false, false),
+            "regenerate wiped apt surface",
+        );
+        for path in regenerated.keys() {
+            assert!(
+                root.join(path).is_file(),
+                "missing regenerated file: {}",
+                path.display()
+            );
+        }
+        assert!(root.join(OWNERSHIP_STATE).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn apt_template_seed_is_scoped_to_velnor_apt() {
+        let root = temporary_repository("apt-seed-scope");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/holla-apt.git\n",
+            ),
+            "write origin remote",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan holla-apt repository",
+        );
+        assert_eq!(config.repository, "tailrocks/holla-apt");
+        assert_eq!(config.profile, RepositoryProfile::AptRepository);
+        assert!(config.workflow_templates.is_empty());
+        let files = generated_files(&config);
+        assert!(
+            files
+                .keys()
+                .all(|path| !path.starts_with(".github/actions")),
+            "holla-apt owns no composite actions until its assets are absorbed"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
