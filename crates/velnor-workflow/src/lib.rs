@@ -79,6 +79,63 @@ const APT_RUN_GATE_ACTION: &str = include_str!("../templates/apt/actions/run-gat
 const APT_AGGREGATE_ACTION: &str = include_str!("../templates/apt/actions/aggregate/action.yml");
 const APT_CACHE_CONTRACT_ACTION: &str =
     include_str!("../templates/apt/actions/cache-contract/action.yml");
+const FIXTURE_ACTIONS_SUITE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/_actions-suite.yml");
+const FIXTURE_DOCKER_SUITE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/_docker-suite.yml");
+const FIXTURE_RUNTIME_SUITE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/_runtime-suite.yml");
+const FIXTURE_RUST_SUITE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/_rust-suite.yml");
+const FIXTURE_APP_TOKEN_PROBE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/app-token-probe.yml");
+const FIXTURE_ATTESTATION_NEGATIVE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/attestation-negative.yml");
+const FIXTURE_BACKEND_PARITY_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/backend-parity.yml");
+const FIXTURE_CI_WORKFLOW_TEMPLATE: &str = include_str!("../templates/fixture/workflows/ci.yml");
+const FIXTURE_COMPAT_PUBLIC_UNMERGED_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/compat-public-unmerged.yml");
+const FIXTURE_COMPAT_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/compat.yml");
+const FIXTURE_CONTROL_PLANE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/control-plane.yml");
+const FIXTURE_DOCKER_LEASE_PROBE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/docker-lease-probe.yml");
+const FIXTURE_DOCKER_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/docker.yml");
+const FIXTURE_RUST_CHECK_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/fixture-rust-check.yml");
+const FIXTURE_L2_NEGATIVE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/l2-negative.yml");
+const FIXTURE_L2_PROVENANCE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/l2-provenance.yml");
+const FIXTURE_L2_RUNTIME_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/l2-runtime.yml");
+const FIXTURE_MULTI_ARCH_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/multi-arch.yml");
+const FIXTURE_PAGES_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/pages.yml");
+const FIXTURE_RENOVATE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/renovate.yml");
+const FIXTURE_REUSE_CALLER_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/reuse-caller.yml");
+const FIXTURE_SCHEDULE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/schedule.yml");
+const FIXTURE_AGGREGATE_NEEDS_ACTION: &str =
+    include_str!("../templates/fixture/actions/aggregate-needs/action.yml");
+const FIXTURE_CHECK_DEPLOYED_DOCS_ACTION: &str =
+    include_str!("../templates/fixture/actions/check-deployed-docs/action.yml");
+const FIXTURE_CHECK_FIXTURE_OUTPUT_ACTION: &str =
+    include_str!("../templates/fixture/actions/check-fixture-output/action.yml");
+const FIXTURE_COLLECT_EVIDENCE_ACTION: &str =
+    include_str!("../templates/fixture/actions/collect-evidence/action.yml");
+const FIXTURE_COMPARE_EVIDENCE_ACTION: &str =
+    include_str!("../templates/fixture/actions/compare-evidence/action.yml");
+const FIXTURE_L2_NESTED_ACTION: &str =
+    include_str!("../templates/fixture/actions/l2-nested/action.yml");
+const FIXTURE_L2_ROOT_ACTION: &str =
+    include_str!("../templates/fixture/actions/l2-root/action.yml");
 const APT_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
 const LEGACY_VELNOR_RUNNER_SELECTOR: &str = "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
 
@@ -576,6 +633,10 @@ struct AnalysisSummary {
 }
 
 /// Generated, editable CI policy. It is intentionally not tied to a repository name.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these independent switches are the stable generated configuration contract"
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectConfig {
     repository: String,
@@ -595,6 +656,10 @@ pub struct ProjectConfig {
     units: Vec<Unit>,
     workflow_templates: BTreeMap<String, String>,
     adopted_workflow_surface: bool,
+    /// Emit `config-variables: null` in the generated actionlint configuration,
+    /// disabling its configuration-variables check for surfaces that declare
+    /// none.
+    actionlint_config_variables_null: bool,
 }
 
 fn default_workflow_files() -> Vec<String> {
@@ -1116,6 +1181,7 @@ fn scan_repository_with_default_branch(
         units,
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
+        actionlint_config_variables_null: false,
     };
     let config = load_workflow_templates(root, apply_local_velnor_profile(root, config)?)?;
     Ok(apply_local_estate_runner_profile(root, config))
@@ -2530,6 +2596,12 @@ const ESTATE_PROFILES: &[EstateProfile] = &[
         release: Some(ReleaseKind::RustBinary),
     },
     EstateProfile {
+        repository: "tailrocks/velnor-actions-fixture",
+        profile: RepositoryProfile::Generic,
+        verified: true,
+        release: None,
+    },
+    EstateProfile {
         repository: "tailrocks/velnor-apt",
         profile: RepositoryProfile::AptRepository,
         verified: true,
@@ -2553,6 +2625,12 @@ fn estate_profile(repository: &str) -> Option<&'static EstateProfile> {
 
 fn estate_workflow_files(profile: &EstateProfile) -> Vec<String> {
     if !profile.verified {
+        return Vec::new();
+    }
+    // The fixture's surface is seeded from crate assets on the local path;
+    // without a scanned checkout the catalog has no units to execute, so it
+    // emits no estate-default workflows for it.
+    if profile.profile == RepositoryProfile::Generic {
         return Vec::new();
     }
     let mut files = vec![
@@ -2635,6 +2713,93 @@ const APT_WORKFLOW_TEMPLATES: &[(&str, &str)] = &[
     ("renovate.yml", APT_RENOVATE_WORKFLOW_TEMPLATE),
 ];
 
+const FIXTURE_OWNED_STATIC_FILES: &[OwnedStaticFile] = &[
+    OwnedStaticFile {
+        path: ".github/actions/aggregate-needs/action.yml",
+        content: FIXTURE_AGGREGATE_NEEDS_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/check-deployed-docs/action.yml",
+        content: FIXTURE_CHECK_DEPLOYED_DOCS_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/check-fixture-output/action.yml",
+        content: FIXTURE_CHECK_FIXTURE_OUTPUT_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/collect-evidence/action.yml",
+        content: FIXTURE_COLLECT_EVIDENCE_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/compare-evidence/action.yml",
+        content: FIXTURE_COMPARE_EVIDENCE_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/l2-nested/action.yml",
+        content: FIXTURE_L2_NESTED_ACTION,
+    },
+    OwnedStaticFile {
+        path: ".github/actions/l2-root/action.yml",
+        content: FIXTURE_L2_ROOT_ACTION,
+    },
+];
+
+/// velnor-actions-fixture's complete workflow surface as `(workflow file,
+/// headerless template body)` crate assets, absorbed from the repository's
+/// post-renovate workflows and rendered through
+/// `render_static_template_for_config`. The audit and evidence scripts and the
+/// L2 fixtures live at the repository root (`scripts/`, `fixtures/`), so the
+/// generated `.github` tree stays fully deletable; the checked-in copies are
+/// outputs of this table, never inputs.
+const FIXTURE_WORKFLOW_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "_actions-suite.yml",
+        FIXTURE_ACTIONS_SUITE_WORKFLOW_TEMPLATE,
+    ),
+    ("_docker-suite.yml", FIXTURE_DOCKER_SUITE_WORKFLOW_TEMPLATE),
+    (
+        "_runtime-suite.yml",
+        FIXTURE_RUNTIME_SUITE_WORKFLOW_TEMPLATE,
+    ),
+    ("_rust-suite.yml", FIXTURE_RUST_SUITE_WORKFLOW_TEMPLATE),
+    (
+        "app-token-probe.yml",
+        FIXTURE_APP_TOKEN_PROBE_WORKFLOW_TEMPLATE,
+    ),
+    (
+        "attestation-negative.yml",
+        FIXTURE_ATTESTATION_NEGATIVE_WORKFLOW_TEMPLATE,
+    ),
+    (
+        "backend-parity.yml",
+        FIXTURE_BACKEND_PARITY_WORKFLOW_TEMPLATE,
+    ),
+    ("ci.yml", FIXTURE_CI_WORKFLOW_TEMPLATE),
+    (
+        "compat-public-unmerged.yml",
+        FIXTURE_COMPAT_PUBLIC_UNMERGED_WORKFLOW_TEMPLATE,
+    ),
+    ("compat.yml", FIXTURE_COMPAT_WORKFLOW_TEMPLATE),
+    ("control-plane.yml", FIXTURE_CONTROL_PLANE_WORKFLOW_TEMPLATE),
+    (
+        "docker-lease-probe.yml",
+        FIXTURE_DOCKER_LEASE_PROBE_WORKFLOW_TEMPLATE,
+    ),
+    ("docker.yml", FIXTURE_DOCKER_WORKFLOW_TEMPLATE),
+    (
+        "fixture-rust-check.yml",
+        FIXTURE_RUST_CHECK_WORKFLOW_TEMPLATE,
+    ),
+    ("l2-negative.yml", FIXTURE_L2_NEGATIVE_WORKFLOW_TEMPLATE),
+    ("l2-provenance.yml", FIXTURE_L2_PROVENANCE_WORKFLOW_TEMPLATE),
+    ("l2-runtime.yml", FIXTURE_L2_RUNTIME_WORKFLOW_TEMPLATE),
+    ("multi-arch.yml", FIXTURE_MULTI_ARCH_WORKFLOW_TEMPLATE),
+    ("pages.yml", FIXTURE_PAGES_WORKFLOW_TEMPLATE),
+    ("renovate.yml", FIXTURE_RENOVATE_WORKFLOW_TEMPLATE),
+    ("reuse-caller.yml", FIXTURE_REUSE_CALLER_WORKFLOW_TEMPLATE),
+    ("schedule.yml", FIXTURE_SCHEDULE_WORKFLOW_TEMPLATE),
+];
+
 /// Extra owned files emitted alongside the workflow surface. Membership is
 /// code-owned catalog data like the workflow list; an unverified profile owns
 /// nothing.
@@ -2644,6 +2809,7 @@ fn estate_owned_static_files(profile: &EstateProfile) -> &'static [OwnedStaticFi
     }
     match profile.repository {
         "tailrocks/velnor" => VELNOR_OWNED_STATIC_FILES,
+        "tailrocks/velnor-actions-fixture" => FIXTURE_OWNED_STATIC_FILES,
         "tailrocks/velnor-apt" => APT_OWNED_STATIC_FILES,
         _ => &[],
     }
@@ -2733,6 +2899,11 @@ fn apply_local_estate_runner_profile(root: &Path, mut config: ProjectConfig) -> 
     let Some(repository) = local_github_repository(root) else {
         return config;
     };
+    if repository == "tailrocks/velnor-actions-fixture" {
+        seed_fixture_owned_workflow_surface(&mut config);
+        config.repository = repository;
+        return config;
+    }
     if !estate_profile(&repository)
         .is_some_and(|profile| profile.profile == RepositoryProfile::AptRepository)
     {
@@ -2763,6 +2934,31 @@ fn seed_apt_owned_workflow_surface(config: &mut ProjectConfig) {
         .map(|(name, _)| (*name).to_owned())
         .collect();
     config.adopted_workflow_surface = true;
+}
+
+/// Seed velnor-actions-fixture's workflow surface from the crate assets, the
+/// same contract as the apt seed: the checked-in copies under `.github` are
+/// pure outputs and a wiped `.github` regenerates from scratch. The runner
+/// labels reproduce the repository's reviewed actionlint contract exactly —
+/// hosted jobs select `ubuntu-26.04`, the queue-validation lane selects
+/// `velnor-cp-queue-validation` — and the surface declares no configuration
+/// variables, so the generated actionlint config disables that check.
+fn seed_fixture_owned_workflow_surface(config: &mut ProjectConfig) {
+    config.workflow_templates = FIXTURE_WORKFLOW_TEMPLATES
+        .iter()
+        .map(|(name, body)| ((*name).to_owned(), (*body).to_owned()))
+        .collect();
+    config.workflow_files = FIXTURE_WORKFLOW_TEMPLATES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
+    config.adopted_workflow_surface = true;
+    "ubuntu-26.04".clone_into(&mut config.github_runner);
+    config.velnor_labels = vec![
+        "velnor-cp-queue-validation".to_owned(),
+        "velnor-target-mvp".to_owned(),
+    ];
+    config.actionlint_config_variables_null = true;
 }
 
 fn configure_velnor_docker_pr_target(config: &mut ProjectConfig) {
@@ -4142,6 +4338,7 @@ fn catalog_config_with_default_branch(
         },
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
+        actionlint_config_variables_null: false,
     };
     enable_mr_boxington_commands(&mut config);
     config
@@ -6870,6 +7067,11 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
     output.push_str("self-hosted-runner:\n  labels:\n");
     for label in labels {
         let _ = writeln!(output, "    - {}", yaml_scalar(&label));
+    }
+    if config.actionlint_config_variables_null {
+        // The surface declares no configuration variables; `null` disables the
+        // check instead of maintaining an empty allowlist.
+        output.push_str("\nconfig-variables: null\n");
     }
     output
 }
@@ -10450,6 +10652,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             ],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
+            actionlint_config_variables_null: false,
         };
         must(
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
@@ -10937,6 +11140,11 @@ const INCLUDED: &str = include_str!("fixture.txt");
     fn runner_mode_contract_holds_across_every_catalog_ci_workflow() {
         for profile in ESTATE_PROFILES {
             if !profile.verified {
+                continue;
+            }
+            // Without catalog units there is no execution lane to contract;
+            // the fixture's surface is seeded from crate assets, not rendered.
+            if catalog_units(profile).is_empty() {
                 continue;
             }
             for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
@@ -12427,7 +12635,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn estate_catalog_has_exact_profile_and_workflow_contracts() {
-        assert_eq!(ESTATE_PROFILES.len(), 32);
+        assert_eq!(ESTATE_PROFILES.len(), 33);
         let repositories = ESTATE_PROFILES
             .iter()
             .map(|profile| profile.repository)
@@ -12476,7 +12684,14 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .filter(|profile| !estate_owned_static_files(profile).is_empty())
             .map(|profile| profile.repository)
             .collect::<Vec<_>>();
-        assert_eq!(owners, ["tailrocks/velnor", "tailrocks/velnor-apt"]);
+        assert_eq!(
+            owners,
+            [
+                "tailrocks/velnor",
+                "tailrocks/velnor-actions-fixture",
+                "tailrocks/velnor-apt"
+            ]
+        );
 
         for profile in ESTATE_PROFILES {
             let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
@@ -12686,6 +12901,247 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 .all(|path| !path.starts_with(".github/actions")),
             "holla-apt owns no composite actions until its assets are absorbed"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_owned_templates_regenerate_the_complete_surface_from_scratch() {
+        let root = temporary_repository("fixture-owned-surface");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor-actions-fixture.git\n",
+            ),
+            "write origin remote",
+        );
+        must(
+            fs::write(root.join("README.md"), "# fixture\n"),
+            "write markdown surface",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan wiped fixture repository",
+        );
+        assert_eq!(config.repository, "tailrocks/velnor-actions-fixture");
+        assert_eq!(config.profile, RepositoryProfile::Generic);
+        assert!(config.adopted_workflow_surface);
+        let expected_names = FIXTURE_WORKFLOW_TEMPLATES
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(config.workflow_files, expected_names);
+        assert_eq!(
+            config
+                .workflow_templates
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected_names
+        );
+
+        let files = generated_files(&config);
+        for (name, _) in FIXTURE_WORKFLOW_TEMPLATES {
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(name)),
+                "generated fixture workflow",
+            );
+            let template = must_some(
+                files.get(&PathBuf::from(WORKFLOW_TEMPLATE_DIR).join(name)),
+                "regenerated fixture workflow template",
+            );
+            assert_eq!(workflow, template, "workflow and template diverge: {name}");
+            assert!(workflow.starts_with(GENERATED_HEADER));
+            // The absorbed bytes are a fixpoint of the render pipeline:
+            // re-rendering the emitted body must reproduce it exactly, or the
+            // checked-in copies would drift on the first regeneration.
+            let rerendered = render_static_template_for_config(
+                &config,
+                name,
+                strip_workflow_generator_header(workflow),
+            );
+            assert_eq!(
+                &rerendered, workflow,
+                "fixture template is not a render fixpoint: {name}"
+            );
+        }
+        // No estate-default or unit workflow leaks into the owned surface.
+        for unexpected in [
+            "ci-pr.yml",
+            "ci-policy.yml",
+            "ci-main.yml",
+            "nightly.yml",
+            "maintenance.yml",
+            "release.yml",
+            "ci-docs.yml",
+        ] {
+            assert!(
+                !files.contains_key(&PathBuf::from(".github/workflows").join(unexpected)),
+                "unexpected workflow in fixture surface: {unexpected}"
+            );
+        }
+        for owned in FIXTURE_OWNED_STATIC_FILES {
+            assert_eq!(
+                files.get(Path::new(owned.path)).map(String::as_str),
+                Some(owned.content),
+                "fixture owned composite missing from generated output: {}",
+                owned.path
+            );
+        }
+        let ci = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci.yml")),
+            "generated fixture ci workflow",
+        );
+        assert!(ci.contains("scripts/audit_capability_coverage.py"));
+        assert!(ci.contains("scripts/audit_workflow_surface.py"));
+        assert!(!ci.contains(".github/scripts/"));
+        let l2_negative = must_some(
+            files.get(&PathBuf::from(".github/workflows/l2-negative.yml")),
+            "generated fixture l2-negative workflow",
+        );
+        assert!(l2_negative.contains("fixtures/l2/"));
+        assert!(!l2_negative.contains(".github/fixtures/"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_owned_surface_pins_the_actionlint_contract() {
+        let root = temporary_repository("fixture-actionlint");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor-actions-fixture.git\n",
+            ),
+            "write origin remote",
+        );
+        must(
+            fs::write(root.join("README.md"), "# fixture\n"),
+            "write markdown surface",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan fixture repository",
+        );
+        let files = generated_files(&config);
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated fixture actionlint config",
+        );
+        assert!(actionlint.starts_with(GENERATED_HEADER));
+        for label in [
+            "    - ubuntu-26.04\n",
+            "    - velnor-cp-queue-validation\n",
+            "    - velnor-target-mvp\n",
+        ] {
+            assert!(
+                actionlint.contains(label),
+                "fixture actionlint config misses label {label:?}: {actionlint}"
+            );
+        }
+        assert!(!actionlint.contains("- self-hosted\n"));
+        assert!(actionlint.contains("\nconfig-variables: null\n"));
+        let project = must_some(
+            files.get(&PathBuf::from(".github/ci/project.toml")),
+            "generated fixture project config",
+        );
+        assert!(project.contains("repository = \"tailrocks/velnor-actions-fixture\""));
+        assert!(project.contains("github_runner = \"ubuntu-26.04\""));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_owned_surface_rewrite_after_wipe_is_byte_identical() {
+        let root = temporary_repository("fixture-owned-surface-wipe");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/velnor-actions-fixture.git\n",
+            ),
+            "write origin remote",
+        );
+        must(
+            fs::write(root.join("README.md"), "# fixture\n"),
+            "write markdown surface",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan fixture repository",
+        );
+        let files = generated_files(&config);
+        must(
+            write_generated(&root, &files, false, false, false),
+            "generate fixture surface",
+        );
+        must(
+            fs::remove_dir_all(root.join(".github")),
+            "wipe generated surface",
+        );
+
+        let rescan = must(
+            scan_repository(&root, RunnerMode::Both),
+            "rescan wiped fixture repository",
+        );
+        let regenerated = generated_files(&rescan);
+        assert_eq!(
+            regenerated, files,
+            "wiped fixture surface must regenerate byte for byte"
+        );
+        must(
+            write_generated(&root, &regenerated, false, false, false),
+            "regenerate wiped fixture surface",
+        );
+        for path in regenerated.keys() {
+            assert!(
+                root.join(path).is_file(),
+                "missing regenerated file: {}",
+                path.display()
+            );
+        }
+        assert!(root.join(OWNERSHIP_STATE).is_file());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fixture_template_seed_is_scoped_to_velnor_actions_fixture() {
+        let root = temporary_repository("fixture-seed-scope");
+        let git = root.join(".git");
+        must(fs::create_dir_all(&git), "create git metadata");
+        must(
+            fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n    url = https://github.com/tailrocks/holla.git\n",
+            ),
+            "write origin remote",
+        );
+
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan holla repository",
+        );
+        assert!(config.workflow_templates.is_empty());
+        assert!(!config.adopted_workflow_surface);
+        assert_eq!(config.github_runner, "ubuntu-24.04");
+        assert!(!config.actionlint_config_variables_null);
+        let files = generated_files(&config);
+        assert!(
+            files
+                .keys()
+                .all(|path| !path.starts_with(".github/actions")),
+            "holla owns no composite actions until its assets are absorbed"
+        );
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated holla actionlint config",
+        );
+        assert!(!actionlint.contains("config-variables"));
         let _ = fs::remove_dir_all(root);
     }
 

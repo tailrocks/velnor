@@ -734,6 +734,7 @@ mod tests {
             units: vec![unit],
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
+            actionlint_config_variables_null: false,
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));

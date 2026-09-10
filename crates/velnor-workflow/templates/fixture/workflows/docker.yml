@@ -1,0 +1,117 @@
+name: docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}/fixture
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          # Velnor daemon chokes on .dockerbuild build-record artifacts
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: Dockerfile.fixture
+          push: false
+          load: true
+          tags: velnor-actions-fixture:${{ matrix.config.lane }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PACKAGE=app-a
+          cache-from: type=gha,scope=fixture-build-${{ matrix.config.lane }}
+          cache-to: type=gha,scope=fixture-build-${{ matrix.config.lane }},mode=max
+      - id: run-output
+        run: |
+          output="$(docker run --rm velnor-actions-fixture:${{ matrix.config.lane }})"
+          echo "output=${output}" >> "${GITHUB_OUTPUT}"
+          echo "docker run output: ${output}"
+      - uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        with:
+          files: docker-bake.hcl
+          push: false
+          set: |
+            fixture.cache-from=type=gha,scope=fixture-bake-${{ matrix.config.lane }}
+            fixture.cache-to=type=gha,scope=fixture-bake-${{ matrix.config.lane }},mode=max
+      - run: |
+          {
+            echo "### docker buildx cache (${{ matrix.config.lane }})"
+            echo '```'
+            docker buildx du 2>/dev/null || echo 'buildx cache info not available'
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - run: echo "${{ steps.run-output.outputs.output }}" > docker-result.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-result-${{ matrix.config.lane }}
+          path: docker-result.txt
+
+  docker-compare:
+    needs: [docker]
+    # Single-lane diagnostic dispatches have no parity claim.
+    if: inputs.lanes == 'both' && needs.docker.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+      - run: |
+          set -euo pipefail
+          # Artifact names use the capitalized matrix lane labels (Velnor/GitHub).
+          test -f "artifacts/docker-result-GitHub/docker-result.txt" || { echo 'missing GitHub docker result' >&2; exit 1; }
+          test -f "artifacts/docker-result-Velnor/docker-result.txt" || { echo 'missing Velnor docker result' >&2; exit 1; }
+          github_out="$(cat "artifacts/docker-result-GitHub/docker-result.txt")"
+          velnor_out="$(cat "artifacts/docker-result-Velnor/docker-result.txt")"
+          echo "github: ${github_out}"
+          echo "velnor: ${velnor_out}"
+          if [[ "${github_out}" != "${velnor_out}" ]]; then
+            echo "MISMATCH: docker run output differs between lanes" >&2
+            exit 1
+          fi
+          echo "docker outputs match"
+      - uses: ./.github/actions/aggregate-needs
+        with:
+          expected: success
+          actual: ${{ needs.docker.result }}

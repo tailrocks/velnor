@@ -1,0 +1,181 @@
+# Canonical extra fixture workflow. Copy into tailrocks/velnor-actions-fixture
+# as .github/workflows/backend-parity.yml. Does not add a repository-controlled
+# backend input. Pool selection (docker vs microvm) is operator execution.toml.
+# lanes remains velnor | github | both; trusted automatic runs select both.
+# Untrusted fork pull requests use GitHub only because they have no Velnor
+# artifact to compare.
+
+name: backend-parity
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-parity-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  parity:
+    name: backend-parity (${{ matrix.config.lane }})
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 20
+    concurrency:
+      group: backend-parity-${{ github.run_id }}-${{ matrix.config.lane }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) && format('{0}', '[{"lane":"GitHub","runner":"ubuntu-26.04"},{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"}}]') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('{0}', '[{"lane":"GitHub","runner":"ubuntu-26.04"}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && format('{0}', '[{"lane":"GitHub","runner":"ubuntu-26.04"}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'velnor') && format('{0}', '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"}}]')) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Record pool backend
+        id: backend
+        env:
+          LANE: ${{ matrix.config.lane }}
+        run: |
+          set -euo pipefail
+          case "${LANE,,}" in
+            github)
+              backend=github-hosted
+              ;;
+            velnor)
+              backend="${VELNOR_EXECUTION_BACKEND:-}"
+              if [[ -z "${backend}" ]]; then
+                echo "::error::VELNOR_EXECUTION_BACKEND is required on the Velnor lane"
+                exit 1
+              fi
+              case "${backend}" in
+                docker|microvm) ;;
+                *)
+                  echo "::error::invalid VELNOR_EXECUTION_BACKEND: ${backend}"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "::error::unsupported backend lane: ${LANE}"
+              exit 1
+              ;;
+          esac
+          echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "lane=${LANE}"
+            echo "execution_backend=${backend}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Run fixture-harness tests and examples
+        env:
+          LANE: ${{ matrix.config.lane }}
+          BACKEND: ${{ steps.backend.outputs.backend }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --locked -p fixture-harness --all-targets
+          mbx run --quiet --locked -p fixture-harness --example command_files
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/tree/nested"
+          printf '%s\n' alpha > "${tmp_dir}/tree/nested/a.txt"
+          mbx run --quiet --locked -p fixture-harness --example artifact_tree -- "${tmp_dir}/tree" > "${tmp_dir}/tree.txt"
+          test -s "${tmp_dir}/tree.txt"
+          mbx run --quiet --locked -p fixture-harness --example cache_payload -- backend "${LANE}" > "${tmp_dir}/cache.txt"
+          grep -q '^velnor.fixture.cache.v1$' "${tmp_dir}/cache.txt"
+          printf '%s\n' release > "${tmp_dir}/fixture.tar.gz"
+          mbx run --quiet --locked -p fixture-harness --example release_subject -- 0000000000000000000000000000000000000000 "${tmp_dir}/fixture.tar.gz" > "${tmp_dir}/subject.json"
+          grep -q 'velnor.fixture.release-subject.v1' "${tmp_dir}/subject.json"
+          cp "${tmp_dir}/tree.txt" "${tmp_dir}/cache.txt" "${tmp_dir}/subject.json" .
+      # The execution backend legitimately differs between lanes — that is the
+      # point of this workflow — so it is asserted per lane against its admitted
+      # set rather than compared across lanes. What must match is the workload's
+      # observed behaviour *despite* the different backend, and that is what the
+      # collected observations below carry.
+      - name: Assert the backend is admitted for this lane
+        env:
+          LANE: ${{ matrix.config.lane }}
+          BACKEND: ${{ steps.backend.outputs.backend }}
+        run: |
+          set -euo pipefail
+          case "${LANE},${BACKEND}" in
+            GitHub,github-hosted|Velnor,docker|Velnor,microvm) ;;
+            *) echo "backend ${BACKEND} is not admitted for lane ${LANE}" >&2; exit 1 ;;
+          esac
+      # `steps` is computed by the runner, not written by this workflow, so the
+      # outcome and conclusion of every step above are the behavioural signal
+      # no workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > "${RUNNER_TEMP}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: backend-parity
+          evidence-id: harness
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: evidence/backend-${{ matrix.config.lane }}.json
+          observations: |
+            --observe-command command-files=mbx run --quiet --locked -p fixture-harness --example command_files
+            --observe-file artifact-tree=tree.txt
+            --observe-file cache-payload=cache.txt
+            --observe-file release-subject=subject.json
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-parity-${{ matrix.config.lane }}
+          path: evidence/backend-${{ matrix.config.lane }}.json
+          if-no-files-found: error
+      - name: Guest docker is not the host control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker run --rm --network none busybox:1.36 echo ok
+
+  compare:
+    name: compare backend lanes
+    needs: [parity]
+    # Fork PRs have no Velnor lane or artifact, so they intentionally skip comparison.
+    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Require both backend lanes to pass
+        env:
+          PARITY_RESULT: ${{ needs.parity.result }}
+        run: test "${PARITY_RESULT}" = success
+      # Checkout first: it cleans the workspace, which would delete the
+      # downloaded lane artifacts if it ran after them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: backend-parity-GitHub
+          path: artifacts/github
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: backend-parity-Velnor
+          path: artifacts/velnor
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: backend-parity
+          directory: artifacts

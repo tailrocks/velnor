@@ -1,0 +1,15 @@
+name: L2 nested fixture
+description: Exercise the pinned remote leaf in the positive closure.
+outputs:
+  closure:
+    description: Validated closure depth.
+    value: ${{ steps.prove.outputs.closure }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: "false"
+    - id: prove
+      shell: bash
+      run: echo "closure=root,nested,remote" >> "${GITHUB_OUTPUT}"

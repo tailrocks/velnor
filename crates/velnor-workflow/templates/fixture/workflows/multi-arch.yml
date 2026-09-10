@@ -1,0 +1,219 @@
+name: multi-arch
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: multi-arch-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DIGEST_DIR: /tmp/fixture-digests
+
+jobs:
+  # Per-platform build — mirrors Jackin construct.yml multi-arch matrix pattern.
+  # Each lane builds for its platform, uploads a digest artifact.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","platform":"linux/amd64","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"Velnor","platform":"linux/arm64","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","platform":"linux/amd64","runner":"ubuntu-26.04","writer":false},{"lane":"GitHub","platform":"linux/arm64","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","platform":"linux/amd64","runner":"ubuntu-26.04","writer":true},{"lane":"GitHub","platform":"linux/arm64","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","platform":"linux/amd64","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"Velnor","platform":"linux/arm64","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 30
+    env:
+      PLATFORM: ${{ matrix.config.platform }}
+      LANE: ${{ matrix.config.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        with:
+          platforms: all
+          reset: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}/fixture-multi
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: build
+        env:
+          # Velnor daemon chokes on .dockerbuild build-record artifacts
+          DOCKER_BUILD_SUMMARY: "false"
+          DOCKER_BUILD_RECORD_UPLOAD: "false"
+        with:
+          context: .
+          file: Dockerfile.fixture
+          platforms: ${{ matrix.config.platform }}
+          push: false
+          labels: |
+            org.opencontainers.image.created=1970-01-01T00:00:00Z
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+          build-args: |
+            PACKAGE=app-a
+          cache-from: type=gha,scope=fixture-multi-${{ matrix.config.lane }}-${{ matrix.config.platform }}
+          cache-to: type=gha,scope=fixture-multi-${{ matrix.config.lane }}-${{ matrix.config.platform }},mode=max
+          outputs: type=image,push-by-digest=false,name-canonical=true
+      - name: Run fixture-harness tests and examples
+        env:
+          LANE: ${{ matrix.config.lane }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --locked -p fixture-harness --all-targets
+          mbx run --quiet --locked -p fixture-harness --example command_files
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/tree/nested"
+          printf '%s\n' alpha > "${tmp_dir}/tree/nested/a.txt"
+          mbx run --quiet --locked -p fixture-harness --example artifact_tree -- "${tmp_dir}/tree" > "${tmp_dir}/tree.txt"
+          test -s "${tmp_dir}/tree.txt"
+          mbx run --quiet --locked -p fixture-harness --example cache_payload -- multi-arch "${LANE,,}" > "${tmp_dir}/cache.txt"
+          grep -q '^velnor.fixture.cache.v1$' "${tmp_dir}/cache.txt"
+          printf '%s\n' release > "${tmp_dir}/fixture.tar.gz"
+          mbx run --quiet --locked -p fixture-harness --example release_subject -- 0000000000000000000000000000000000000000 "${tmp_dir}/fixture.tar.gz" > "${tmp_dir}/subject.json"
+          grep -q 'velnor.fixture.release-subject.v1' "${tmp_dir}/subject.json"
+      - run: |
+          set -euo pipefail
+          image_digest="${{ steps.build.outputs.digest }}"
+          test -n "${image_digest}"
+          [[ "${image_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "${DIGEST_DIR}"
+          printf '%s\n' "${image_digest}" > "${DIGEST_DIR}/${LANE}-${PLATFORM//\//-}.digest"
+          {
+            echo "### build digest (${LANE} ${PLATFORM})"
+            echo '```'
+            cat "${DIGEST_DIR}/${LANE}-${PLATFORM//\//-}.digest"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      # `steps` is computed by the runner, not written by this workflow, so the
+      # outcome and conclusion of every step above are the behavioural signal
+      # no workflow author can fabricate. The image digest is a measured build
+      # output, compared verbatim across lanes: two runners building the same
+      # Dockerfile at the same commit for the same platform must agree.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          cat > "${RUNNER_TEMP}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: multi-arch
+          evidence-id: ${{ matrix.config.platform == 'linux/amd64' && 'amd64' || matrix.config.platform == 'linux/arm64' && 'arm64' || 'unknown' }}
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: evidence/multi-arch-${{ matrix.config.lane }}-${{ matrix.config.platform == 'linux/amd64' && 'amd64' || matrix.config.platform == 'linux/arm64' && 'arm64' || 'unknown' }}.json
+          observations: |
+            --observe-file digest=${{ env.DIGEST_DIR }}/${{ matrix.config.lane }}-${{ matrix.config.platform == 'linux/amd64' && 'linux-amd64' || 'linux-arm64' }}.digest
+            --observe-command platform=echo ${{ matrix.config.platform }}
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.config.lane }}-${{ matrix.config.platform == 'linux/amd64' && 'amd64' || matrix.config.platform == 'linux/arm64' && 'arm64' || 'unknown' }}
+          path: ${{ env.DIGEST_DIR }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: multi-arch-evidence-${{ matrix.config.lane }}-${{ matrix.config.platform == 'linux/amd64' && 'amd64' || matrix.config.platform == 'linux/arm64' && 'arm64' || 'unknown' }}
+          path: evidence/multi-arch-${{ matrix.config.lane }}-${{ matrix.config.platform == 'linux/amd64' && 'amd64' || matrix.config.platform == 'linux/arm64' && 'arm64' || 'unknown' }}.json
+          if-no-files-found: error
+
+  compare:
+    name: compare multi-arch lanes
+    needs: [build]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.lanes == 'both' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Require both lanes and both platforms to pass
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: test "${BUILD_RESULT}" = success
+      # Checkout first: it cleans the workspace, which would delete the
+      # downloaded lane artifacts if it ran after them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: multi-arch-evidence-GitHub-amd64
+          path: artifacts/github-amd64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: multi-arch-evidence-GitHub-arm64
+          path: artifacts/github-arm64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: multi-arch-evidence-Velnor-amd64
+          path: artifacts/velnor-amd64
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: multi-arch-evidence-Velnor-arm64
+          path: artifacts/velnor-arm64
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: multi-arch
+          directory: artifacts
+
+  # Manifest merge — mirrors Jackin construct.yml publish-manifest pattern.
+  # Downloads all platform digests and merges using merge-multiple: true.
+  merge-manifests:
+    needs: [build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      DIGEST_DIR: /tmp/fixture-digests
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: 'digest-*'
+          path: ${{ env.DIGEST_DIR }}
+          merge-multiple: true
+      - run: |
+          {
+            echo "### merged digests"
+            echo '```'
+            find "${DIGEST_DIR}" -name '*.digest' | sort | while read -r f; do
+              echo "$(basename "$f"): $(cat "$f")"
+            done
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "merge-manifests passed"
+      - uses: ./.github/actions/aggregate-needs
+        with:
+          expected: success
+          actual: ${{ needs.build.result }}

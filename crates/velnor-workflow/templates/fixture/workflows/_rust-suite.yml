@@ -1,0 +1,722 @@
+name: _rust-suite
+
+# The Rust scenario matrix.
+#
+# Velnor selects its default Rust acceleration (Mr Boxington) for a job exactly
+# when that job does NOT declare `mozilla-actions/sccache-action`. Declaring
+# sccache switches the runner to the `MBX_DISABLE=1` compatibility branch and
+# also makes the job ineligible for the microVM backend. This suite therefore
+# keeps the default path free of every compiler-cache declaration and treats
+# sccache as one scenario among several.
+#
+# A. rust-default            out-of-box Velnor Rust path (mandatory)
+# B. rust-sccache            explicit sccache compatibility
+# C. rust-accel-optout       explicit acceleration opt-out via MBX_DISABLE
+# D. rust-cache-interaction  cache interactions and invalidation
+# E. rust-parallel           independent simultaneous Rust jobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: github | velnor | both
+        type: choice
+        default: both
+        options: [github, velnor, both]
+  workflow_call:
+    inputs:
+      lane: {type: string, required: false, default: both}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-suite-${{ github.ref }}-${{ inputs.lanes || inputs.lane }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # A. The default Velnor Rust path.
+  #
+  # No RUSTC_WRAPPER, no sccache action, no explicit Mr Boxington action, no
+  # acceleration opt-out and no `target/` cache: whatever Velnor does for an
+  # ordinary cargo workflow is what this job measures. The same commands run on
+  # the GitHub-hosted lane. The hosted lane is slower; the compared evidence is
+  # semantic, so it must be identical.
+  rust-default:
+    name: A default (${{ matrix.lane }}, ${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        package: [app-a, app-b]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      # Cargo source persistence only. Caching `target/` here would test the
+      # interaction, not the default path; scenario D owns that.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-default-${{ matrix.lane }}-${{ matrix.package }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-default-${{ matrix.lane }}-${{ matrix.package }}-
+      - run: rustup component add rustfmt clippy
+      - run: just fmt-check
+      - run: just clippy "${{ matrix.package }}"
+      # Record what the runner handed the job. A default-path job must not have
+      # been given a compiler-cache wrapper on either lane; a divergence here is
+      # a Velnor finding, not a fixture problem, so it is compared evidence.
+      - id: acceleration
+        run: |
+          set -euo pipefail
+          if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
+            echo "wrapper=present" >> "${GITHUB_OUTPUT}"
+          else
+            echo "wrapper=absent" >> "${GITHUB_OUTPUT}"
+          fi
+          # Backend detail differs between lanes by design, so it is reported
+          # rather than compared.
+          {
+            echo "### Default Rust path (${{ matrix.lane }}, ${{ matrix.package }})"
+            echo "- RUSTC_WRAPPER: '${RUSTC_WRAPPER:-}'"
+            echo "- mbx store mounted: $([[ -d /var/cache/mbx ]] && echo yes || echo no)"
+            echo "- sccache store mounted: $([[ -d /var/cache/sccache ]] && echo yes || echo no)"
+            echo "- mbx on PATH: $(command -v mbx >/dev/null 2>&1 && echo yes || echo no)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - id: tests
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --color never --locked -p "${PACKAGE}" 2>&1 | tee nextest.log
+          count="$(sed -n 's/.*Summary \[[^]]*\] *\([0-9][0-9]*\) test.*/\1/p' nextest.log | tail -1)"
+          test -n "${count}"
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+      - name: Run default-path probes
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --locked -p fixture-harness --all-targets
+          mkdir -p probe
+          mbx run --quiet --locked -p fixture-harness --example command_files > probe/command-files.txt
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/tree/nested"
+          printf '%s\n' alpha > "${tmp_dir}/tree/nested/a.txt"
+          mbx run --quiet --locked -p fixture-harness --example artifact_tree -- "${tmp_dir}/tree" > probe/tree.txt
+          test -s probe/tree.txt
+          mbx run --quiet --locked -p fixture-harness --example cache_payload -- cargo "rust-default-${PACKAGE}" > probe/cache.txt
+          grep -q '^velnor.fixture.cache.v1$' probe/cache.txt
+          printf '%s\n' release > "${tmp_dir}/fixture.tar.gz"
+          mbx run --quiet --locked -p fixture-harness --example release_subject -- 0000000000000000000000000000000000000000 "${tmp_dir}/fixture.tar.gz" > probe/subject.json
+          grep -q 'velnor.fixture.release-subject.v1' probe/subject.json
+      - name: Capture default step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect default-path evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_PACKAGE: ${{ matrix.package }}
+          FIXTURE_COMPILER_CACHE_WRAPPER: ${{ steps.acceleration.outputs.wrapper }}
+          FIXTURE_TESTS: ${{ steps.tests.outputs.count }}
+        with:
+          scenario: rust-default
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-default-${{ matrix.lane }}-${{ matrix.package }}.json
+          observations: |
+            --observe-env package=FIXTURE_PACKAGE
+            --observe-env compiler_cache_wrapper=FIXTURE_COMPILER_CACHE_WRAPPER
+            --observe-env tests=FIXTURE_TESTS
+            --observe-file command-files=probe/command-files.txt
+            --observe-file artifact-tree=probe/tree.txt
+            --observe-file cache-payload=probe/cache.txt
+            --observe-file release-subject=probe/subject.json
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-default-${{ matrix.lane }}-${{ matrix.package }}
+          path: evidence/rust-default-${{ matrix.lane }}-${{ matrix.package }}.json
+          if-no-files-found: error
+
+  # B. Explicit sccache compatibility.
+  #
+  # Proves the compatibility branch keeps correct semantics, and that Velnor
+  # disables Mr Boxington exactly as designed when sccache is requested. This is
+  # a compatibility scenario, never the benchmark for the default path.
+  rust-sccache:
+    name: B sccache (${{ matrix.lane }}, ${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        package: [app-a, app-b]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 25
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - run: rustup component add rustfmt clippy
+      # When the runner mounted its sccache store it must also have disabled
+      # Mr Boxington and mounted no mbx store. On a lane that mounts neither the
+      # check is vacuous, so one identical step covers both lanes.
+      - name: Assert Mr Boxington is disabled as designed
+        run: |
+          set -euo pipefail
+          test "${RUSTC_WRAPPER:-}" = sccache
+          if [[ -d /var/cache/sccache ]]; then
+            test "${MBX_DISABLE:-}" = "1"
+            test ! -d /var/cache/mbx
+          fi
+      - run: just fmt-check
+      - run: just clippy "${{ matrix.package }}"
+      - id: tests
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mbx nextest run --color never --locked -p "${PACKAGE}" 2>&1 | tee nextest.log
+          count="$(sed -n 's/.*Summary \[[^]]*\] *\([0-9][0-9]*\) test.*/\1/p' nextest.log | tail -1)"
+          test -n "${count}"
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+      - name: Capture sccache step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect sccache-compatibility evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_PACKAGE: ${{ matrix.package }}
+          FIXTURE_COMPILER_CACHE_WRAPPER: ${{ env.RUSTC_WRAPPER }}
+          FIXTURE_TESTS: ${{ steps.tests.outputs.count }}
+        with:
+          scenario: rust-sccache
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-sccache-${{ matrix.lane }}-${{ matrix.package }}.json
+          observations: |
+            --observe-env package=FIXTURE_PACKAGE
+            --observe-env compiler_cache_wrapper=FIXTURE_COMPILER_CACHE_WRAPPER
+            --observe-env tests=FIXTURE_TESTS
+            --observe-command test-log=test -s nextest.log
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-sccache-${{ matrix.lane }}-${{ matrix.package }}
+          path: evidence/rust-sccache-${{ matrix.lane }}-${{ matrix.package }}.json
+          if-no-files-found: error
+
+  # C. Explicit acceleration opt-out.
+  #
+  # `MBX_DISABLE` is the one MBX_-prefixed name Velnor deliberately does not
+  # protect (velnor-runner::runtime_env::is_protected_default_env), so a
+  # workflow may set it and turn Velnor's Rust acceleration off without
+  # requesting a different compiler cache. This job proves the opt-out survives
+  # into the job environment and that plain Cargo still works.
+  rust-accel-optout:
+    name: C acceleration opt-out (${{ matrix.lane }}, ${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        package: [app-a, app-b]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 20
+    env:
+      MBX_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Assert the opt-out reached the job
+        run: |
+          set -euo pipefail
+          test "${MBX_DISABLE:-}" = "1"
+          test -z "${RUSTC_WRAPPER:-}"
+          {
+            echo "### Acceleration opt-out (${{ matrix.lane }}, ${{ matrix.package }})"
+            echo "- MBX_DISABLE: '${MBX_DISABLE:-}'"
+            echo "- mbx store mounted: $([[ -d /var/cache/mbx ]] && echo yes || echo no)"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - id: tests
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mbx build --locked -p "${PACKAGE}"
+          mbx nextest run --color never --locked -p "${PACKAGE}" 2>&1 | tee nextest.log
+          count="$(sed -n 's/.*Summary \[[^]]*\] *\([0-9][0-9]*\) test.*/\1/p' nextest.log | tail -1)"
+          test -n "${count}"
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+      - name: Capture opt-out step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect acceleration opt-out evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_PACKAGE: ${{ matrix.package }}
+          FIXTURE_ACCELERATION: ${{ env.MBX_DISABLE }}
+          FIXTURE_TESTS: ${{ steps.tests.outputs.count }}
+        with:
+          scenario: rust-accel-optout
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-accel-optout-${{ matrix.lane }}-${{ matrix.package }}.json
+          observations: |
+            --observe-env package=FIXTURE_PACKAGE
+            --observe-env acceleration=FIXTURE_ACCELERATION
+            --observe-env compiler_cache_wrapper=RUSTC_WRAPPER
+            --observe-env tests=FIXTURE_TESTS
+            --observe-command test-log=test -s nextest.log
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-accel-optout-${{ matrix.lane }}-${{ matrix.package }}
+          path: evidence/rust-accel-optout-${{ matrix.lane }}-${{ matrix.package }}.json
+          if-no-files-found: error
+
+  # D. Cache interaction.
+  #
+  # Each variant runs the same build twice around one deliberate change and
+  # proves the second build is correct, so a cache can never serve a stale
+  # result. `toolchain-change` and `trust-change` are declared and recorded as
+  # not executable here; see the reasons emitted by the job.
+  rust-cache-interaction:
+    name: D cache interaction (${{ matrix.lane }}, ${{ matrix.interaction }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        interaction: [cargo-source-cache, target-cache, source-change, lockfile-change]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      # The explicit-sccache interaction lives in its own job below. Velnor
+      # decides between Mr Boxington and sccache from the steps a job DECLARES
+      # (manifest::declares_sccache filters on step.enabled, which an `if:`
+      # expression does not clear), so an `if:`-guarded sccache step would
+      # switch the acceleration branch for every variant of this matrix.
+      # Cargo source persistence: a user cache next to Velnor's own store.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-interaction-${{ matrix.lane }}-${{ matrix.interaction }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-interaction-${{ matrix.lane }}-${{ matrix.interaction }}-
+      # The `target/` conflict is investigated deliberately and only here: on
+      # Velnor the host-persistent target generation and a user cache of the
+      # same tree both claim `target/`.
+      - if: matrix.interaction == 'target-cache'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: rust-interaction-target-${{ matrix.lane }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-interaction-target-${{ matrix.lane }}-${{ hashFiles('Cargo.lock') }}-
+      - name: Baseline build
+        run: |
+          set -euo pipefail
+          mbx build --locked -p app-a
+          ./target/debug/app-a > baseline.txt
+          test -s baseline.txt
+          grep -Fxq 'fixture::app-a' baseline.txt
+      - name: Apply the interaction's change
+        id: change
+        env:
+          INTERACTION: ${{ matrix.interaction }}
+        run: |
+          set -euo pipefail
+          case "${INTERACTION}" in
+            source-change)
+              sed -i 's/format!("fixture::{name}")/format!("fixture::source-change::{name}")/' crates/shared/src/lib.rs
+              echo "changed=source" >> "${GITHUB_OUTPUT}"
+              ;;
+            lockfile-change)
+              sed -i 's/^version = "0.1.0"$/version = "0.1.1"/' crates/shared/Cargo.toml
+              mbx update --workspace --offline
+              git --no-pager diff --stat Cargo.lock
+              echo "changed=lockfile" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "changed=none" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+          {
+            echo "### Cache interaction (${{ matrix.lane }}, ${INTERACTION})"
+            echo "- declared but not executable here: toolchain-change (a new"
+            echo "  toolchain must be pinned across two runs, not inside one),"
+            echo "  trust-change (the store trust class is chosen by the Velnor"
+            echo "  host from the job's trust scope and no workflow input"
+            echo "  reaches it)."
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Rebuild after the change
+        id: rebuild
+        env:
+          INTERACTION: ${{ matrix.interaction }}
+        run: |
+          set -euo pipefail
+          if [[ "${INTERACTION}" == "lockfile-change" ]]; then
+            mbx build -p app-a
+          else
+            mbx build --locked -p app-a
+          fi
+          ./target/debug/app-a > rebuilt.txt
+          test -s rebuilt.txt
+          if [[ "${INTERACTION}" == "source-change" ]]; then
+            grep -Fxq 'fixture::source-change::app-a' rebuilt.txt
+          else
+            grep -Fxq 'fixture::app-a' rebuilt.txt
+          fi
+          if cmp -s baseline.txt rebuilt.txt; then
+            echo "output=unchanged" >> "${GITHUB_OUTPUT}"
+          else
+            echo "output=changed" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Capture cache-interaction step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect cache-interaction evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_INTERACTION: ${{ matrix.interaction }}
+          FIXTURE_CHANGE: ${{ steps.change.outputs.changed }}
+          FIXTURE_REBUILD_OUTPUT: ${{ steps.rebuild.outputs.output }}
+          FIXTURE_NOT_EXECUTABLE: toolchain-change,trust-change
+        with:
+          scenario: rust-cache-interaction
+          evidence-id: ${{ matrix.interaction }}
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-cache-interaction-${{ matrix.lane }}-${{ matrix.interaction }}.json
+          observations: |
+            --observe-env interaction=FIXTURE_INTERACTION
+            --observe-env change=FIXTURE_CHANGE
+            --observe-env rebuild_output=FIXTURE_REBUILD_OUTPUT
+            --observe-env not_executable=FIXTURE_NOT_EXECUTABLE
+            --observe-file baseline=baseline.txt
+            --observe-file rebuilt=rebuilt.txt
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-cache-interaction-${{ matrix.lane }}-${{ matrix.interaction }}
+          path: evidence/rust-cache-interaction-${{ matrix.lane }}-${{ matrix.interaction }}.json
+          if-no-files-found: error
+
+  # D (explicit sccache). A separate job, because declaring the sccache action
+  # at all switches Velnor's acceleration branch for the whole job.
+  rust-cache-interaction-sccache:
+    name: D cache interaction (${{ matrix.lane }}, explicit-sccache)
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 30
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-interaction-sccache-${{ matrix.lane }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-interaction-sccache-${{ matrix.lane }}-
+      - name: Baseline build
+        run: |
+          set -euo pipefail
+          mbx build --locked -p app-a
+          ./target/debug/app-a > baseline.txt
+          test -s baseline.txt
+          grep -Fxq 'fixture::app-a' baseline.txt
+      - name: Rebuild after a source change
+        id: rebuild
+        run: |
+          set -euo pipefail
+          sed -i 's/format!("fixture::{name}")/format!("fixture::source-change::{name}")/' crates/shared/src/lib.rs
+          mbx build --locked -p app-a
+          ./target/debug/app-a > rebuilt.txt
+          test -s rebuilt.txt
+          grep -Fxq 'fixture::source-change::app-a' rebuilt.txt
+          if cmp -s baseline.txt rebuilt.txt; then
+            echo "output=unchanged" >> "${GITHUB_OUTPUT}"
+          else
+            echo "output=changed" >> "${GITHUB_OUTPUT}"
+          fi
+      - name: Capture explicit-sccache step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect explicit-sccache evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_INTERACTION: explicit-sccache
+          FIXTURE_CHANGE: source
+          FIXTURE_REBUILD_OUTPUT: ${{ steps.rebuild.outputs.output }}
+          FIXTURE_NOT_EXECUTABLE: toolchain-change,trust-change
+        with:
+          scenario: rust-cache-interaction
+          evidence-id: explicit-sccache
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-cache-interaction-${{ matrix.lane }}-explicit-sccache.json
+          observations: |
+            --observe-env interaction=FIXTURE_INTERACTION
+            --observe-env change=FIXTURE_CHANGE
+            --observe-env rebuild_output=FIXTURE_REBUILD_OUTPUT
+            --observe-env not_executable=FIXTURE_NOT_EXECUTABLE
+            --observe-file baseline=baseline.txt
+            --observe-file rebuilt=rebuilt.txt
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-cache-interaction-${{ matrix.lane }}-explicit-sccache
+          path: evidence/rust-cache-interaction-${{ matrix.lane }}-explicit-sccache.json
+          if-no-files-found: error
+
+  # E. Parallel Rust.
+  #
+  # Four independent shards build and test the same workspace at the same time
+  # against one Velnor host. The compared evidence is semantic; the scheduling
+  # and compile-deduplication measurements differ between lanes by design and
+  # are reported to the run summary and to the aggregate job below.
+  rust-parallel:
+    name: E parallel (${{ matrix.lane }}, shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        shard: [1, 2, 3, 4]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - id: shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          started="$(date -u +%s)"
+          mbx build --color never --locked --workspace 2>&1 | tee build.log
+          mbx nextest run --color never --locked --workspace 2>&1 | tee nextest.log
+          finished="$(date -u +%s)"
+          count="$(sed -n 's/.*Summary \[[^]]*\] *\([0-9][0-9]*\) test.*/\1/p' nextest.log | tail -1)"
+          test -n "${count}"
+          compiled="$(grep -c '^ *Compiling ' build.log || true)"
+          echo "count=${count}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Parallel shard ${SHARD} (${{ matrix.lane }})"
+            echo "- started_epoch: ${started}"
+            echo "- finished_epoch: ${finished}"
+            echo "- seconds: $((finished - started))"
+            echo "- compiled_units: ${compiled}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          mkdir -p measurements
+          printf 'shard=%s\nlane=%s\nstarted=%s\nfinished=%s\ncompiled=%s\n' \
+            "${SHARD}" "${{ matrix.lane }}" "${started}" "${finished}" "${compiled}" \
+            > "measurements/rust-parallel-${{ matrix.lane }}-${SHARD}.txt"
+      - name: Capture parallel step outcomes
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${STEPS_JSON}" > "${RUNNER_TEMP}/steps.json"
+      - name: Collect parallel evidence
+        uses: ./.github/actions/collect-evidence
+        env:
+          FIXTURE_SHARD: ${{ matrix.shard }}
+          FIXTURE_TESTS: ${{ steps.shard.outputs.count }}
+        with:
+          scenario: rust-parallel
+          evidence-id: ${{ matrix.shard }}
+          lane: ${{ matrix.lane }}
+          output: evidence/rust-parallel-${{ matrix.lane }}-${{ matrix.shard }}.json
+          observations: |
+            --observe-env shard=FIXTURE_SHARD
+            --observe-env tests=FIXTURE_TESTS
+            --observe-command measurement=test -s measurements/rust-parallel-${{ matrix.lane }}-${{ matrix.shard }}.txt
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: suite-rust-parallel-${{ matrix.lane }}-${{ matrix.shard }}
+          path: |
+            evidence/rust-parallel-${{ matrix.lane }}-${{ matrix.shard }}.json
+            measurements/rust-parallel-${{ matrix.lane }}-${{ matrix.shard }}.txt
+          if-no-files-found: error
+
+  # One comparator leg per scenario, so a divergence names its scenario.
+  compare:
+    name: compare ${{ matrix.scenario }} lanes
+    if: (inputs.lanes || inputs.lane) == 'both'
+    needs:
+      - rust-default
+      - rust-sccache
+      - rust-accel-optout
+      - rust-cache-interaction
+      - rust-cache-interaction-sccache
+      - rust-parallel
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - rust-default
+          - rust-sccache
+          - rust-accel-optout
+          - rust-cache-interaction
+          - rust-parallel
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: suite-${{ matrix.scenario }}-*
+          path: artifacts
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: ${{ matrix.scenario }}
+          directory: artifacts
+      # Scheduling and compile deduplication are lane-dependent by design, so
+      # they are reported instead of compared. Overlap is the property that
+      # makes the parallel scenario meaningful, and it is asserted per lane.
+      - if: matrix.scenario == 'rust-parallel'
+        name: Report parallel scheduling and deduplication
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+
+          lanes = {}
+          for path in Path("artifacts").rglob("*.txt"):
+              record = dict(
+                  line.split("=", 1)
+                  for line in path.read_text().splitlines()
+                  if "=" in line
+              )
+              lanes.setdefault(record["lane"], []).append(record)
+
+          if not lanes:
+              sys.exit("no parallel measurements found")
+
+          failures = []
+          for lane, records in sorted(lanes.items()):
+              records.sort(key=lambda record: int(record["started"]))
+              latest_start = max(int(record["started"]) for record in records)
+              earliest_finish = min(int(record["finished"]) for record in records)
+              overlap = earliest_finish - latest_start
+              compiled = [int(record["compiled"]) for record in records]
+              print(
+                  f"{lane}: shards={len(records)} overlap_seconds={overlap} "
+                  f"compiled_units={compiled} "
+                  f"wall_seconds={max(int(r['finished']) for r in records) - min(int(r['started']) for r in records)}"
+              )
+              if overlap <= 0:
+                  failures.append(
+                      f"{lane}: shards did not overlap; the parallel scenario proved nothing"
+                  )
+          if failures:
+              sys.exit("\n".join(failures))
+          PY
