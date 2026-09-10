@@ -1,0 +1,21 @@
+name: Check fixture output
+description: Validate command-file state and the package under test.
+inputs:
+  package:
+    required: true
+    description: Package name.
+outputs:
+  checked:
+    description: Whether validation ran.
+    value: ${{ steps.check.outputs.checked }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "${{ inputs.package }}" = "${FIXTURE_PACKAGE}"
+        test "$(fixture-tool)" = "fixture-tool-ok"
+        echo "checked=true" >> "${GITHUB_OUTPUT}"
+

@@ -1,0 +1,215 @@
+name: _runtime-suite
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: github | velnor | both
+        type: choice
+        default: both
+        options: [github, velnor, both]
+  workflow_call:
+    inputs:
+      lane: {type: string, required: false, default: both}
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: runtime-suite-${{ github.ref }}-${{ inputs.lanes || inputs.lane }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: runtime (${{ matrix.lane }}, ${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON((inputs.lanes || inputs.lane) == 'both' && '["github","velnor"]' || format('["{0}"]', inputs.lanes || inputs.lane)) }}
+        package: [app-a, app-b]
+    runs-on: ${{ matrix.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 25
+    env:
+      FIXTURE_PACKAGE: ${{ matrix.package }}
+      LANE: ${{ matrix.lane }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            velnor-static-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-${{ github.workflow }}-${{ github.job }}-
+          save-on-workflow-dispatch: true
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      - name: Run fixture-harness tests and examples
+        run: |
+          set -euo pipefail
+          mbx nextest run --locked -p fixture-harness --all-targets
+          mbx run --quiet --locked -p fixture-harness --example command_files
+          tmp_dir="$(mktemp -d)"
+          mkdir -p "${tmp_dir}/tree/nested"
+          printf '%s\n' alpha > "${tmp_dir}/tree/nested/a.txt"
+          mbx run --quiet --locked -p fixture-harness --example artifact_tree -- "${tmp_dir}/tree" > "${tmp_dir}/tree.txt"
+          test -s "${tmp_dir}/tree.txt"
+          mbx run --quiet --locked -p fixture-harness --example cache_payload -- runtime "${LANE}" > "${tmp_dir}/cache.txt"
+          grep -q '^velnor.fixture.cache.v1$' "${tmp_dir}/cache.txt"
+          printf '%s\n' release > "${tmp_dir}/fixture.tar.gz"
+          mbx run --quiet --locked -p fixture-harness --example release_subject -- 0000000000000000000000000000000000000000 "${tmp_dir}/fixture.tar.gz" > "${tmp_dir}/subject.json"
+          grep -q 'velnor.fixture.release-subject.v1' "${tmp_dir}/subject.json"
+      - id: command-files
+        name: Exercise GitHub command files
+        env:
+          EXPECTED_PACKAGE: ${{ matrix.package }}
+          EXPECTED_LANE: ${{ matrix.lane }}
+        run: |
+          set -euo pipefail
+          command_value="runtime-${EXPECTED_LANE}-${EXPECTED_PACKAGE}"
+          echo "RUNTIME_ENV_VALUE=${command_value}" >> "${GITHUB_ENV}"
+          echo "package=${EXPECTED_PACKAGE}" >> "${GITHUB_OUTPUT}"
+          echo "lane=${EXPECTED_LANE}" >> "${GITHUB_OUTPUT}"
+          mkdir -p "$HOME/.local/bin"
+          printf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "$HOME/.local/bin/fixture-tool"
+          chmod +x "$HOME/.local/bin/fixture-tool"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          summary="runtime ${EXPECTED_LANE} ${EXPECTED_PACKAGE}"
+          echo "### ${summary}" >> "${GITHUB_STEP_SUMMARY}"
+          grep -Fqx "### ${summary}" "${GITHUB_STEP_SUMMARY}"
+      - name: Assert GitHub command-file values
+        env:
+          EXPECTED_PACKAGE: ${{ matrix.package }}
+          EXPECTED_LANE: ${{ matrix.lane }}
+          OUTPUT_PACKAGE: ${{ steps.command-files.outputs.package }}
+          OUTPUT_LANE: ${{ steps.command-files.outputs.lane }}
+        run: |
+          set -euo pipefail
+          expected="runtime-${EXPECTED_LANE}-${EXPECTED_PACKAGE}"
+          test "${RUNTIME_ENV_VALUE}" = "${expected}"
+          test "${OUTPUT_PACKAGE}" = "${EXPECTED_PACKAGE}"
+          test "${OUTPUT_LANE}" = "${EXPECTED_LANE}"
+          test "$(command -v fixture-tool)" = "${HOME}/.local/bin/fixture-tool"
+          test "$(fixture-tool)" = fixture-tool-ok
+      - id: tolerated-failure
+        name: Exercise continue-on-error step semantics
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          echo 'intentional fixture failure is safe and expected' >&2
+          exit 17
+      - name: Assert outcome versus conclusion semantics
+        if: ${{ always() }}
+        env:
+          STEP_OUTCOME: ${{ steps.tolerated-failure.outcome }}
+          STEP_CONCLUSION: ${{ steps.tolerated-failure.conclusion }}
+        run: |
+          set -euo pipefail
+          test "${STEP_OUTCOME}" = failure
+          test "${STEP_CONCLUSION}" = success
+      - name: Run service_probe against local TCP fixture
+        run: |
+          set -euo pipefail
+          fixture_dir="$(mktemp -d)"
+          address_file="${fixture_dir}/address"
+          server_log="${fixture_dir}/server.log"
+          python3 - "${address_file}" >"${server_log}" 2>&1 <<'PY' &
+          import socket
+          import sys
+          from pathlib import Path
+
+          address_file = Path(sys.argv[1])
+          with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+              listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              listener.bind(("127.0.0.1", 0))
+              listener.listen(1)
+              address_file.write_text(f"127.0.0.1:{listener.getsockname()[1]}\n")
+              connection, _ = listener.accept()
+              with connection:
+                  request = bytearray()
+                  while not request.endswith(b"\n"):
+                      chunk = connection.recv(4096)
+                      if not chunk:
+                          raise RuntimeError("fixture client closed before request terminator")
+                      request.extend(chunk)
+                  if bytes(request) != b"fixture-ping\n":
+                      raise RuntimeError(f"unexpected request: {bytes(request)!r}")
+                  connection.sendall(b"fixture-pong\n")
+          PY
+          server_pid=$!
+          cleanup() {
+            status=$?
+            kill "${server_pid}" 2>/dev/null || true
+            wait "${server_pid}" 2>/dev/null || true
+            rm -rf "${fixture_dir}"
+            exit "${status}"
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 100); do
+            if [[ -s "${address_file}" ]]; then
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              cat "${server_log}" >&2 || true
+              exit 1
+            fi
+            sleep 0.1
+          done
+          if [[ ! -s "${address_file}" ]]; then
+            cat "${server_log}" >&2 || true
+            exit 1
+          fi
+          address="$(<"${address_file}")"
+          mbx run --quiet --locked -p fixture-harness --example service_probe -- "${address}" | tee "${fixture_dir}/probe.txt"
+          grep -Fqx 'response="fixture-pong\n"' "${fixture_dir}/probe.txt"
+          wait "${server_pid}"
+      - uses: ./.github/actions/check-fixture-output
+        with:
+          package: ${{ matrix.package }}
+      # `steps` is computed by the runner, not written by this workflow, so
+      # the outcome and conclusion of every step above are the behavioural
+      # signal no workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        run: |
+          set -euo pipefail
+          mkdir -p result
+          cat > "${RUNNER_TEMP}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: runtime-result
+          evidence-id: ${{ matrix.package }}
+          lane: ${{ matrix.lane }}
+          output: result/result.json
+          observations: |
+            --observe-command examples=mbx run --quiet --locked -p fixture-harness --example command_files
+            --observe-command artifact-tree=mbx run --quiet --locked -p fixture-harness --example artifact_tree
+            --observe-command cache-payload=mbx run --quiet --locked -p fixture-harness --example cache_payload
+            --observe-command release-subject=mbx run --quiet --locked -p fixture-harness --example release_subject
+            --observe-env command-file-env=FIXTURE_PACKAGE
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: result-${{ matrix.lane }}-${{ matrix.package }}
+          path: result/result.json
+          if-no-files-found: error
+
+  compare:
+    name: compare runtime lanes
+    if: (inputs.lanes || inputs.lane) == 'both'
+    needs: [runtime]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: result-*
+          path: artifacts
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: runtime-result
+          directory: artifacts

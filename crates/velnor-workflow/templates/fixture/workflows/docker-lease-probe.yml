@@ -1,0 +1,132 @@
+name: docker-lease-probe
+
+# Diagnostic for tailrocks/velnor#348: raw-wire probe of the docker lease
+# socket. Reproduces the docker CLI attach/create/start dance byte-for-byte
+# so the exact point where container stdout disappears can be seen.
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-lease-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    env:
+      LANE_ID: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Inspect Docker lease socket
+        run: |
+          set -euo pipefail
+          set -x
+          ls -la /var/run/docker.sock
+          stat /var/run/docker.sock
+          env | grep -i docker || true
+          docker version
+          docker info --format '{{json .}}' | head -c 600; echo
+      - name: Verify direct Docker CLI output
+        run: |
+          set -euo pipefail
+          set -x
+          docker pull -q busybox:latest
+          direct_output="$(docker run --rm busybox:latest echo probe-direct=ok)"
+          test "${direct_output}" = "probe-direct=ok"
+          echo "cli-output:${direct_output}"
+          mkdir -p evidence
+          LANE_ID="${LANE_ID}" DIRECT_OUTPUT="${direct_output}" python3 -c '
+          import json, os
+          from pathlib import Path
+          Path("evidence/direct-cli.json").write_text(json.dumps({
+              "schema": "velnor.fixture.docker-lease-probe.v1",
+              "scenario": "docker-lease-probe",
+              "evidence_id": "direct-cli",
+              "lane": os.environ["LANE_ID"],
+              "runner_name": os.environ.get("RUNNER_NAME", ""),
+              "semantic": {"status": "passed", "stdout": os.environ["DIRECT_OUTPUT"]},
+          }, sort_keys=True) + "\n")
+          '
+      - name: Run repository-local raw wire probe
+        env:
+          LANE_ID: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 scripts/workflow_evidence.py docker-probe \
+            --lane "${LANE_ID}" \
+            --runner-name "${RUNNER_NAME}" \
+            --output evidence/docker-lease-probe.json
+      - name: Upload per-lane Docker lease evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-lease-evidence-${{ matrix.config.lane }}
+          path: evidence/
+          if-no-files-found: error
+      # Cleanup must only touch probe-* containers: the lease daemon is shared
+      # and `docker ps -aq` also lists velnor-job-* containers (including this
+      # job's own), so an unfiltered rm -f kills the job itself and siblings.
+      - name: Remove only probe containers
+        if: always()
+        run: |
+          set -euo pipefail
+          set -x
+          docker ps -a --filter name=probe- | head -20
+          mapfile -t ids < <(docker ps -aq --filter name=probe-)
+          if [ "${#ids[@]}" -gt 0 ]; then docker rm -f "${ids[@]}"; fi
+
+  compare:
+    if: always()
+    needs: [probe]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: docker-lease-probe-${{ github.run_id }}-compare
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download selected lane Docker evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: docker-lease-evidence-*
+          path: evidence
+      - name: Compare Docker lease semantic results
+        env:
+          LANES: ${{ inputs.lanes }}
+        run: |
+          set -euo pipefail
+          if [[ "${LANES}" == "both" ]]; then
+            expected_lanes=(github velnor)
+          else
+            expected_lanes=("${LANES}")
+          fi
+          # A single-lane dispatch is diagnostic: it uses `diagnose`, which never
+          # claims parity. `compare` refuses a single lane outright.
+          if [[ "${#expected_lanes[@]}" -eq 1 ]]; then
+            verb=diagnose
+          else
+            verb=compare
+          fi
+          python3 scripts/workflow_evidence.py "${verb}" \
+            --directory evidence \
+            --scenario docker-lease-probe \
+            --lanes "${expected_lanes[@]}"

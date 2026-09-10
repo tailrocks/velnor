@@ -1,0 +1,209 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["**"]
+  merge_group:
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: github | velnor | both
+        type: choice
+        default: both
+        options: [github, velnor, both]
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+# Every automatic positive path runs both lanes. A single manual lane is
+# diagnostic only and cannot produce the readiness verdict.
+jobs:
+  contract-audit:
+    name: contract and readiness audit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    concurrency:
+      group: ci-${{ github.run_id }}-contract-audit
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout Velnor runner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: tailrocks/velnor
+          ref: __VELNOR_WORKFLOW_SOURCE_REV__
+          path: .velnor-source
+          persist-credentials: false
+      - name: Audit capability contract
+        run: python3 scripts/audit_capability_coverage.py --contract-only
+      - name: Audit workflow surface
+        run: python3 scripts/audit_workflow_surface.py
+      - name: Audit readiness coverage
+        env:
+          VELNOR_SOURCE_DIR: ${{ github.workspace }}/.velnor-source
+          VELNOR_SOURCE_SHA: __VELNOR_WORKFLOW_SOURCE_REV__
+        run: python3 scripts/audit_capability_coverage.py
+
+  rust:
+    uses: ./.github/workflows/_rust-suite.yml
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+  runtime:
+    uses: ./.github/workflows/_runtime-suite.yml
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+  actions:
+    uses: ./.github/workflows/_actions-suite.yml
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+  docker:
+    uses: ./.github/workflows/_docker-suite.yml
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+
+  l2-runtime:
+    uses: ./.github/workflows/l2-runtime.yml
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+
+  l2-provenance:
+    uses: ./.github/workflows/l2-provenance.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    secrets: inherit
+    with:
+      lane: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'github' || github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'merge_group' && 'both' || github.event_name == 'push' && 'both' || github.event_name == 'schedule' && 'both' || 'both' }}
+      signer-workflow: github.com/${{ github.repository }}/.github/workflows/ci.yml
+
+  lane-verdict:
+    name: exact two-lane evidence verdict
+    if: >-
+      always() && !(
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name != github.repository
+      )
+    needs: [contract-audit, rust, runtime, actions, docker, l2-runtime, l2-provenance]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    concurrency:
+      group: ci-${{ github.run_id }}-lane-verdict
+      cancel-in-progress: false
+    steps:
+      - name: Require all positive prerequisites
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          python3 -c 'import json,sys; n=json.loads(sys.argv[1]); print("prerequisite results:", n); sys.exit(any(v["result"] != "success" for v in n.values()))' "$NEEDS"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: suite-rust-*
+          path: artifacts/rust
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: result-*
+          path: artifacts/runtime
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: suite-actions-*
+          path: artifacts/actions
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: suite-docker-*
+          path: artifacts/docker
+      - name: Require exact GitHub and Velnor evidence for every suite
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          # The Rust scenario matrix. The default Velnor Rust path is the
+          # mandatory scenario; sccache is one scenario among several.
+          rust_scenarios = {
+              "rust-default": ("app-a", "app-b"),
+              "rust-sccache": ("app-a", "app-b"),
+              "rust-accel-optout": ("app-a", "app-b"),
+              "rust-cache-interaction": (
+                  "cargo-source-cache",
+                  "explicit-sccache",
+                  "lockfile-change",
+                  "source-change",
+                  "target-cache",
+              ),
+              "rust-parallel": ("1", "2", "3", "4"),
+          }
+          expected = {
+              (scenario, lane, key)
+              for scenario, keys in rust_scenarios.items()
+              for lane in ("github", "velnor")
+              for key in keys
+          }
+          expected |= {
+              ("runtime-result", lane, package)
+              for lane in ("github", "velnor")
+              for package in ("app-a", "app-b")
+          }
+          expected |= {
+              ("actions", lane, "probes") for lane in ("github", "velnor")
+          }
+          expected |= {
+              ("docker", lane, "image") for lane in ("github", "velnor")
+          }
+          scenarios = {item[0] for item in expected}
+          observed = set()
+          for path in Path("artifacts").rglob("*.json"):
+              payload = json.loads(path.read_text())
+              if payload.get("schema") != "velnor.fixture.evidence.v2":
+                  raise SystemExit(f"unsupported evidence schema in {path}")
+              scenario = payload["scenario"]
+              if scenario not in scenarios:
+                  raise SystemExit(f"unexpected evidence scenario in {path}: {scenario}")
+              lane = payload["provenance"]["lane"]
+              observed.add((scenario, lane, payload["evidence_id"]))
+          if observed != expected:
+              missing = sorted(expected - observed)
+              extra = sorted(observed - expected)
+              raise SystemExit(f"exact lane evidence mismatch; missing={missing}; extra={extra}")
+          print(f"exact two-lane evidence verified ({len(expected)} semantic records)")
+          PY
+
+  ci-required:
+    if: always()
+    needs: [contract-audit, rust, runtime, actions, docker, l2-runtime, l2-provenance, lane-verdict]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    concurrency:
+      group: ci-${{ github.run_id }}-required
+      cancel-in-progress: false
+    steps:
+      - name: Require every selected suite
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - "$NEEDS" "$FORK_PR" <<'PY'
+          import json
+          import sys
+
+          needs = json.loads(sys.argv[1])
+          fork_pr = sys.argv[2].lower() == "true"
+          failures = [
+              name
+              for name, value in needs.items()
+              if value["result"] != "success"
+              and not (fork_pr and name == "lane-verdict" and value["result"] == "skipped")
+          ]
+          print("suite results:", needs)
+          if failures:
+              raise SystemExit(f"required checks failed: {failures}")
+          PY

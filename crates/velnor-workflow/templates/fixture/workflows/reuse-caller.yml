@@ -1,0 +1,79 @@
+name: reuse-caller
+
+on:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: reuse-caller-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Call the reusable workflow — mirrors ChainArgos kestra and Jackin composite patterns.
+  # Each lane calls the same reusable workflow with secrets: inherit.
+  call-app-a:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"cache_suffix":"Velnor"},{"lane":"github","runner":"ubuntu-26.04","cache_suffix":"GitHub"}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"github","runner":"ubuntu-26.04","cache_suffix":"GitHub"}]' || '[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"cache_suffix":"Velnor"}]') }}
+    uses: ./.github/workflows/fixture-rust-check.yml
+    secrets: inherit
+    with:
+      package: app-a
+      lane: ${{ matrix.config.lane }}
+      runner: ${{ toJSON(matrix.config.runner) }}
+      cache-key-suffix: ${{ matrix.config.cache_suffix }}
+
+  call-app-b:
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"cache_suffix":"Velnor"},{"lane":"github","runner":"ubuntu-26.04","cache_suffix":"GitHub"}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"github","runner":"ubuntu-26.04","cache_suffix":"GitHub"}]' || '[{"lane":"velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"cache_suffix":"Velnor"}]') }}
+    uses: ./.github/workflows/fixture-rust-check.yml
+    secrets: inherit
+    with:
+      package: app-b
+      lane: ${{ matrix.config.lane }}
+      runner: ${{ toJSON(matrix.config.runner) }}
+      cache-key-suffix: ${{ matrix.config.cache_suffix }}
+
+  reuse-required:
+    if: always()
+    needs: [call-app-a, call-app-b]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download reusable-workflow evidence
+        if: always()
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: result-*
+          path: artifacts
+          merge-multiple: false
+      - uses: ./.github/actions/compare-evidence
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.lanes == 'both'
+        with:
+          scenario: fixture-rust-check
+          directory: artifacts
+      - name: Record diagnostic-only single-lane dispatch
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.lanes != 'both'
+        run: echo "single-lane dispatch is diagnostic only; parity comparison skipped"
+      - uses: ./.github/actions/aggregate-needs
+        if: always()
+        with:
+          needs-json: ${{ toJSON(needs) }}
+          workflow-label: reuse-caller
