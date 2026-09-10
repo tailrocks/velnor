@@ -31,9 +31,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c0aee2d43c2fa313146aa9e59f24a5b04fc3ed3e
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@5c7781a05f4aec07e30b648c3af1e3328d668b8c
         with:
-          rev: c0aee2d43c2fa313146aa9e59f24a5b04fc3ed3e
+          rev: 5c7781a05f4aec07e30b648c3af1e3328d668b8c
       - name: Select affected units
         id: plan
         env:
@@ -46,7 +46,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-c0aee2d43c2fa313146aa9e59f24a5b04fc3ed3e
+          name: velnor-workflow-runtime-5c7781a05f4aec07e30b648c3af1e3328d668b8c
           path: ~/.cargo/bin/velnor-workflow
           if-no-files-found: error
           retention-days: 7
