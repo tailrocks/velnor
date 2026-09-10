@@ -1,0 +1,21 @@
+name: Aggregate gates
+description: >-
+  Emit the lane contract signal. This step runs only after every applicable gate
+  in the lane job has already succeeded (each gate fails the job on error), so
+  reaching it means the lane genuinely passed. It emits `contract=success`. A lane
+  whose gate failed never reaches this step, so its contract output stays empty and
+  the lane fails. Skipped work never produces `contract=success`.
+outputs:
+  contract:
+    description: "'success' only when every applicable gate in this lane succeeded."
+    value: ${{ steps.emit.outputs.contract }}
+runs:
+  using: composite
+  steps:
+    - name: Emit lane contract
+      id: emit
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "contract=success" >> "${GITHUB_OUTPUT}"
+        echo "lane contract: success (every applicable gate passed)"

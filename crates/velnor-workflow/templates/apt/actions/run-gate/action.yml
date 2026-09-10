@@ -1,0 +1,35 @@
+name: Run gate
+description: >-
+  Execute exactly one named CI gate command. The command is identical on either
+  lane; only the runner that hosts this composite differs. This is a lane-neutral
+  building block: it contains no lane-specific, Velnor-specific, or
+  GitHub-hosted-specific logic.
+inputs:
+  name:
+    description: Gate name (install, build, test, lint, or format).
+    required: true
+  command:
+    description: Exact command to execute for this gate. Must be non-empty.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Run gate
+      shell: bash
+      env:
+        GATE_NAME: ${{ inputs.name }}
+        GATE_COMMAND: ${{ inputs.command }}
+      run: |
+        set -euo pipefail
+        if [ -z "${GATE_NAME}" ]; then
+          echo "run-gate: empty gate name" >&2
+          exit 1
+        fi
+        if [ -z "${GATE_COMMAND}" ]; then
+          echo "run-gate: gate '${GATE_NAME}' has an empty command" >&2
+          exit 1
+        fi
+        echo "::group::gate ${GATE_NAME}"
+        echo "+ ${GATE_COMMAND}"
+        bash -eo pipefail -c "${GATE_COMMAND}"
+        echo "::endgroup::"

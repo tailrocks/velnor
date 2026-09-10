@@ -1,0 +1,89 @@
+name: Package update
+
+on:
+  schedule:
+    - cron: "29 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+
+permissions:
+  attestations: read
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  jackin_project:
+    if: ${{ github.repository_owner == 'jackin-project' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: [stable]
+    uses: ./.github/workflows/package-updater.yml
+    with:
+      consumer-repository: ${{ github.repository }}
+      channel: ${{ matrix.channel }}
+      branch: package-update/verified/${{ matrix.channel }}
+      lane: ${{ matrix.config.lane }}
+      writer: ${{ matrix.config.writer }}
+    secrets:
+      app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}
+  tailrocks:
+    if: ${{ github.repository_owner == 'tailrocks' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: [stable]
+    uses: ./.github/workflows/package-updater.yml
+    with:
+      consumer-repository: ${{ github.repository }}
+      channel: ${{ matrix.channel }}
+      branch: package-update/verified/${{ matrix.channel }}
+      lane: ${{ matrix.config.lane }}
+      writer: ${{ matrix.config.writer }}
+    secrets:
+      app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}
+  chainargos:
+    if: ${{ github.repository_owner == 'ChainArgos' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: [stable]
+    uses: ./.github/workflows/package-updater.yml
+    with:
+      consumer-repository: ${{ github.repository }}
+      channel: ${{ matrix.channel }}
+      branch: package-update/verified/${{ matrix.channel }}
+      lane: ${{ matrix.config.lane }}
+      writer: ${{ matrix.config.writer }}
+    secrets:
+      app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}
+  package-update-required:
+    if: ${{ always() }}
+    needs: [jackin_project, tailrocks, chainargos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          OWNER: ${{ github.repository_owner }}
+          JACKIN: ${{ needs.jackin_project.result }}
+          TAILROCKS: ${{ needs.tailrocks.result }}
+          CHAINARGOS: ${{ needs.chainargos.result }}
+        run: |
+          set -euo pipefail
+          case "$OWNER" in
+            jackin-project) test "$JACKIN" = success; test "$TAILROCKS" = skipped; test "$CHAINARGOS" = skipped ;;
+            tailrocks) test "$JACKIN" = skipped; test "$TAILROCKS" = success; test "$CHAINARGOS" = skipped ;;
+            ChainArgos) test "$JACKIN" = skipped; test "$TAILROCKS" = skipped; test "$CHAINARGOS" = success ;;
+            *) echo "unrecognized owner" >&2; exit 1 ;;
+          esac
