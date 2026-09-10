@@ -242,6 +242,7 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("37beffda261423addd537c33f2d126df7f6ffbab", "v46.2.6"),
     allowed("39b914146caeff8cd512e61c8992f1d5913af85c", "v46.2.5"),
     allowed("5402b206248e5a8c8427a15102702eb9c1793efc", "v46.2.4"),
     allowed("0a7b68676027570f113b1d6e7b69b231b56167ab", "v46.2.3"),
@@ -483,7 +484,7 @@ pub static ACTIONS: &[ActionCapability] = &[
         "actions/create-github-app-token",
         CreateGitHubAppToken,
         &[
-            allowed("bcd2ba49218906704ab6c1aa796996da409d3eb1", "v3.0.0"),
+            allowed("bcd2ba49218906704ab6c1aa796996da409d3eb1", "v3.2.0"),
             allowed("fee1f7d63c2ff003460e3d139729b119787bc349", "v2.2.2"),
         ],
         &[
