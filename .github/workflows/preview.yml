@@ -682,9 +682,28 @@ jobs:
           # live version is compared first and a regression is refused: the
           # operator must re-run the LATEST preview run instead. Re-publishing
           # the identical version (same commit re-run) stays idempotent.
-          live_name="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/preview" --jq '.name' 2>/dev/null || true)"
-          live_version="${live_name#Preview }"
-          if [ -n "$live_version" ]; then
+          #
+          # The live release is read with its HTTP status: a 404 means no
+          # rolling release exists yet (the first publish) and proceeds to
+          # create, any other transport failure fails closed, and the error
+          # body can never leak into the version comparison.
+          live_response="$(mktemp)"
+          trap 'rm -f -- "$live_response"' EXIT
+          live_status=0
+          gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/preview" > "$live_response" 2>/dev/null || live_status=$?
+          live_http="$(awk 'NR == 1 {print $2; exit}' "$live_response")"
+          if [ "$live_status" -ne 0 ]; then
+            [ "$live_http" = "404" ] \
+              || { echo "::error::could not read the live preview release (gh api exit $live_status, HTTP ${live_http:-unknown}); refusing to replace it" >&2; exit 1; }
+          else
+            # Strip the -i status line and headers before parsing the body.
+            live_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$live_response")"
+            if ! live_name="$(jq -er '.name | strings' <<<"$live_body" 2>/dev/null)"; then
+              echo "::error::live preview release response carries no name; refusing to replace it" >&2
+              exit 1
+            fi
+            [ -n "$live_name" ] || { echo "::error::live preview release has an empty name; refusing to replace it" >&2; exit 1; }
+            live_version="${live_name#Preview }"
             [[ "$live_name" = "Preview $live_version" && "$live_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+~preview\.[0-9]+\+[0-9a-f]{7}$ ]] \
               || { echo "::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it" >&2; exit 1; }
             if dpkg --compare-versions "$live_version" eq "$VERSION"; then
