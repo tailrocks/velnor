@@ -36,8 +36,10 @@ primitives. Generation is a function of the scanned repository shape, this
 config, and the generator revision (`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
-A sidecar written by an older schema is never parsed: rerun generate on a
-byte-matching tree to move it to schema 2.
+The scan reads the git index (tracked files only), so untracked CI runtime
+artifacts, scratch files, and linked-worktree `.git` files never enter the
+recorded scan input. A sidecar written by an older schema is never parsed:
+rerun generate on a byte-matching tree to move it to schema 2.
 
 Generated jobs install the runtime through the versioned composite action
 (mise-action model: declare a revision, get the binary on PATH, cached)
