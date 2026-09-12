@@ -136,7 +136,11 @@ pub struct JobRow {
     pub acquired_at: Option<Timestamp>,
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
+    /// Effective admitted scope the job runs with, never the pool flag.
     pub trust_scope: Option<String>,
+    /// The job's derived trust class label; `None` for rows admitted before
+    /// derivation moved ahead of persistence.
+    pub trust_class: Option<String>,
     pub resource_policy: Option<String>,
     pub phase: String,
     pub conclusion: Option<String>,
@@ -270,6 +274,7 @@ pub struct JobSummary {
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
     pub trust_scope: Option<String>,
+    pub trust_class: Option<String>,
     pub resource_policy: Option<String>,
     pub phase: String,
     pub conclusion: Option<String>,
@@ -743,8 +748,8 @@ impl Store {
         transaction.execute(
             "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                                head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
-                               trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                               trust_scope, trust_class, resource_policy, phase, conclusion, infrastructure_category, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
              ON CONFLICT (instance_slug, job_uid) DO UPDATE SET
                 repository = excluded.repository,
                 workflow = excluded.workflow,
@@ -759,6 +764,7 @@ impl Store {
                 slot_name = COALESCE(excluded.slot_name, jobs.slot_name),
                 runner_name = excluded.runner_name,
                 trust_scope = excluded.trust_scope,
+                trust_class = excluded.trust_class,
                 resource_policy = excluded.resource_policy,
                 phase = excluded.phase,
                 conclusion = excluded.conclusion,
@@ -780,6 +786,7 @@ impl Store {
                 row.slot_name,
                 row.runner_name,
                 row.trust_scope,
+                row.trust_class,
                 row.resource_policy,
                 row.phase,
                 row.conclusion,
@@ -948,7 +955,7 @@ impl Store {
         let mut statement = conn.prepare_cached(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                     head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
-                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+                    trust_scope, trust_class, resource_policy, phase, conclusion, infrastructure_category
              FROM jobs WHERE instance_slug = ?1 AND run_id = ?2 AND attempt = ?3",
         )?;
         let mut rows = statement.query(params![instance_slug, run_id, i64::from(attempt)])?;
@@ -979,7 +986,7 @@ impl Store {
         let mut statement = conn.prepare_cached(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                     head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
-                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+                    trust_scope, trust_class, resource_policy, phase, conclusion, infrastructure_category
              FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
         )?;
         let mut rows = statement.query(params![instance_slug, job_uid])?;
@@ -1305,7 +1312,7 @@ impl Store {
         let mut statement = conn.prepare_cached(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                     head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
-                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+                    trust_scope, trust_class, resource_policy, phase, conclusion, infrastructure_category
              FROM jobs WHERE instance_slug = ?1 ORDER BY id DESC",
         )?;
         let rows = statement.query_map([instance_slug], map_summary)?;
@@ -1907,8 +1914,8 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
     transaction.execute(
         "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
                            head_ref, head_sha, trigger_event, queued_at, acquired_at, slot_name, runner_name,
-                           trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                           trust_scope, trust_class, resource_policy, phase, conclusion, infrastructure_category, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
          ON CONFLICT (instance_slug, job_uid)
           DO UPDATE SET
             job_uid = excluded.job_uid,
@@ -1923,6 +1930,7 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
             slot_name = COALESCE(excluded.slot_name, jobs.slot_name),
             runner_name = excluded.runner_name,
             trust_scope = excluded.trust_scope,
+            trust_class = excluded.trust_class,
             resource_policy = excluded.resource_policy,
             updated_at = excluded.updated_at",
         params![
@@ -1941,6 +1949,7 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
             summary.slot_name(),
             summary.runner_name(),
             summary.trust_scope(),
+            summary.trust_class(),
             summary.resource_policy(),
             summary.phase().as_str(),
             summary.conclusion().map(JobConclusion::as_str),
@@ -1974,6 +1983,7 @@ fn validate_job_row(row: &JobRow) -> StoreResult<()> {
         ("head_sha", row.head_sha.as_deref()),
         ("runner_name", row.runner_name.as_deref()),
         ("trust_scope", row.trust_scope.as_deref()),
+        ("trust_class", row.trust_class.as_deref()),
         ("resource_policy", row.resource_policy.as_deref()),
         ("slot_name", row.slot_name.as_deref()),
         ("conclusion", row.conclusion.as_deref()),
@@ -2370,10 +2380,11 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobSummary> {
         slot_name: row.get(12)?,
         runner_name: row.get(13)?,
         trust_scope: row.get(14)?,
-        resource_policy: row.get(15)?,
-        phase: row.get(16)?,
-        conclusion: row.get(17)?,
-        infrastructure_category: row.get(18)?,
+        trust_class: row.get(15)?,
+        resource_policy: row.get(16)?,
+        phase: row.get(17)?,
+        conclusion: row.get(18)?,
+        infrastructure_category: row.get(19)?,
     })
 }
 
@@ -2387,7 +2398,7 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
     let (owner, name) = repository_full
         .rsplit_once('/')
         .ok_or_else(|| summary_decode("repository"))?;
-    let phase_raw: String = row.get(16)?;
+    let phase_raw: String = row.get(17)?;
     // The column stores two coordinated vocabularies: the summary phase on
     // insert and the store-side machine state after transitions. Map the
     // machine spellings back onto the closed JobPhase taxonomy; anything
@@ -2426,14 +2437,15 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
         slot_name: row.get(12)?,
         runner_name: row.get(13)?,
         trust_scope: row.get(14)?,
-        resource_policy: row.get(15)?,
+        trust_class: row.get(15)?,
+        resource_policy: row.get(16)?,
         phase,
-        conclusion: optional_enum("conclusion", row.get(17)?, |raw: &str| {
+        conclusion: optional_enum("conclusion", row.get(18)?, |raw: &str| {
             JobConclusion::try_from(raw)
         })?,
         infrastructure_category: optional_enum(
             "infrastructure_category",
-            row.get(18)?,
+            row.get(19)?,
             |raw: &str| InfrastructureCategory::try_from(raw),
         )?,
     })

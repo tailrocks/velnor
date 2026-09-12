@@ -78,7 +78,8 @@ fn summary(run_id: u64, attempt: u32) -> JobSummary {
         acquired_at: Some(at("2026-08-24T12:30:47Z")),
         slot_name: Some("slot-0".to_owned()),
         runner_name: Some("sentry.slot-0.runner_a".to_owned()),
-        trust_scope: Some("trusted".to_owned()),
+        trust_scope: Some("untrusted".to_owned()),
+        trust_class: Some("fork-pr".to_owned()),
         resource_policy: Some("standard.v2".to_owned()),
         phase: JobPhase::Running,
         conclusion: None,
@@ -114,6 +115,7 @@ fn inputs_of(summary: &JobSummary) -> NormalizedJob {
         slot_name: summary.slot_name().map(str::to_owned),
         runner_name: summary.runner_name().map(str::to_owned),
         trust_scope: summary.trust_scope().map(str::to_owned),
+        trust_class: summary.trust_class().map(str::to_owned),
         resource_policy: summary.resource_policy().map(str::to_owned),
         phase: summary.phase(),
         conclusion: summary.conclusion(),
@@ -259,7 +261,7 @@ fn database_pages_and_columns_contain_no_secret_markers() {
     let mut statement = conn
         .prepare(
             "SELECT instance_slug, job_uid, repository, workflow, job_name, head_ref, head_sha,
-                    trigger_event, queued_at, acquired_at, runner_name, trust_scope,
+                    trigger_event, queued_at, acquired_at, runner_name, trust_scope, trust_class,
                     resource_policy, phase, conclusion, infrastructure_category, updated_at
              FROM jobs",
         )
@@ -267,7 +269,7 @@ fn database_pages_and_columns_contain_no_secret_markers() {
     let mut rows = statement.query([]).unwrap();
     let mut inspected = 0;
     while let Some(row) = rows.next().unwrap() {
-        for column in 0..17 {
+        for column in 0..18 {
             let value: Option<String> = row.get(column).unwrap();
             if let Some(value) = value {
                 assert_no_markers(&value, "stored column");
