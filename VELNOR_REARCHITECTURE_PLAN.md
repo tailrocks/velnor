@@ -236,6 +236,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R1-cond gave the step loop cancel re-evaluation (a killed step records failure and remaining conditions re-evaluate fresh instead of breaking), failed pre/post records on unevaluable conditions instead of silent skips, and a `status-conditions` dual-lane workflow pinning all four status functions plus the fail-closed unevaluable step for R2-v2v4's live run (§107). |
 | 2026-09-12 | R1-cond correction fixed the vacuous bad-if pin (an `always() &&` guard so the unevaluable RHS evaluates instead of short-circuiting to a skip), kept the execution error in the cancelled pre-step record, and absorbed unevaluable inner conditions into the composite umbrella so it renders failed (§107). |
 | 2026-09-12 | R1-cmd finished the command surface: warn-and-honor `set-output`/`save-state` with the name-required error (correcting the env-files-only premise against hosted behavior), loud `add-matcher`/`remove-matcher` rejection, job-env unsecure opt-ins, a real `hashFiles --follow-symbolic-links` mode, and a `command-surface` dual-lane pin for R2-v2v4's live run (§108). |
+| 2026-09-12 | R1-cmd correction fixed no-follow file-link hashing (target content, not empty) with the GitHub-lane pin assertion, follow-mode sibling double-yield behind an ancestor-chain guard, the no-follow broken-link expression error, and job-scoped deprecated-command telemetry (§108). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5649,9 +5650,10 @@ closed, one of them against the report's own premise:
   pin asserting empty outputs would fail on the GitHub lane — so
   Velnor now matches upstream exactly: the output/state is stored, the
   exact `UnsupportedCommandMessage` warning fires on every use, the
-  `DeprecatedCommand` telemetry stays once per parse, and a missing
-  or empty `name` throws the upstream `Required field 'name' is
-  missing` pair instead of being silently dropped. Upstream gates the
+  `DeprecatedCommand` telemetry stays once per job scope (correction
+  round, below), and a missing or empty `name` throws the upstream
+  `Required field 'name' is missing` pair instead of being silently
+  dropped. Upstream gates the
   warning on the server variable
   `DistributedTask.DeprecateStepOutputCommands`, which Velnor has no
   channel for; the flag is on for github.com, so warning
@@ -5682,13 +5684,15 @@ closed, one of them against the report's own premise:
   resolves links the way the bundled @actions/glob does with
   `followSymbolicLinks`: a file link hashes its target's content
   under the link's lexical path, a directory link is traversed, a
-  broken link is skipped, and traversed directories are
-  canonicalized into a per-search-root visited set so cycles
-  terminate (a second lexical spelling of an already-visited
-  directory still hashes under the other root, as the generator
-  yields both). No-follow mode is unchanged and now also exact: a
-  search root that is itself a link resolves to nothing, where the
-  old `root.is_file()` check followed it.
+  broken link is skipped, and each descended directory pushes its
+  canonical path on an ancestor chain (upstream's `traversalChain`,
+  fixed to the item level) and pops it on return, so sibling
+  aliases BOTH yield while true cycles terminate. No-follow mode
+  hashes lexically-matching file links too — upstream's File branch
+  has no isFile check, so lstat links are yielded and read through —
+  while a lexically-matching broken link fails the whole evaluation,
+  exactly upstream's `statSync` throw surfacing as
+  `InvalidOperationException` (correction round, below).
 
 Tests, 12 new (6 command, 6 hash/executor), all passing: per-use
 deprecation warnings with exact upstream text; nameless
@@ -5699,8 +5703,8 @@ skip/follow/cycle hashes; end-to-end flag flow through expression
 evaluation including the invalid-option error; and executor-level
 proof the job env reaches step parsing. Two brief benchmarks in the
 repo's timing-gated style: 2k parses of a 1k-line mixed output
-(bound 10 s, observed 1.8 s) and 50 follow-mode hashes of a 200-file
-symlinked tree (bound 60 s, observed 0.3 s).
+(bound 10 s, observed 1.8 s) and 50 follow-mode hashes of a 401-file
+aliased tree (bound 60 s, observed 0.37 s; correction round, below).
 
 Dual-lane pins. New `command-surface` workflow (generator template +
 regen wiring; standalone so the legacy commands cannot redden
@@ -5744,3 +5748,67 @@ server gate and echo state are separate items); save-state has no
 live pin because intra-action state is only observable through post
 `STATE_` env and fixture actions are single-file composites — a
 multi-file node post-probe is a separate package.
+
+Correction round (same date): four review issues, each re-verified
+against upstream sources and a live probe of the real
+@actions/glob 0.7.0 (the runner's node `hashFiles` loop replicated:
+lexical workspace-prefix check, `statSync`-then-read per yielded
+path) rather than taken on pointers alone:
+
+- No-follow file links hash (real bug, fixed): the package claimed a
+  no-follow link root "resolves to nothing", but upstream's File
+  branch has no isFile check — an lstat link that matches lexically
+  is yielded and read through. The probe confirms no-follow
+  `hashFiles('pin/link.txt')` equals the target hash, so the pin's
+  `test -z HASH_LINK_PLAIN` would have reddened the GitHub lane;
+  both modes now hash file links, and the pin asserts plain ==
+  follow == real. (No-follow `dirlink/**` stays empty — a link is
+  never descended without the flag — so that pin assertion stands.)
+  The two tests that encoded `''` are reworked.
+- Follow-mode ancestor chain (real bug, fixed): the per-root
+  never-shrinking visited set hashed only the first spelling of an
+  aliased directory, but upstream's `traversalChain` is fixed to the
+  item level — only ancestors block a descend. The probe confirms
+  follow `pin/**/*.txt` yields `dirlink/inner.txt` AND
+  `sub/inner.txt`, and follow `pin/**/inner.txt` differs from the
+  single file. Collection now pushes the canonical path on descend
+  and pops it on return; the cycle test pins termination plus the
+  double-spelling digest, the follow test pins both sibling
+  equalities, and the benchmark tree is 401 files (each `aliased/`
+  spelling hashes), not 200.
+- No-follow broken links error (real bug, fixed): the probe confirms
+  no-follow `hashFiles('pin/broken.txt')` throws ENOENT out of node
+  — exit 1, `HashFilesFunction` throws `InvalidOperationException`,
+  expression evaluation fails — while follow mode omits it via
+  `omitBrokenSymbolicLinks`. `hash_files` now returns `Result` and
+  fails the evaluation on any matched-but-unreadable file with the
+  upstream-shaped message, mirroring the sibling `hash_artifact_dir`
+  (which never had the silent `.ok()` drop); no-follow broken links
+  are collected as candidates so only lexically-matching ones fail,
+  and a broad pattern over a tree containing one fails the whole
+  call, exactly like upstream. Pinned at both the `hash_files` and
+  the `resolve_expressions` level.
+- Deprecated-command telemetry is per-job (fidelity delta, fixed):
+  upstream gates on `Global.HasDeprecatedSetOutput` /
+  `HasDeprecatedSaveState`, but Velnor deduped per parse, so N steps
+  emitted N entries. The job engine now owns the once-flags and
+  threads them through every full step-output parse (one engine per
+  job, same lifetime as the cancellation token); the two streaming
+  mask-only parses take throwaways so they consume nothing. Pinned
+  by a shared-scope unit test and a two-step engine test.
+
+Tests, 1 new + 5 reworked/extended, all passing. Gates observed in
+this worktree: `cargo fmt --all -- --check` clean; `cargo
+check --workspace --all-targets` zero warnings; strict clippy clean
+workspace-wide (with `test-support`, `-D warnings`); serial runner
+lib 1791 passed, 0 failed, 1 ignored (1790 + 1 new); focused
+command 23/23 and hash 10/10; model 129+4+6+4; control
+237+8+18+7; velnorctl all green; velnor-workflow 197+2+2+8;
+actionlint on the reworked template reports only the pre-existing
+`ubuntu-26.04` runner-label note — no diagnostics on the changed
+lines. Full parallel runner-package runs show transient
+mirror-lease failures (varying 1–2–0 across identical runs, serial
+always green) that reproduce on the untouched base tree: a
+pre-existing parallel flake, not this change. One transient
+synthetic-surface failure in a workflow run passed on rerun — the
+same documented-flake class as R1-cmd's.
