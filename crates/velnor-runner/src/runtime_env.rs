@@ -339,6 +339,31 @@ fn configured_cache_url(url: Option<&str>, has_job_token: bool) -> Option<String
         .and_then(|url| crate::gha_cache::normalize_public_base(url).ok())
 }
 
+/// Extract the cache session binding for this job: the job-scoped runtime
+/// token plus the repository identity its cache requests are scoped to,
+/// carrying the job's trust class so fork-PR and unknown jobs write an
+/// isolated fork namespace instead of the base one. `None` when the job
+/// carries no usable token or identity; such jobs keep working, but their
+/// cache requests fall back to an isolated per-token namespace (one forensic
+/// line per token at request time).
+pub(crate) fn job_cache_session(
+    job: &AgentJobRequestMessage,
+) -> Option<(String, crate::gha_cache::CacheIdentity)> {
+    let token = job
+        .system_connection()
+        .and_then(endpoint_access_token)
+        .filter(|token| !token.is_empty())?;
+    let repository = job.variable("github.repository")?;
+    let git_ref = job.variable("github.ref")?;
+    let base_ref = job
+        .variable("github.base_ref")
+        .filter(|base| !base.is_empty());
+    let trust = crate::trust_class::TrustClass::derive(job);
+    let identity =
+        crate::gha_cache::CacheIdentity::new(repository, git_ref, base_ref, trust).ok()?;
+    Some((token.to_owned(), identity))
+}
+
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
     if let Some(value) = value {
         env.push((name.to_string(), value.to_string()));
@@ -748,5 +773,188 @@ mod tests {
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("MBX_DISABLE".into(), "1".into())));
         assert!(!env.iter().any(|(name, _)| name == "MBX_CACHE_DIR"));
+    }
+
+    fn cache_session_job(
+        variables: serde_json::Value,
+        token: Option<&str>,
+    ) -> AgentJobRequestMessage {
+        let mut job = serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": variables,
+        });
+        if let Some(token) = token {
+            job["resources"] = serde_json::json!({
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.githubusercontent.com/x",
+                    "authorization": {
+                        "parameters": { "AccessToken": token }
+                    }
+                }]
+            });
+        }
+        serde_json::from_value(job).unwrap()
+    }
+
+    #[test]
+    fn job_cache_session_binds_token_to_repository_identity() {
+        let job = cache_session_job(
+            serde_json::json!({
+                "github.repository": { "value": "Acme/Repo" },
+                "github.ref": { "value": "refs/pull/7/merge" },
+                "github.base_ref": { "value": "main" },
+            }),
+            Some("runtime-token"),
+        );
+        let (token, identity) = job_cache_session(&job).unwrap();
+        assert_eq!(token, "runtime-token");
+        // No event or plan-scope signals: the derivation fails closed to
+        // Unknown, and the identity carries it.
+        assert_eq!(
+            identity,
+            crate::gha_cache::CacheIdentity::new(
+                "acme/repo",
+                "refs/pull/7/merge",
+                Some("refs/heads/main"),
+                crate::trust_class::TrustClass::Unknown,
+            )
+            .unwrap()
+        );
+    }
+
+    fn cache_session_job_full(body: serde_json::Value) -> AgentJobRequestMessage {
+        serde_json::from_value(body).expect("cache session test job parses")
+    }
+
+    #[test]
+    fn job_cache_session_carries_trusted_for_base_jobs() {
+        let job = cache_session_job_full(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "github.event_name": { "value": "push" },
+                "github.repository": { "value": "acme/repo" },
+                "github.ref": { "value": "refs/heads/main" },
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.githubusercontent.com/x",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" },
+                }],
+            },
+        }));
+        let (token, identity) = job_cache_session(&job).unwrap();
+        assert_eq!(token, "runtime-token");
+        assert_eq!(
+            identity,
+            crate::gha_cache::CacheIdentity::new(
+                "acme/repo",
+                "refs/heads/main",
+                None,
+                crate::trust_class::TrustClass::Trusted,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn job_cache_session_carries_fork_pr_for_fork_events() {
+        let job = cache_session_job_full(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "github.event_name": { "value": "pull_request" },
+                "github.repository": { "value": "octo/base" },
+                "github.ref": { "value": "refs/pull/7/merge" },
+                "github.base_ref": { "value": "main" },
+            },
+            "contextData": {
+                "github": {
+                    "event": {
+                        "pull_request": {
+                            "head": { "repo": { "full_name": "mallory/base", "id": 2 } },
+                            "base": { "repo": { "id": 1 } },
+                        }
+                    }
+                }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.githubusercontent.com/x",
+                    "authorization": {
+                        "parameters": { "AccessToken": "runtime-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "octo/base",
+                    "properties": { "cloneUrl": "https://github.com/octo/base.git" },
+                }],
+            },
+        }));
+        let (token, identity) = job_cache_session(&job).unwrap();
+        assert_eq!(token, "runtime-token");
+        assert_eq!(
+            identity,
+            crate::gha_cache::CacheIdentity::new(
+                "octo/base",
+                "refs/pull/7/merge",
+                Some("refs/heads/main"),
+                crate::trust_class::TrustClass::ForkPR,
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn job_cache_session_is_none_without_token_or_identity() {
+        let repo = serde_json::json!({
+            "github.repository": { "value": "acme/repo" },
+            "github.ref": { "value": "refs/heads/main" },
+        });
+        // No endpoint at all.
+        assert!(job_cache_session(&cache_session_job(repo.clone(), None)).is_none());
+        // Empty token.
+        assert!(job_cache_session(&cache_session_job(repo.clone(), Some(""))).is_none());
+        // No repository variable.
+        let job = cache_session_job(
+            serde_json::json!({
+                "github.ref": { "value": "refs/heads/main" },
+            }),
+            Some("runtime-token"),
+        );
+        assert!(job_cache_session(&job).is_none());
+        // Malformed repository.
+        let job = cache_session_job(
+            serde_json::json!({
+                "github.repository": { "value": "not-a-repo" },
+                "github.ref": { "value": "refs/heads/main" },
+            }),
+            Some("runtime-token"),
+        );
+        assert!(job_cache_session(&job).is_none());
     }
 }

@@ -2495,7 +2495,39 @@ fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathB
             "GHA cache is enabled but canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
         )
     })?;
-    Ok(layout.cache_root.join("gha-cache"))
+    Ok(crate::store_catalog::gha_cache_root(&layout))
+}
+
+/// Bind the job's runtime token to its repository identity before any job
+/// process can issue a cache request, so restores hit the shared repo
+/// namespaces. Runs for every backend (script and microVM) because it sits in
+/// `execute_script_job`, ahead of the backend split.
+///
+/// Best-effort by design: a cache session is a performance binding, not job
+/// state. When registration is skipped or fails, the job still runs and its
+/// cache requests fall back to an isolated per-token namespace — with one
+/// forensic line per token at request time, so the degradation is visible
+/// rather than silently cold.
+fn register_job_cache_session(job: &AgentJobRequestMessage) {
+    if crate::gha_cache::enabled_from_env().is_none() {
+        return;
+    }
+    let Some((token, identity)) = crate::runtime_env::job_cache_session(job) else {
+        eprintln!(
+            "Warning: gha cache session not registered: job carries no usable runtime token or repository identity"
+        );
+        return;
+    };
+    let Some(layout) = crate::storage::StorageLayout::resolve() else {
+        eprintln!(
+            "Warning: gha cache session not registered: canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
+        );
+        return;
+    };
+    let root = crate::store_catalog::gha_cache_root(&layout);
+    if let Err(error) = crate::gha_cache::register_job_cache_session(&root, &token, &identity) {
+        eprintln!("Warning: gha cache session registration failed: {error:#}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2602,11 +2634,16 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // P1: host the GitHub cache contract when the operator enables it. The
     // service spawn and runtime-env injection key off the same URL; each job
     // still authenticates with its own runtime token, while disabled fleets
-    // remain byte-for-byte unchanged.
+    // remain byte-for-byte unchanged. Registered jobs resolve to shared
+    // repo namespaces (see `register_job_cache_session`); unregistered tokens
+    // get an isolated namespace plus one forensic line in the daemon log.
     if let Some(url) = crate::gha_cache::enabled_from_env() {
         let root = gha_cache_root(crate::storage::StorageLayout::resolve())?;
-        let service = crate::gha_cache::CacheService::open(root)
+        let mut service = crate::gha_cache::CacheService::open(root)
             .context("initialize GHA cache service on canonical storage")?;
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            service.forensic_log_dir = Some(config_base.join("logs"));
+        }
         let bound = crate::gha_cache::bind_configured(service)
             .await
             .context("bind GHA cache service")?;
@@ -8348,6 +8385,7 @@ fn execute_script_job(
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .backend();
     let job_dir = job_work_dir(config_dir, work_dir, job);
+    register_job_cache_session(job);
     let result = execute_script_job_inner(
         &job_dir,
         docker_host_work_dir,

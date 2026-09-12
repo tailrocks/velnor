@@ -217,6 +217,11 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
 | 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
+| 2026-09-12 | gha-cache-repo-namespace landed: repo/ref-scoped hosted cache with isolated fallback (`aeb1f257`); BC-22 cache-namespacing half resolved, `pub mod gha_cache` narrowed to `pub(crate)`. |
+| 2026-09-12 | gha-cache-fork-isolation landed: trust-headed cache chains — ForkPR/Unknown jobs write an isolated `fork-` namespace and read through base scopes, trusted jobs never resolve fork namespaces; closes the repo-namespace save-gating follow-up. |
+| 2026-09-12 | gha-cache-fork-isolation fmt correction: the landed commit failed the read-only `cargo fmt -p velnor-runner -- --check` gate (one hunk in `fork_isolation_conformance_fork_v1_reads_through_to_base`); reformatted, no behavior change. |
+| 2026-09-12 | cache-trust-regression landed (4 of 5 brief items): two-token end-to-end cache regressions plus a byte-identical port of the accepted gha-cache-prefix-max fix; the trusted-pool admission item is blocked on the trust-admission-fork merge and escalated (see §13). |
+| 2026-09-12 | Velnor finalize: all six trust/cache packages accepted, remaining scope none; final verification leaves six areas non-accept with red-team F-V1 (unrecorded trust decision) blocking — see the finalize anchor at the end of this file. |
 | 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §101). |
 | 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §101). |
 | 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§101). |
@@ -584,6 +589,13 @@ growth. Routine `cache gc` is manual-only with no timer unit, so all 310 GiB of 
 budgets are dead letters, and the GitHub Actions cache service is namespaced by the
 *per-job* `ACTIONS_RUNTIME_TOKEN` (`gha_cache.rs:222-227`), so it can never produce a
 cross-run hit while each tenant still accumulates 10 GiB outside `store_roots`.
+
+**[Cache-namespacing half RESOLVED in `aeb1f257` (gha-cache-repo-namespace, see §13).
+Tokens now resolve through a durable job-session registry to shared
+`repo-<sha256(repository \0 ref)>` namespaces searched ref-then-base per the GitHub
+cache scope rules; unregistered tokens keep an isolated per-token namespace with one
+forensic line each. The remainder of BC-22 (disk-pressure terminal state, live-state
+reaping, Docker accounting, manual-only `cache gc`) is untouched by that commit.]**
 
 Missing invariants: *one catalog is the sole constructor of store paths, so a path built
 two ways is unrepresentable; one capacity model derived from `statvfs` rather than summed
@@ -1326,6 +1338,71 @@ live in files under concurrent ownership, so they were reported rather than
 applied. Git byte and ref counters need no runner change for harness-driven
 scenarios: `GIT_TRACE2_EVENT` is set and its documented event JSON parsed. For
 runner-driven jobs the runner must set the same variable on its git children.
+
+## 13. Completed work packages (continued, gha-cache-repo-namespace)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| gha-cache-repo-namespace | Hosted GHA cache: repository/ref scoping (closes the BC-22 cache-namespacing defect) | `CacheIdentity`/`CacheSession`/`register_job_cache_session`: the slot process binds each job's runtime token to its repository identity before any job process runs; lookups search the ref namespace fully, then the base (PR target) namespace, per the GitHub cache scope rules; writes land in the job's own ref scope only, so PR runs restore base entries without overwriting them. Unregistered tokens fall back to an isolated per-token namespace with exactly one forensic line per token hash in `daemon.log`. `pub mod gha_cache` narrowed to `pub(crate)` (all consumers in-crate); uncalled `pub serve()` deleted; the daemon's cache-root join collapsed onto `store_catalog`. Gates: fmt clean, clippy workspace `-D warnings` clean, focused 49/49, workspace 2785/2789 (3 action-fixture failures reproduce on clean HEAD, 1 failure inside the concurrent uncommitted acquisition work). |
+
+Recorded deviations and follow-ups (deliberately out of this package, not oversights):
+
+- Default-branch fallback is absent: GitHub retries the lookup on the repository's default
+  branch, which the job message does not carry, so the chain ends at the base ref. PR runs
+  (base usually the default branch) are covered; direct pushes to a side branch cannot yet
+  restore default-branch entries. Populating the default branch from repo metadata is the
+  follow-up.
+- Save gating by trigger type (`pull_request_target`/`issue_comment`/`workflow_run` runs get
+  read-only default-branch access on GitHub) is not modelled; `CacheIdentity` carries no
+  event. That is cache-poisoning hardening, a separate package.
+- The native `actions/cache` path in `executor.rs` (BC-21) is a different implementation and
+  still has no ref scoping; this package covers the hosted `gha_cache` service only.
+
+## 13. Completed work packages (continued, gha-cache-fork-isolation)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| gha-cache-fork-isolation | Hosted GHA cache: fork-PR read/write isolation (closes the save-gating follow-up recorded under gha-cache-repo-namespace) | `CacheIdentity` carries the job's `TrustClass` (derived once at registration from the job message) and the durable session persists its label. ForkPR/Unknown jobs resolve a fork-headed chain — isolated `fork-<sha256>` namespace first, then the base ref/base namespaces for read-through — while trusted jobs resolve the base namespaces only. Every write path already lands in the chain head, so v1 reserve/upload and v2 reserve/upload/finalize are isolated with no route change: an untrusted run cannot write a base scope even when its ref *is* a base branch (the `workflow_run`-from-a-fork shape), and a trusted chain can never name — hence never restore or download — a fork entry. Sessions without a trust label (pre-trust bindings) or with an unusable one fail closed to the isolated per-token namespace like corrupt sessions. `reserve_v2`/`finalize_v2` generalized over the request body type (no behavior change) so the v2 write path is covered by tests. Gates: fmt clean, clippy workspace `-D warnings` clean, focused gha_cache/trust_class/runtime_env 100/100. |
+
+Classification arrives as a byte-identical port of the accepted `job-trust-class` package
+(`crates/velnor-runner/src/trust_class.rs` at `perf/docker-rust-mbx`, plus its one `lib.rs`
+module line): this branch carries the repo-namespace work that package's branch lacks, so
+the derivation is reused verbatim rather than re-derived. `job_cache_session` is the only
+production wiring — `TrustClass::derive` at registration, carried in the identity — and
+`runner.rs` is untouched (it passes the identity through unchanged).
+
+Recorded deviations and follow-ups (deliberately out of this package, not oversights):
+
+- Fork namespaces are per-(repository, ref), not per-fork: two different forks' runs on the
+  same non-merge ref (e.g. two `workflow_run` runs on `main`) share one fork namespace.
+  Trusted jobs are unaffected — no trusted chain names a fork namespace — but fork-vs-fork
+  cache poisoning within that namespace is possible. Per-head-repository fork namespaces
+  are the follow-up. Merge-ref fork PRs are already per-PR unique via the ref.
+- The native `actions/cache` path in `executor.rs` is still unscoped (same exclusion as
+  the repo-namespace package); this package covers the hosted `gha_cache` service only.
+- The `gha-cache-prefix-max` tie-break fix is accepted on `perf/docker-rust-mbx` but lives
+  on the other side of the branch split; it is not ported here and this package does not
+  touch `prefix_scan`. (Resolved by cache-trust-regression below, which ports it
+  byte-identically.)
+
+## 13. Completed work packages (continued, cache-trust-regression)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| cache-trust-regression | End-to-end cross-job cache and fork-trust regression tests (4 of the 5 brief items; the fifth is escalated, not skipped) | Three two-token end-to-end regressions over the v1 save path and both lookup generations: `cache_trust_regression_cross_job_restore_hit_within_one_repo` (job A saves on `main`, job B restores from `feature` through the base scope, exact + restore-prefix + byte download, with proof the hit came from A's scope), `cache_trust_regression_cross_repo_restore_misses` (v1/v2/download all miss across repositories; B's same-key save succeeds conflict-free), `cache_trust_regression_fork_pr_read_hit_but_write_isolated` (trusted save → fork restore + fork save → trusted v1/v2/download all miss the fork entry). Plus `cache_trust_regression_benchmark_cross_job_restore_throughput` (2k session-resolve + two-scope restores against the 30 s bound, in the repo's timing-gated-test style). The `gha-cache-prefix-max` fix is ported byte-identically from `perf/docker-rust-mbx` (`a58bcb48`: direct-max `prefix_scan` over `(created_ms, key_len, hash)`, `BTreeMap` import deleted) with its accepted `prefix_scan_equal_rank_breaks_ties_by_hash` test and `commit_blob_at` helper, verified by diffing the ported bodies against the perf source. Gates: `cargo fmt --all --check` clean, clippy workspace `--all-targets --features velnor-runner/test-support -D warnings` clean, focused gha_cache 56/56, trust_class 43/43, runtime_env 12/12. |
+
+Not landed, escalated rather than re-designed: the fifth brief item — "fork-PR job
+on a trusted pool lands on untrusted stores/socket" — tests the trust-admission-fork
+enforcement (`ee95c5d4` + `a30e6196`, ~1000 lines across `runner.rs`,
+`container.rs`, `executor.rs`, `cache.rs`, `storage.rs`, `github_adapter.rs`),
+which exists only on `perf/docker-rust-mbx`. This branch has the pool-level gate
+(`trust_scope`) and the pure narrowing function (`TrustClass::admitted_scope`,
+already unit-tested) but no per-job enforcement in the admission path, and
+`runner.rs` is under concurrent edit with uncommitted work — porting the
+enforcement here would collide with it. Landing a regression test for behavior
+that cannot pass is refused; the item needs the branch merge (or an explicit
+re-targeting of this package onto `perf/docker-rust-mbx`) before the test can
+be written against the real seam.
 
 ### Correction to BC-16 — the admission gate was self-poisoning, not merely contended
 
@@ -4883,3 +4960,131 @@ runner/model/control pass; targeted ops/trust/admission/blocking 93/93;
 runner lib 1710 passed with the same 3 pre-existing environmental
 `action::tests::fetched_*` failures (re-verified on the untouched base);
 `trust_scope_single_source` 2/2.
+
+> Convergence note (2026-09-12): the §§96–101 record above arrived on
+> `perf/docker-rust-mbx@e851b8c2` and the finalize anchor below on
+> `fix/runner-acquisition-intent-recovery@801e37eb`; the line-convergence
+> merge keeps both verbatim. The anchor's "lines have NOT converged" branch
+> state describes pre-merge topology — see the convergence record at the end
+> of this file for the merged SHAs.
+
+## Finalize anchor — trust/cache wave acceptance and final verification — 2026-09-12
+
+Evidence basis: the six `accept` verdicts arrived as the finalize brief
+(package IDs only, no inspectable review bodies — treated as pointers for
+verdict attribution, not reused as evidence). Commit topology below was
+verified live by `git rev-parse`/`git log`/`git cherry` in this checkout;
+the F-V1 code basis was re-inspected via `git show
+origin/perf/docker-rust-mbx:...` (no branch switch). All review findings and
+non-accept areas are attributed to the final-verification report, whose full
+text is the unresolved evidence for any item not re-inspected here.
+
+Branch state at finalize time (read carefully — the wave is split across
+two lines, and this copy of the plan only sees one):
+
+- This checkout is `fix/runner-acquisition-intent-recovery@843b9f06`
+  (`843b9f0657a460d78ddbb6af321b2166b4232c28`), tracking `origin/main`
+  (ahead 5, behind 3). Its tree is DIRTY: 393 uncommitted insertions in
+  `crates/velnor-runner/src/runner.rs` + `node/complete.rs` (the
+  acquisition-intent recovery work the branch is named for — inspected only
+  to identify, not touched). No verdict below covers that uncommitted code.
+- The trust-derivation/enforcement half of the wave lives on
+  `origin/perf/docker-rust-mbx@0b5448ae`
+  (`0b5448ae0a827d833d86b6f90db9113187d0a8b2`); the cache half lives here
+  (`aeb1f257..843b9f06` on top of the shared base `96bf1ed6`). The two
+  lines have NOT converged: this branch lacks `ee95c5d4` (TrustClass
+  admission enforcement) and this copy of the plan lacks the perf line's
+  §§96–100, which record the trust packages. Read §§96–100 on
+  `origin/perf/docker-rust-mbx` for the trust-side package detail; the
+  cache-side §13 (continued) sections in this copy are current.
+- `origin/main@7e594ce1` has since taken the acquisition recovery
+  (`097bc05d`, #665), phase/cache outcome reports (`5408a98a`, #664), and
+  the package-updater callee admission (`7e594ce1`, #663).
+
+Accepted packages (remaining scope: none):
+
+| ID | Verdict | Commits |
+| --- | --- | --- |
+| job-trust-class | accept | `0730ab89` derivation + `e98b95e1` `workflow_run`-from-fork correction (perf line; §§97–98 there) |
+| gha-cache-prefix-max | accept | `a58bcb48` (§99 on perf; ported byte-identically onto this line by `843b9f06`) |
+| trust-admission-fork | accept | `ee95c5d4` enforcement + `cc2ae0e3`/`0b5448ae` docs (perf line only; §100 there) |
+| gha-cache-repo-namespace | accept | `aeb1f257` + `99578305` docs (this line; §13) |
+| gha-cache-fork-isolation | accept | `abe0a07b` + `3cabdce7` review fmt correction (this line; §13) |
+| cache-trust-regression | accept | `843b9f06` (this line; §13; 4 of 5 brief items, trusted-pool admission item escalated) |
+
+Reviews: per-package Opus review is recorded only as the `accept` verdicts
+above plus the one visible correction commit (`3cabdce7`, fmt gate). The
+final verification pass returned six NON-ACCEPT areas (summarized from the
+report; file:line pointers are the report's, re-inspected only for F-V1):
+
+- GitHub Actions semantic parity (6 items): mixed native/JS post-action
+  ordering grouped, not unified LIFO; `failure()`/`success()`/`cancelled()`
+  branches unpinned dual-lane (only `always()` asserted live); honored
+  `::set-output::`/`::save-state::` with no dual-lane pin while GitHub's
+  contract is env-files-only; `hashFiles --follow-symbolic-links` silently
+  dropped; `add-matcher`/`remove-matcher` silently ignored;
+  `ACTIONS_ALLOW_UNSECURE_*` opt-ins ignoring job env (self-admitted).
+- Rust/Docker performance (6 items): no product benchmark exists (BC-27
+  open, `velnor-bench` scaffolding only, WP-17 not started); the CI/CD
+  performance goal fails its own §8 acceptance; the perf branch contributes
+  zero Rust/Docker performance improvements (trust enforcement only); trust
+  partitioning adds unmeasured cost (cold-start rebuilds, per-class GC
+  sweeps, split stores); structural bottlenecks BC-7/BC-14/BC-28 still
+  open; no independent verifier-side perf validation (V5/V6 pending).
+- Concurrency/reliability (2 items): step-log publisher has network awaits
+  with no application timeout fed by unbounded channels (head-of-line stall
+  + unbounded memory growth; fix: ~30 s `tokio::time::timeout` with
+  drop-and-reconnect); no live dual-lane cancel/timeout verdict (V4
+  pending — code paths tested, end-to-end unproven).
+- Architecture/code quality (4 items): god-files persist vs the P3 target
+  (`executor.rs` 28k lines, `runner.rs` 21k, runner crate 143k);
+  stringly-`anyhow` interior persists with zero `ExitClass`/`ErrorEnvelope`
+  adoption in `velnor-runner`; `#![allow(dead_code)]` file-wide in 10
+  runner modules; verification-integrity caveat — the inspected checkout
+  is this branch, not `perf/docker-rust-mbx` (see branch state above).
+- Verifier coverage (5 items): readiness artifacts stale vs the perf tip
+  (21 inventory-drift errors; procedural `just refresh-capability-baseline`
+  due — blocks any readiness claim); no live dual-lane verdict, deployed
+  image identity, fault/soak proof, or benchmark validation accepted
+  (V2/V4/V6 open); plan staleness — Velnor-side surface defects 1–3 are
+  fixed at the perf tip but still listed open; no automated
+  generated-`.github` drift gate in the fixture; `compare-evidence`
+  self-documents unauthenticated `VELNOR_SOURCE_SHA` (independent
+  attestation still required).
+- Final red-team (6 items): **[BLOCKING] F-V1 (medium)** — the trust
+  decision is not recorded anywhere for admitted jobs: `TrustClass::derive`
+  runs at `runner.rs:6180`, AFTER the admission row persists and telemeters
+  the raw pool scope (`runner.rs:6090-6130`, `trust_scope:
+  Some(args.trust_scope.clone())` at :6119), so `JobAdmission.trust_scope`
+  (`ops.rs:129`, projected to `trust_domain` at :471) records a
+  fork/unknown job on a trusted pool as `trusted` — re-inspected and
+  CONFIRMED in `origin/perf/docker-rust-mbx` source. Fix: derive before
+  admission persistence and add job trust class + effective scope to the
+  admission row/telemetry. F-V2 (low): `workflow_run` path lacks the PR
+  path's numeric-id contradiction check. F-V3 (low/robustness):
+  `clone_url_repository` ignores URL host, SSH-style URLs always yield
+  None → Unknown. F-V4 (note, pre-existing): `is_user_secret_variable`
+  case-sensitive prefix match. F-V5 (note): `github_adapter.rs:135-138`
+  re-implements the trust-namespace match instead of the shared helper.
+  F-A1 (process note): fixture capability audit fails closed on the stale
+  `6e59b98d` baseline — correct staleness detection, refresh due.
+
+Blockers (nothing here is a readiness claim):
+
+1. F-V1 is the wave's blocking defect: every admitted-but-downgraded fork
+   job is forensically misattributed today. It must land before any
+   activation that relies on admission records.
+2. The two branch lines must converge (merge review, no force-push) before
+   any single-SHA claim about "the wave" is meaningful; until then the
+   cache-trust-regression escalated item (trusted-pool admission) stays
+   open by construction.
+3. The fixture capability baseline must be refreshed against the converged
+   tip (`just refresh-capability-baseline`, procedural, no hand-edit)
+   before any readiness statement.
+4. V2/V4/V6 live evidence (dual-lane verdict, deployed image identity,
+   fault/soak, benchmark validation) remains the binding constraint on
+   every readiness claim — unchanged by this finalize.
+
+Status: the trust/cache implementation wave is complete and accepted; the
+program is NOT ready. Next bounded work, in order: F-V1 fix → branch-line
+convergence merge → baseline refresh → V2/V4/V6 live evidence.
