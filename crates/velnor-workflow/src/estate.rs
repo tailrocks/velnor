@@ -32,6 +32,11 @@ use crate::{
 // TODO(rearch): consumer ChainArgos/blockchain-nodes still on legacy table.
 // TODO(rearch): consumer ChainArgos/github-terraform still on legacy table.
 // TODO(rearch): consumer ChainArgos/java-monorepo still on legacy table.
+// TODO(rearch): consumer tailrocks/cloudflare-tofu still on legacy table.
+// TODO(rearch): consumer tailrocks/github-terraform still on legacy table.
+// TODO(rearch): consumer tailrocks/pg-bigdecimal still on legacy table.
+// TODO(rearch): consumer tailrocks/tailrocks-skills still on legacy table.
+// TODO(rearch): consumer tailrocks/tracing-request-level still on legacy table.
 //
 /// The runner group the apt surfaces select their trust-gated self-hosted
 /// lane by. The repo-owned generation config declares its own group; this

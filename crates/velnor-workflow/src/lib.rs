@@ -2133,7 +2133,8 @@ fn run(cli: &Cli) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn generated_files(config: &ProjectConfig) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {    generated_files_with_surface(config, None)
+fn generated_files(config: &ProjectConfig) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
+    generated_files_with_surface(config, None)
 }
 
 /// The generated surface, with the workflow families the declared primitives
@@ -4299,8 +4300,8 @@ impl Drop for Checkout {
 mod tests {
     use super::*;
     use crate::estate::{
-        catalog_config_with_default_branch, catalog_unit, catalog_units,
-        estate_profile, render_apt_package_update_template, RepositoryProfile, ESTATE_PROFILES,
+        catalog_config_with_default_branch, catalog_unit, catalog_units, estate_profile,
+        render_apt_package_update_template, RepositoryProfile, ESTATE_PROFILES,
     };
     use crate::scan::rust::{parse_cargo_manifest, parse_include_str_literals, CargoDependency};
 
@@ -6295,9 +6296,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
         let (root, config) = package_update_surface(template, grants);
         let rendered = must_some(
-            must(generated_files(&config), "generate").remove(
-                &PathBuf::from(".github/workflows/package-update.yml"),
-            ),
+            must(generated_files(&config), "generate")
+                .remove(&PathBuf::from(".github/workflows/package-update.yml")),
             "generated package update",
         );
         for (block, matrix) in expected {
@@ -6472,9 +6472,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
                     }
                     if matches!(
                         workflow_name,
-                        "maintenance.yml"
-                            | "ci-release-package-signer.yml"
-                            | "ci-policy.yml"
+                        "maintenance.yml" | "ci-release-package-signer.yml" | "ci-policy.yml"
                     ) {
                         continue;
                     }
@@ -6612,7 +6610,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn mr_boxington_units_restore_their_declared_cargo_sources_on_both_lanes() {
-        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
+        let profile = must_some(
+            estate_profile(native_workspace_consumer()),
+            "estate profile",
+        );
         let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
         let rust = must_some(
             config.units.iter().find(|unit| unit.id == "rust"),
@@ -6643,7 +6644,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn raw_output_caches_alongside_mr_boxington_need_a_justification() {
-        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
+        let profile = must_some(
+            estate_profile(native_workspace_consumer()),
+            "estate profile",
+        );
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
         let rust = must_some(
             config.units.iter_mut().find(|unit| unit.id == "rust"),
@@ -6690,7 +6694,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn rust_units_fetch_sources_first_and_verify_offline_except_policy() {
-        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
+        let profile = must_some(
+            estate_profile(native_workspace_consumer()),
+            "estate profile",
+        );
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
         let mut policy = catalog_unit(
             "rust-dependency-policy",
@@ -7208,7 +7215,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert_ne!(reviewed, current);
 
         let error = must_some(
-            apply_generated_write_plan(&root, &wanted, &GenerationInputs::parts(0, 0), false, false, true, &reviewed).err(),
+            apply_generated_write_plan(
+                &root,
+                &wanted,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                true,
+                &reviewed,
+            )
+            .err(),
             "refuse unreviewed concurrent bytes",
         );
         assert!(error.to_string().contains("changed after preflight"));
@@ -7244,7 +7260,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
 
         let error = must_some(
-            apply_generated_write_plan(&root, &files, &GenerationInputs::parts(0, 0), true, false, false, &reviewed).err(),
+            apply_generated_write_plan(
+                &root,
+                &files,
+                &GenerationInputs::parts(0, 0),
+                true,
+                false,
+                false,
+                &reviewed,
+            )
+            .err(),
             "refuse replaced identity",
         );
         assert!(error.to_string().contains("changed after preflight"));
@@ -7558,7 +7583,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "create guide symlink",
         );
         must(
-            fs::write(root.join(OWNERSHIP_STATE), ownership_state_content(&previous, &GenerationInputs::parts(0, 0))),
+            fs::write(
+                root.join(OWNERSHIP_STATE),
+                ownership_state_content(&previous, &GenerationInputs::parts(0, 0)),
+            ),
             "restore legacy guide ownership state",
         );
         let error = must_some(
@@ -7628,6 +7656,20 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
+    /// A verified native-workspace consumer drives the same render paths the
+    /// deleted velnor profile exercised, without naming a repository here.
+    fn native_workspace_consumer() -> &'static str {
+        must_some(
+            ESTATE_PROFILES
+                .iter()
+                .find(|profile| {
+                    profile.verified && profile.profile == RepositoryProfile::RustWorkspaceNative
+                })
+                .map(|profile| profile.repository),
+            "native-workspace consumer on the legacy table",
+        )
+    }
+
     #[test]
     fn estate_remote_repository_scans_and_adopts_its_own_workflows() {
         // The consumer comes from the legacy table itself, so the generator
@@ -7647,7 +7689,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         must(
             fs::write(
                 root.join(".git/config"),
-                &format!("[remote \"origin\"]\n    url = git@github.com:{consumer}.git\n"),
+                format!("[remote \"origin\"]\n    url = git@github.com:{consumer}.git\n"),
             ),
             "write repository remote metadata",
         );
