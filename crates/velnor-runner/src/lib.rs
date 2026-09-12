@@ -34,7 +34,7 @@ pub mod execution;
 mod executor;
 mod expression;
 mod fs_copy;
-pub mod gha_cache;
+pub(crate) mod gha_cache;
 mod git_mirror;
 mod github_adapter;
 pub mod host_capacity;
