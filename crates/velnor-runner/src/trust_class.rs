@@ -144,6 +144,46 @@ impl TrustClass {
     }
 }
 
+/// A job's admitted trust: the derived class bound to the effective scope
+/// it narrows the pool ceiling to.
+///
+/// Constructible only through [`AdmittedTrust::narrow`], which runs the
+/// class's narrowing over the raw pool flag. The fields are private, so no
+/// call site can pair a class with a scope it forbids (`fork-pr` with
+/// `trusted`) — the wrong value is inexpressible, not merely untested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedTrust {
+    class: TrustClass,
+    effective_scope: String,
+}
+
+impl AdmittedTrust {
+    /// Bind `class` to the scope it admits on a pool whose flag is
+    /// `pool_scope`: the ceiling for [`TrustClass::Trusted`], the untrusted
+    /// floor for every other class.
+    #[must_use]
+    pub fn narrow(class: TrustClass, pool_scope: &str) -> Self {
+        let effective_scope = class.admitted_scope(pool_scope).to_owned();
+        Self {
+            class,
+            effective_scope,
+        }
+    }
+
+    /// The derived class this binding narrows.
+    #[must_use]
+    pub fn class(&self) -> TrustClass {
+        self.class
+    }
+
+    /// The scope the job runs with: the value admission persists and every
+    /// enforcement path threads down.
+    #[must_use]
+    pub fn effective_scope(&self) -> &str {
+        &self.effective_scope
+    }
+}
+
 /// `pull_request` prefix length: `pull_request`, `pull_request_target`,
 /// `pull_request_review`, and `pull_request_review_comment` all share it.
 const PULL_REQUEST_PREFIX: &[u8; 12] = b"pull_request";
@@ -859,6 +899,26 @@ mod tests {
                     "{class:?} on pool {pool:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn admitted_trust_conformance_narrow_binds_class_to_effective_scope() {
+        // The constructor production and every test build admissions through:
+        // the class is preserved and the scope is the class narrowed over
+        // the raw pool flag. No other (class, scope) pair is constructible.
+        for (class, pool, scope) in [
+            (TrustClass::Trusted, "trusted", "trusted"),
+            (TrustClass::Trusted, "release", "release"),
+            (TrustClass::Trusted, "public-forks", "public-forks"),
+            (TrustClass::ForkPR, "trusted", "untrusted"),
+            (TrustClass::ForkPR, "release", "untrusted"),
+            (TrustClass::Unknown, "trusted", "untrusted"),
+            (TrustClass::Unknown, "public-forks", "untrusted"),
+        ] {
+            let trust = AdmittedTrust::narrow(class, pool);
+            assert_eq!(trust.class(), class, "{class:?} on pool {pool:?}");
+            assert_eq!(trust.effective_scope(), scope, "{class:?} on pool {pool:?}");
         }
     }
 

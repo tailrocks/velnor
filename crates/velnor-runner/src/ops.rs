@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::trust_class::AdmittedTrust;
+#[cfg(test)]
 use crate::trust_class::TrustClass;
 #[cfg(test)]
 use rusqlite::Connection;
@@ -127,13 +129,12 @@ pub struct JobAdmission {
     pub queued_at_rfc3339: Option<String>,
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
-    /// Effective admitted scope the job runs with: the pool ceiling narrowed
-    /// by [`TrustClass`], never the raw pool flag.
-    pub trust_scope: Option<String>,
-    /// The job's trust class, derived before this row is constructed. The
-    /// typed, non-optional field is the ordering proof: an admission row
-    /// cannot exist without a derivation.
-    pub trust_class: TrustClass,
+    /// The job's admitted trust, bound at construction via
+    /// [`AdmittedTrust::narrow`]: the derived class plus the effective scope
+    /// it narrows the pool ceiling to. A single field, so no call site can
+    /// pair a class with a scope it forbids — the class and the scope on the
+    /// row and its telemetry always agree.
+    pub trust: AdmittedTrust,
     pub resource_policy: Option<String>,
     /// Secret/mask values collected from the raw job message; applied to
     /// every textual projection so no secret value can enter the store even
@@ -175,10 +176,10 @@ impl JobAdmission {
             acquired_at: Some(Timestamp::now()),
             slot_name: self.slot_name.as_deref().map(|v| self.project(v)),
             runner_name: self.runner_name.as_deref().map(|v| self.project(v)),
-            trust_scope: self.trust_scope.as_deref().map(|v| self.project(v)),
+            trust_scope: Some(self.project(self.trust.effective_scope())),
             // Code-generated closed label, never workflow input: it bypasses
             // mask projection so no secret value can rewrite the audit fact.
-            trust_class: Some(self.trust_class.as_str().to_owned()),
+            trust_class: Some(self.trust.class().as_str().to_owned()),
             resource_policy: self
                 .resource_policy
                 .as_deref()
@@ -478,13 +479,13 @@ impl OpsSink {
             .map(|value| value.to_string())
             .unwrap_or_else(|| admission.project(&admission.job_uid));
         let repo = admission.project(&admission.repository_full_name);
-        let trust_domain = admission.project(admission.trust_scope.as_deref().unwrap_or("unknown"));
+        let trust_domain = admission.project(admission.trust.effective_scope());
         // Admission-bound context, like `trust_domain`: every lifecycle
         // observation carries the derived class. The admission is
         // authoritative over any caller-supplied field of the same name.
         fields.insert(
             "trust_class".to_owned(),
-            serde_json::Value::String(admission.trust_class.as_str().to_owned()),
+            serde_json::Value::String(admission.trust.class().as_str().to_owned()),
         );
         let input = TelemetryEnvelopeInput {
             run_id: &run_id,
@@ -1264,8 +1265,7 @@ mod tests {
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: TrustClass::Trusted,
+            trust: AdmittedTrust::narrow(TrustClass::Trusted, "trusted"),
             resource_policy: Some("standard".to_owned()),
             masks: secret.iter().map(|value| (*value).to_owned()).collect(),
         }
@@ -1302,8 +1302,7 @@ mod tests {
             (203_u64, TrustClass::Unknown, "untrusted"),
         ] {
             let mut adm = admission(run_id, None);
-            adm.trust_class = class;
-            adm.trust_scope = Some(scope.to_owned());
+            adm.trust = AdmittedTrust::narrow(class, "trusted");
             assert!(sink.record_admission(&adm));
             let uid = adm.job_uid().unwrap();
             let stored = sink
@@ -1328,8 +1327,7 @@ mod tests {
     fn admission_telemetry_carries_trust_class_and_effective_domain() {
         let (dir, sink) = temp_sink("trust-telemetry");
         let mut adm = admission(204, None);
-        adm.trust_class = TrustClass::ForkPR;
-        adm.trust_scope = Some("untrusted".to_owned());
+        adm.trust = AdmittedTrust::narrow(TrustClass::ForkPR, "trusted");
         let fields = BTreeMap::from([
             ("queued_for_ms".to_owned(), serde_json::json!(7_u64)),
             ("queue_time_present".to_owned(), serde_json::json!(true)),
@@ -1360,8 +1358,7 @@ mod tests {
         // A secret equal to a class label must not rewrite the audit fact:
         // the label bypasses mask projection by construction.
         let mut adm = admission(205, Some("fork-pr"));
-        adm.trust_class = TrustClass::ForkPR;
-        adm.trust_scope = Some("untrusted".to_owned());
+        adm.trust = AdmittedTrust::narrow(TrustClass::ForkPR, "trusted");
         adm.job_name = "hold".to_owned();
         assert!(sink.record_admission(&adm));
         let uid = adm.job_uid().unwrap();

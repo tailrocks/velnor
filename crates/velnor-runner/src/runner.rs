@@ -6125,8 +6125,7 @@ async fn handle_job_request(
                     .and_then(|value| value.value.clone())
             }),
             runner_name: Some(runner_name.to_owned()),
-            trust_scope: Some(effective_trust_scope.clone()),
-            trust_class: job_trust,
+            trust: crate::trust_class::AdmittedTrust::narrow(job_trust, &args.trust_scope),
             resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
@@ -14696,8 +14695,9 @@ mod tests {
 
         // F-V1: trust derives before the admission row persists, and the row
         // plus its telemetry record the job's class and effective scope —
-        // never the raw pool flag. Each case builds the admission exactly as
-        // `handle_job_request` does: derive, narrow, then persist.
+        // never the raw pool flag. Each case binds trust through the same
+        // constructor `handle_job_request` uses, narrowing the raw pool flag,
+        // so the test cannot hand-assemble a pair production cannot produce.
         for (event, head, class, scope) in [
             ("push", None, TrustClass::Trusted, "trusted"),
             (
@@ -14709,8 +14709,9 @@ mod tests {
         ] {
             let job = admission_job(event, head, false);
             assert_eq!(TrustClass::derive(&job), class);
-            let admitted = class.admitted_scope("trusted").to_owned();
-            assert_eq!(admitted, scope);
+            let trust = crate::trust_class::AdmittedTrust::narrow(class, "trusted");
+            assert_eq!(trust.class(), class);
+            assert_eq!(trust.effective_scope(), scope);
 
             let base = unique_temp_dir("admission-trust-row");
             std::fs::create_dir_all(&base).unwrap();
@@ -14732,8 +14733,7 @@ mod tests {
                 queued_at_rfc3339: None,
                 slot_name: Some("slot-0".to_owned()),
                 runner_name: Some("fixture-runner-0".to_owned()),
-                trust_scope: Some(admitted),
-                trust_class: class,
+                trust,
                 resource_policy: Some("standard".to_owned()),
                 masks: job_secret_mask_values(&job),
             };
@@ -17366,8 +17366,10 @@ jobs:
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["worker-test-secret".to_owned()],
         }

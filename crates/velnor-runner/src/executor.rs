@@ -13957,8 +13957,10 @@ mod tests {
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -14034,8 +14036,10 @@ mod tests {
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -15912,8 +15916,10 @@ esac
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -15996,8 +16002,10 @@ esac
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -24402,8 +24410,10 @@ fi"#
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
-            trust_class: crate::trust_class::TrustClass::Trusted,
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };

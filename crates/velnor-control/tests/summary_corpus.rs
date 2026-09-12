@@ -78,7 +78,7 @@ fn summary(run_id: u64, attempt: u32) -> JobSummary {
         acquired_at: Some(at("2026-08-24T12:30:47Z")),
         slot_name: Some("slot-0".to_owned()),
         runner_name: Some("sentry.slot-0.runner_a".to_owned()),
-        trust_scope: Some("trusted".to_owned()),
+        trust_scope: Some("untrusted".to_owned()),
         trust_class: Some("fork-pr".to_owned()),
         resource_policy: Some("standard.v2".to_owned()),
         phase: JobPhase::Running,
