@@ -73,8 +73,10 @@ all_velnor_units_drained() {
   # because an active timer can start an old doctor during package unpack.
   active_services_raw=$(systemctl list-units --type=service --all --no-legend --plain 'velnor*.service' 2>/dev/null) || return 1
   active_timers_raw=$(systemctl list-units --type=timer --all --no-legend --plain 'velnor*.timer' 2>/dev/null) || return 1
+  # NF skips the empty lines printf injects when an enumeration is empty:
+  # a bare empty line has no fields and must not look like an active unit.
   active_units=$(printf '%s\n%s\n' "$active_services_raw" "$active_timers_raw" \
-    | awk '$3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
+    | awk 'NF && $3 != "inactive" && $3 != "failed" {print $1 "(" $3 ")"}')
   [ -z "$active_units" ]
 }
 
