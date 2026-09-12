@@ -22570,6 +22570,21 @@ fi"#
             )
             .unwrap()
         );
+        // A non-recursive glob reaches the link identically to a direct
+        // root: `*.txt` hashes link plus real, never real alone.
+        assert_eq!(
+            hash_files(&workspace, &["*.txt".to_string()], false).unwrap(),
+            hash_files(
+                &workspace,
+                &["link.txt".to_string(), "real.txt".to_string()],
+                false
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            hash_files(&workspace, &["*.txt".to_string()], false).unwrap(),
+            target
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

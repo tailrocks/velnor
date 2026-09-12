@@ -237,6 +237,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R1-cond correction fixed the vacuous bad-if pin (an `always() &&` guard so the unevaluable RHS evaluates instead of short-circuiting to a skip), kept the execution error in the cancelled pre-step record, and absorbed unevaluable inner conditions into the composite umbrella so it renders failed (§107). |
 | 2026-09-12 | R1-cmd finished the command surface: warn-and-honor `set-output`/`save-state` with the name-required error (correcting the env-files-only premise against hosted behavior), loud `add-matcher`/`remove-matcher` rejection, job-env unsecure opt-ins, a real `hashFiles --follow-symbolic-links` mode, and a `command-surface` dual-lane pin for R2-v2v4's live run (§108). |
 | 2026-09-12 | R1-cmd correction fixed no-follow file-link hashing (target content, not empty) with the GitHub-lane pin assertion, follow-mode sibling double-yield behind an ancestor-chain guard, the no-follow broken-link expression error, and job-scoped deprecated-command telemetry (§108). |
+| 2026-09-13 | R1-cmd second correction re-ran the four review issues: all four cited `main`-tree line numbers, so each was re-verified against the `r0-fv2v5` tree and the fetched upstream sources instead of re-fixed, and the glob-reached-link gap the review named got a unit assertion plus a single-file `pin/l*.txt` pin the GitHub lane can prove (§108). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5812,3 +5813,50 @@ always green) that reproduce on the untouched base tree: a
 pre-existing parallel flake, not this change. One transient
 synthetic-surface failure in a workflow run passed on rerun — the
 same documented-flake class as R1-cmd's.
+
+Second correction round (2026-09-13): the follow-up review marked
+issues 1–3 NOT FIXED, but every line number it cited
+(`executor.rs:12484-12508`, `:13202-13346`,
+`runner.rs:12605-12633`) is the `main` tree, which does not contain
+this package at all — the fixes live on `r0-fv2v5`. Each issue was
+therefore re-verified against the package tree and the upstream
+sources fetched fresh (`HashFilesFunction.cs` including the
+`InvalidOperationException` message shape, the bundled node
+`hashFiles` loop, @actions/glob's globber/Pattern/options
+sources), not re-fixed on pointers:
+
+- Glob-reached file links hash (issue 1, already fixed):
+  `collect_workspace_children` pushes target-is-file links in both
+  modes, and the File branch genuinely has no isFile check
+  upstream. The review's exact `pin/*.txt` example is now a unit
+  assertion (`*.txt` equals the explicit link+real pair and differs
+  from real alone), and the pin gained a single-file glob-reached
+  assertion, `hashFiles('pin/l*.txt') == HASH_REAL`, which the
+  GitHub lane proves: a multi-file `pin/*.txt` equality would be
+  unsound there because upstream yields readdir order while Velnor
+  sorts per root.
+- Follow flag threading (issue 2, already fixed): the flag flows
+  from `hash_files_function` into `hash_files`, the guard is the
+  push-on-descend/pop-on-return ancestor chain (equivalent to
+  upstream's level-fixup `traversalChain`), and sibling aliases
+  both yield; no silent-discard path exists in this tree.
+- Broken-link error (issue 3, already fixed): `hash_files`
+  returns `Result`, a lexically-matching no-follow broken link
+  fails at digest time with the upstream-shaped message, and
+  follow mode omits it via the traversal skip; glob-build failure
+  still resolves empty, matching upstream's lenient minimatch
+  rather than its assert path.
+- Telemetry once-per-job (issue 4, already fixed, was
+  non-blocking): the engine-owned `DeprecatedCommandScope`
+  (one per `DockerJobEngine`, same lifetime as the job) threads
+  through all three full parses while both streaming mask-only
+  parses take documented throwaways; the `seen` dedupe in
+  `run_service_telemetry` remains as a wire-level backstop.
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; strict clippy clean workspace-wide (with `test-support`,
+`-D warnings`); serial runner lib 1791 passed, 0 failed,
+1 ignored; focused hash 10/10 and command 63/63; model
+129+4+6+4; control 237+8+18+7; velnorctl all green;
+velnor-workflow 197+2+2+8; actionlint on the reworked template
+reports only the pre-existing `ubuntu-26.04` runner-label note.

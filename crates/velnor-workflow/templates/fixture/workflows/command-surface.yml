@@ -73,6 +73,7 @@ jobs:
             echo "via_file=file-value"
             echo "hash_link_follow=${{ hashFiles('--follow-symbolic-links', 'pin/link.txt') }}"
             echo "hash_link_plain=${{ hashFiles('pin/link.txt') }}"
+            echo "hash_link_glob=${{ hashFiles('pin/l*.txt') }}"
             echo "hash_real=${{ hashFiles('pin/real.txt') }}"
             echo "hash_dir_follow=${{ hashFiles('--follow-symbolic-links', 'pin/dirlink/**') }}"
             echo "hash_dir_plain=${{ hashFiles('pin/dirlink/**') }}"
@@ -98,6 +99,7 @@ jobs:
           VIA_FILE: ${{ steps.emit.outputs.via_file }}
           HASH_LINK_FOLLOW: ${{ steps.emit.outputs.hash_link_follow }}
           HASH_LINK_PLAIN: ${{ steps.emit.outputs.hash_link_plain }}
+          HASH_LINK_GLOB: ${{ steps.emit.outputs.hash_link_glob }}
           HASH_REAL: ${{ steps.emit.outputs.hash_real }}
           HASH_DIR_FOLLOW: ${{ steps.emit.outputs.hash_dir_follow }}
           HASH_DIR_PLAIN: ${{ steps.emit.outputs.hash_dir_plain }}
@@ -111,6 +113,8 @@ jobs:
           test "${HASH_LINK_PLAIN}" = "${HASH_REAL}"
           test -n "${HASH_LINK_FOLLOW}"
           test "${HASH_LINK_FOLLOW}" = "${HASH_REAL}"
+          test -n "${HASH_LINK_GLOB}"
+          test "${HASH_LINK_GLOB}" = "${HASH_REAL}"
           test -z "${HASH_DIR_PLAIN}"
           test -n "${HASH_DIR_FOLLOW}"
           test "${HASH_DIR_FOLLOW}" = "${HASH_SUB}"
