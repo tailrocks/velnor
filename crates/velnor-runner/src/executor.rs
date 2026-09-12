@@ -10,7 +10,7 @@ use crate::{
     container::{JobContainerSpec, Shell},
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
-    workflow_command::parse_workflow_commands_with_job_env,
+    workflow_command::{parse_workflow_commands_with_job_env, DeprecatedCommandScope},
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
@@ -1730,6 +1730,11 @@ pub(crate) struct DockerJobEngine<R> {
     /// are definitionally not the job, take an inert token through
     /// [`DockerJobEngine::inert`].
     cancellation: crate::execution::cancel::JobCancellation,
+    /// Job-global deprecated-command telemetry flags (upstream `Global`
+    /// scope: N steps using `set-output` emit one `DeprecatedCommand`
+    /// entry). Threaded through every full step-output parse; streaming
+    /// mask-only parses use a throwaway instead.
+    deprecated_command_scope: DeprecatedCommandScope,
 }
 
 #[derive(Debug, Clone)]
@@ -1762,6 +1767,7 @@ where
             job_network_guard: None,
             lifecycle_telemetry: None,
             cancellation,
+            deprecated_command_scope: DeprecatedCommandScope::default(),
         }
     }
 
@@ -2599,8 +2605,16 @@ where
                     )?;
                     let live_sender = self.step_log_sender.clone();
                     let mut on_output = |_: CommandStream, line: &str| {
-                        streamed_masks
-                            .extend(parse_workflow_commands_with_job_env(line, &env).masks);
+                        // Mask-only: the throwaway scope keeps streaming from
+                        // consuming the job's telemetry once-flags.
+                        streamed_masks.extend(
+                            parse_workflow_commands_with_job_env(
+                                line,
+                                &env,
+                                &mut DeprecatedCommandScope::default(),
+                            )
+                            .masks,
+                        );
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -2663,6 +2677,7 @@ where
                         &step_result.stdout,
                         &step_result.stderr,
                         &env,
+                        &mut self.deprecated_command_scope,
                     ));
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
@@ -3231,6 +3246,7 @@ where
             &step_result.stdout,
             &step_result.stderr,
             &env,
+            &mut self.deprecated_command_scope,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3369,6 +3385,7 @@ where
             &step_result.stdout,
             &step_result.stderr,
             &env,
+            &mut self.deprecated_command_scope,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3973,7 +3990,16 @@ where
             if line.starts_with("__VELNOR_MISE_BIN__") {
                 return;
             }
-            live_masks.extend(parse_workflow_commands_with_job_env(line, &env).masks);
+            // Mask-only: the throwaway scope keeps streaming from consuming
+            // the job's telemetry once-flags.
+            live_masks.extend(
+                parse_workflow_commands_with_job_env(
+                    line,
+                    &env,
+                    &mut DeprecatedCommandScope::default(),
+                )
+                .masks,
+            );
             if let Some(live) = live_step.as_ref() {
                 emit_live_step_log(
                     &live_sender,
@@ -12758,7 +12784,7 @@ impl JobExpressionContext<'_> {
             workspace,
             &patterns,
             follow_symbolic_links,
-        )))
+        )?))
     }
 }
 
@@ -13424,9 +13450,10 @@ fn parse_workflow_commands_from_output(
     stdout: &str,
     stderr: &str,
     job_env: &[(String, String)],
+    scope: &mut DeprecatedCommandScope,
 ) -> StepCommandState {
-    let mut state = parse_workflow_commands_with_job_env(stdout, job_env);
-    state.merge(parse_workflow_commands_with_job_env(stderr, job_env));
+    let mut state = parse_workflow_commands_with_job_env(stdout, job_env, scope);
+    state.merge(parse_workflow_commands_with_job_env(stderr, job_env, scope));
     state
 }
 
@@ -13456,9 +13483,13 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
     }
 }
 
-fn hash_files(workspace: &Path, patterns: &[String], follow_symbolic_links: bool) -> String {
+fn hash_files(
+    workspace: &Path,
+    patterns: &[String],
+    follow_symbolic_links: bool,
+) -> Result<String, expression::ExpressionError> {
     let Ok(globs) = build_ordered_globs(patterns) else {
-        return String::new();
+        return Ok(String::new());
     };
     let search_roots = hash_file_search_roots(workspace, patterns);
     let mut seen = BTreeSet::new();
@@ -13475,8 +13506,8 @@ fn hash_files(workspace: &Path, patterns: &[String], follow_symbolic_links: bool
             // resolve to the same directory through different lexical paths
             // (a symlinked directory alongside its target), and both lexical
             // spellings hash, exactly as the glob generator yields both.
-            let mut visited = BTreeSet::new();
-            collect_workspace_files(&root, &mut files, follow_symbolic_links, &mut visited);
+            let mut chain = Vec::new();
+            collect_workspace_files(&root, &mut files, follow_symbolic_links, &mut chain);
             files.sort();
         }
         for path in files {
@@ -13490,14 +13521,29 @@ fn hash_files(workspace: &Path, patterns: &[String], follow_symbolic_links: bool
         }
     }
     if matches.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    let mut digests: Vec<_> = matches
+    // Upstream hashes every yielded path and throws on the first read
+    // failure — node exits 1, `HashFilesFunction` throws
+    // `InvalidOperationException`, and expression evaluation fails — so a
+    // matched-but-unreadable file (a no-follow broken symlink above all)
+    // errors here too instead of being silently dropped.
+    let digest_results: Vec<_> = matches
         .par_iter()
         .enumerate()
-        .filter_map(|(index, path)| sha256_file_digest(path).ok().map(|digest| (index, digest)))
+        .map(|(index, path)| sha256_file_digest(path).map(|digest| (index, digest)))
         .collect();
+    let mut digests: Vec<_> = digest_results
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            expression::ExpressionError::evaluation(format!(
+                "hashFiles('{}') failed. Fail to hash files under directory '{}'",
+                patterns.join(", "),
+                workspace.display()
+            ))
+        })?;
     digests.sort_by_key(|(index, _)| *index);
 
     let mut aggregate = Sha256::new();
@@ -13505,7 +13551,7 @@ fn hash_files(workspace: &Path, patterns: &[String], follow_symbolic_links: bool
         aggregate.update(digest);
     }
     let digest = aggregate.finalize();
-    hex_digest(&digest)
+    Ok(hex_digest(&digest))
 }
 
 fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMatcher)>> {
@@ -13587,14 +13633,33 @@ fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
     builder.build().context("build glob set")
 }
 
-/// A search root that is itself a symlink resolves only in follow mode:
-/// without the flag the glob generator stats without following, so a link
-/// is neither a file to hash nor a directory to traverse.
+/// A search root that is itself a file hashes in both modes, and so does a
+/// root that links to a file: upstream's File branch has no isFile check,
+/// so an lstat link that matches lexically is yielded and read through.
+/// A no-follow link to a directory is neither hashed nor traversed, while a
+/// broken-link root is yielded and fails at read time — exactly upstream's
+/// `statSync` throw. (Follow mode omits broken links during traversal via
+/// `omitBrokenSymbolicLinks`, so a broken root resolves to nothing there.)
 fn hash_root_is_file(root: &Path, follow_symbolic_links: bool) -> bool {
     if follow_symbolic_links {
-        root.is_file()
-    } else {
-        fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_file())
+        return root.is_file();
+    }
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return false;
+    };
+    if metadata.file_type().is_file() {
+        return true;
+    }
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    // A link to a file hashes; a link to a directory does not; a broken
+    // link is yielded as a candidate and fails at digest time when — and
+    // only when — it matches lexically. A link to anything else (a fifo,
+    // a socket) is skipped: opening it for a digest would block.
+    match fs::metadata(root) {
+        Ok(target) => target.is_file(),
+        Err(_) => true,
     }
 }
 
@@ -13604,29 +13669,50 @@ fn hash_root_is_real_dir(root: &Path) -> bool {
 
 /// Collect candidate files under `dir` for `hashFiles`.
 ///
-/// `DirEntry::file_type` never follows symlinks, which is exactly the
-/// no-follow mode: a symlink is neither a directory to descend nor a file
-/// to hash, so it is skipped. With `--follow-symbolic-links` (upstream
-/// passes `followSymbolicLinks` to the bundled @actions/glob) a symlink
-/// resolves to whatever it points at: a file hashes under its lexical
-/// path, a directory is traversed, and a broken link is skipped.
-/// Traversed directories are canonicalized into `visited` so a symlink
-/// cycle terminates instead of recursing forever; a directory that cannot
-/// be canonicalized — a loop makes `canonicalize` fail — is not entered.
+/// `DirEntry::file_type` never follows symlinks, which is the no-follow
+/// stat: a symlink is never a directory to descend — but upstream's File
+/// branch has no isFile check, so a link to a file IS a file to hash, in
+/// both modes, read through under its lexical path at digest time. Only
+/// directory traversal differs: with `--follow-symbolic-links` (upstream
+/// passes `followSymbolicLinks` to the bundled @actions/glob) a link to a
+/// directory is traversed, and a broken link is skipped
+/// (`omitBrokenSymbolicLinks`); without the flag a broken link is yielded
+/// as a candidate and fails at digest time when it matches lexically —
+/// upstream's `statSync` throw.
+/// `chain` is upstream's `traversalChain`, fixed to the item level by
+/// construction: each descended directory pushes its canonical path and
+/// pops it on return, so only an ancestor blocks a descend. Sibling
+/// aliases of one target BOTH yield while true cycles terminate; a
+/// never-shrinking visited set would over-dedupe the siblings. A
+/// directory that cannot be canonicalized — a loop makes `canonicalize`
+/// fail — is not entered.
 fn collect_workspace_files(
     dir: &Path,
     files: &mut Vec<PathBuf>,
     follow_symbolic_links: bool,
-    visited: &mut BTreeSet<PathBuf>,
+    chain: &mut Vec<PathBuf>,
 ) {
-    if follow_symbolic_links {
-        let Ok(canonical) = dir.canonicalize() else {
-            return;
-        };
-        if !visited.insert(canonical) {
-            return;
-        }
+    if !follow_symbolic_links {
+        collect_workspace_children(dir, files, false, chain);
+        return;
     }
+    let Ok(canonical) = dir.canonicalize() else {
+        return;
+    };
+    if chain.contains(&canonical) {
+        return;
+    }
+    chain.push(canonical.clone());
+    collect_workspace_children(dir, files, true, chain);
+    debug_assert_eq!(chain.pop(), Some(canonical));
+}
+
+fn collect_workspace_children(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    follow_symbolic_links: bool,
+    chain: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -13635,19 +13721,26 @@ fn collect_workspace_files(
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if follow_symbolic_links && file_type.is_symlink() {
-            let Ok(target) = fs::metadata(&path) else {
-                continue;
-            };
-            if target.is_dir() {
-                collect_workspace_files(&path, files, true, visited);
-            } else if target.is_file() {
-                files.push(path);
+        if file_type.is_symlink() {
+            match fs::metadata(&path) {
+                Ok(target) if target.is_dir() => {
+                    if follow_symbolic_links {
+                        collect_workspace_files(&path, files, true, chain);
+                    }
+                }
+                Ok(target) if target.is_file() => files.push(path),
+                // A link to a fifo or socket is skipped in both modes:
+                // opening it for a digest would block.
+                Ok(_) => {}
+                // A broken link is omitted in follow mode but yielded
+                // without the flag, failing at digest time iff matched.
+                Err(_) if follow_symbolic_links => {}
+                Err(_) => files.push(path),
             }
             continue;
         }
         if file_type.is_dir() {
-            collect_workspace_files(&path, files, follow_symbolic_links, visited);
+            collect_workspace_files(&path, files, follow_symbolic_links, chain);
             continue;
         }
         if !file_type.is_file() {
@@ -22180,6 +22273,60 @@ fi"#
     }
 
     #[test]
+    fn deprecated_command_telemetry_fires_once_per_job_across_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let script_step = |id: &str| {
+            ExecutableStep::Script(ScriptStep {
+                id: id.into(),
+                display_name: String::new(),
+                script: "node old-action.js".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            })
+        };
+        let steps = vec![script_step("first"), script_step("second")];
+        let mut executor = DockerJobEngine::inert(StderrCommandRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // The mock runner emits `::set-output::` on every step's stderr:
+        // each step honors the command and warns per use, but the job as a
+        // whole emits one telemetry entry — upstream's
+        // `Global.HasDeprecatedSetOutput` gate, with the streaming
+        // mask-only parses on throwaway scopes so they consume nothing.
+        let results = &summary.step_results;
+        assert_eq!(results.len(), 2);
+        let deprecated_entries = |state: &StepCommandState| {
+            state
+                .telemetry
+                .iter()
+                .filter(|telemetry| telemetry.message == "DeprecatedCommand: set-output")
+                .count()
+        };
+        for result in results {
+            assert_eq!(result.state.outputs["answer"], "42");
+            assert_eq!(result.state.warning_count, 2);
+        }
+        assert_eq!(deprecated_entries(&results[0].state), 1);
+        assert_eq!(deprecated_entries(&results[1].state), 0);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn step_log_includes_step_summary_file_content() {
         let result = StepExecutionResult {
             exit_code: 0,
@@ -22298,7 +22445,8 @@ fi"#
             &workspace,
             &["**/*.txt".to_string(), "nested/gamma.bin".to_string()],
             false,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             digest,
@@ -22319,7 +22467,8 @@ fi"#
             &workspace,
             &["zeta.txt".to_string(), "alpha.txt".to_string()],
             false,
-        );
+        )
+        .unwrap();
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("zeta.txt")).unwrap());
         expected.update(sha256_file_digest(&workspace.join("alpha.txt")).unwrap());
@@ -22332,6 +22481,7 @@ fi"#
                 &["alpha.txt".to_string(), "zeta.txt".to_string()],
                 false
             )
+            .unwrap()
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -22345,7 +22495,7 @@ fi"#
         fs::write(workspace.join("crates/direct/Cargo.toml"), "direct\n").unwrap();
         fs::write(workspace.join("crates/direct/fuzz/Cargo.toml"), "nested\n").unwrap();
 
-        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()], false);
+        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()], false).unwrap();
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("crates/direct/Cargo.toml")).unwrap());
 
@@ -22372,7 +22522,7 @@ fi"#
 
     #[cfg(unix)]
     #[test]
-    fn hash_files_skips_symlinks_without_the_follow_flag() {
+    fn hash_files_no_follow_hashes_file_links_and_errors_on_broken_links() {
         use std::os::unix::fs::symlink;
 
         let temp = temp_dir();
@@ -22384,24 +22534,41 @@ fi"#
         symlink("sub", workspace.join("dirlink")).unwrap();
         symlink("missing.txt", workspace.join("broken.txt")).unwrap();
 
-        // Patterns naming only links match nothing without the flag.
-        assert_eq!(hash_files(&workspace, &["link.txt".to_string()], false), "");
+        // Upstream's File branch has no isFile check: a lexically-matching
+        // file link is yielded and read through, so no-follow hashes the
+        // target's content exactly like follow mode does.
+        let target = hash_files(&workspace, &["real.txt".to_string()], false).unwrap();
+        assert!(!target.is_empty());
         assert_eq!(
-            hash_files(&workspace, &["dirlink/**".to_string()], false),
+            hash_files(&workspace, &["link.txt".to_string()], false).unwrap(),
+            target
+        );
+        // A directory link is still neither hashed nor traversed without
+        // the flag: its lstat is not a directory to descend.
+        assert_eq!(
+            hash_files(&workspace, &["dirlink/**".to_string()], false).unwrap(),
             ""
         );
+        // A lexically-matching broken link is yielded and fails at read
+        // time, failing the whole evaluation like upstream's statSync
+        // throw — even as one match among many in a broad pattern.
+        assert!(hash_files(&workspace, &["broken.txt".to_string()], false).is_err());
+        assert!(hash_files(&workspace, &["**/*.txt".to_string()], false).is_err());
+        // Without the broken link the broad pattern hashes the real files
+        // plus the file link's target content.
+        fs::remove_file(workspace.join("broken.txt")).unwrap();
         assert_eq!(
-            hash_files(&workspace, &["broken.txt".to_string()], false),
-            ""
-        );
-        // A broad pattern hashes the real files and nothing else.
-        assert_eq!(
-            hash_files(&workspace, &["**/*.txt".to_string()], false),
+            hash_files(&workspace, &["**/*.txt".to_string()], false).unwrap(),
             hash_files(
                 &workspace,
-                &["real.txt".to_string(), "sub/inner.txt".to_string()],
+                &[
+                    "link.txt".to_string(),
+                    "real.txt".to_string(),
+                    "sub/inner.txt".to_string(),
+                ],
                 false
             )
+            .unwrap()
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -22422,20 +22589,41 @@ fi"#
 
         // A followed file link hashes its target's content under the link's
         // lexical path, so it equals the direct hash of the same content.
-        let direct = hash_files(&workspace, &["real.txt".to_string()], false);
+        let direct = hash_files(&workspace, &["real.txt".to_string()], false).unwrap();
         assert!(!direct.is_empty());
         assert_eq!(
-            hash_files(&workspace, &["link.txt".to_string()], true),
+            hash_files(&workspace, &["link.txt".to_string()], true).unwrap(),
             direct
         );
         // A followed directory link traverses like its target.
         assert_eq!(
-            hash_files(&workspace, &["dirlink/**".to_string()], true),
-            hash_files(&workspace, &["sub/**".to_string()], true)
+            hash_files(&workspace, &["dirlink/**".to_string()], true).unwrap(),
+            hash_files(&workspace, &["sub/**".to_string()], true).unwrap()
+        );
+        // Sibling aliases BOTH yield: the broad hash covers the dirlink and
+        // sub spellings of inner.txt, so a two-spelling pattern differs
+        // from the single file.
+        assert_eq!(
+            hash_files(&workspace, &["**/*.txt".to_string()], true).unwrap(),
+            hash_files(
+                &workspace,
+                &[
+                    "dirlink/inner.txt".to_string(),
+                    "link.txt".to_string(),
+                    "real.txt".to_string(),
+                    "sub/inner.txt".to_string(),
+                ],
+                true
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            hash_files(&workspace, &["**/inner.txt".to_string()], true).unwrap(),
+            hash_files(&workspace, &["sub/inner.txt".to_string()], true).unwrap()
         );
         // A broken link contributes nothing and fails nothing.
         assert_eq!(
-            hash_files(&workspace, &["broken.txt".to_string()], true),
+            hash_files(&workspace, &["broken.txt".to_string()], true).unwrap(),
             ""
         );
         fs::remove_dir_all(temp).unwrap();
@@ -22453,14 +22641,19 @@ fi"#
         symlink("..", workspace.join("loop/nested/up")).unwrap();
         symlink("loop", workspace.join("self")).unwrap();
 
-        let direct = hash_files(&workspace, &["loop/nested/deep.txt".to_string()], true);
-        assert!(!direct.is_empty());
-        // The cycle links add no files: the broad hash equals the hash of the
-        // one real file, and the traversal terminates instead of recursing.
-        assert_eq!(
-            hash_files(&workspace, &["**/*.txt".to_string()], true),
-            direct
-        );
+        let single = hash_files(&workspace, &["loop/nested/deep.txt".to_string()], true).unwrap();
+        assert!(!single.is_empty());
+        // The ancestor-chain guard terminates the `up` cycle, but the
+        // sibling alias still yields: the broad hash covers the file twice
+        // — once per lexical spelling — exactly like upstream's
+        // traversalChain, so it differs from the single file.
+        let file_hash = sha256_file_digest(&workspace.join("loop/nested/deep.txt")).unwrap();
+        let mut expected = Sha256::new();
+        expected.update(file_hash);
+        expected.update(file_hash);
+        let broad = hash_files(&workspace, &["**/*.txt".to_string()], true).unwrap();
+        assert_eq!(broad, hex_digest(&expected.finalize()));
+        assert_ne!(broad, single);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -22474,23 +22667,40 @@ fi"#
         fs::create_dir_all(&workspace).unwrap();
         fs::write(workspace.join("real.txt"), "real\n").unwrap();
         symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
         let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
 
-        // Before the flag was honored this resolved to `hash=`; the option
-        // was parsed and silently dropped.
+        // A file link resolves through to its target with or without the
+        // flag; only directory traversal needs the opt-in.
+        let target = state
+            .resolve_expressions("hash=${{ hashFiles('real.txt') }}")
+            .unwrap();
+        assert_ne!(target, "hash=");
         assert_eq!(
             state
                 .resolve_expressions("hash=${{ hashFiles('link.txt') }}")
                 .unwrap(),
-            "hash="
+            target
         );
         assert_eq!(
             state
                 .resolve_expressions("hash=${{ hashFiles('--follow-symbolic-links', 'link.txt') }}")
                 .unwrap(),
+            target
+        );
+        // A no-follow broken link fails expression evaluation (upstream's
+        // statSync throw surfacing as InvalidOperationException); follow
+        // mode omits it and resolves empty.
+        assert!(state
+            .resolve_expressions("hash=${{ hashFiles('broken.txt') }}")
+            .is_err());
+        assert_eq!(
             state
-                .resolve_expressions("hash=${{ hashFiles('real.txt') }}")
-                .unwrap()
+                .resolve_expressions(
+                    "hash=${{ hashFiles('--follow-symbolic-links', 'broken.txt') }}"
+                )
+                .unwrap(),
+            "hash="
         );
         let invalid = state.resolve_expressions("hash=${{ hashFiles('--bogus', 'real.txt') }}");
         assert!(invalid.is_err());
@@ -22509,11 +22719,20 @@ fi"#
             "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
             "true".to_string(),
         )];
-        let state =
-            parse_workflow_commands_from_output("::set-env name=RESTORED::yes\n", "", &job_env);
+        let state = parse_workflow_commands_from_output(
+            "::set-env name=RESTORED::yes\n",
+            "",
+            &job_env,
+            &mut DeprecatedCommandScope::default(),
+        );
         assert_eq!(state.env.get("RESTORED").map(String::as_str), Some("yes"));
 
-        let refused = parse_workflow_commands_from_output("::set-env name=MODE::x\n", "", &[]);
+        let refused = parse_workflow_commands_from_output(
+            "::set-env name=MODE::x\n",
+            "",
+            &[],
+            &mut DeprecatedCommandScope::default(),
+        );
         assert!(refused.env.is_empty());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -22538,22 +22757,22 @@ fi"#
         symlink("pkg0/src/f0.rs", workspace.join("top-link.rs")).unwrap();
 
         let plain = vec!["**/*.rs".to_string()];
-        let followed = hash_files(black_box(&workspace), black_box(&plain), true);
+        let followed = hash_files(black_box(&workspace), black_box(&plain), true).unwrap();
         assert!(!followed.is_empty());
         assert_ne!(
             followed,
-            hash_files(&workspace, &["pkg0/src/f0.rs".to_string()], false)
+            hash_files(&workspace, &["pkg0/src/f0.rs".to_string()], false).unwrap()
         );
 
         let started = Instant::now();
         for _ in 0..50 {
-            let digest = hash_files(black_box(&workspace), black_box(&plain), true);
+            let digest = hash_files(black_box(&workspace), black_box(&plain), true).unwrap();
             assert_eq!(digest, followed);
         }
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(60),
-            "50 follow-mode hashes of a 200-file symlinked tree took {elapsed:?}",
+            "50 follow-mode hashes of a 401-file aliased tree took {elapsed:?}",
         );
         fs::remove_dir_all(temp).unwrap();
     }

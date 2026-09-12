@@ -129,8 +129,26 @@ fn convert_to_boolean(value: Option<&str>) -> bool {
     )
 }
 
-pub fn parse_workflow_commands(output: &str) -> StepCommandState {
-    parse_workflow_commands_with_policy(output, CommandPolicy::from_runner_env())
+/// Job-global deprecated-command telemetry flags:
+/// `Global.HasDeprecatedSetOutput` / `Global.HasDeprecatedSaveState`
+/// (`IGlobalContext`, src/Runner.Sdk). Upstream publishes each
+/// `DeprecatedCommand` telemetry entry once per JOB, not once per step, so
+/// the job engine owns one of these and threads it through every full
+/// step-output parse: N steps using `set-output` emit one `ActionCommand`
+/// entry while the deprecation warning still fires per use. Streaming
+/// mask-only parses take a throwaway: their telemetry is discarded by
+/// design, so they must not consume the job's once-flags.
+#[derive(Debug, Default)]
+pub struct DeprecatedCommandScope {
+    set_output: bool,
+    save_state: bool,
+}
+
+pub fn parse_workflow_commands(
+    output: &str,
+    scope: &mut DeprecatedCommandScope,
+) -> StepCommandState {
+    parse_workflow_commands_with_policy(output, CommandPolicy::from_runner_env(), scope)
 }
 
 /// Parse step output with the step's effective environment supplying the
@@ -139,11 +157,16 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
 pub fn parse_workflow_commands_with_job_env(
     output: &str,
     job_env: &[(String, String)],
+    scope: &mut DeprecatedCommandScope,
 ) -> StepCommandState {
-    parse_workflow_commands_with_policy(output, CommandPolicy::from_job_env(job_env))
+    parse_workflow_commands_with_policy(output, CommandPolicy::from_job_env(job_env), scope)
 }
 
-fn parse_workflow_commands_with_policy(output: &str, policy: CommandPolicy) -> StepCommandState {
+fn parse_workflow_commands_with_policy(
+    output: &str,
+    policy: CommandPolicy,
+    scope: &mut DeprecatedCommandScope,
+) -> StepCommandState {
     let mut state = StepCommandState::default();
     let mut stopped_token = None::<String>;
     for line in output.lines() {
@@ -163,10 +186,14 @@ fn parse_workflow_commands_with_policy(output: &str, policy: CommandPolicy) -> S
             "stop-commands" => {
                 process_stop_commands(&mut state, command.value, policy, &mut stopped_token);
             }
-            "set-output" => process_set_output(&mut state, line, &command),
+            "set-output" => {
+                process_set_output(&mut state, &mut scope.set_output, line, &command);
+            }
             "set-env" => process_set_env(&mut state, line, &command, policy),
             "add-path" => process_add_path(&mut state, line, command.value, policy),
-            "save-state" => process_save_state(&mut state, line, &command),
+            "save-state" => {
+                process_save_state(&mut state, &mut scope.save_state, line, &command);
+            }
             "add-mask" => process_add_mask(&mut state, command.value),
             "add-matcher" | "remove-matcher" => {
                 reject_problem_matcher(&mut state, line, &command_name);
@@ -304,15 +331,20 @@ fn process_add_path(
 /// The stdout command is deprecated but still honored — GitHub postponed the
 /// removal (2023-07-24 changelog) and hosted runners warn-and-honor to this
 /// day — so the output is stored exactly like upstream, with the deprecation
-/// warning on every use and the telemetry once per parse. Upstream gates the
-/// warning on the server variable `DistributedTask.DeprecateStepOutputCommands`,
+/// warning on every use and the telemetry once per job scope. Upstream gates
+/// the warning on the server variable `DistributedTask.DeprecateStepOutputCommands`,
 /// which Velnor has no channel for; the flag is on for github.com (warnings
 /// observed on hosted runners), so warning unconditionally is hosted parity.
 /// A missing or empty `name` throws upstream, which the command manager
 /// turns into two step errors and a failed command result.
-fn process_set_output(state: &mut StepCommandState, line: &str, command: &WorkflowCommand<'_>) {
+fn process_set_output(
+    state: &mut StepCommandState,
+    telemetry_emitted: &mut bool,
+    line: &str,
+    command: &WorkflowCommand<'_>,
+) {
     push_warning(state, unsupported_command_message("set-output"));
-    record_deprecated_command_telemetry(state, "set-output");
+    record_deprecated_command_telemetry(state, telemetry_emitted, "set-output");
     let Some(name) = command
         .properties
         .get("name")
@@ -331,9 +363,14 @@ fn process_set_output(state: &mut StepCommandState, line: &str, command: &Workfl
 /// `SaveStateCommandExtension.ProcessCommand` (@397b032,
 /// src/Runner.Worker/ActionCommandManager.cs): the same deprecated-but-honored
 /// shape as `set-output`, storing intra-action state instead of outputs.
-fn process_save_state(state: &mut StepCommandState, line: &str, command: &WorkflowCommand<'_>) {
+fn process_save_state(
+    state: &mut StepCommandState,
+    telemetry_emitted: &mut bool,
+    line: &str,
+    command: &WorkflowCommand<'_>,
+) {
     push_warning(state, unsupported_command_message("save-state"));
-    record_deprecated_command_telemetry(state, "save-state");
+    record_deprecated_command_telemetry(state, telemetry_emitted, "save-state");
     let Some(name) = command
         .properties
         .get("name")
@@ -443,18 +480,18 @@ fn push_warning(state: &mut StepCommandState, message: String) {
     });
 }
 
-fn record_deprecated_command_telemetry(state: &mut StepCommandState, command: &str) {
-    let message = format!("DeprecatedCommand: {command}");
-    if !state
-        .telemetry
-        .iter()
-        .any(|telemetry| telemetry.kind == "ActionCommand" && telemetry.message == message)
-    {
-        state.telemetry.push(StepCommandTelemetry {
-            message,
-            kind: "ActionCommand".to_string(),
-        });
+fn record_deprecated_command_telemetry(
+    state: &mut StepCommandState,
+    telemetry_emitted: &mut bool,
+    command: &str,
+) {
+    if std::mem::replace(telemetry_emitted, true) {
+        return;
     }
+    state.telemetry.push(StepCommandTelemetry {
+        message: format!("DeprecatedCommand: {command}"),
+        kind: "ActionCommand".to_string(),
+    });
 }
 
 fn command_annotation(level: StepAnnotationLevel, command: &WorkflowCommand<'_>) -> StepAnnotation {
@@ -578,9 +615,16 @@ fn unescape_property(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Single-parse shorthand: a fresh job scope per call, so one output's
+    /// assertions never inherit another parse's once-flags. Tests that pin
+    /// the job-scope dedupe itself pass an explicit shared scope instead.
+    fn parse_for_test(output: &str) -> StepCommandState {
+        parse_workflow_commands(output, &mut DeprecatedCommandScope::default())
+    }
+
     #[test]
     fn parses_state_changing_workflow_commands() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::set-output name=answer::42\n\
              ::save-state name=cleanup::yes\n\
              ::add-mask::top-secret\n\
@@ -620,14 +664,14 @@ mod tests {
 
     #[test]
     fn unescapes_command_data_and_properties() {
-        let state = parse_workflow_commands("::set-output name=one%2Ctwo::a%0Ab%25c\n");
+        let state = parse_for_test("::set-output name=one%2Ctwo::a%0Ab%25c\n");
 
         assert_eq!(state.outputs["one,two"], "a\nb%c");
     }
 
     #[test]
     fn honors_workflow_commands_with_leading_whitespace() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "  ::add-mask::indented-secret\n\
              \t::set-output name=answer::42\n",
         );
@@ -638,7 +682,7 @@ mod tests {
 
     #[test]
     fn masks_every_line_of_a_multi_line_secret() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::add-mask::-----BEGIN KEY-----%0Aline-one%0A  line-two  %0A%0A-----END KEY-----\n",
         );
 
@@ -656,7 +700,7 @@ mod tests {
 
     #[test]
     fn warns_instead_of_masking_a_blank_add_mask_value() {
-        let state = parse_workflow_commands("::add-mask::   \n");
+        let state = parse_for_test("::add-mask::   \n");
 
         assert!(state.masks.is_empty());
         assert_eq!(state.warning_count, 1);
@@ -668,7 +712,7 @@ mod tests {
 
     #[test]
     fn ignores_commands_between_stop_and_resume_token() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::stop-commands::pause\n\
              ::set-output name=ignored::nope\n\
              ::error::ignored\n\
@@ -686,7 +730,7 @@ mod tests {
 
     #[test]
     fn refuses_set_env_and_add_path_after_cve_2020_15228() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::set-env name=MODE::release\n\
              ::add-path::/opt/tool\n",
         );
@@ -728,6 +772,7 @@ mod tests {
              ::add-path::/opt/other\n\
              ::add-path::/opt/tool\n",
             policy,
+            &mut DeprecatedCommandScope::default(),
         );
 
         assert_eq!(state.env["MODE"], "release");
@@ -751,7 +796,7 @@ mod tests {
     #[test]
     fn refuses_invalid_stop_command_tokens_and_keeps_processing() {
         for token in ["", "stop-commands", "SET-ENV", "pause-logging"] {
-            let state = parse_workflow_commands(&format!(
+            let state = parse_for_test(&format!(
                 "::stop-commands::{token}\n::add-mask::still-secret\n"
             ));
 
@@ -784,6 +829,7 @@ mod tests {
                 allow_unsecure_commands: false,
                 allow_unsecure_stop_command_tokens: true,
             },
+            &mut DeprecatedCommandScope::default(),
         );
 
         assert_eq!(state.masks, vec!["pause-logging", "seen"]);
@@ -793,13 +839,13 @@ mod tests {
 
     #[test]
     fn masks_stop_command_tokens_longer_than_six_characters() {
-        let state = parse_workflow_commands("::stop-commands::randomToken\n");
+        let state = parse_for_test("::stop-commands::randomToken\n");
 
         assert_eq!(state.masks, vec!["randomToken"]);
         assert_eq!(state.error_count, 0);
         assert!(state.telemetry.is_empty());
 
-        let short = parse_workflow_commands("::stop-commands::short1\n");
+        let short = parse_for_test("::stop-commands::short1\n");
 
         assert!(short.masks.is_empty());
         assert_eq!(short.error_count, 0);
@@ -807,7 +853,7 @@ mod tests {
 
     #[test]
     fn resumes_on_the_token_command_name_alone() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::stop-commands::myToken\n\
              ::set-output name=ignored::nope\n\
              \t::MYTOKEN prop=1::trailing data\n\
@@ -819,16 +865,18 @@ mod tests {
     }
 
     #[test]
-    fn emits_deprecated_command_telemetry_once_per_parse() {
-        let state = parse_workflow_commands(
+    fn emits_deprecated_command_telemetry_once_per_job_scope() {
+        let mut scope = DeprecatedCommandScope::default();
+        let first = parse_workflow_commands(
             "::set-output name=one::1\n\
              ::set-output name=two::2\n\
              ::save-state name=cleanup::yes\n\
              ::save-state name=cleanup2::yes\n",
+            &mut scope,
         );
 
         assert_eq!(
-            state.telemetry,
+            first.telemetry,
             vec![
                 StepCommandTelemetry {
                     message: "DeprecatedCommand: set-output".to_string(),
@@ -840,11 +888,24 @@ mod tests {
                 }
             ]
         );
+
+        // A later step sharing the job scope honors the commands and warns
+        // per use, but emits no further telemetry — upstream's
+        // `Global.HasDeprecatedSetOutput` / `HasDeprecatedSaveState` gate.
+        let second = parse_workflow_commands(
+            "::set-output name=three::3\n::save-state name=later::yes\n",
+            &mut scope,
+        );
+
+        assert_eq!(second.outputs["three"], "3");
+        assert_eq!(second.state["later"], "yes");
+        assert_eq!(second.warning_count, 2);
+        assert!(second.telemetry.is_empty());
     }
 
     #[test]
     fn preserves_annotation_titles_and_group_boundaries() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::group::Build\n\
              ::notice title=sccache stats::hit rate 80%25\n\
              ::debug::resolved key\n\
@@ -857,7 +918,7 @@ mod tests {
 
     #[test]
     fn warns_on_every_deprecated_output_command_use() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::set-output name=one::1\n\
              ::set-output name=two::2\n\
              ::save-state name=cleanup::yes\n",
@@ -880,13 +941,14 @@ mod tests {
                 "The `save-state` command is deprecated and will be disabled soon. Please upgrade to using Environment Files. For more information see: https://github.blog/changelog/2022-10-11-github-actions-deprecating-save-state-and-set-output-commands/",
             ]
         );
-        // The warning fires per use; the telemetry stays once per command.
+        // The warning fires per use; the telemetry stays once per command
+        // within this fresh job scope.
         assert_eq!(state.telemetry.len(), 2);
     }
 
     #[test]
     fn refuses_nameless_set_output_and_save_state() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::set-output::nameless\n\
              ::set-output name=::empty\n\
              ::save-state::nameless\n",
@@ -918,7 +980,7 @@ mod tests {
 
     #[test]
     fn rejects_problem_matcher_commands_loudly() {
-        let state = parse_workflow_commands(
+        let state = parse_for_test(
             "::add-matcher::/github/workspace/matchers.json\n\
              ::remove-matcher owner=tsc::\n\
              ::remove-matcher::/github/workspace/matchers.json\n",
@@ -954,6 +1016,7 @@ mod tests {
             "::set-env name=MODE::release\n\
              ::add-path::/opt/tool\n",
             &job_env,
+            &mut DeprecatedCommandScope::default(),
         );
 
         assert_eq!(state.env["MODE"], "release");
@@ -968,6 +1031,7 @@ mod tests {
             "::stop-commands::pause-logging\n::add-mask::hidden\n::pause-logging::\n\
              ::add-mask::seen\n",
             &stop_env,
+            &mut DeprecatedCommandScope::default(),
         );
 
         assert_eq!(stopped.masks, vec!["pause-logging", "seen"]);
@@ -983,6 +1047,7 @@ mod tests {
                 "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
                 "false".to_string(),
             )],
+            &mut DeprecatedCommandScope::default(),
         );
         assert!(refused.env.is_empty());
         assert_eq!(refused.error_count, 2);
@@ -995,6 +1060,7 @@ mod tests {
                 "actions_allow_unsecure_commands".to_string(),
                 "true".to_string(),
             )],
+            &mut DeprecatedCommandScope::default(),
         );
         assert!(miscased.env.is_empty());
         assert_eq!(miscased.error_count, 2);
@@ -1012,6 +1078,7 @@ mod tests {
                     "false".to_string(),
                 ),
             ],
+            &mut DeprecatedCommandScope::default(),
         );
         assert!(shadowed.env.is_empty());
         assert_eq!(shadowed.error_count, 2);
@@ -1028,7 +1095,7 @@ mod tests {
 
         let started = Instant::now();
         for _ in 0..2_000 {
-            let state = parse_workflow_commands(black_box(&output));
+            let state = parse_for_test(black_box(&output));
             assert_eq!(state.outputs["answer"], "42");
             assert_eq!(state.warning_count, 500);
         }

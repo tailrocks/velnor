@@ -107,7 +107,8 @@ jobs:
           set -euo pipefail
           test "${VIA_COMMAND}" = cmd-value
           test "${VIA_FILE}" = file-value
-          test -z "${HASH_LINK_PLAIN}"
+          test -n "${HASH_LINK_PLAIN}"
+          test "${HASH_LINK_PLAIN}" = "${HASH_REAL}"
           test -n "${HASH_LINK_FOLLOW}"
           test "${HASH_LINK_FOLLOW}" = "${HASH_REAL}"
           test -z "${HASH_DIR_PLAIN}"
