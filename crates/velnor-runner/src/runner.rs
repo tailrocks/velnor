@@ -6122,18 +6122,36 @@ async fn handle_job_request(
     // credential — the same value runtime_env injects as
     // ACTIONS_RUNTIME_TOKEN — to its cache identity for the whole job
     // lifetime. The RAII session unbinds on every return path below,
-    // including early fail-closed exits.
+    // including early fail-closed exits. An incomplete identity fails closed
+    // to a per-token namespace; the forensics line names the job and the raw
+    // signals so an identity-signal outage is visible in logs (the registry
+    // itself stays silent — only this call site has the context).
+    let cache_repository_id = crate::github_adapter::job_variable(&job, "github.repository_id");
+    let cache_ref_scope = crate::github_adapter::job_variable(&job, "github.ref");
+    let cache_scope_present = job
+        .plan
+        .scope_identifier
+        .as_deref()
+        .is_some_and(|scope| !scope.trim().is_empty());
+    let cache_identity = crate::gha_cache::CacheIdentity::derive(
+        cache_repository_id,
+        cache_ref_scope,
+        cache_scope_present,
+        job_trust.is_trusted(),
+    );
+    if cache_identity == crate::gha_cache::CacheIdentity::Isolated {
+        forensics.lifecycle(&format!(
+            "gha-cache identity incomplete; job caches isolated to its own token namespace job_id={} repository_id={:?} ref={:?} scope_present={} trusted={}",
+            job.job_id,
+            cache_repository_id,
+            cache_ref_scope,
+            cache_scope_present,
+            job_trust.is_trusted(),
+        ));
+    }
     let _cache_session = crate::gha_cache::register_job_cache_session(
         crate::runtime_env::job_runtime_token(&job),
-        crate::gha_cache::CacheIdentity::derive(
-            crate::github_adapter::job_variable(&job, "github.repository_id"),
-            crate::github_adapter::job_variable(&job, "github.ref"),
-            job.plan
-                .scope_identifier
-                .as_deref()
-                .is_some_and(|scope| !scope.trim().is_empty()),
-            job_trust.is_trusted(),
-        ),
+        cache_identity,
     );
 
     // Plan 066 required write: the sanitized admission row must persist

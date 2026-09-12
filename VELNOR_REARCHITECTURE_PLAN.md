@@ -4863,21 +4863,36 @@ ref_scope ‖ trust)` where `repository_id` (`github.repository_id`),
 `ref_scope` (`github.ref`), and the trust floor
 (`TrustClass::is_trusted`, §97) come from the server-attested job message —
 never from workflow-supplied data and never from the token. Jobs in the
-same repository and branch share one namespace, so saves are visible to
-later jobs per GitHub's branch scoping; different repositories, refs, or
-trust classes select disjoint namespaces, so a fork job can neither read
-trusted entries nor poison them (BC-21 read-write invariant).
+same repository and ref share one namespace, so a save is visible to later
+jobs on that exact ref; different repositories, refs, or trust classes
+select disjoint namespaces, so a fork job can neither read trusted entries
+nor poison them (BC-21 read-write invariant). Intentional deviation from
+GitHub's branch scoping, recorded here and in the `gha_cache.rs` module
+docs: lookups use strict ref equality with no base-branch or
+default-branch fallback, so a branch or `refs/pull/N/merge` job starts
+cold where GitHub would restore the base branch's entries. A fallback
+would let untrusted readers consult trusted namespaces, which BC-21
+forbids; restoring GitHub parity needs new server-attested
+base/default-ref signals plus a read-only fallback chain that never
+crosses the trust floor.
 
 The token remains only the credential: the runner binds it to the job's
 cache identity at admission (next to the §100 trust derivation) and holds
 the RAII `CacheSession` for the whole job lifetime, so every return path —
 including early fail-closed exits — unbinds it. The registry stores only
 the keyed token hash, never the credential, as a stack so a duplicate
-registration cannot unbind a live job. Route auth rejects unknown tokens
+registration cannot unbind a live job. The registry API
+(`CacheIdentity`, `CacheSession`, `register_job_cache_session`) is
+`pub(crate)`: the only caller is the admission hook in `runner.rs`, so no
+in-process caller can bind an arbitrary token to a victim Shared
+identity. Route auth rejects unknown tokens
 with 401 (previously any non-empty string was accepted); a job whose
 identity signals are incomplete fails closed to a per-token namespace —
 today's isolation, never another job's entries — with a
-`forensics.lifecycle` line. Both the binding and the `ACTIONS_CACHE_URL`
+`forensics.lifecycle` line emitted at the admission call site, naming the
+job id and the raw signals (`repository_id`, `ref`, `scope_present`,
+`trusted`) so an identity-signal outage is diagnosable; the registry
+itself stays silent. Both the binding and the `ACTIONS_CACHE_URL`
 injection read the credential through one new accessor
 (`runtime_env::job_runtime_token`), so registration and presentation
 cannot drift. Each daemon's service authenticates its own jobs only:
@@ -4903,4 +4918,10 @@ pass; `trust_class` 42/42 pass; full serial
 --test-threads=1` 1720 passed with the same 3 pre-existing environmental
 failures as §101 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
 exists but is empty — cause re-verified, `action.rs` untouched).
+Review-correction re-run (strict-ref deviation documented, registry API
+narrowed to `pub(crate)`, isolated-fallback forensics moved to the
+admission call site with job context): identical gates — fmt clean,
+clippy clean, `gha_cache` 44/44, `runtime_env` 8/8, `trust_class` 42/42,
+full serial 1720 passed with the same 3 pre-existing environmental
+failures (cause re-verified, `action.rs` untouched).
 gha-cache-repo-namespace status: complete.

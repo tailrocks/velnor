@@ -20,10 +20,19 @@
 //! ref scope (`github.ref`), and the trust floor come from the server-attested
 //! job message the runner binds to the job's runtime token at admission —
 //! never from workflow-supplied data and never from the token itself. Jobs in
-//! the same repository and branch therefore share one namespace, so saves are
-//! visible to later jobs per GitHub's branch scoping, while different
-//! repositories, refs, or trust classes never alias. Insertion enforces an
+//! the same repository and ref therefore share one namespace, so a save is
+//! visible to later jobs on that exact ref, while different repositories,
+//! refs, or trust classes never alias. Insertion enforces an
 //! LRU byte budget by deleting oldest-hit entries.
+//!
+//! Intentional deviation from GitHub's branch scoping: lookups use strict
+//! ref equality with no base-branch or default-branch fallback, so a branch
+//! or `refs/pull/N/merge` job starts cold where GitHub would restore the
+//! base branch's entries. A fallback would let untrusted readers consult
+//! trusted namespaces, which BC-21 forbids (a fork job can neither read
+//! trusted entries nor poison them); restoring GitHub parity needs new
+//! server-attested base/default-ref signals plus a read-only fallback chain
+//! that never crosses the trust floor, so strict equality stands until then.
 //!
 //! The service is OFF unless the operator exports `VELNOR_ACTIONS_CACHE_URL`
 //! into the runner environment (strict capability contract: no behavior
@@ -408,7 +417,7 @@ fn clear_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Re
 /// runner captures from the job message at admission and binds to the job's
 /// runtime token for the job's lifetime.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CacheIdentity {
+pub(crate) enum CacheIdentity {
     /// Shared repo namespace: `github.repository_id`, `github.ref`, and the
     /// trust floor (`TrustClass::is_trusted`). Jobs that agree on all three
     /// share one namespace, so a save is visible to later jobs in the same
@@ -426,10 +435,12 @@ pub enum CacheIdentity {
 
 impl CacheIdentity {
     /// Derive the identity from server-attested job-message signals. Pure:
-    /// no I/O, so the fail-closed branch is exactly `Isolated` and the
-    /// caller logs it at the registration boundary.
+    /// no I/O, so the fail-closed branch is exactly `Isolated`. The
+    /// admission call site owns the isolated-fallback forensics line, where
+    /// the job id and the raw signals are available; the registry stays
+    /// silent so a signal outage is diagnosed once, with context.
     #[must_use]
-    pub fn derive(
+    pub(crate) fn derive(
         repository_id: Option<&str>,
         ref_scope: Option<&str>,
         scope_present: bool,
@@ -505,7 +516,7 @@ fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, Vec<CacheId
 /// registration, so every return path — including early fail-closed exits —
 /// releases the credential.
 #[must_use]
-pub struct CacheSession {
+pub(crate) struct CacheSession {
     key: Option<String>,
     identity: CacheIdentity,
 }
@@ -530,19 +541,19 @@ impl Drop for CacheSession {
 /// Bind `token` — the same credential `runtime_env` injects as
 /// `ACTIONS_RUNTIME_TOKEN` — to `identity` until the returned session drops.
 /// A missing or empty token binds nothing: without a credential the job gets
-/// no `ACTIONS_CACHE_URL`, so no client can present it.
-pub fn register_job_cache_session(token: Option<&str>, identity: CacheIdentity) -> CacheSession {
+/// no `ACTIONS_CACHE_URL`, so no client can present it. Deliberately silent:
+/// the admission call site emits the isolated-fallback forensics line with
+/// the job id and the failed signals, where that context exists.
+pub(crate) fn register_job_cache_session(
+    token: Option<&str>,
+    identity: CacheIdentity,
+) -> CacheSession {
     let Some(token) = token.filter(|token| !token.is_empty()) else {
         return CacheSession {
             key: None,
             identity,
         };
     };
-    if identity == CacheIdentity::Isolated {
-        eprintln!(
-            "forensics.lifecycle: gha-cache identity incomplete; job caches isolated to its own token namespace"
-        );
-    }
     let key = token_key(token);
     lock_registry()
         .entry(key.clone())
@@ -2389,9 +2400,11 @@ mod tests {
 
     #[test]
     fn same_repo_and_branch_share_one_namespace_across_credentials() {
-        // GitHub branch scoping: a save by one job is visible to a later job
-        // in the same repository and branch, even though the two jobs carry
-        // different per-job credentials.
+        // Same-ref sharing (GitHub's branch scoping minus the
+        // base/default-branch fallback, which BC-21 forbids — see module
+        // docs): a save by one job is visible to a later job in the same
+        // repository and ref, even though the two jobs carry different
+        // per-job credentials.
         let first = register_shared("share-conformance-first", 42, "refs/heads/main", true);
         let second = register_shared("share-conformance-second", 42, "refs/heads/main", true);
         let first_ns = namespace_for_token("share-conformance-first").expect("first resolves");
