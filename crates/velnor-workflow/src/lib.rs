@@ -157,6 +157,8 @@ const FIXTURE_REUSE_CALLER_WORKFLOW_TEMPLATE: &str =
     include_str!("../templates/fixture/workflows/reuse-caller.yml");
 const FIXTURE_SCHEDULE_WORKFLOW_TEMPLATE: &str =
     include_str!("../templates/fixture/workflows/schedule.yml");
+const FIXTURE_STATUS_CONDITIONS_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/status-conditions.yml");
 const FIXTURE_AGGREGATE_NEEDS_ACTION: &str =
     include_str!("../templates/fixture/actions/aggregate-needs/action.yml");
 const FIXTURE_CHECK_DEPLOYED_DOCS_ACTION: &str =
@@ -1359,6 +1361,10 @@ const FIXTURE_WORKFLOW_TEMPLATES: &[(&str, &str)] = &[
     ("renovate.yml", FIXTURE_RENOVATE_WORKFLOW_TEMPLATE),
     ("reuse-caller.yml", FIXTURE_REUSE_CALLER_WORKFLOW_TEMPLATE),
     ("schedule.yml", FIXTURE_SCHEDULE_WORKFLOW_TEMPLATE),
+    (
+        "status-conditions.yml",
+        FIXTURE_STATUS_CONDITIONS_WORKFLOW_TEMPLATE,
+    ),
 ];
 
 /// Extra owned files emitted alongside the workflow surface. Membership is

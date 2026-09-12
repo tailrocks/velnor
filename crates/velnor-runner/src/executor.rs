@@ -1423,6 +1423,25 @@ impl PostAction {
             PostAction::Native(post) => post.step_id.as_str(),
         }
     }
+
+    fn display_name(&self) -> &str {
+        match self {
+            PostAction::JavaScript(post) => post.display_name.as_str(),
+            PostAction::Native(post) => post.display_name.as_str(),
+        }
+    }
+}
+
+/// One LIFO drain position after its post condition was evaluated.
+///
+/// A post whose condition cannot be evaluated is not dropped: upstream fails
+/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
+/// emits a failed record in position and keeps draining — the failed result
+/// flips the job conclusion exactly like a main-step failure.
+#[derive(Debug, Clone)]
+enum PostDrainItem {
+    Run(PostAction),
+    ConditionFailed { action: PostAction, message: String },
 }
 
 impl ExecutableStep {
@@ -2296,6 +2315,59 @@ where
                 continue;
             }
             let mut post_registered = false;
+            // The pre step's own condition (`runs.pre-if`), evaluated once.
+            // False skips the pre while main still runs; unevaluable fails
+            // the step without running main or registering post — upstream's
+            // pre step never runs, so neither its main nor its post is
+            // registered (`src/Runner.Worker/ActionRunner.cs` registers post from
+            // a pre or main that runs, and a failed pre fails the job while
+            // main skips).
+            let pre_condition = match step {
+                ExecutableStep::JavaScript { invocation, .. }
+                    if invocation.pre_container_path.is_some() =>
+                {
+                    Some(step_state.evaluate_post_condition(invocation.pre_condition.as_deref()))
+                }
+                _ => None,
+            };
+            if let Some(Err(error)) = pre_condition.as_ref() {
+                let message =
+                    format!("Step '{display_name}' pre-condition could not be evaluated: {error}");
+                eprintln!("{message}");
+                let reports = composite_frame.is_none() && step.reports_timeline_start();
+                let mut failed_started_at = String::new();
+                if reports {
+                    failed_started_at = self.emit_step_started(
+                        step_backend_id.clone(),
+                        &display_name,
+                        &mut timeline_order,
+                    );
+                }
+                let result = StepExecutionResult {
+                    exit_code: 1,
+                    state: StepCommandState::default(),
+                    skipped: false,
+                    failure_ignored: false,
+                    stdout: String::new(),
+                    stderr: message,
+                };
+                if reports {
+                    let log = step_log_with_name(
+                        &step_backend_id,
+                        &display_name,
+                        timeline_order,
+                        &failed_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &step_log_prelude(step, &step_state),
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                }
+                state.apply(&step_context_id, &result);
+                results.push(result);
+                continue;
+            }
             if let ExecutableStep::JavaScript {
                 step_id,
                 invocation,
@@ -2304,7 +2376,7 @@ where
                 ..
             } = step
                 && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
-                && step_state.post_condition_met(invocation.pre_condition.as_deref())
+                && matches!(pre_condition, Some(Ok(true)))
             {
                 if invocation.post_container_path.is_some() {
                     post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
@@ -2326,7 +2398,7 @@ where
                 } else {
                     unix_now_rfc3339()
                 };
-                let mut result = self.execute_javascript_action_in_started_container(
+                let mut result = match self.execute_javascript_action_in_started_container(
                     container,
                     step_id,
                     invocation,
@@ -2335,7 +2407,28 @@ where
                     temp_host,
                     &step_state,
                     effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                )?;
+                ) {
+                    Ok(result) => result,
+                    // Cancel re-evaluation
+                    // (`src/Runner.Worker/StepsRunner.cs:146-187`): a pre
+                    // killed by cancellation records its failure and the job
+                    // continues to re-evaluated remaining steps — never an
+                    // early return that would also drop the post drain below.
+                    // The post stays registered: the pre ran, which is what
+                    // registers it upstream (`src/Runner.Worker/ActionRunner.cs`).
+                    Err(error) if state.is_cancelled() => {
+                        eprintln!("Step '{display_name}' pre step was cancelled: {error:#}");
+                        StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: String::new(),
+                            stderr: format!("Step '{display_name}' pre step was cancelled"),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                };
                 let failed = result.exit_code != 0;
                 if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
@@ -2652,10 +2745,34 @@ where
                     // a step that fails by throwing still honors
                     // continue-on-error — outcome stays failure, the reported
                     // conclusion is success, and the job runs remaining steps.
-                    if step.continue_on_error() && !state.is_cancelled() {
-                        eprintln!(
-                            "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
-                        );
+                    //
+                    // Cancel re-evaluation
+                    // (`src/Runner.Worker/StepsRunner.cs:146-187`,
+                    // `RunStepAsync` OperationCanceledException catch): a step
+                    // killed by cancellation records its failure and the loop
+                    // CONTINUES. Every remaining condition is re-evaluated
+                    // fresh against the cancelled status, so `always()` and
+                    // `cancelled()` cleanup still runs while ordinary steps
+                    // skip — the `break` below would silently drop exactly
+                    // the cleanup upstream runs. The runner reports the job
+                    // `Canceled` from its own flag, so no `step_error` is set:
+                    // returning `Ok` also preserves the cleanup step logs the
+                    // `Err` path would discard.
+                    //
+                    // Known rendering delta: upstream records the killed step
+                    // `Canceled`; Velnor's outcome has no cancelled value, so
+                    // it records failure. Under cancellation `success()` and
+                    // `failure()` are false either way — only the
+                    // `steps.<id>.outcome` string differs.
+                    let cancelled = state.is_cancelled();
+                    if cancelled || step.continue_on_error() {
+                        if cancelled {
+                            eprintln!("Step '{display_name}' was cancelled: {error:#}");
+                        } else {
+                            eprintln!(
+                                "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
+                            );
+                        }
                         let mut salvaged_state = script_plan
                             .as_ref()
                             .and_then(|plan| plan.collect_state().ok())
@@ -2665,7 +2782,11 @@ where
                             exit_code: 1,
                             state: salvaged_state,
                             skipped: false,
-                            failure_ignored: true,
+                            // `continue-on-error` stays gated on
+                            // not-cancelled: a killed step never reports
+                            // success, which is what keeps `success()` false
+                            // for every re-evaluated remaining step.
+                            failure_ignored: !cancelled,
                             stdout: String::new(),
                             stderr: format!("{error:#}"),
                         };
@@ -2717,13 +2838,31 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        // Registration order above is step order, so reverse-then-filter is
-        // upstream's `TryPop` sequence; every entry keeps its own post
-        // condition evaluated against the job's final status.
+        // Registration order above is step order, so reverse is upstream's
+        // `TryPop` sequence; every entry keeps its own post condition
+        // evaluated against the job's final status. False drops the entry;
+        // unevaluable keeps its LIFO position as a failed record (never a
+        // silent skip — upstream fails the post step).
         let post_actions = post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.post_condition_met(post_action.condition()))
+            .filter_map(|post_action| {
+                match state.evaluate_post_condition(post_action.condition()) {
+                    Ok(true) => Some(PostDrainItem::Run(post_action)),
+                    Ok(false) => None,
+                    Err(error) => {
+                        let message = format!(
+                            "Post step '{}' condition could not be evaluated: {error}",
+                            post_action.display_name()
+                        );
+                        eprintln!("{message}");
+                        Some(PostDrainItem::ConditionFailed {
+                            action: post_action,
+                            message,
+                        })
+                    }
+                }
+            })
             .collect::<Vec<_>>();
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
@@ -2748,7 +2887,53 @@ where
         // only consecutive natives group — but every entry still executes in
         // the stack's LIFO position.
         let mut post_iter = post_actions.into_iter().peekable();
-        while let Some(post_action) = post_iter.next() {
+        while let Some(item) = post_iter.next() {
+            let post_action = match item {
+                // The failed record keeps its LIFO position; the drain
+                // continues with the remaining posts, and the failed result
+                // flips the job conclusion like any step failure.
+                PostDrainItem::ConditionFailed { action, message } => {
+                    let failed_step_id = uuid::Uuid::new_v4().to_string();
+                    let failed_name = post_step_display_name(action.display_name());
+                    let failed_started_at = self.emit_step_started(
+                        failed_step_id.clone(),
+                        failed_name.clone(),
+                        &mut timeline_order,
+                    );
+                    let result = StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: message,
+                    };
+                    let prelude = match &action {
+                        PostAction::JavaScript(post) => {
+                            javascript_post_log_prelude(&post.invocation, &state)
+                        }
+                        PostAction::Native(post) => {
+                            native_post_log_prelude(&post.invocation, &state)
+                        }
+                    };
+                    let log = step_log_with_name(
+                        &failed_step_id,
+                        &failed_name,
+                        timeline_order,
+                        &failed_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &prelude,
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                    state.apply(&failed_step_id, &result);
+                    executed_physical_actions += 1;
+                    results.push(result);
+                    continue;
+                }
+                PostDrainItem::Run(post_action) => post_action,
+            };
             let first = match post_action {
                 PostAction::JavaScript(post_action) => {
                     let js_post_step_id = uuid::Uuid::new_v4().to_string();
@@ -2810,11 +2995,12 @@ where
                 while post_iter.peek().is_some_and(|next| {
                     matches!(
                         next,
-                        PostAction::Native(candidate)
+                        PostDrainItem::Run(PostAction::Native(candidate))
                             if candidate.umbrella_display.as_deref() == Some(umbrella.as_str())
                     )
                 }) {
-                    let Some(PostAction::Native(next)) = post_iter.next() else {
+                    let Some(PostDrainItem::Run(PostAction::Native(next))) = post_iter.next()
+                    else {
                         unreachable!("peeked a native post sharing the umbrella");
                     };
                     group.push(next);
@@ -12233,6 +12419,10 @@ impl JobExecutionState {
     /// Pre/post step conditions. An absent condition runs unconditionally
     /// (`ActionRunner` only registers a pre/post step when its condition is
     /// satisfied), otherwise the `success()` default applies as above.
+    ///
+    /// A condition that fails to evaluate returns `Err`, which callers turn
+    /// into a failed pre/post record — upstream fails the owning step
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`), never silently skips it.
     fn evaluate_post_condition(
         &self,
         condition: Option<&str>,
@@ -12244,28 +12434,6 @@ impl JobExecutionState {
             return Ok(true);
         };
         self.evaluate_condition_expression(strip_expression(condition))
-    }
-
-    /// Whether a pre/post step's condition is satisfied.
-    ///
-    /// Deferred root cause: upstream fails the owning step when a pre/post
-    /// condition cannot be evaluated
-    /// (`src/Runner.Worker/StepsRunner.cs:231-242`). Velnor registers pre/post
-    /// steps outside the main step-result path, so there is no result row to
-    /// fail here; giving them one belongs to the lifecycle work package. Until
-    /// then the condition is fail-*closed* and the error is reported — never
-    /// fail-open, which is the divergence this module removes.
-    fn post_condition_met(&self, condition: Option<&str>) -> bool {
-        match self.evaluate_post_condition(condition) {
-            Ok(condition_met) => condition_met,
-            Err(error) => {
-                eprintln!(
-                    "Pre/post step condition {:?} could not be evaluated: {error}",
-                    condition.unwrap_or_default()
-                );
-                false
-            }
-        }
     }
 
     fn evaluate_condition_expression(
@@ -23160,6 +23328,11 @@ fi"#
             "noSuchFunction('a')",
             "contains('a')",
             "github.ref ==",
+            // The live dual-lane pin evaluates `fromJSON` over a runtime
+            // output holding invalid JSON; upstream throws out of
+            // `JToken.ReadFrom` (`FromJson.cs`) exactly like the serde
+            // failure below, so both runners fail the step.
+            "fromJSON('not json')",
         ] {
             assert!(
                 state.evaluate_condition(Some(condition)).is_err(),
@@ -23173,6 +23346,471 @@ fi"#
             &[],
             &[]
         ));
+    }
+
+    /// Requests job cancellation on the Nth `docker exec`, then optionally
+    /// throws on later execs — the production shape where the termination
+    /// ladder kills the running step's process group mid-step and every
+    /// remaining condition is re-evaluated against the cancelled status.
+    struct CancelDuringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        cancel_on_exec: usize,
+        fail_after_cancel: usize,
+        execs: usize,
+    }
+
+    impl CommandRunner for CancelDuringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") {
+                self.execs += 1;
+                if self.execs == self.cancel_on_exec {
+                    self.token
+                        .request(crate::execution::cancel::CancelReason::ServerRequested);
+                }
+                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
+                    self.fail_after_cancel -= 1;
+                    anyhow::bail!("process terminated by signal");
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn script_step(id: &str, script: &str, condition: Option<&str>) -> ExecutableStep {
+        ExecutableStep::Script(ScriptStep {
+            id: id.into(),
+            display_name: String::new(),
+            script: script.into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: condition.map(str::to_string),
+            continue_on_error: false,
+            timeout_minutes: None,
+        })
+    }
+
+    fn exec_count(calls: &[(String, Vec<String>)]) -> usize {
+        calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .count()
+    }
+
+    /// Cancel re-evaluation at loop level
+    /// (`src/Runner.Worker/StepsRunner.cs:188-198`): the token already fired
+    /// before any step ran, so ordinary steps skip on their implicit
+    /// `success()`, `failure()` cleanup does not run — the status is
+    /// cancelled, not failure — and `always()`/`cancelled()` steps run.
+    #[test]
+    fn cancel_reevaluation_runs_cleanup_and_skips_ordinary_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("ordinary", "echo ordinary", None),
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step("on-always", "echo always", Some("always()")),
+            script_step("on-cancelled", "echo cancelled", Some("cancelled()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        let mut executor = DockerJobEngine::new(
+            RecordingRunner {
+                calls: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                codes: Vec::new(),
+            },
+            token,
+        );
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].skipped);
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(!results[3].skipped);
+        assert_eq!(results[3].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Cancel re-evaluation mid-loop (`src/Runner.Worker/StepsRunner.cs:146-187`):
+    /// cancellation arrives while the first step runs, so every later
+    /// condition is evaluated fresh against the cancelled status — the next
+    /// ordinary step and the `failure()` step skip without dispatching while
+    /// `always()` and `cancelled()` steps still run.
+    #[test]
+    fn cancel_during_step_reevaluates_remaining_conditions() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("first", "echo first", None),
+            script_step("second", "echo second", None),
+            script_step("on-always", "echo always", Some("always()")),
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step("on-cancelled", "echo cancelled", Some("cancelled()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringExecRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                cancel_on_exec: 1,
+                fail_after_cancel: 0,
+                execs: 0,
+            },
+            token,
+        );
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 5);
+        assert!(!results[0].skipped);
+        assert_eq!(results[0].exit_code, 0);
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(results[3].skipped);
+        assert!(!results[4].skipped);
+        assert_eq!(results[4].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 3);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A step killed by cancellation records its failure and the loop
+    /// CONTINUES (`RunStepAsync` OperationCanceledException catch): breaking
+    /// here would silently drop the `always()` cleanup upstream runs. The
+    /// runner reports the job `Canceled` from its own flag; the executor
+    /// returns `Ok` so the cleanup step logs persist.
+    #[test]
+    fn cancelled_execution_error_continues_to_cleanup() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("killed", "echo killed", None),
+            script_step("ordinary", "echo ordinary", None),
+            script_step("cleanup", "echo cleanup", Some("always()")),
+            script_step("on-failure", "echo failure", Some("failure()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringExecRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                cancel_on_exec: 1,
+                fail_after_cancel: 1,
+                execs: 0,
+            },
+            token,
+        );
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 4);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        assert!(!summary.step_results[0].failure_ignored);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("process terminated by signal"),
+            "killed step keeps the execution error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert!(summary.step_results[1].skipped);
+        assert!(!summary.step_results[2].skipped);
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert!(summary.step_results[3].skipped);
+        assert_eq!(exec_count(&executor.runner().calls), 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Loop-level `src/Runner.Worker/StepsRunner.cs:231-242`: a step whose
+    /// condition cannot be evaluated fails — reported, not run, not skipped —
+    /// and the remaining steps still run, with `failure()` true afterwards.
+    #[test]
+    fn unevaluable_condition_fails_step_and_continues() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            script_step("ordinary", "echo ordinary", None),
+            script_step("on-failure", "echo failure", Some("failure()")),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: Vec::new(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].exit_code, 1);
+        assert!(!results[0].skipped);
+        assert!(!results[0].failure_ignored);
+        assert!(
+            results[0].stderr.contains("could not be evaluated"),
+            "failed step reports the condition error: {:?}",
+            results[0].stderr
+        );
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.pre-if` fails the step without running main and
+    /// without registering post: upstream's pre never runs, so neither its
+    /// main nor its post is registered, and the failed pre fails the job.
+    #[test]
+    fn unevaluable_pre_condition_fails_step_without_running_main() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "guarded".into(),
+            display_name: "Run guarded-action".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                pre_condition: Some("noSuchFunction('a')".into()),
+                main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                post_condition: Some("always()".into()),
+                action_container_path: "/__a/_actions/guarded".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 1);
+        assert!(!results[0].skipped);
+        assert!(
+            results[0]
+                .stderr
+                .contains("pre-condition could not be evaluated"),
+            "failed step reports the pre-condition error: {:?}",
+            results[0].stderr
+        );
+        // Neither the main entrypoint nor the post entrypoint was dispatched:
+        // failing the pre registers nothing.
+        for (_, args) in &executor.runner().calls {
+            for arg in args {
+                assert!(
+                    !arg.contains("main.js") && !arg.contains("post.js"),
+                    "unevaluable pre must dispatch nothing: {arg:?}"
+                );
+            }
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.post-if` fails the post record in its LIFO
+    /// position while the remaining posts still execute
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`); the failed result flips
+    /// the job conclusion like any step failure.
+    #[test]
+    fn unevaluable_post_condition_fails_post_and_keeps_lifo() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("noSuchFunction('a')".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::Native {
+                step_id: "sccache".into(),
+                display_name: "Run sccache".into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // Two mains, one executed post, one failed post record.
+        assert_eq!(summary.step_results.len(), 4);
+        let post_logs: Vec<_> = summary
+            .step_logs
+            .iter()
+            .filter(|log| log.display_name.starts_with("Post "))
+            .collect();
+        assert_eq!(post_logs.len(), 2);
+        // LIFO: the later-registered sccache post drains first and succeeds;
+        // the guarded post keeps its position as a failed record.
+        assert_eq!(post_logs[0].display_name, "Post Run sccache");
+        assert_eq!(post_logs[0].exit_code, 0);
+        assert_eq!(post_logs[1].display_name, "Post Run guarded-action");
+        assert_eq!(post_logs[1].exit_code, 1);
+        assert!(
+            summary
+                .step_results
+                .iter()
+                .any(|result| result.exit_code != 0
+                    && !result.failure_ignored
+                    && result.stderr.contains("could not be evaluated")),
+            "failed post record flips the job conclusion"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Status-function evaluation across job states, in the repo's
+    /// timing-gated style: pure expression evaluation must stay far below
+    /// the bound even on a loaded serial-gate runner.
+    #[test]
+    fn status_function_evaluation_benchmark() {
+        use std::hint::black_box;
+
+        let fresh = JobExecutionState::default();
+        let mut failed = JobExecutionState::default();
+        failed.apply(
+            "failed",
+            &StepExecutionResult {
+                exit_code: 1,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut cancelled = JobExecutionState::default();
+        cancelled.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        // The fixture states answer per upstream before timing anything.
+        assert!(fresh.evaluate_condition(Some("success()")).unwrap());
+        assert!(!fresh.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!failed.evaluate_condition(Some("success()")).unwrap());
+        assert!(failed.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!cancelled.evaluate_condition(Some("success()")).unwrap());
+        assert!(!cancelled.evaluate_condition(Some("failure()")).unwrap());
+        assert!(cancelled.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(cancelled.evaluate_condition(Some("always()")).unwrap());
+
+        let states = [&fresh, &failed, &cancelled];
+        let conditions = [
+            "success()",
+            "failure()",
+            "cancelled()",
+            "always()",
+            "failure() && steps.failed.outcome == 'failure'",
+            "cancelled() && job.status == 'cancelled'",
+        ];
+        let started = Instant::now();
+        for _ in 0..10_000 {
+            for state in &states {
+                for condition in &conditions {
+                    let _ = black_box(state)
+                        .evaluate_condition(Some(black_box(condition)))
+                        .unwrap();
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "180k status-function evaluations took {elapsed:?}",
+        );
     }
 
     #[test]
@@ -26933,7 +27571,7 @@ bitcoin-processor-app.push=true")
             stack
                 .iter()
                 .rev()
-                .filter(|post| state.post_condition_met(post.condition()))
+                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
                 .map(PostAction::step_id)
                 .collect::<Vec<_>>(),
             vec!["sccache-last", "sccache-first"]
@@ -26946,7 +27584,7 @@ bitcoin-processor-app.push=true")
             let drained: Vec<&PostAction> = black_box(&stack)
                 .iter()
                 .rev()
-                .filter(|post| state.post_condition_met(post.condition()))
+                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
                 .collect();
             assert_eq!(drained.len(), 2);
         }
