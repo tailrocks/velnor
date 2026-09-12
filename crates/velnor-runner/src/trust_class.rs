@@ -483,8 +483,10 @@ fn server_url_host(raw: &str) -> Option<String> {
 ///
 /// Understands the two shapes git accepts — `scheme://[user@]host[:port]/path`
 /// and scp-like `[user@]host:path` — and requires the URL's host to equal the
-/// job's GitHub server host (case-insensitively). The last two non-empty path
-/// segments are the identity; anything else shaped is unparseable.
+/// job's GitHub server host (case-insensitively). Exactly two non-empty path
+/// segments are the identity; a deeper path is unparseable, not a longer name
+/// for its tail: taking the last two would let `evil/octo/base` corroborate
+/// a base of `octo/base`.
 fn clone_url_repository(url: &str, expected_host: &str) -> Option<String> {
     let url = url.trim();
     let (host, path) = if url.contains("://") {
@@ -508,16 +510,16 @@ fn clone_url_repository(url: &str, expected_host: &str) -> Option<String> {
     if !host.eq_ignore_ascii_case(expected_host) {
         return None;
     }
-    let mut segments: Vec<&str> = path
+    let segments: Vec<&str> = path
         .split('/')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect();
-    if segments.len() < 2 {
+    if segments.len() != 2 {
         return None;
     }
-    let repo = segments.pop()?;
-    let owner = segments.pop()?;
+    let owner = segments[0];
+    let repo = segments[1];
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     if owner.is_empty() || repo.is_empty() {
         return None;
@@ -1408,6 +1410,62 @@ mod tests {
                 derive_json(baseline),
                 TrustClass::Unknown,
                 "clone URL {clone_url:?} names no repository"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_deep_clone_url_path_cannot_corroborate() {
+        // A path deeper than `owner/repo` is unparseable — it must not
+        // corroborate via its tail. Each URL below ends in the base
+        // `octo/base`, so a last-two-segments parse would affirm `Trusted`;
+        // the name signal stays friendly to prove the URL alone refuses.
+        for clone_url in [
+            "https://github.com/evil/octo/base",
+            "https://github.com/evil/octo/base.git",
+            "https://token@github.com/evil/octo/base.git",
+            "ssh://git@github.com/evil/octo/base.git",
+            "git@github.com:evil/octo/base.git",
+            "git@github.com:evil/octo/base",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "clone URL {clone_url:?} is deeper than owner/repo"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_url_repository_requires_exactly_two_path_segments() {
+        // Direct contract: two segments parse (with the `.git` suffix and
+        // empty segments from slashes normalized away); one segment and
+        // three segments are unparseable even when the tail names a repo.
+        assert_eq!(
+            clone_url_repository("https://github.com/octo/base.git", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        assert_eq!(
+            clone_url_repository("https://github.com/octo/base/", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        assert_eq!(
+            clone_url_repository("git@github.com:octo/base.git", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        for url in [
+            "https://github.com/onlyone.git",
+            "https://github.com/a/b/c",
+            "https://github.com/evil/octo/base",
+            "git@github.com:evil/octo/base.git",
+            "ssh://git@github.com/a/b/c.git",
+        ] {
+            assert_eq!(
+                clone_url_repository(url, "github.com"),
+                None,
+                "clone URL {url:?} is not exactly owner/repo"
             );
         }
     }

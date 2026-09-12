@@ -6319,33 +6319,33 @@ async fn handle_job_request(
                     .context("derive persistent target GC scope")?
                     .to_string_lossy()
                     .to_string();
-                let cargo_bin_scope = crate::container::cargo_executable_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                let cargo_bin_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::cargo_executable_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &cargo_root,
                 )
-                .strip_prefix(&cargo_root)
-                .context("derive Cargo executable GC scope")?
-                .to_string_lossy()
-                .to_string();
-                let mise_install_scope = crate::container::mise_executable_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                .context("derive Cargo executable GC scope")?;
+                let mise_install_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::mise_executable_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &mise_root,
                 )
-                .strip_prefix(&mise_root)
-                .context("derive mise install GC scope")?
-                .to_string_lossy()
-                .to_string();
-                let mise_binary_scope = crate::container::mise_binary_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                .context("derive mise install GC scope")?;
+                let mise_binary_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::mise_binary_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &mise_root,
                 )
-                .strip_prefix(&mise_root)
-                .context("derive mise binary GC scope")?
-                .to_string_lossy()
-                .to_string();
+                .context("derive mise binary GC scope")?;
                 let actions_cache = crate::storage::cache_class_path(
                     &work_root,
                     &effective_trust_scope,
