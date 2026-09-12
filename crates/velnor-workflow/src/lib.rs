@@ -58,7 +58,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b2
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "97e53e779426ccb7b196342df13e6cd6144c8502";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "f79c639261f0b4dd3bd1924e59d6a7b4a3d5bb72";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 // The GitHub cache payload changed from Cargo's target tree to mbx objects.
 // Keep the transition explicit: the generated custom keys bypass the action's
