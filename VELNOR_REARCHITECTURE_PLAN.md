@@ -188,6 +188,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
 | 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
+| 2026-09-12 | gha-cache-repo-namespace landed: repo/ref-scoped hosted cache with isolated fallback (`aeb1f257`); BC-22 cache-namespacing half resolved, `pub mod gha_cache` narrowed to `pub(crate)`. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -552,6 +553,13 @@ growth. Routine `cache gc` is manual-only with no timer unit, so all 310 GiB of 
 budgets are dead letters, and the GitHub Actions cache service is namespaced by the
 *per-job* `ACTIONS_RUNTIME_TOKEN` (`gha_cache.rs:222-227`), so it can never produce a
 cross-run hit while each tenant still accumulates 10 GiB outside `store_roots`.
+
+**[Cache-namespacing half RESOLVED in `aeb1f257` (gha-cache-repo-namespace, see §13).
+Tokens now resolve through a durable job-session registry to shared
+`repo-<sha256(repository \0 ref)>` namespaces searched ref-then-base per the GitHub
+cache scope rules; unregistered tokens keep an isolated per-token namespace with one
+forensic line each. The remainder of BC-22 (disk-pressure terminal state, live-state
+reaping, Docker accounting, manual-only `cache gc`) is untouched by that commit.]**
 
 Missing invariants: *one catalog is the sole constructor of store paths, so a path built
 two ways is unrepresentable; one capacity model derived from `statvfs` rather than summed
@@ -1294,6 +1302,25 @@ live in files under concurrent ownership, so they were reported rather than
 applied. Git byte and ref counters need no runner change for harness-driven
 scenarios: `GIT_TRACE2_EVENT` is set and its documented event JSON parsed. For
 runner-driven jobs the runner must set the same variable on its git children.
+
+## 13. Completed work packages (continued, gha-cache-repo-namespace)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| gha-cache-repo-namespace | Hosted GHA cache: repository/ref scoping (closes the BC-22 cache-namespacing defect) | `CacheIdentity`/`CacheSession`/`register_job_cache_session`: the slot process binds each job's runtime token to its repository identity before any job process runs; lookups search the ref namespace fully, then the base (PR target) namespace, per the GitHub cache scope rules; writes land in the job's own ref scope only, so PR runs restore base entries without overwriting them. Unregistered tokens fall back to an isolated per-token namespace with exactly one forensic line per token hash in `daemon.log`. `pub mod gha_cache` narrowed to `pub(crate)` (all consumers in-crate); uncalled `pub serve()` deleted; the daemon's cache-root join collapsed onto `store_catalog`. Gates: fmt clean, clippy workspace `-D warnings` clean, focused 49/49, workspace 2785/2789 (3 action-fixture failures reproduce on clean HEAD, 1 failure inside the concurrent uncommitted acquisition work). |
+
+Recorded deviations and follow-ups (deliberately out of this package, not oversights):
+
+- Default-branch fallback is absent: GitHub retries the lookup on the repository's default
+  branch, which the job message does not carry, so the chain ends at the base ref. PR runs
+  (base usually the default branch) are covered; direct pushes to a side branch cannot yet
+  restore default-branch entries. Populating the default branch from repo metadata is the
+  follow-up.
+- Save gating by trigger type (`pull_request_target`/`issue_comment`/`workflow_run` runs get
+  read-only default-branch access on GitHub) is not modelled; `CacheIdentity` carries no
+  event. That is cache-poisoning hardening, a separate package.
+- The native `actions/cache` path in `executor.rs` (BC-21) is a different implementation and
+  still has no ref scoping; this package covers the hosted `gha_cache` service only.
 
 ### Correction to BC-16 — the admission gate was self-poisoning, not merely contended
 
