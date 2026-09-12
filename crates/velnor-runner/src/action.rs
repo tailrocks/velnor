@@ -3509,7 +3509,7 @@ runs:
     #[test]
     fn parses_fetched_target_action_metadata() {
         let roots = [
-            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-runner-action-scratch"),
             Path::new("/tmp/velnor-targets/jackin/.github/actions"),
         ];
         if roots.iter().all(|root| !root.exists()) {
@@ -3539,7 +3539,7 @@ runs:
 
     #[test]
     fn fetched_target_composite_actions_have_repository_action_closure() {
-        let actions_root = Path::new("/tmp/velnor-actions");
+        let actions_root = Path::new("/tmp/velnor-runner-action-scratch");
         if !actions_root.exists() {
             return;
         }
@@ -3596,7 +3596,7 @@ runs:
 
     #[test]
     fn fetched_target_composite_actions_expand_to_supported_invocations() {
-        let actions_root = Path::new("/tmp/velnor-actions");
+        let actions_root = Path::new("/tmp/velnor-runner-action-scratch");
         let roots = [
             actions_root,
             Path::new("/tmp/velnor-targets/jackin/.github/actions"),
@@ -3668,7 +3668,7 @@ runs:
 
     #[test]
     fn fetched_target_workflow_actions_have_metadata() {
-        let actions_root = Path::new("/tmp/velnor-actions");
+        let actions_root = Path::new("/tmp/velnor-runner-action-scratch");
         let workflow_roots = [
             Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
             Path::new("/tmp/velnor-targets/java-monorepo/.github/workflows"),

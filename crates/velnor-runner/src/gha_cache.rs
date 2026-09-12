@@ -15,7 +15,7 @@
 //! `tenants/<repo-namespace>/blobs/<sha256>` plus tiny JSON entry records
 //! keyed by `sha256(key \0 version)`. Key matching follows GitHub semantics:
 //! exact `(key, version)` first, then restore-keys prefix order, newest wins.
-//! The namespace is `sha256("velnor-actions-cache-repo\0" ‖ repository_id ‖
+//! The namespace is `sha256("velnor-runner-cache-repo\0" ‖ repository_id ‖
 //! ref_scope ‖ trust)` where the repository id (`github.repository_id`), the
 //! ref scope (`github.ref`), and the trust floor come from the server-attested
 //! job message the runner binds to the job's runtime token at admission —
@@ -469,7 +469,7 @@ impl CacheIdentity {
 /// request against the live-job registry that selects this namespace.
 fn repo_cache_namespace(repository_id: u64, ref_scope: &str, trusted: bool) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-repo\0");
+    hasher.update(b"velnor-runner-cache-repo\0");
     hasher.update(repository_id.to_be_bytes());
     hasher.update(b"\0");
     hasher.update(ref_scope.as_bytes());
@@ -483,7 +483,7 @@ fn repo_cache_namespace(repository_id: u64, ref_scope: &str, trusted: bool) -> S
 /// can never alias a shared namespace.
 fn isolated_cache_namespace(token: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-tenant\0");
+    hasher.update(b"velnor-runner-cache-tenant\0");
     hasher.update(token.as_bytes());
     hex(&hasher.finalize())
 }
@@ -500,7 +500,7 @@ fn registry() -> &'static Mutex<HashMap<String, Vec<CacheIdentity>>> {
 
 fn token_key(token: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-token-key\0");
+    hasher.update(b"velnor-runner-cache-token-key\0");
     hasher.update(token.as_bytes());
     hex(&hasher.finalize())
 }

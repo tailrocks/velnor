@@ -20260,7 +20260,7 @@ runs:
 
     #[test]
     fn target_workflow_repository_actions_plan_from_cached_metadata() {
-        let actions_host = Path::new("/tmp/velnor-actions");
+        let actions_host = Path::new("/tmp/velnor-runner-action-scratch");
         let workflow_roots = [
             Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
             Path::new("/tmp/velnor-targets/java-monorepo/.github/workflows"),
