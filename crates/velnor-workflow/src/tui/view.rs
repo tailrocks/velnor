@@ -694,6 +694,7 @@ mod tests {
 
     fn configured_app() -> super::super::App {
         let mut app = app();
+        app.inputs = Some(crate::GenerationInputs::parts(0, 0));
         let unit = crate::Unit {
             id: "workspace-with-a-long-name".to_owned(),
             label: "Workspace with a long Unicode label λ".to_owned(),
@@ -881,6 +882,8 @@ mod tests {
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,
+            recorded_inputs: None,
+            foreign_schema: None,
         });
         app.phase = super::super::Phase::Review;
         let review = render_text(&mut app, 80, 24);

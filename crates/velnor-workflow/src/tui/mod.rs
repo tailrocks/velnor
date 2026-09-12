@@ -25,9 +25,9 @@ use termrock::style::{ColorCapability, DesignSystem};
 use termrock::widgets::{ListRow, ListState, ScrollAreaState};
 
 use super::{
-    apply_generated_write_plan, generated_files, plan_generated_write,
-    scan_repository_with_default_branch, Checkout, Cli, GeneratedWritePlan, GeneratorError,
-    ProjectConfig, RepositorySource, RunnerMode, WriteOutcome,
+    apply_generated_write_plan, generated_files, plan_generated_write, scan_target, Checkout, Cli,
+    GeneratedWritePlan, GenerationInputs, GeneratorError, ProjectConfig, RepositorySource,
+    RunnerMode, WriteOutcome,
 };
 
 const MIN_WIDTH: u16 = 52;
@@ -48,6 +48,7 @@ enum GenerationCompletion {
 struct PreparedProject {
     checkout: Checkout,
     config: ProjectConfig,
+    inputs: GenerationInputs,
     output_root: std::path::PathBuf,
 }
 
@@ -84,6 +85,7 @@ struct App {
     generation_receiver: Option<Receiver<GenerationResult>>,
     checkout: Option<Checkout>,
     config: Option<ProjectConfig>,
+    inputs: Option<GenerationInputs>,
     output_root: Option<std::path::PathBuf>,
     selector: Option<ListState<String>>,
     scroll: ScrollAreaState,
@@ -107,6 +109,7 @@ impl App {
             generation_receiver: None,
             checkout: None,
             config: None,
+            inputs: None,
             output_root: None,
             selector: None,
             scroll: ScrollAreaState::new().axes(true, false),
@@ -206,6 +209,7 @@ impl App {
         self.checkout = Some(prepared.checkout);
         self.output_root = Some(prepared.output_root);
         self.config = Some(prepared.config);
+        self.inputs = Some(prepared.inputs);
         self.selector = Some(selector);
         self.phase = if self
             .config
@@ -520,6 +524,13 @@ impl App {
             return;
         };
         let files = generated_files(&config);
+        let Some(inputs) = self.inputs.clone() else {
+            self.fail(
+                FailedOperation::Review,
+                "generation inputs were not resolved".to_owned(),
+            );
+            return;
+        };
         let Some(output_root) = self.output_root.as_deref() else {
             self.fail(
                 FailedOperation::Review,
@@ -527,7 +538,7 @@ impl App {
             );
             return;
         };
-        let plan = match plan_generated_write(output_root, &files) {
+        let plan = match plan_generated_write(output_root, &files, &inputs) {
             Ok(plan) => plan,
             Err(error) => {
                 self.fail(FailedOperation::Review, error.to_string());
@@ -564,11 +575,19 @@ impl App {
             );
             return;
         };
+        let Some(inputs) = self.inputs.clone() else {
+            self.fail(
+                FailedOperation::Generate,
+                "generation inputs were not resolved".to_owned(),
+            );
+            return;
+        };
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = complete_generation(
                 &output_root,
                 &files_for_worker,
+                &inputs,
                 dry_run,
                 check,
                 force,
@@ -635,19 +654,21 @@ impl App {
 fn complete_generation(
     output_root: &std::path::Path,
     files: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    inputs: &GenerationInputs,
     dry_run: bool,
     check: bool,
     force: bool,
     reviewed_plan: &GeneratedWritePlan,
 ) -> Result<GenerationCompletion, GeneratorError> {
-    let plan = plan_generated_write(output_root, files)?;
+    let plan = plan_generated_write(output_root, files, inputs)?;
     if &plan != reviewed_plan {
         return Ok(GenerationCompletion::PlanChanged(plan));
     }
     if check && plan.has_drift() {
         return Ok(GenerationCompletion::CheckDrift(plan));
     }
-    let outcome = apply_generated_write_plan(output_root, files, dry_run, check, force, &plan)?;
+    let outcome =
+        apply_generated_write_plan(output_root, files, inputs, dry_run, check, force, &plan)?;
     Ok(GenerationCompletion::Finished { outcome, plan })
 }
 
@@ -790,15 +811,15 @@ fn spawn_scan(
                 Some(branch) => super::validate_default_branch(branch)?.to_owned(),
                 None => source.default_branch(checkout.path())?,
             };
-            let config =
-                scan_repository_with_default_branch(checkout.path(), runners, &default_branch)?;
+            let scanned = scan_target(checkout.path(), runners, &default_branch)?;
             let output_root = match output.as_deref() {
                 Some(path) => super::resolve_output_path(path)?,
                 None => source.output_root(checkout.path())?,
             };
             Ok(PreparedProject {
                 checkout,
-                config,
+                config: scanned.config,
+                inputs: scanned.inputs,
                 output_root,
             })
         })()
@@ -899,6 +920,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Synthetic generation inputs for tests that exercise the file plan
+    /// directly instead of a scanned repository.
+    fn test_inputs() -> crate::GenerationInputs {
+        crate::GenerationInputs::parts(0, 0)
+    }
+
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     };
@@ -995,6 +1022,7 @@ mod tests {
         }
         app.config = Some(config);
         app.selector = Some(selector);
+        app.inputs = Some(test_inputs());
         app.output_root = Some(PathBuf::from("."));
         app.phase = Phase::Configure;
         app
@@ -1108,6 +1136,8 @@ mod tests {
             conflicts: Vec::new(),
             ownership_present: true,
             ownership_needs_refresh: true,
+            recorded_inputs: None,
+            foreign_schema: None,
         };
         let (sender, receiver) = std::sync::mpsc::channel();
         assert!(sender
@@ -1137,6 +1167,8 @@ mod tests {
             conflicts: vec![PathBuf::from(".github/workflows/ci-pr.yml")],
             ownership_present: true,
             ownership_needs_refresh: false,
+            recorded_inputs: None,
+            foreign_schema: None,
         };
         let (sender, receiver) = std::sync::mpsc::channel();
         assert!(sender
@@ -1169,14 +1201,22 @@ mod tests {
         let content = format!("{}name: CI\n", crate::GENERATED_HEADER);
         let files = BTreeMap::from([(relative.clone(), content.clone())]);
         assert!(fs::create_dir_all(root.join(".github/workflows")).is_ok());
-        let reviewed = crate::plan_generated_write(&root, &files);
+        let reviewed = crate::plan_generated_write(&root, &files, &test_inputs());
         assert!(reviewed.is_ok());
         let Some(reviewed) = reviewed.ok() else {
             return;
         };
         assert!(fs::write(root.join(&relative), content).is_ok());
 
-        let result = super::complete_generation(&root, &files, true, false, false, &reviewed);
+        let result = super::complete_generation(
+            &root,
+            &files,
+            &test_inputs(),
+            true,
+            false,
+            false,
+            &reviewed,
+        );
         assert!(matches!(
             result,
             Ok(super::GenerationCompletion::PlanChanged(_))
