@@ -240,6 +240,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R1-cmd second correction re-ran the four review issues: all four cited `main`-tree line numbers, so each was re-verified against the `r0-fv2v5` tree and the fetched upstream sources instead of re-fixed, and the glob-reached-link gap the review named got a unit assertion plus a single-file `pin/l*.txt` pin the GitHub lane can prove (§108). |
 | 2026-09-13 | R1-pub bounded the step publishers: bounded channels with counted best-effort drops, a 30s deadline on every publish network call, feed drop-and-reconnect on stall, and an entry- plus byte-capped streamed-log mirror; drain-before-exit kept, with the drop counts on the forensics line (§109). |
 | 2026-09-13 | R1-pub correction counted the mirror evictions on the forensics line, stamped a truncation marker into the merged cancel-path log when drops/evictions are nonzero, and re-grounded the single-oversize-record carve-out on `ScriptJobResult` retention instead of the nonexistent producer line-buffering cap (§109). |
+| 2026-09-13 | R1-bench landed the WP-17 census/fault/soak/compare core: runner `docker::metrics::snapshot`, checkout span contract pinned, `CommandRunner` fault decorator, bench census/fault-catalogue/trace/soak/compare modules, `fault/*` + `lifecycle/trust-partition` rows, and the `float_roundtrip` record-integrity fix — all proven against a live Engine (§110). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5969,3 +5970,92 @@ clippy clean workspace-wide and with `test-support` (`-D warnings`);
 serial runner lib 1759 passed, 0 failed, 1 ignored (1756 on the
 pre-correction tree + 3 new); serial runner lib with
 `test-support` 1804 passed, 0 failed, 1 ignored.
+
+## 110. R1-bench: WP-17 census, fault catalogue, soak, and comparison — 2026-09-13
+
+Bounded package: the benchmark core that is implementable and provable
+without the `velnor-job` dispatch driver. No simulation anywhere: every new
+measurement either drives real work or is reported as unrun with the missing
+requirement named.
+
+Runner side (`crates/velnor-runner`):
+
+- `docker::metrics::snapshot()` plus `Snapshot`/`ClassTotal`: the same
+  process counters the `velnor.docker` tracing fields derive from, exposed
+  machine-readably. Not a second counter; the snapshot test asserts the
+  totals equal the forensics fields.
+- Checkout span contract pinned: `checkout_emits_the_five_bench_phase_spans`
+  runs a real checkout over a `file://` origin under a JSON close-event
+  subscriber and asserts all five span names and `phase` fields the bench
+  trace reader keys on. Renaming either side breaks this test on purpose.
+- New `fault_injection.rs` (`cfg(test)` only): a `CommandRunner` decorator
+  with scripted fail/delay/spawn-error rules that intercepts on all ten
+  `run*` entry points. Conformance tests run the real `execute_checkout`
+  against an injected fetch failure (fails closed, code and reason in the
+  step log, sequence stops before the workspace checkout) and an unreachable
+  remote (loud error, never a silent skip).
+
+Bench side (`crates/velnor-bench`, matrix 33 → 38 rows):
+
+- `census`: per-class Docker census derived with the runner's own
+  `docker::classify`, so there is one classifier and one twelve-label
+  vocabulary. Carried on every observation and summarised per class;
+  validation rejects unknown labels and census/resource count disagreements.
+- `fault`: the 27-class catalogue across the process, HTTP, filesystem, and
+  signal seams. Four classes run today through `docker-direct`
+  (`drivers/fault.rs`: real SIGKILL mid-step, real failing user command,
+  real absent-object error, real network conflict); each observation carries
+  a `FaultOutcome`, and `run` exits nonzero when any outcome is uncontained
+  while still writing the record. The other 23 stay declared-but-unrun.
+- `trace`: `trace.jsonl` span-close reader for the checkout phases. The
+  round-trip test generates records with the real subscriber layer, proving
+  the field paths; name/phase disagreement is ignored, never misattributed.
+- `soak` + CLI: round-after-round residue sampling (verdict passes only on
+  zero owned-object residue every round) plus scratch-growth slope and
+  timing-drift ratio as evidence. New `velnor.bench.soak.v1` schema.
+- `compare` + CLI + record `context` map: A/B ratios gated on sample size
+  like the percentiles (a p95 ratio needs n>=20 on both sides), refusing
+  cross-scenario and cross-driver comparisons and surfacing `--context`
+  differences. New `velnor.bench.comparison.v1` schema.
+- New rows: `lifecycle/trust-partition` (no fallback: the trust-partition
+  cost protocol is two same-scenario `velnor-job` records, one per trust
+  class, divided by `compare`) and the four `fault/*` rows (honest
+  `docker-direct` degradation, like the docker rows, unlike the rust rows).
+
+Record-integrity fix found live: the first `compare` run failed with
+`SummaryMismatch` on a record that had validated at write time. Root cause
+was lossy float parsing, not the summaries: serde_json without
+`float_roundtrip` parses the 17th significant digit one ulp off
+(`434.15526315789475` came back `...8947`, proven bit-for-bit against
+`str::parse`). The workspace now enables `float_roundtrip` (lockfile gains
+no new packages), with a regression test pinning bit-exact round trip of a
+17-digit variance.
+
+Live evidence from this worktree (OrbStack Engine 29.4.0, busybox:1.36):
+`docker/existing-image` at n=20 emits a real p95 (492, below the max 515)
+and withholds p99; per-class census p50/p95 on counts and latencies; all
+four fault scenarios inject and contain (`wait_exit=3`, `wait_exit=137`,
+`inspect_exit=1 remove_exit=0`, `conflict_exit=1`, zero residue); a 5-round
+soak passes with zero residue; `compare` divides two n=20 records with the
+runner context difference surfaced. No bench-owned containers or networks
+remain on the daemon.
+
+Explicitly not done (needs the dispatch driver, a registered runner, and
+GitHub credentials — none available here): the `velnor-job` driver itself,
+any live Velnor-vs-actions/runner A/B numbers, product-level trust-partition
+numbers, and the 23 `velnor-job`-only fault classes. BC-27 is therefore
+narrowed, not closed: the harness now measures real container lifecycles,
+real faults, and real trends, but no product job benchmark exists yet.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets --locked` zero warnings; strict
+clippy clean on bench and on runner with `test-support` (`-D warnings`);
+bench 183 passed, 0 failed; serial runner lib 1772 passed, 0 failed,
+1 ignored; serial runner lib with `test-support` 1817 passed, 0 failed,
+1 ignored; model 129+4+6+4.
+
+R1-bench status: complete. Known deltas, kept explicit: soak disk growth
+has no pass/fail policy yet (reported as evidence); the `S8` acceptance
+named in the brief is not present in either repository at these heads, so
+the percentile acceptance (p95 at n>=20) was re-evaluated instead, with the
+live n=20 run above.
