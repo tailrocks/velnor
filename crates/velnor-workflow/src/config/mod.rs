@@ -118,6 +118,12 @@ struct WorkflowSection {
     velnor_labels: Option<Vec<String>>,
     /// Velnor runner group for self-hosted lanes.
     velnor_runner_group: Option<String>,
+    /// Per-owner-block update channel grants for the rendered
+    /// `package-update.yml` matrix; the `default` key covers owner blocks
+    /// without their own row. Absent from the canonical form, so configs that
+    /// do not use it keep their recorded digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
 }
@@ -190,6 +196,12 @@ impl RepoGenerationConfig {
     /// The declared render primitives, in the order the config declares them.
     pub(crate) fn declare(&self) -> &[DeclareRow] {
         &self.declare
+    }
+
+    /// The declared per-owner-block update channel grants, when the config
+    /// declares them.
+    pub(crate) fn package_update_channels(&self) -> Option<BTreeMap<String, Vec<String>>> {
+        self.workflow.package_update_channels.clone()
     }
 
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
@@ -422,12 +434,12 @@ mod tests {
             "schema = 1\n\
              \n\
              [generator]\n\
-             repository = \"tailrocks/fixture\"\n\
+             repository = \"example/fixture\"\n\
              \n\
              [workflow]\n\
              github_runner = \"ubuntu-24.04\"\n\
-             velnor_labels = [\"self-hosted\", \"velnor-target-mvp\"]\n\
-             velnor_runner_group = \"velnor-target-mvp\"\n\
+             velnor_labels = [\"self-hosted\", \"example-runner-label\"]\n\
+             velnor_runner_group = \"example-runner-group\"\n\
              default_branch = \"trunk\"\n\
              \n\
              [scan]\n\
@@ -491,10 +503,10 @@ mod tests {
 
     #[test]
     fn declaration_order_is_part_of_the_digest() {
-        let leading = "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+        let leading = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                        [[declare]]\nprimitive = \"a\"\nfile = \"a.yml\"\n\n\
                        [[declare]]\nprimitive = \"b\"\nfile = \"b.yml\"\n";
-        let trailing = "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+        let trailing = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                         [[declare]]\nprimitive = \"b\"\nfile = \"b.yml\"\n\n\
                         [[declare]]\nprimitive = \"a\"\nfile = \"a.yml\"\n";
         let first = must(config_for(leading).canonical_json(), "canonicalize leading");
@@ -519,7 +531,7 @@ mod tests {
         must(
             fs::write(
                 &path,
-                "schema = 2\n\n[generator]\nrepository = \"tailrocks/fixture\"\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n",
             ),
             "write future schema",
         );
@@ -529,7 +541,7 @@ mod tests {
             "error must name the schema: {error}"
         );
         must(
-            fs::write(&path, "[generator]\nrepository = \"tailrocks/fixture\"\n"),
+            fs::write(&path, "[generator]\nrepository = \"example/fixture\"\n"),
             "write config without schema",
         );
         let missing = must_some_error(load(&path).err(), "missing schema must fail");
@@ -547,7 +559,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let available = shape.unit_ids().collect::<Vec<_>>().join(", ");
         let config = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
         );
         let error = must_some_error(config.validate(&unit_ids).err(), "unknown unit must fail");
@@ -566,7 +578,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         for file in ["../escape.yml", "nested/deep.yml", "workflow.yaml", ".yml"] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
@@ -579,7 +591,7 @@ mod tests {
             );
         }
         let separator = config_for(concat!(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n",
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n",
             "[[declare]]\nprimitive = \"rust-crate\"\nfile = 'back\\slash.yml'\n",
         ));
         let error = must_some_error(
@@ -596,11 +608,11 @@ mod tests {
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         for repository in [
-            "tailrocks",
-            "tailrocks/",
+            "example",
+            "example/",
             "/fixture",
-            "tailrocks/.git",
-            "tailrocks/fixture/extra",
+            "example/.git",
+            "example/fixture/extra",
         ] {
             let config = config_for(&format!(
                 "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n"
@@ -637,13 +649,13 @@ mod tests {
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let opaque = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
         must(opaque.validate(&unit_ids), "opaque args validate");
         let float = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nratio = 1.5\n",
         );
@@ -655,7 +667,7 @@ mod tests {
     #[test]
     fn unknown_fields_are_rejected() {
         let error = match toml::from_str::<RepoGenerationConfig>(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\ndco_required_is_spelled_like_this = true\n",
         ) {
             Ok(_) => String::from("accepted"),
@@ -696,7 +708,7 @@ mod tests {
         must(
             fs::write(
                 &path,
-                "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n",
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n",
             ),
             "write discovered config",
         );

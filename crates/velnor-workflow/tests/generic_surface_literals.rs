@@ -7,14 +7,18 @@
 use std::path::{Path, PathBuf};
 
 const DENY_LIST: &[&str] = &[
-    "tailrocks/velnor",
+    "tailrocks/",
     "velnor-apt",
     "velnor-actions-fixture",
+    "velnor-trusted",
+    "velnor-target-mvp",
+    "velnor-runner",
     "rust-velnor",
     "bun-velnor",
     "rust-production-topology",
     "crates/velnor",
     "ChainArgos",
+    "package-release.v1",
 ];
 
 fn source_files(directory: &str) -> Vec<PathBuf> {
