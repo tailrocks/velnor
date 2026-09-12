@@ -1,4 +1,4 @@
-# Plan 039 release-ref ledger — all 136 entries approved under operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3.
+# Plan 039 release-ref ledger — all 145 entries approved under operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3.
 #
 # Schema (owned by crates/velnor-tools/src/fleet_policy.rs and validated by
 # audit-ci):
@@ -1075,6 +1075,51 @@ review_state = "approved"
 [[entries]]
 owner = "tailrocks"
 repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/_actions-suite.yml"
+git_ref = "refs/heads/main"
+admission_reason = "implements reusable Velnor-lane suites invoked by admitted caller workflows on the default branch"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/_docker-suite.yml"
+git_ref = "refs/heads/main"
+admission_reason = "implements reusable Velnor-lane suites invoked by admitted caller workflows on the default branch"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/_runtime-suite.yml"
+git_ref = "refs/heads/main"
+admission_reason = "implements reusable Velnor-lane suites invoked by admitted caller workflows on the default branch"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/_rust-suite.yml"
+git_ref = "refs/heads/main"
+admission_reason = "implements reusable Velnor-lane suites invoked by admitted caller workflows on the default branch"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/app-token-probe.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
 workflow_path = ".github/workflows/attestation-negative.yml"
 git_ref = "refs/heads/main"
 admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
@@ -1084,9 +1129,27 @@ review_state = "approved"
 [[entries]]
 owner = "tailrocks"
 repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/backend-parity.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the two-lane backend-parity verification surface (velnor|github) on the default branch with direct Velnor-lane jobs"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
 workflow_path = ".github/workflows/ci.yml"
 git_ref = "refs/heads/main"
 admission_reason = "uses Velnor-workflow-owned local workflows that directly define Velnor-lane jobs"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/compat-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
 approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
 review_state = "approved"
 
@@ -1111,7 +1174,25 @@ review_state = "approved"
 [[entries]]
 owner = "tailrocks"
 repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/docker-lease-probe.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
 workflow_path = ".github/workflows/docker.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
+review_state = "approved"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/fixture-rust-check.yml"
 git_ref = "refs/heads/main"
 admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
 approving_change = "operator-approved-all:40f05b7418e3431978997ef7b5ca0b5aaa52a2b3"
