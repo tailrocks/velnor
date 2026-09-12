@@ -142,6 +142,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-bench/src/drivers/cargo.rs` + `drivers/docker.rs` (cleanup ownership and error propagation) | codex-lead | claimed — T-024 |
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
+| `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | claimed — trust-admission-fork |
 
 ## 8. Discovered bug classes
 
