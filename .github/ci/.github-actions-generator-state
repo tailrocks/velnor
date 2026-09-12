@@ -26,6 +26,6 @@ schema = 1
 .github/workflows/ci-rust-velnorctl.yml	a20e85b075f2b4ca
 .github/workflows/maintenance.yml	2fa7edb094936b03
 .github/workflows/nightly.yml	ffef9ba0c2a44075
-.github/workflows/preview.yml	d65a5e42ae64256a
+.github/workflows/preview.yml	60171ffcf76ff6fc
 .github/workflows/release.yml	eb617e651a2b6420
 .github/workflows/velnor-workflow-policy.yml	3e6c0852dbc3a65e

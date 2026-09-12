@@ -11356,7 +11356,14 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 guarded.push(current.clone());
             }
         }
-        for job in ["identity", "guest-payload", "build", "attest", "publish"] {
+        for job in [
+            "identity",
+            "metadata",
+            "guest-payload",
+            "build",
+            "attest",
+            "publish",
+        ] {
             assert!(
                 guarded.iter().any(|guarded| guarded == job),
                 "preview job {job} must refuse a non-main ref"
@@ -11380,6 +11387,54 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(delete.contains("dpkg --compare-versions \"$live_version\" gt \"$VERSION\""));
         assert!(delete.contains("re-run the LATEST preview run"));
         assert!(delete.contains("^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{7}$"));
+    }
+
+    #[test]
+    fn velnor_preview_deb_lane_copies_metadata_instead_of_executing_the_target_binary() {
+        // The deb jobs run on the host arch and cross-compile, so the binary
+        // they just built cannot be executed to export the packaged
+        // build-identity.json and capabilities manifest (aarch64 on x86_64
+        // fails with "Exec format error"). The metadata is exported once by the
+        // host-native metadata job and copied by both deb arches, exactly like
+        // the stable release lane.
+        let workflow = render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE);
+        let deb_lane = must_some(
+            workflow
+                .split_once("\n  build:\n")
+                .and_then(|(_, lane)| lane.split_once("\n  attest:"))
+                .map(|(lane, _)| lane),
+            "preview workflow declares the deb build lane before attest",
+        );
+        assert!(!deb_lane.contains("release export"));
+        assert!(!deb_lane.contains("capabilities export"));
+        assert!(!deb_lane.contains("test -x \"$runner\""));
+        assert!(deb_lane.contains("needs: [identity, metadata, guest-payload]"));
+        assert!(deb_lane.contains("name: preview-metadata"));
+        assert!(deb_lane.contains(
+            "cp preview-metadata/build-identity.json crates/velnor-runner/release/build-identity.json"
+        ));
+        assert!(deb_lane.contains(
+            "cp preview-metadata/manifest.json crates/velnor-runner/release/manifest.json"
+        ));
+        // The copied metadata is still bound to the source commit the deb
+        // claims to ship: consumer verification and postinst's offline check
+        // both read this field.
+        assert!(deb_lane.contains("'.source_sha == $sha'"));
+
+        let metadata = must_some(
+            workflow
+                .split_once("\n  metadata:\n")
+                .and_then(|(_, job)| job.split_once("\n  build:\n"))
+                .map(|(job, _)| job),
+            "preview workflow declares the metadata job",
+        );
+        // Host-native export: no cross target anywhere in the job.
+        assert!(!metadata.contains("--target"));
+        assert!(metadata.contains("--features release-build"));
+        assert!(metadata.contains("VELNOR_PREVIEW_SOURCE_SHA"));
+        assert!(metadata.contains("release export"));
+        assert!(metadata.contains("capabilities export"));
+        assert!(metadata.contains("name: preview-metadata"));
     }
 
     #[test]
