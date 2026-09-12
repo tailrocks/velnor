@@ -142,7 +142,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-bench/src/drivers/cargo.rs` + `drivers/docker.rs` (cleanup ownership and error propagation) | codex-lead | claimed — T-024 |
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
-| `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | claimed — trust-admission-fork |
+| `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
 
 ## 8. Discovered bug classes
 
@@ -4727,3 +4727,71 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 `cargo clippy -p velnor-runner --all-targets --features test-support
 --locked -- -D warnings` pass; `gha_cache` module suite 30/30 pass.
 gha-cache-prefix-max status: complete.
+
+## 100. trust-admission-fork: TrustClass enforced in job admission on every pool — 2026-09-12
+
+The WP-6 remainder from §97/§98: the pool flag is now only a ceiling. Each
+job admits under its own trust — `TrustClass::derive` runs once per job in
+`handle_job_request`, and `TrustClass::admitted_scope` narrows the pool
+ceiling by it (`trust_class.rs`, `runner.rs`). A `Trusted` job keeps the
+pool value byte-identically (including `release` and custom scopes); a
+`ForkPR` or `Unknown` job fails to the untrusted floor on every pool.
+
+Enforcement, all from the admitted scope: `validate_job_trust_policy` takes
+the pool flag plus the job class and admits user secrets only when both are
+trusted (the refusal names the class and the pool); the storage-lease block
+derives its trust key, roots, and GC scopes from it; `execute_script_job*`
+thread it (renamed parameter) into the container spec (no host socket, no
+privileged options, no published ports, `StoreTrustClass::Untrusted`), the
+git mirror store, and the executor, whose native-adapter gates
+(QEMU/login/BuildKit) and new `JobExecutionState.trust_scope` field (cache
+paths; empty fails closed, derived states carry it) enforce it.
+
+Two structural removals came with the threading. First, every trust-scoped
+store root takes the scope explicitly now (`storage.rs` `cache_class_path`,
+`container.rs` cargo/mise/target roots and executable stores,
+`store_catalog.rs`), and the ambient pool read
+`github_adapter::cargo_target_trust_scope` is deleted — no per-job path can
+observe the pool behind the gate's back any more. Second, GC sweeps each
+trust-partitioned class under the pool namespace plus the untrusted floor
+(`cache.rs` `trust_partitioned_roots`, deduped by path so the legacy layout
+enumerates once); without the second root, fork-job stores on a trusted
+pool would grow unbounded, invisible to every collector.
+
+Found and fixed on the same path: `github_cargo_target_store_host`
+re-resolved its scope argument through the first-wins process cell, which
+hands back the pool in production and silently discarded the job's scope —
+the parameter was dead past startup. Per-job paths normalize with the new
+`trust_scope::normalize_scope` (same spelling, no cell write) instead, and
+`trust_scope::resolve` is documented startup-only so the trap cannot recur.
+
+Trusted jobs are byte-identical to before on every path (the admitted scope
+equals the pool value); only fork/unknown jobs move namespaces, and their
+first run rebuilds caches once. Lease/GC scope keys are unchanged: a lease
+derives from the same effective root the job mounts, and cross-namespace key
+matches only ever over-protect, never under-protect.
+
+Tests, 16 new, all passing: `trust_class` ceiling/floor mapping (2),
+`trust_scope` normalization without publishing (1), `runner` secrets-matrix
+updates plus 10 admission tests (pool×class matrix, three
+`admission_conformance_*` including end-to-end through the container spec,
+one single-signal `admission_regression_*`, and
+`admission_benchmark_trust_decision_throughput` — 20k derive+narrow+validate
+decisions in 0.04s against the 5s bound, the benchmark in the repo's
+timing-gated-test style), `github_adapter` scope-parameter-over-cell
+regression (1), `executor` state-scope cache namespacing (1), `cache`
+pool+fork namespace reclaim (1). Docs updated where the behavior changed
+(`reference/trust-scope.mdx`, `guides/execution.mdx`,
+`reference/interface.mdx`); the `security-and-data.mdx` pinned line numbers
+were left to the established drift tolerance.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `trust_class` filter 43/43 pass; store
+suites (`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`)
+166/166 pass; full serial `cargo test -p velnor-runner --lib --features
+test-support --locked -- --test-threads=1` 1705 passed with the same 3
+pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
+`/tmp/velnor-actions` exists but is empty — verified identical on the
+untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
+WP-6 status: complete (derivation §97+§98, enforcement this section).
