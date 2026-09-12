@@ -226,10 +226,12 @@ fn main() -> Result<()> {
             };
             record.validate()?;
             let uncontained = record.observations.iter().any(|observation| {
-                observation
-                    .fault
-                    .as_ref()
-                    .is_some_and(|outcome| !outcome.contained)
+                observation.fault.as_ref().is_some_and(|outcome| {
+                    // A never-injected run is not a measurement of anything,
+                    // but its record — with the detail diagnostics — is still
+                    // written; the nonzero exit below marks the miss.
+                    !outcome.injected || !outcome.contained
+                })
             });
             let line = record.to_ndjson()?;
             match output {
@@ -246,7 +248,7 @@ fn main() -> Result<()> {
             }
             if uncontained {
                 anyhow::bail!(
-                    "{id}: the record is written, but at least one fault outcome is uncontained"
+                    "{id}: the record is written, but at least one fault outcome is uncontained or never injected"
                 );
             }
         }

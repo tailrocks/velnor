@@ -9,6 +9,16 @@
 //! production functions against injected failures and assert the production
 //! containment behaviour, not the decorator's bookkeeping.
 //!
+//! Coverage is every spawning entry point: all ten `run*` methods plus
+//! `spawn`, each logged in [`FaultInjectingRunner::intercepted`] whether
+//! faulted or passed through. A [`FaultAction::Fail`] rule on `spawn` fails
+//! the spawn itself — a spawn has no result channel to carry an exit code —
+//! and the error names the scripted code and stderr. [`CommandRunner::kill`]
+//! passes through deliberately: it takes a pid handle, not an argv, so no
+//! rule can match it, and it signals a live child rather than spawning one.
+//! Only the firecracker jailer path uses `spawn`/`kill` today, so no docker
+//! or git production path bypasses interception.
+//!
 //! This module is unit-test tooling. It never ships in any build: the module
 //! is compiled only for `cfg(test)`. If a future integration harness (such as
 //! the `velnor-job` benchmark driver) needs scripted injection, the gate
@@ -154,9 +164,24 @@ impl<R: CommandRunner> CommandRunner for FaultInjectingRunner<R> {
     }
 
     fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
-        self.inner.spawn(program, args)
+        match self.intercept(program, args) {
+            // A spawn has no result channel for an exit code: the injected
+            // failure surfaces as a spawn error naming the scripted outcome.
+            Some(FaultAction::Fail { code, stderr }) => {
+                bail!("injected fault on spawn of {program}: exit {code}: {stderr}")
+            }
+            Some(FaultAction::SpawnError { message }) => bail!("{message}"),
+            Some(FaultAction::Delay { duration }) => {
+                std::thread::sleep(duration);
+                self.inner.spawn(program, args)
+            }
+            None => self.inner.spawn(program, args),
+        }
     }
 
+    // Deliberate passthrough, documented on the module: a pid handle carries
+    // no argv for a rule to match, and killing signals a live child rather
+    // than spawning one.
     fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
         self.inner.kill(process)
     }
@@ -352,6 +377,8 @@ mod tests {
     #[derive(Debug, Default)]
     struct SucceedingRunner {
         seen: Vec<(String, Vec<String>)>,
+        spawned: Vec<(String, Vec<String>)>,
+        killed: Vec<u32>,
     }
 
     impl CommandRunner for SucceedingRunner {
@@ -362,6 +389,18 @@ mod tests {
                 stdout: "inner-ok".to_owned(),
                 stderr: String::new(),
             })
+        }
+
+        fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
+            self.spawned.push((program.to_owned(), args.to_vec()));
+            Ok(SpawnedProcess {
+                pid: 4242 + self.spawned.len() as u32,
+            })
+        }
+
+        fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
+            self.killed.push(process.pid);
+            Ok(())
         }
     }
 
@@ -522,6 +561,96 @@ mod tests {
                 "fatal: the remote hung up".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn spawn_intercepts_rules_and_logs_like_every_other_entry_point() {
+        // A spawn used to bypass interception entirely: no rule matching, no
+        // log entry. Now it matches rules, consumes budget, and is logged.
+        let mut runner = FaultInjectingRunner::new(
+            SucceedingRunner::default(),
+            vec![FaultRule::new(
+                "jailer",
+                &["--id"],
+                1,
+                FaultAction::Fail {
+                    code: 1,
+                    stderr: "injected jailer failure".to_owned(),
+                },
+            )],
+        );
+        let error = runner
+            .spawn("jailer", &args(&["--id", "vm-1"]))
+            .expect_err("a faulted spawn fails");
+        assert!(error.to_string().contains("exit 1"), "{error:#}");
+        assert!(
+            error.to_string().contains("injected jailer failure"),
+            "{error:#}"
+        );
+        assert_eq!(runner.faulted_count(), 1);
+        // Budget spent: the next spawn passes through, and the inner runner
+        // sees only the passthrough.
+        let child = runner
+            .spawn("jailer", &args(&["--id", "vm-2"]))
+            .expect("spawn passes through after the budget is spent");
+        assert_eq!(runner.faulted_count(), 1);
+        assert_eq!(runner.intercepted().len(), 2);
+        assert!(
+            runner
+                .intercepted()
+                .iter()
+                .all(|call| call.program == "jailer"),
+            "both spawns are logged"
+        );
+        let inner = runner.into_inner();
+        assert_eq!(inner.spawned.len(), 1);
+        assert_eq!(inner.spawned[0].1, args(&["--id", "vm-2"]));
+        assert_eq!(child.pid, 4243);
+    }
+
+    #[test]
+    fn a_spawn_error_rule_fails_the_spawn_without_reaching_the_inner_runner() {
+        let mut runner = FaultInjectingRunner::new(
+            SucceedingRunner::default(),
+            vec![FaultRule::new(
+                "jailer",
+                &[],
+                usize::MAX,
+                FaultAction::SpawnError {
+                    message: "injected fault: jailer binary missing".to_owned(),
+                },
+            )],
+        );
+        let error = runner
+            .spawn("jailer", &args(&["--id", "vm-1"]))
+            .expect_err("spawn errors fail the call");
+        assert!(error.to_string().contains("jailer binary missing"));
+        assert_eq!(runner.faulted_count(), 1);
+        assert!(runner.into_inner().spawned.is_empty());
+    }
+
+    #[test]
+    fn kill_passes_through_because_a_pid_carries_no_argv_to_match() {
+        // Even a catch-all rule cannot fault a kill: kill takes a pid handle,
+        // not a program plus arguments. It delegates to the inner runner.
+        let mut runner = FaultInjectingRunner::new(
+            SucceedingRunner::default(),
+            vec![FaultRule::new(
+                "jailer",
+                &[],
+                usize::MAX,
+                FaultAction::Fail {
+                    code: 1,
+                    stderr: "must not fire".to_owned(),
+                },
+            )],
+        );
+        runner
+            .kill(&SpawnedProcess { pid: 4242 })
+            .expect("kill delegates");
+        assert_eq!(runner.faulted_count(), 0);
+        assert!(runner.intercepted().is_empty());
+        assert_eq!(runner.into_inner().killed, vec![4242]);
     }
 
     #[test]

@@ -6,8 +6,12 @@
 //! honestly:
 //!
 //! * owned Docker objects still present (`com.velnor.bench.owner`-labelled
-//!   containers and networks), which must be zero after every round's own
-//!   teardown — any residue is a leak, full stop;
+//!   containers, networks, and images), which must be zero after every round's
+//!   own teardown — any residue is a leak, full stop. Images are sampled
+//!   because the build workloads mint a fresh owner-labelled image per round;
+//!   sampling only containers and networks let a build soak pass while
+//!   per-round images accumulated without bound, and daemon storage is
+//!   invisible to the scratch-bytes signal below;
 //! * the scratch root's on-disk size, reported as first/last bytes plus a
 //!   per-round least-squares slope so growth is visible even when it stays
 //!   below any threshold.
@@ -38,7 +42,7 @@ pub const SOAK_SCHEMA: &str = "velnor.bench.soak.v1";
 /// Minimum rounds: fewer cannot show a trend.
 pub const MIN_ROUNDS: usize = 3;
 
-/// Label key every bench-owned container and network carries.
+/// Label key every bench-owned container, network, and image carries.
 const OWNER_LABEL_KEY: &str = "com.velnor.bench.owner";
 
 /// One soak round: the iteration's own observation plus leak samples.
@@ -50,6 +54,10 @@ pub struct SoakRound {
     pub owned_containers: u64,
     /// Bench-owned networks still present after the round.
     pub owned_networks: u64,
+    /// Bench-owned images still present after the round. Defaulted so reports
+    /// written before image sampling existed still parse.
+    #[serde(default)]
+    pub owned_images: u64,
     /// Scratch-root bytes after the round.
     pub work_root_bytes: u64,
 }
@@ -60,7 +68,7 @@ pub struct SoakVerdict {
     /// True when no round left any owned object behind.
     pub passed: bool,
     pub rounds: usize,
-    /// Largest single-round residue (containers plus networks).
+    /// Largest single-round residue (containers plus networks plus images).
     pub max_residue: u64,
     pub work_root_bytes_first: u64,
     pub work_root_bytes_last: u64,
@@ -132,19 +140,21 @@ fn sample_round(
 ) -> Result<SoakRound> {
     // Host-only workloads spawn no containers; their soak still monitors disk
     // growth and timing drift, but Docker residue is meaningless.
-    let (owned_containers, owned_networks) = if sample_docker {
+    let (owned_containers, owned_networks, owned_images) = if sample_docker {
         (
             count_owned(context, "containers", &["container", "ls", "--all"])?,
             count_owned(context, "networks", &["network", "ls"])?,
+            count_owned(context, "images", &["image", "ls"])?,
         )
     } else {
-        (0, 0)
+        (0, 0, 0)
     };
     Ok(SoakRound {
         round,
         total_ms: observation.total_ms,
         owned_containers,
         owned_networks,
+        owned_images,
         work_root_bytes: tree_bytes(&context.work_root),
     })
 }
@@ -187,7 +197,7 @@ fn median(mut values: Vec<u64>) -> Option<f64> {
 fn verdict(rounds: &[SoakRound]) -> SoakVerdict {
     let max_residue = rounds
         .iter()
-        .map(|round| round.owned_containers + round.owned_networks)
+        .map(|round| round.owned_containers + round.owned_networks + round.owned_images)
         .max()
         .unwrap_or(0);
     let bytes: Vec<u64> = rounds.iter().map(|round| round.work_root_bytes).collect();
@@ -344,6 +354,7 @@ mod tests {
                 total_ms,
                 owned_containers: 0,
                 owned_networks: 0,
+                owned_images: 0,
                 work_root_bytes: 1000 + round as u64 * 100,
             })
             .collect();
@@ -366,6 +377,7 @@ mod tests {
                 total_ms,
                 owned_containers: u64::from(round == 1),
                 owned_networks: 0,
+                owned_images: 0,
                 work_root_bytes: 500,
             })
             .collect();
@@ -373,6 +385,27 @@ mod tests {
         assert!(!result.passed);
         assert_eq!(result.max_residue, 1);
         assert_eq!(result.work_root_bytes_per_round, 0.0);
+    }
+
+    #[test]
+    fn owned_image_residue_fails_the_verdict() {
+        // Build workloads mint one image per round; the verdict must count
+        // images or a build soak passes with unbounded accumulation.
+        let rounds: Vec<SoakRound> = [10, 10, 10]
+            .into_iter()
+            .enumerate()
+            .map(|(round, total_ms)| SoakRound {
+                round,
+                total_ms,
+                owned_containers: 0,
+                owned_networks: 0,
+                owned_images: round as u64 + 1,
+                work_root_bytes: 500,
+            })
+            .collect();
+        let result = verdict(&rounds);
+        assert!(!result.passed);
+        assert_eq!(result.max_residue, 3);
     }
 
     #[test]
@@ -395,6 +428,7 @@ mod tests {
                 total_ms: 10,
                 owned_containers: 0,
                 owned_networks: 0,
+                owned_images: 0,
                 work_root_bytes: 100,
             }],
             verdict: SoakVerdict {

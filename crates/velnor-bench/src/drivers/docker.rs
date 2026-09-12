@@ -813,6 +813,24 @@ impl DockerWorkload {
         }
     }
 
+    /// Remove one owned image tag now and forget it, instead of holding it to
+    /// teardown. Build workloads call this at the end of every round — and for
+    /// the cache warmup in `prepare` — so no round leaves an owned image
+    /// behind for soak to trip on. Removing the tag does not evict the layers,
+    /// so the next round's build still hits the warm layer cache.
+    fn remove_owned_image_by_tag(&mut self, context: &mut Context, tag: &str) -> Result<()> {
+        let id = self
+            .owned_images
+            .iter()
+            .find(|owned| owned.tag == tag)
+            .map(|owned| owned.id.clone())
+            .with_context(|| format!("owned image {tag:?} was not captured before removal"))?;
+        let owner = self.owner_token();
+        remove_owned_image(context, tag, &id, &owner)?;
+        self.owned_images.retain(|owned| owned.tag != tag);
+        Ok(())
+    }
+
     fn cleanup_owned_resources(&mut self, context: &mut Context) -> Result<()> {
         let mut failures = Vec::new();
         let mut remaining_containers = Vec::new();
@@ -950,6 +968,10 @@ impl Workload for DockerWorkload {
                 let warmed = context.runner.run("docker", &args)?;
                 require_success(warmed, "docker cached-build warmup")?;
                 self.capture_owned_image(context, &tag)?;
+                // Drop the warmup tag at once: the layers stay cached for the
+                // measured builds, while a lingering tag would read as residue
+                // in every round's soak sample.
+                self.remove_owned_image_by_tag(context, &tag)?;
             }
         }
         Ok(())
@@ -1459,7 +1481,12 @@ impl DockerWorkload {
         resources.cache_misses = misses;
         stages.insert(Stage::FirstUserCommand, build_ms);
         stages.insert(Stage::CompletionOverhead, inspect_ms);
-        stages.insert(Stage::Teardown, 0);
+        // Per-round teardown removes the round's image now, like the container
+        // workloads remove their round's objects: holding every round's image
+        // to teardown let a build soak pass with unbounded accumulation.
+        let (removed, teardown_ms) = timed(|| self.remove_owned_image_by_tag(context, &tag));
+        removed?;
+        stages.insert(Stage::Teardown, teardown_ms);
         Ok(())
     }
 }

@@ -241,6 +241,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R1-pub bounded the step publishers: bounded channels with counted best-effort drops, a 30s deadline on every publish network call, feed drop-and-reconnect on stall, and an entry- plus byte-capped streamed-log mirror; drain-before-exit kept, with the drop counts on the forensics line (§109). |
 | 2026-09-13 | R1-pub correction counted the mirror evictions on the forensics line, stamped a truncation marker into the merged cancel-path log when drops/evictions are nonzero, and re-grounded the single-oversize-record carve-out on `ScriptJobResult` retention instead of the nonexistent producer line-buffering cap (§109). |
 | 2026-09-13 | R1-bench landed the WP-17 census/fault/soak/compare core: runner `docker::metrics::snapshot`, checkout span contract pinned, `CommandRunner` fault decorator, bench census/fault-catalogue/trace/soak/compare modules, `fault/*` + `lifecycle/trust-partition` rows, and the `float_roundtrip` record-integrity fix — all proven against a live Engine (§110). |
+| 2026-09-13 | R1-bench correction closed all five review issues: fail-closed fault residue sampling (`Result` + uncontained-on-sampling-error, network `not found` vocabulary fixed live), soak image sampling with per-round build-image teardown, zero-filled intermittent census classes, records kept for uninjected runs with the nonzero exit preserved, and spawn interception in the fault decorator with kill documented as passthrough (§110). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -6059,3 +6060,63 @@ has no pass/fail policy yet (reported as evidence); the `S8` acceptance
 named in the brief is not present in either repository at these heads, so
 the percentile acceptance (p95 at n>=20) was re-evaluated instead, with the
 live n=20 run above.
+
+R1-bench correction — 2026-09-13 (review, all five issues fixed): (1)
+fault residue sampling failed open — `container_residue` /
+`network_residue` (`drivers/fault.rs`) mapped every sampling error to empty
+residue, so a dead daemon read as proven containment. Both now return
+`Result`: exit 0 proves presence, a daemon not-found answer proves absence,
+and anything else (spawn failure, timeout, inconclusive stderr) is an error
+that yields an uncontained outcome whose detail names the sampling failure;
+the record is still written and `run` exits nonzero. The strict classifier
+caught a real vocabulary gap live: networks answer `network <name> not
+found`, not `No such ...`, so `is_not_found` now matches both, pinned by
+test. (2) Soak sampled only containers and networks while build workloads
+minted one owner-labelled image per round (held to teardown), so a build
+soak passed with unbounded accumulation invisible to both signals. Soak now
+samples owned images too (`owned_images` per round, counted in
+`max_residue`, defaulted so old reports still parse), and the build
+workloads remove each round's image at round end — plus the cache-warmup tag
+in `prepare`, since layers stay cached without the tag — with the removal
+measured in `Stage::Teardown` instead of the hardcoded 0; teardown recovery
+is kept as the safety net. (3) Census summaries dropped any class missing
+from even one observation, so a class in 19/20 rounds vanished silently.
+Absence is now zero-filled (census absence is observed-zero, unlike a
+missing stage) whenever any observation carries the class. (4) `validate()`
+rejected `injected=false` before `main` wrote the record, losing the detail
+diagnostics; the `FaultNotInjected` rejection is removed and `run` writes
+the record then exits nonzero on any uninjected or uncontained outcome.
+(5) `FaultInjectingRunner` passed `spawn` / `kill` through unlogged while
+the module doc claimed every spawn. `spawn` is now intercepted (rules match,
+budget consumed, logged; `Fail` surfaces as a spawn error naming the
+scripted code, since a spawn has no result channel) and `kill` is documented
+as deliberate passthrough — a pid handle carries no argv to match, and only
+the firecracker jailer path uses `spawn` / `kill`, so no docker or git path
+bypasses interception.
+
+Correction tests: 7 new, 1 replaced. Bench: the residue classifier proves
+presence/absence and fails closed on daemon-down, timeout, and empty
+failure; owned-image residue fails the soak verdict; an intermittent census
+class zero-fills and validates; the uninjected rejection test is replaced by
+an uninjected run keeping its record. Runner: spawn interception
+(fail-as-spawn-error, budget, log), spawn-error without reaching the inner
+runner, and kill passthrough under a catch-all rule.
+
+Live evidence from this worktree (OrbStack Engine, alpine:3.21): all four
+fault scenarios inject and contain at n=3 with exit 0; the fail-closed path
+was proven live mid-correction (the network-vocabulary gap produced
+uncontained outcomes with `residue sampling failed` details, the record
+still written, nonzero exit); build-cached, build-uncached, and
+existing-image soaks pass 3/3 rounds with zero container/network/image
+residue; build-cached records 3 cache hits + 1 miss per iteration with
+measured teardown, proving warmup-tag removal kept the layer cache; a
+fault record flipped to uninjected validates through `compare`; no
+bench-owned containers, networks, or images remain on the daemon.
+
+Correction gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets --locked` zero warnings;
+strict clippy clean on bench and on runner with `test-support`
+(`-D warnings`); bench 187 passed, 0 failed (183 pre-correction + 4 new);
+serial runner lib 1775 passed, 0 failed, 1 ignored (1772 + 3 new); serial
+runner lib with `test-support` 1820 passed, 0 failed, 1 ignored
+(1817 + 3 new).

@@ -97,8 +97,10 @@ pub struct Summaries {
     pub stages_ms: BTreeMap<Stage, Summary>,
     pub checkout_phases_ms: BTreeMap<CheckoutPhase, Summary>,
     /// Per-class census summaries, keyed by the runner's class label. A class
-    /// is summarised only when every observation carries it, like stages.
-    /// Defaulted so records written before the census existed still parse.
+    /// is summarised when any observation carries it, with zeroes filled in
+    /// for the observations that do not: census absence is observed-zero, not
+    /// unobserved like a missing stage. Defaulted so records written before
+    /// the census existed still parse.
     #[serde(default)]
     pub docker_census: BTreeMap<String, CensusSummary>,
     /// Per-lane totals; the whole point of the lane split.
@@ -157,22 +159,37 @@ impl Summaries {
         }
 
         // The census labels are a closed set — the runner's DockerOp
-        // vocabulary — so iterate it exactly like Stage::ALL above.
+        // vocabulary — so iterate it. Unlike stages, a class missing from some
+        // observation is observed-zero for that round, not unobserved: the
+        // census only carries classes the round actually invoked. Zero-fill
+        // the gaps so an intermittent class is summarised instead of silently
+        // dropped.
         let mut docker_census = BTreeMap::new();
         for op in velnor_runner::docker::DockerOp::ALL {
             let label = op.label();
-            if !observations.is_empty()
-                && observations
-                    .iter()
-                    .all(|observation| observation.docker_census.by_class.contains_key(label))
+            if observations
+                .iter()
+                .any(|observation| observation.docker_census.by_class.contains_key(label))
             {
                 let counts: Vec<u64> = observations
                     .iter()
-                    .map(|observation| observation.docker_census.by_class[label].count)
+                    .map(|observation| {
+                        observation
+                            .docker_census
+                            .by_class
+                            .get(label)
+                            .map_or(0, |class| class.count)
+                    })
                     .collect();
                 let latencies: Vec<u64> = observations
                     .iter()
-                    .map(|observation| observation.docker_census.by_class[label].latency_ms)
+                    .map(|observation| {
+                        observation
+                            .docker_census
+                            .by_class
+                            .get(label)
+                            .map_or(0, |class| class.latency_ms)
+                    })
                     .collect();
                 docker_census.insert(
                     label.to_owned(),
@@ -285,9 +302,6 @@ pub enum RecordError {
     UnknownFaultClass {
         class: String,
     },
-    FaultNotInjected {
-        class: String,
-    },
     FaultResidueWhileContained {
         class: String,
     },
@@ -386,10 +400,6 @@ impl std::fmt::Display for RecordError {
             Self::UnknownFaultClass { class } => write!(
                 formatter,
                 "fault outcome names unknown catalogue class {class:?}"
-            ),
-            Self::FaultNotInjected { class } => write!(
-                formatter,
-                "fault outcome for {class:?} never triggered its fault"
             ),
             Self::FaultResidueWhileContained { class } => write!(
                 formatter,
@@ -490,11 +500,11 @@ impl BenchRecord {
                             class: outcome.class.clone(),
                         });
                     }
-                    if !outcome.injected {
-                        return Err(RecordError::FaultNotInjected {
-                            class: outcome.class.clone(),
-                        });
-                    }
+                    // A never-injected outcome still validates: rejecting it
+                    // here would discard the record — and the detail
+                    // diagnostics pinning down why the fault never triggered.
+                    // `run` writes the record and exits nonzero instead, on
+                    // the same path as an uncontained outcome.
                     if outcome.contained && !outcome.residue.is_empty() {
                         return Err(RecordError::FaultResidueWhileContained {
                             class: outcome.class.clone(),
@@ -888,6 +898,27 @@ mod tests {
     }
 
     #[test]
+    fn a_census_class_missing_from_some_iterations_is_zero_filled_not_dropped() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        // One round invoked no docker at all: its census is empty and its
+        // resource count agrees, so absence is observed-zero.
+        record.observations[0].docker_census.by_class.clear();
+        record.observations[0].resources.docker_invocations = 0;
+        record.summaries = Summaries::new(&record.observations).expect("summaries");
+        let summary = record
+            .summaries
+            .docker_census
+            .get("query")
+            .expect("an intermittent class is still summarised");
+        assert_eq!(summary.count.samples, 4);
+        assert_eq!(summary.count.min, 0);
+        assert_eq!(summary.count.max, 2);
+        assert_eq!(summary.latency_ms.min, 0);
+        assert_eq!(summary.latency_ms.max, 4);
+        record.validate().expect("zero-filled summaries validate");
+    }
+
+    #[test]
     fn a_census_label_outside_the_runner_vocabulary_is_rejected() {
         let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
         record.observations[0].docker_census.by_class.insert(
@@ -996,19 +1027,17 @@ mod tests {
     }
 
     #[test]
-    fn a_fault_that_never_triggered_is_rejected() {
+    fn a_fault_that_never_triggered_keeps_its_record() {
+        // Validation accepts the miss so `run` can write the record — with
+        // the detail diagnostics — and exit nonzero on the uncontained path.
         let mut record = fault_record();
-        record.observations[0]
-            .fault
-            .as_mut()
-            .expect("outcome")
-            .injected = false;
-        assert_eq!(
-            record.validate(),
-            Err(RecordError::FaultNotInjected {
-                class: "docker-kill-mid-step".to_owned(),
-            })
-        );
+        let outcome = record.observations[0].fault.as_mut().expect("outcome");
+        outcome.injected = false;
+        outcome.contained = false;
+        outcome.detail = "running=false kill_exit=0 wait_exit=-1".to_owned();
+        record
+            .validate()
+            .expect("an uninjected run is still a record");
     }
 
     #[test]

@@ -29,7 +29,7 @@ use crate::{
     record::{Observation, Resources},
     scenario::Scenario,
     stage::Stage,
-    sys::tree_bytes,
+    sys::{tree_bytes, Invocation},
 };
 
 /// Shape of the injected fault.
@@ -202,9 +202,11 @@ fn parse_wait_code(stdout: &str) -> Result<i32> {
 }
 
 /// True when the daemon answers that the named object does not exist.
+/// Containers answer `No such container` (or `No such object`) while networks
+/// answer `network <name> not found` — both are proven absence, observed live.
 fn is_not_found(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
-    lower.contains("no such")
+    lower.contains("no such") || lower.contains("not found")
 }
 
 impl Workload for FaultWorkload {
@@ -345,28 +347,75 @@ fn remove_network(context: &mut Context, name: &str) -> Result<()> {
     )
 }
 
-/// Names of owned objects that still exist. Empty is containment.
-fn container_residue(context: &mut Context, name: &str) -> Vec<String> {
-    match context
-        .runner
-        .run("docker", &["inspect", "--format", "{{.Id}}", name])
-    {
-        Ok(invocation) if invocation.ok() => vec![format!("container {name}")],
-        _ => Vec::new(),
+/// Classify one residue `inspect`. `Ok(true)` proves the object still exists,
+/// `Ok(false)` proves the daemon answered absent, and `Err` means the sample
+/// itself failed and proves nothing. Sampling failures fail closed: an
+/// unverified cleanup is never reported as containment, so a dead daemon, a
+/// timed-out inspect, or any other inconclusive answer marks the outcome
+/// uncontained instead of reading as proven cleanup.
+fn inspect_means_present(invocation: &Invocation, description: &str) -> Result<bool> {
+    if invocation.ok() {
+        return Ok(true);
     }
+    if is_not_found(&invocation.stderr) {
+        return Ok(false);
+    }
+    bail!(
+        "residue sampling for {description} failed with exit code {}: {}",
+        invocation.code,
+        invocation.stderr.trim()
+    )
 }
 
-fn network_residue(context: &mut Context, name: &str) -> Vec<String> {
-    match context.runner.run(
-        "docker",
-        &["network", "inspect", "--format", "{{.Id}}", name],
-    ) {
-        Ok(invocation) if invocation.ok() => vec![format!("network {name}")],
-        _ => Vec::new(),
+/// Names of owned objects that still exist. Empty is containment — but only
+/// when the sample actually verified absence; see [`inspect_means_present`].
+fn container_residue(context: &mut Context, name: &str) -> Result<Vec<String>> {
+    let invocation = context
+        .runner
+        .run("docker", &["inspect", "--format", "{{.Id}}", name])
+        .with_context(|| format!("residue sampling for container {name}"))?
+        .clone();
+    if inspect_means_present(&invocation, &format!("container {name}"))? {
+        return Ok(vec![format!("container {name}")]);
     }
+    Ok(Vec::new())
+}
+
+fn network_residue(context: &mut Context, name: &str) -> Result<Vec<String>> {
+    let invocation = context
+        .runner
+        .run(
+            "docker",
+            &["network", "inspect", "--format", "{{.Id}}", name],
+        )
+        .with_context(|| format!("residue sampling for network {name}"))?
+        .clone();
+    if inspect_means_present(&invocation, &format!("network {name}"))? {
+        return Ok(vec![format!("network {name}")]);
+    }
+    Ok(Vec::new())
 }
 
 impl FaultWorkload {
+    /// An outcome for a residue sample that failed. Containment is unproven,
+    /// so the outcome is uncontained and the detail names the sampling error.
+    /// The record is still written — an unverified cleanup is evidence — and
+    /// `run` exits nonzero on the uncontained outcome.
+    fn sampling_failure(
+        &self,
+        injected: bool,
+        detail: &str,
+        error: &anyhow::Error,
+    ) -> FaultOutcome {
+        FaultOutcome {
+            class: self.kind.class().to_owned(),
+            injected,
+            contained: false,
+            residue: Vec::new(),
+            detail: format!("{detail}; residue sampling failed: {error:#}"),
+        }
+    }
+
     /// Prove the container is running before killing it, so a kill against a
     /// dead container cannot pass as an injection.
     fn await_running(&self, context: &mut Context, name: &str) -> Result<bool> {
@@ -478,19 +527,24 @@ impl FaultWorkload {
         let started = Instant::now();
         remove_container(context, &name)?;
         self.owned_containers.retain(|owned| owned != &name);
-        let residue = container_residue(context, &name);
+        let sampled = container_residue(context, &name);
         stages.insert(Stage::Teardown, elapsed_ms(started));
 
+        let detail = format!(
+            "running={running} kill_exit={} wait_exit={code}",
+            killed.code,
+        );
+        let residue = match sampled {
+            Ok(residue) => residue,
+            Err(error) => return Ok(self.sampling_failure(injected, &detail, &error)),
+        };
         let contained = injected && residue.is_empty();
         Ok(FaultOutcome {
             class: self.kind.class().to_owned(),
             injected,
             contained,
             residue,
-            detail: format!(
-                "running={running} kill_exit={} wait_exit={code}",
-                killed.code,
-            ),
+            detail,
         })
     }
 
@@ -569,16 +623,21 @@ impl FaultWorkload {
         let started = Instant::now();
         remove_container(context, &name)?;
         self.owned_containers.retain(|owned| owned != &name);
-        let residue = container_residue(context, &name);
+        let sampled = container_residue(context, &name);
         stages.insert(Stage::Teardown, elapsed_ms(started));
 
+        let detail = format!("wait_exit={code}");
+        let residue = match sampled {
+            Ok(residue) => residue,
+            Err(error) => return Ok(self.sampling_failure(injected, &detail, &error)),
+        };
         let contained = injected && residue.is_empty();
         Ok(FaultOutcome {
             class: self.kind.class().to_owned(),
             injected,
             contained,
             residue,
-            detail: format!("wait_exit={code}"),
+            detail,
         })
     }
 
@@ -605,7 +664,7 @@ impl FaultWorkload {
             .run("docker", &["rm", "--force", name.as_str()])
             .context("docker rm missing object")?
             .clone();
-        let residue = container_residue(context, &name);
+        let sampled = container_residue(context, &name);
         stages.insert(Stage::Teardown, elapsed_ms(started));
         // Key on the daemon's answer, not the exit code: `docker rm --force`
         // against an absent object exits 0 on Engine 29 while still reporting
@@ -614,16 +673,21 @@ impl FaultWorkload {
         let remove_clean = is_not_found(&removed.stderr);
 
         let injected = inspect_clean && remove_clean;
+        let detail = format!(
+            "inspect_exit={} remove_exit={}",
+            inspected.code, removed.code
+        );
+        let residue = match sampled {
+            Ok(residue) => residue,
+            Err(error) => return Ok(self.sampling_failure(injected, &detail, &error)),
+        };
         let contained = injected && residue.is_empty();
         Ok(FaultOutcome {
             class: self.kind.class().to_owned(),
             injected,
             contained,
             residue,
-            detail: format!(
-                "inspect_exit={} remove_exit={}",
-                inspected.code, removed.code
-            ),
+            detail,
         })
     }
 
@@ -681,16 +745,21 @@ impl FaultWorkload {
         let started = Instant::now();
         remove_network(context, &name)?;
         self.owned_networks.retain(|owned| owned != &name);
-        let residue = network_residue(context, &name);
+        let sampled = network_residue(context, &name);
         stages.insert(Stage::Teardown, elapsed_ms(started));
 
+        let detail = format!("conflict_exit={}", conflicted.code);
+        let residue = match sampled {
+            Ok(residue) => residue,
+            Err(error) => return Ok(self.sampling_failure(injected, &detail, &error)),
+        };
         let contained = injected && residue.is_empty();
         Ok(FaultOutcome {
             class: self.kind.class().to_owned(),
             injected,
             contained,
             residue,
-            detail: format!("conflict_exit={}", conflicted.code),
+            detail,
         })
     }
 }
@@ -738,10 +807,66 @@ mod tests {
     #[test]
     fn not_found_matching_accepts_only_absent_object_errors() {
         assert!(is_not_found("Error: No such container: abc"));
-        assert!(is_not_found("Error: no such network: xyz"));
+        assert!(is_not_found("Error: No such object: abc"));
+        assert!(is_not_found(
+            "Error response from daemon: network vb-fault-net-1 not found"
+        ));
         assert!(!is_not_found(""));
         assert!(!is_not_found(
             "Error response from daemon: Cannot connect to the Docker daemon"
         ));
+    }
+
+    fn inspect_invocation(code: i32, stdout: &str, stderr: &str) -> Invocation {
+        Invocation {
+            program: "docker".to_owned(),
+            args: vec!["inspect".to_owned()],
+            code,
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+            wall: std::time::Duration::from_millis(5),
+        }
+    }
+
+    #[test]
+    fn residue_sampling_verifies_presence_and_absence() {
+        let present = inspect_invocation(0, "abc123\n", "");
+        assert!(inspect_means_present(&present, "container x").expect("present"));
+
+        let absent = inspect_invocation(1, "", "Error: No such container: x\n");
+        assert!(!inspect_means_present(&absent, "container x").expect("absent"));
+
+        let absent_network =
+            inspect_invocation(1, "", "Error response from daemon: network x not found\n");
+        assert!(!inspect_means_present(&absent_network, "network x").expect("absent network"));
+    }
+
+    #[test]
+    fn residue_sampling_fails_closed_on_inconclusive_answers() {
+        // A dead daemon is the case that used to read as proven containment:
+        // the inspect exits nonzero without a not-found answer.
+        let daemon_down = inspect_invocation(
+            1,
+            "",
+            "Error response from daemon: Cannot connect to the Docker daemon\n",
+        );
+        assert!(
+            inspect_means_present(&daemon_down, "container x").is_err(),
+            "a dead daemon proves nothing"
+        );
+
+        // A timed-out inspect (the runner kills the child, exit -1) likewise
+        // proves nothing.
+        let timed_out = inspect_invocation(-1, "", "command timed out after 15000 ms");
+        assert!(
+            inspect_means_present(&timed_out, "network y").is_err(),
+            "a timed-out sample proves nothing"
+        );
+
+        let empty_failure = inspect_invocation(1, "", "");
+        assert!(
+            inspect_means_present(&empty_failure, "container x").is_err(),
+            "an unexplained failure proves nothing"
+        );
     }
 }
