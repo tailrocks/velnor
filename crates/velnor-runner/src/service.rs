@@ -433,9 +433,11 @@ impl From<DaemonArgs> for crate::args::DaemonArgs {
             docker_image: a.docker_image,
             job_cpus: a.job_cpus,
             job_memory: a.job_memory,
-            // The one resolution point of the pool trust boundary. Everything
-            // downstream — the capability gates and every trust-scoped store
-            // path — reads the value published here.
+            // The one resolution point of the pool trust boundary: the ceiling
+            // every job on this pool runs under. Admission narrows it by the
+            // job's trust class, and everything downstream — the capability
+            // gates and every trust-scoped store path — reads the job's
+            // admitted scope, never this flag directly.
             trust_scope: a.trust.resolve().into_string(),
             emergency_reserve_bytes: a.emergency_reserve_bytes,
             job_peak_bytes: a.job_peak_bytes,

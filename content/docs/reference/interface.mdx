@@ -205,7 +205,7 @@ The allowlist is closed. A JavaScript, Docker, or composite action that is not o
 
 The operator PAT is used for registration, runner/group lookup, and runner cleanup. It is not a job credential.
 
-GitHub supplies job-scoped credentials in the acquired job payload. Velnor injects them only after admission, including the job token, Actions runtime token, OIDC material, and cache/results credentials. A job carrying GitHub user secrets is rejected outright unless the operator set `VELNOR_TRUST_SCOPE=trusted`, which is not the default; see [Trust scope](/reference/trust-scope). MicroVM guests must be credential-free at readiness; credentials are delivered only for the job session.
+GitHub supplies job-scoped credentials in the acquired job payload. Velnor injects them only after admission, including the job token, Actions runtime token, OIDC material, and cache/results credentials. A job carrying GitHub user secrets is rejected outright unless the pool is `trusted` (`VELNOR_TRUST_SCOPE=trusted`, which is not the default) and the job's own trust class is trusted; see [Trust scope](/reference/trust-scope). MicroVM guests must be credential-free at readiness; credentials are delivered only for the job session.
 
 Packaged installations keep the operator token in `/etc/velnor/secrets.env` with mode `0600`; it is not passed in process arguments.
 

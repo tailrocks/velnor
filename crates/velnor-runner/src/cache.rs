@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use crate::{
     args::{CacheArgs, CacheCommand, CacheGcArgs},
     config,
+    store_catalog::StoreCatalog,
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -386,111 +387,121 @@ fn store_roots_with_layout(
     // itself: that is exactly how the artifact store came to be written at
     // `<work>/slot-N/_velnor_artifacts` while GC swept `<work>/_velnor_artifacts`.
     let catalog = crate::store_catalog::StoreCatalog::for_work_root_with_layout(work_root, layout);
-    let cargo = catalog.cargo();
-    let cargo_bin = cargo.join("bin");
-    let cargo_bin_legacy = is_legacy_store(&cargo);
-    let mise = catalog.mise();
-    let mise_legacy = is_legacy_store(&mise);
-    let targets = catalog.targets();
-    let targets_legacy = is_legacy_store(&targets);
-    let actions_cache = catalog.actions_cache();
-    let actions_cache_legacy = is_legacy_store(&actions_cache);
-    let mut stores = vec![
-        StoreRoot {
-            kind: CacheStore::Cargo,
-            path: cargo.join("registry"),
-            scope_prefix: vec!["registry".into()],
-            scope_depth: 0,
-            candidate_depth: 0,
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Cargo,
-            path: cargo.join("git"),
-            scope_prefix: vec!["git".into()],
-            scope_depth: 0,
-            candidate_depth: 0,
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Cargo,
-            path: cargo_bin,
-            scope_prefix: vec!["bin".into()],
-            scope_depth: if cargo_bin_legacy { 2 } else { 1 },
-            candidate_depth: if cargo_bin_legacy { 2 } else { 1 },
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Mise,
-            path: mise.join("cache"),
-            scope_prefix: vec!["cache".into()],
-            scope_depth: 0,
-            candidate_depth: 0,
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Mise,
-            path: mise.join("installs"),
-            scope_prefix: vec!["installs".into()],
-            scope_depth: if mise_legacy { 2 } else { 1 },
-            candidate_depth: if mise_legacy { 2 } else { 1 },
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        // Plan 008: persistent per-version mise binaries, same trust/repository
-        // boundary and mise budget as installs.
-        StoreRoot {
-            kind: CacheStore::Mise,
-            path: mise.join("binaries"),
-            scope_prefix: vec!["binaries".into()],
-            scope_depth: if mise_legacy { 2 } else { 1 },
-            candidate_depth: if mise_legacy { 2 } else { 1 },
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Mise,
-            path: mise.join("rustup"),
-            scope_prefix: vec!["rustup".into()],
-            scope_depth: if mise_legacy { 2 } else { 1 },
-            candidate_depth: if mise_legacy { 2 } else { 1 },
-            gc_managed: true,
-            emergency_managed: true,
-        },
-        StoreRoot {
+    let mut stores = Vec::new();
+    // Jobs run under their admitted scope: trusted jobs under the pool scope,
+    // fork and unknown jobs under the untrusted floor — on every pool. Each
+    // trust-partitioned class is swept under both namespaces; the roots dedupe
+    // by path, so the legacy layout (one root, trust below it) enumerates once.
+    for cargo in trust_partitioned_roots(&catalog, StoreCatalog::cargo) {
+        let legacy = is_legacy_store(&cargo);
+        stores.extend([
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: cargo.join("registry"),
+                scope_prefix: vec!["registry".into()],
+                scope_depth: 0,
+                candidate_depth: 0,
+                gc_managed: true,
+                emergency_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: cargo.join("git"),
+                scope_prefix: vec!["git".into()],
+                scope_depth: 0,
+                candidate_depth: 0,
+                gc_managed: true,
+                emergency_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: cargo.join("bin"),
+                scope_prefix: vec!["bin".into()],
+                scope_depth: if legacy { 2 } else { 1 },
+                candidate_depth: if legacy { 2 } else { 1 },
+                gc_managed: true,
+                emergency_managed: true,
+            },
+        ]);
+    }
+    for mise in trust_partitioned_roots(&catalog, StoreCatalog::mise) {
+        let legacy = is_legacy_store(&mise);
+        stores.extend([
+            StoreRoot {
+                kind: CacheStore::Mise,
+                path: mise.join("cache"),
+                scope_prefix: vec!["cache".into()],
+                scope_depth: 0,
+                candidate_depth: 0,
+                gc_managed: true,
+                emergency_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Mise,
+                path: mise.join("installs"),
+                scope_prefix: vec!["installs".into()],
+                scope_depth: if legacy { 2 } else { 1 },
+                candidate_depth: if legacy { 2 } else { 1 },
+                gc_managed: true,
+                emergency_managed: true,
+            },
+            // Plan 008: persistent per-version mise binaries, same trust/repository
+            // boundary and mise budget as installs.
+            StoreRoot {
+                kind: CacheStore::Mise,
+                path: mise.join("binaries"),
+                scope_prefix: vec!["binaries".into()],
+                scope_depth: if legacy { 2 } else { 1 },
+                candidate_depth: if legacy { 2 } else { 1 },
+                gc_managed: true,
+                emergency_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Mise,
+                path: mise.join("rustup"),
+                scope_prefix: vec!["rustup".into()],
+                scope_depth: if legacy { 2 } else { 1 },
+                candidate_depth: if legacy { 2 } else { 1 },
+                gc_managed: true,
+                emergency_managed: true,
+            },
+        ]);
+    }
+    for targets in trust_partitioned_roots(&catalog, StoreCatalog::targets) {
+        let legacy = is_legacy_store(&targets);
+        stores.push(StoreRoot {
             kind: CacheStore::Targets,
             path: targets,
             scope_prefix: Vec::new(),
             // The existing job bucket remains the ownership scope. Immutable
             // target generations are one directory below it.
-            scope_depth: if targets_legacy { 5 } else { 4 },
-            candidate_depth: if targets_legacy { 6 } else { 5 },
+            scope_depth: if legacy { 5 } else { 4 },
+            candidate_depth: if legacy { 6 } else { 5 },
             gc_managed: true,
             emergency_managed: true,
-        },
-        StoreRoot {
+        });
+    }
+    for actions_cache in trust_partitioned_roots(&catalog, StoreCatalog::actions_cache) {
+        let legacy = is_legacy_store(&actions_cache);
+        stores.push(StoreRoot {
             kind: CacheStore::ActionsCache,
             path: actions_cache,
             scope_prefix: Vec::new(),
-            scope_depth: if actions_cache_legacy { 2 } else { 1 },
-            candidate_depth: if actions_cache_legacy { 3 } else { 2 },
+            scope_depth: if legacy { 2 } else { 1 },
+            candidate_depth: if legacy { 3 } else { 2 },
             gc_managed: true,
             emergency_managed: true,
-        },
-        StoreRoot {
-            kind: CacheStore::Artifacts,
-            path: catalog.artifacts(),
-            scope_prefix: Vec::new(),
-            scope_depth: 1,
-            candidate_depth: 1,
-            gc_managed: true,
-            emergency_managed: true,
-        },
-    ];
+        });
+    }
+    stores.push(StoreRoot {
+        kind: CacheStore::Artifacts,
+        path: catalog.artifacts(),
+        scope_prefix: Vec::new(),
+        scope_depth: 1,
+        candidate_depth: 1,
+        gc_managed: true,
+        emergency_managed: true,
+    });
     for (trust_class, trust_scope) in crate::store_catalog::TRUST_SCOPES {
         for (kind, path) in [
             (CacheStore::Mbx, catalog.mbx(trust_scope)),
@@ -527,6 +538,28 @@ fn store_roots_with_layout(
 fn is_legacy_store(path: &Path) -> bool {
     path.file_name()
         .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
+}
+
+/// The roots of one trust-partitioned store class: the pool scope first, then
+/// the untrusted floor fork and unknown jobs run under, deduped by path.
+///
+/// The pool scope comes from the process resolution (the daemon's flag); the
+/// floor is unconditional. Legacy roots ignore the scope, so both resolve to
+/// the one root and enumerate once. Canonical roots namespace by scope, so a
+/// trusted pool sweeps both its own namespace and the fork-job namespace —
+/// without the second root, fork-job stores on a trusted pool would grow
+/// unbounded, invisible to every collector.
+fn trust_partitioned_roots(
+    catalog: &StoreCatalog,
+    root: impl Fn(&StoreCatalog, &str) -> PathBuf,
+) -> Vec<PathBuf> {
+    let pool = root(catalog, &crate::trust_scope::current());
+    let floor = root(catalog, crate::trust_scope::FAIL_CLOSED);
+    if floor == pool {
+        vec![pool]
+    } else {
+        vec![pool, floor]
+    }
 }
 
 fn scoped_sizes(store: &StoreRoot) -> Result<BTreeMap<String, u64>> {
@@ -1922,6 +1955,45 @@ mod tests {
         assert!(active.exists());
         assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
         assert!(root.join("log/gc-history.jsonl").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gc_sweeps_both_pool_and_fork_namespaces_on_a_trusted_pool() {
+        // Fork and unknown jobs run under the untrusted floor on every pool,
+        // so a trusted pool accumulates stores in two canonical namespaces.
+        // Both must be visible to the collector; without the second root the
+        // fork-job stores would grow unbounded.
+        let _serial = crate::trust_scope::test_support::serialized();
+        assert_eq!(crate::trust_scope::resolve("trusted").as_str(), "trusted");
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-gc-trust-namespaces-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let trusted = root.join("cache/velnor/v1/trusted/caches/repo/key");
+        let untrusted = root.join("cache/velnor/v1/untrusted/caches/repo/key");
+        for path in [&trusted, &untrusted] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("data"), vec![0; 16]).unwrap();
+        }
+
+        let report = reclaim_work_root_with_layout(
+            &work,
+            &root.join("run"),
+            &root.join("log"),
+            32,
+            &BTreeSet::new(),
+            false,
+            Some(&layout),
+        )
+        .unwrap();
+
+        assert!(!trusted.exists(), "pool namespace was not swept");
+        assert!(!untrusted.exists(), "fork-job namespace was not swept");
+        assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 

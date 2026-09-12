@@ -36,9 +36,10 @@
 //! * [`TrustClass::Unknown`] is treated as untrusted: only [`TrustClass::Trusted`]
 //!   reports [`TrustClass::is_trusted`].
 //!
-//! This module derives the class only. Enforcing it (a pool refusing a job
-//! whose class exceeds the pool's) is the WP-6 remainder and lives outside
-//! this package.
+//! This module derives the class and maps it against the pool ceiling
+//! ([`TrustClass::admitted_scope`]). Enforcing the admitted scope — secrets,
+//! the Docker socket, and the store namespace a job runs with — happens at
+//! admission (`runner.rs`) and in the execution path it threads the scope to.
 //!
 //! [`RepositoryResource`]: crate::job_message::RepositoryResource
 
@@ -112,6 +113,24 @@ impl TrustClass {
     #[must_use]
     pub fn is_trusted(self) -> bool {
         matches!(self, Self::Trusted)
+    }
+
+    /// The trust scope in effect for a job of this class on a pool whose flag
+    /// is `pool_scope`.
+    ///
+    /// The pool flag is a ceiling, never the job's trust: a [`TrustClass::Trusted`]
+    /// job keeps the pool value (including `release` and custom scopes), while
+    /// [`TrustClass::ForkPR`] and [`TrustClass::Unknown`] fail closed to the
+    /// untrusted floor whatever the pool allows. Admission computes this once
+    /// per job and threads it down; no per-job path re-derives trust from the
+    /// pool flag alone.
+    #[must_use]
+    pub fn admitted_scope<'a>(&self, pool_scope: &'a str) -> &'a str {
+        if self.is_trusted() {
+            pool_scope
+        } else {
+            crate::trust_scope::FAIL_CLOSED
+        }
     }
 
     /// Stable lowercase label for logs and telemetry.
@@ -811,6 +830,36 @@ mod tests {
         assert_eq!(TrustClass::Trusted.as_str(), "trusted");
         assert_eq!(TrustClass::ForkPR.as_str(), "fork-pr");
         assert_eq!(TrustClass::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn trust_class_conformance_pool_flag_is_a_ceiling() {
+        // A trusted job keeps the pool value untouched — the ceiling,
+        // including non-docker scopes like `release` and custom pool names.
+        for pool in [
+            "trusted",
+            " trusted ",
+            "release",
+            "public-forks",
+            "untrusted",
+        ] {
+            assert_eq!(TrustClass::Trusted.admitted_scope(pool), pool);
+        }
+    }
+
+    #[test]
+    fn trust_class_conformance_fork_and_unknown_fail_to_the_untrusted_floor() {
+        // Any other class fails closed to the untrusted floor whatever the
+        // pool allows: the pool flag can never grant a job trust.
+        for class in [TrustClass::ForkPR, TrustClass::Unknown] {
+            for pool in ["trusted", "release", "public-forks", "untrusted"] {
+                assert_eq!(
+                    class.admitted_scope(pool),
+                    crate::trust_scope::FAIL_CLOSED,
+                    "{class:?} on pool {pool:?}"
+                );
+            }
+        }
     }
 
     // Regression: each test mutates exactly one signal of the trusted

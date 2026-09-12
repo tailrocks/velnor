@@ -168,9 +168,11 @@ payload; Velnor injects the applicable `GITHUB_TOKEN`, Actions runtime token,
 OIDC data, cache credentials, and Results Service data only after admission.
 
 Trust scope defaults to `untrusted` and fails closed. A job carrying GitHub
-user secrets is refused before execution unless the operator set
-`VELNOR_TRUST_SCOPE=trusted`. See [Trust scope](/reference/trust-scope) for the
-full capability table and the store partitioning it controls.
+user secrets is refused before execution unless the pool is `trusted`
+(`VELNOR_TRUST_SCOPE=trusted`) and the job's own trust class — derived from
+its event — is trusted: fork and unknown jobs are refused user secrets on
+every pool. See [Trust scope](/reference/trust-scope) for the full capability
+table and the store partitioning it controls.
 
 Secret variables and mask hints become
 runtime masks; masked values are excluded from environment URLs and sanitized
@@ -210,10 +212,10 @@ available resources instead of Velnor hardcoding CPU or memory values for it.
 
 Velnor mounts the job's host-persistent Mr Boxington cache and managed target
 directories at `/var/cache/mbx`. The host store is partitioned by the job's
-trust class — derived from the operator's pool trust scope, never from the job
-payload — and then by numeric GitHub repository ID. A missing or invalid
-repository identity fails closed to a job-ephemeral store. See
-[Trust scope](/reference/trust-scope) and
+admitted scope — the job's trust class, derived from its event, narrowed by
+the operator's pool ceiling — and then by numeric GitHub repository ID. A
+missing or invalid repository identity fails closed to a job-ephemeral store.
+See [Trust scope](/reference/trust-scope) and
 [Storage and resource budgets](/operations/storage-and-resources).
 
 Mr Boxington owns garbage collection inside this store. Velnor supplies the

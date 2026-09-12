@@ -26,6 +26,12 @@ pub struct GitHubJobContainerPaths {
     pub execution_backend: velnor_model::ExecutionBackendKind,
 }
 
+/// Build the job container spec for one admitted job.
+///
+/// `trust_scope` is the job's admitted scope (the pool ceiling narrowed by
+/// the job's trust class at admission), never the raw pool flag: it decides
+/// the Docker socket mount, privileged options, port publishing, and every
+/// trust-scoped store path in the spec.
 #[allow(clippy::too_many_arguments)]
 pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
@@ -176,9 +182,12 @@ pub(crate) fn github_cargo_target_store_host(
         eprintln!("forensics.lifecycle: persistent target store refused: invalid job display name");
         return ephemeral();
     };
+    // Normalize once, without resolving: this is the job's admitted scope,
+    // and re-resolving it through the process cell would hand back the pool.
+    let scope = crate::trust_scope::normalize_scope(trust_scope);
     crate::storage::append_legacy_trust(
-        crate::container::cargo_target_store_host(temp_host),
-        crate::trust_scope::resolve(trust_scope).as_str(),
+        crate::container::cargo_target_store_host(temp_host, scope),
+        scope,
     )
     .join(CARGO_TARGET_GENERATION)
     .join(repository)
@@ -211,22 +220,25 @@ fn target_path_component(value: &str) -> Option<String> {
     Some(key)
 }
 
-/// The pool trust boundary this process resolved at startup.
+/// Whether the scope in effect for a job unlocks host-level capability.
 ///
-/// There is no ambient read here any more: [`crate::trust_scope`] owns the
-/// `VELNOR_TRUST_SCOPE` variable through clap, resolves it against the command
-/// line exactly once, and hands the same answer to the capability gates and to
-/// every trust-scoped store path.
-pub(crate) fn cargo_target_trust_scope() -> String {
-    crate::trust_scope::current()
-}
-
+/// The argument is the job's admitted scope (the pool ceiling narrowed by the
+/// job's trust class), never the raw pool flag: only the exact value
+/// `trusted` passes, case-insensitively. Untrusted jobs — and jobs on
+/// untrusted pools — get no host Docker socket, no privileged container
+/// options, no host port publishing, and no user secrets.
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
     trust_scope
         .trim()
         .eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
 }
 
+/// The store class a job admitted with this scope mounts and writes.
+///
+/// The argument is the job's admitted scope (the pool ceiling narrowed by the
+/// job's trust class), never the raw pool flag. `trusted` and `release` map
+/// to their namespaces; anything else — including every custom pool scope —
+/// fails closed to [`crate::container::StoreTrustClass::Untrusted`].
 pub(crate) fn store_trust_class(trust_scope: &str) -> crate::container::StoreTrustClass {
     if trust_scope.trim().eq_ignore_ascii_case("trusted") {
         crate::container::StoreTrustClass::Trusted
@@ -1150,6 +1162,45 @@ mod tests {
     }
 
     #[test]
+    fn target_bucket_honors_its_scope_parameter_over_the_process_pool() {
+        // Regression: this path used to re-resolve its scope argument through
+        // the process-wide cell, whose first-wins rule hands back the pool in
+        // production and silently discards the job's admitted scope. A fork
+        // job's untrusted target bucket landed in the trusted namespace.
+        let _serial = crate::trust_scope::test_support::serialized();
+        let pool = crate::trust_scope::resolve("trusted");
+        assert_eq!(pool.as_str(), "trusted");
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobName": "test",
+            "jobDisplayName": "Rust / test (ubuntu)",
+            "requestId": 42,
+            "variables": {
+                "github.workflow": { "value": "CI", "isSecret": false },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let host = github_cargo_target_store_host(
+            &job,
+            std::path::Path::new("/velnor/work"),
+            crate::trust_scope::FAIL_CLOSED,
+        );
+
+        assert_eq!(
+            host,
+            std::path::PathBuf::from(
+                "/velnor/work/_velnor_targets/untrusted/workspace-v4-success-only/ChainArgos_java-monorepo/CI/Rust___test__ubuntu_"
+            )
+        );
+    }
+
+    #[test]
     fn target_bucket_refuses_missing_repository_identity() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
@@ -1204,7 +1255,8 @@ mod tests {
     /// the capability gates read the command line and the store paths read the
     /// variable, so a fork pull request ran without the Docker socket but wrote
     /// into the *trusted* cargo/mise stores that the next job mounts read-write
-    /// onto its `PATH`. Every consumer must now observe `public`.
+    /// onto its `PATH`. Every consumer takes the resolved scope as a parameter
+    /// now — no ambient read remains to disagree — and must observe `public`.
     #[test]
     fn every_consumer_observes_one_resolved_trust_scope() {
         let _serial = crate::trust_scope::test_support::serialized();
@@ -1292,17 +1344,37 @@ mod tests {
         // the environment variable behind the gate's back. Stores named by the
         // raw scope carry a `public` component; stores named by the derived
         // trust class carry `untrusted`. Neither may ever carry `trusted`.
-        assert_eq!(cargo_target_trust_scope(), "public");
         let scoped_by_raw_value = [
             github_cargo_target_store_host(&job, temp, resolved.as_str()),
-            crate::container::cargo_executable_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::mise_executable_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::mise_binary_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::playwright_browser_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::cargo_executable_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::mise_executable_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::mise_binary_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::playwright_browser_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
             // The persistent actions cache, exactly as `executor.rs` composes it.
             crate::storage::append_legacy_trust(
-                crate::storage::cache_class_path(temp, "caches", "_velnor_caches"),
-                &cargo_target_trust_scope(),
+                crate::storage::cache_class_path(
+                    temp,
+                    resolved.as_str(),
+                    "caches",
+                    "_velnor_caches",
+                ),
+                resolved.as_str(),
             ),
         ];
         let scoped_by_trust_class = [spec.mbx_store_host.clone().expect("mbx store")];

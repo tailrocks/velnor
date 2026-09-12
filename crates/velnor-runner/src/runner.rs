@@ -6172,6 +6172,13 @@ async fn handle_job_request(
     };
 
     apply_workflow_script_step_names(&mut job, &early_context, &broker_cancellation.stored).await;
+    // The job's trust class, derived once from the job's own event. The pool
+    // flag is only the ceiling: fork and unknown jobs run under the untrusted
+    // floor on every pool. Everything below — the secrets gate, the storage
+    // leases, the container spec, the executor — enforces this admitted scope,
+    // never the raw pool flag.
+    let job_trust = crate::trust_class::TrustClass::derive(&job);
+    let effective_trust_scope = job_trust.admitted_scope(&args.trust_scope).to_owned();
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -6182,11 +6189,13 @@ async fn handle_job_request(
                         .unwrap_or_else(|| config_dir.join("_work")),
                 );
                 let repository_key = crate::container::sanitize_store_key(repository);
-                let trust_key = crate::container::sanitize_store_key(&args.trust_scope);
-                let cargo_root = crate::container::cargo_store_host(&work_root);
-                let mise_root = crate::container::mise_store_host(&work_root);
+                let trust_key = crate::container::sanitize_store_key(&effective_trust_scope);
+                let cargo_root =
+                    crate::container::cargo_store_host(&work_root, &effective_trust_scope);
+                let mise_root =
+                    crate::container::mise_store_host(&work_root, &effective_trust_scope);
                 let target_root = crate::storage::append_legacy_trust(
-                    crate::container::cargo_target_store_host(&work_root),
+                    crate::container::cargo_target_store_host(&work_root, &effective_trust_scope),
                     &trust_key,
                 );
                 let target_job = crate::github_adapter::github_cargo_target_store_host(
@@ -6198,26 +6207,39 @@ async fn handle_job_request(
                     .context("derive persistent target GC scope")?
                     .to_string_lossy()
                     .to_string();
-                let cargo_bin_scope =
-                    crate::container::cargo_executable_store_host(&work_root, &repository_key)
-                        .strip_prefix(&cargo_root)
-                        .context("derive Cargo executable GC scope")?
-                        .to_string_lossy()
-                        .to_string();
-                let mise_install_scope =
-                    crate::container::mise_executable_store_host(&work_root, &repository_key)
-                        .strip_prefix(&mise_root)
-                        .context("derive mise install GC scope")?
-                        .to_string_lossy()
-                        .to_string();
-                let mise_binary_scope =
-                    crate::container::mise_binary_store_host(&work_root, &repository_key)
-                        .strip_prefix(&mise_root)
-                        .context("derive mise binary GC scope")?
-                        .to_string_lossy()
-                        .to_string();
-                let actions_cache =
-                    crate::storage::cache_class_path(&work_root, "caches", "_velnor_caches");
+                let cargo_bin_scope = crate::container::cargo_executable_store_host(
+                    &work_root,
+                    &effective_trust_scope,
+                    &repository_key,
+                )
+                .strip_prefix(&cargo_root)
+                .context("derive Cargo executable GC scope")?
+                .to_string_lossy()
+                .to_string();
+                let mise_install_scope = crate::container::mise_executable_store_host(
+                    &work_root,
+                    &effective_trust_scope,
+                    &repository_key,
+                )
+                .strip_prefix(&mise_root)
+                .context("derive mise install GC scope")?
+                .to_string_lossy()
+                .to_string();
+                let mise_binary_scope = crate::container::mise_binary_store_host(
+                    &work_root,
+                    &effective_trust_scope,
+                    &repository_key,
+                )
+                .strip_prefix(&mise_root)
+                .context("derive mise binary GC scope")?
+                .to_string_lossy()
+                .to_string();
+                let actions_cache = crate::storage::cache_class_path(
+                    &work_root,
+                    &effective_trust_scope,
+                    "caches",
+                    "_velnor_caches",
+                );
                 let actions_cache_scope = if actions_cache
                     .file_name()
                     .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
@@ -6303,7 +6325,7 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
-        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope) {
+        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope, job_trust) {
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -6626,7 +6648,7 @@ async fn handle_job_request(
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let slot_count = args.slot_count;
         let node_action_image = args.node_action_image.clone();
-        let trust_scope = args.trust_scope.clone();
+        let effective_trust_scope = effective_trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -6656,7 +6678,7 @@ async fn handle_job_request(
                 slot_count,
                 &node_action_image,
                 &admission_graph,
-                &trust_scope,
+                &effective_trust_scope,
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -6973,16 +6995,27 @@ fn should_execute_job(args: &RunArgs) -> bool {
     args.execute_scripts || (!args.complete_noop && !args.dry_run_jobs)
 }
 
-fn validate_job_trust_policy(job: &AgentJobRequestMessage, trust_scope: &str) -> Result<()> {
-    if crate::github_adapter::github_trust_scope_allows_host_docker(trust_scope) {
+/// Admit a job's secrets: user secrets flow only to a trusted-class job on a
+/// trusted pool. The pool flag is the ceiling and the job's trust class is the
+/// job's trust — a fork or unknown job is refused user secrets on every pool,
+/// and a trusted job is refused them on any pool below `trusted`.
+fn validate_job_trust_policy(
+    job: &AgentJobRequestMessage,
+    pool_scope: &str,
+    job_trust: crate::trust_class::TrustClass,
+) -> Result<()> {
+    if job_trust.is_trusted()
+        && crate::github_adapter::github_trust_scope_allows_host_docker(pool_scope)
+    {
         return Ok(());
     }
     let secret_names = job_user_secret_names(job);
     if !secret_names.is_empty() {
         bail!(
-            "refusing to execute job '{}' in Velnor trust scope '{}' because GitHub sent user secret(s): {}",
+            "refusing to execute {} job '{}' on a Velnor pool with trust scope '{}' because GitHub sent user secret(s): {}",
+            job_trust.as_str(),
             job.job_display_name,
-            trust_scope,
+            pool_scope,
             secret_names.join(", ")
         );
     }
@@ -8292,7 +8325,7 @@ fn execute_script_job(
     slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
-    trust_scope: &str,
+    effective_trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -8316,7 +8349,7 @@ fn execute_script_job(
         slot_count,
         node_action_image,
         admission_graph,
-        trust_scope,
+        effective_trust_scope,
         run_service_url,
         billing_owner_id,
         job,
@@ -8404,7 +8437,7 @@ fn execute_microvm_script_job(
     docker_image: &str,
     slot_count: NonZeroU32,
     node_action_image: &str,
-    trust_scope: &str,
+    effective_trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
 ) -> Result<ScriptJobResult> {
@@ -8425,7 +8458,7 @@ fn execute_microvm_script_job(
         slot_count,
         node_action_image,
         "microvm".into(),
-        trust_scope,
+        effective_trust_scope,
     )?;
     if container.mount_docker_socket {
         return Err(microvm_capability_error(
@@ -8812,7 +8845,7 @@ fn execute_script_job_inner(
     slot_count: NonZeroU32,
     node_action_image: &str,
     admission_graph: &crate::admission::AdmissionGraph,
-    trust_scope: &str,
+    effective_trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -8832,7 +8865,7 @@ fn execute_script_job_inner(
             docker_image,
             slot_count,
             node_action_image,
-            trust_scope,
+            effective_trust_scope,
             run_service_url,
             billing_owner_id,
         );
@@ -8858,8 +8891,8 @@ fn execute_script_job_inner(
     // (cargo registry/git + mise installs/cache; see container.rs). Created
     // here so the first job doesn't depend on docker's implicit host-dir
     // creation semantics.
-    let cargo_store = crate::container::cargo_store_host(&temp);
-    let mise_store = crate::container::mise_store_host(&temp);
+    let cargo_store = crate::container::cargo_store_host(&temp, effective_trust_scope);
+    let mise_store = crate::container::mise_store_host(&temp, effective_trust_scope);
     for path in [
         cargo_store.join("registry"),
         cargo_store.join("git"),
@@ -8891,7 +8924,7 @@ fn execute_script_job_inner(
         slot_count,
         node_action_image,
         daemon_id,
-        trust_scope,
+        effective_trust_scope,
     )?;
     seed_mise_store_from_image(&container);
     let context_data = job_context_data(job);
@@ -8940,7 +8973,7 @@ fn execute_script_job_inner(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Result<Vec<_>>>()?;
-    let git_mirror_store = crate::container::git_mirror_store_host(&temp, trust_scope);
+    let git_mirror_store = crate::container::git_mirror_store_host(&temp, effective_trust_scope);
     // Capability validation has already accepted the complete job. Start the
     // Docker environment while checkout performs host-side network and disk
     // work. The guard removes a successfully pre-created environment if any
@@ -9179,7 +9212,7 @@ fn execute_script_job_inner(
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
-        .with_trust_scope(trust_scope)
+        .with_trust_scope(effective_trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
     // Adopt the pre-create thread's lease guard so the in-container docker
     // socket stays proxied until THIS executor's job cleanup drops it.
@@ -11132,7 +11165,10 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
 /// dir so jobs start with the baked toolset and only add tools on top.
 fn seed_mise_store_from_image(container: &crate::container::JobContainerSpec) {
     let docker_image = &container.image;
-    let mise_store = crate::container::mise_store_host(&container.temp_host);
+    let mise_store = crate::container::mise_store_host(
+        &container.temp_host,
+        crate::container::store_trust_namespace(container.store_trust_class),
+    );
     let marker = mise_store.join(".image-seeded");
     let lock_path = mise_store.join(".image-seed.lock");
     let lock = match OpenOptions::new()
@@ -14393,7 +14429,14 @@ mod tests {
             "system.github.token": { "value": "ghs", "isSecret": true }
         }));
 
-        let error = validate_job_trust_policy(&job, "public-forks").unwrap_err();
+        // The pool flag is a ceiling: even a trusted job is refused user
+        // secrets on a pool below `trusted`.
+        let error = validate_job_trust_policy(
+            &job,
+            "public-forks",
+            crate::trust_class::TrustClass::Trusted,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("secrets.DOCKERHUB_TOKEN"));
     }
@@ -14404,7 +14447,343 @@ mod tests {
             "system.github.token": { "value": "ghs", "isSecret": true }
         }));
 
-        validate_job_trust_policy(&job, "public-forks").unwrap();
+        validate_job_trust_policy(
+            &job,
+            "public-forks",
+            crate::trust_class::TrustClass::Trusted,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn trusted_pool_trusted_job_allows_user_secrets() {
+        let job = minimal_job_with_variables(serde_json::json!({
+            "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::Trusted)
+            .unwrap();
+    }
+
+    #[test]
+    fn trusted_pool_fork_job_refuses_user_secrets() {
+        let job = minimal_job_with_variables(serde_json::json!({
+            "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        let error =
+            validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::ForkPR)
+                .unwrap_err();
+
+        let text = error.to_string();
+        assert!(text.contains("secrets.DOCKERHUB_TOKEN"), "{text}");
+        assert!(text.contains("fork-pr"), "{text}");
+        assert!(text.contains("trusted"), "{text}");
+    }
+
+    #[test]
+    fn trusted_pool_unknown_job_refuses_user_secrets() {
+        let job = minimal_job_with_variables(serde_json::json!({
+            "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        let error =
+            validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::Unknown)
+                .unwrap_err();
+
+        let text = error.to_string();
+        assert!(text.contains("secrets.DOCKERHUB_TOKEN"), "{text}");
+        assert!(text.contains("unknown"), "{text}");
+    }
+
+    #[test]
+    fn release_pool_trusted_job_refuses_user_secrets() {
+        // `release` is a store namespace, not host-level trust: the pool side
+        // of the gate stays exactly as before.
+        let job = minimal_job_with_variables(serde_json::json!({
+            "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        validate_job_trust_policy(&job, "release", crate::trust_class::TrustClass::Trusted)
+            .unwrap_err();
+    }
+
+    #[test]
+    fn fork_job_without_user_secrets_admits_on_every_pool() {
+        // Untrusted jobs are downgraded, not refused: without user secrets
+        // they admit and execute on the untrusted path.
+        let job = minimal_job_with_variables(serde_json::json!({
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        for pool in ["trusted", "release", "public-forks", "untrusted"] {
+            for class in [
+                crate::trust_class::TrustClass::ForkPR,
+                crate::trust_class::TrustClass::Unknown,
+            ] {
+                validate_job_trust_policy(&job, pool, class)
+                    .unwrap_or_else(|error| panic!("{class:?} on pool {pool:?}: {error:#}"));
+            }
+        }
+    }
+
+    /// A job message with complete trust signals: a `push` job when `event`
+    /// is `push`, a fork pull-request job otherwise.
+    fn admission_job(
+        event: &str,
+        head_repository: Option<&str>,
+        user_secret: bool,
+    ) -> crate::job_message::AgentJobRequestMessage {
+        let mut variables = serde_json::json!({
+            "github.event_name": { "value": event },
+            "github.repository": { "value": "octo/base" },
+            "github.repository_id": { "value": "42" },
+            "github.workflow": { "value": "CI" },
+            "system.github.token": { "value": "ghs", "isSecret": true },
+        });
+        if user_secret {
+            variables["secrets.DOCKERHUB_TOKEN"] =
+                serde_json::json!({ "value": "secret", "isSecret": true });
+        }
+        let mut github_context = serde_json::Map::new();
+        if let Some(head) = head_repository {
+            github_context.insert(
+                "event".to_string(),
+                serde_json::json!({
+                    "pull_request": {
+                        "head": { "repo": { "full_name": head, "id": 2 } },
+                        "base": { "repo": { "id": 1 } },
+                    }
+                }),
+            );
+        }
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Admission",
+            "requestId": 1,
+            "variables": variables,
+            "contextData": { "github": github_context },
+            "resources": { "repositories": [{
+                "alias": "self",
+                "name": "octo/base",
+                "properties": { "cloneUrl": "https://github.com/octo/base.git" },
+            }] },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn admission_conformance_fork_pr_runs_untrusted_on_trusted_pool() {
+        use crate::trust_class::TrustClass;
+
+        // The full admission decision for a fork pull-request job carrying a
+        // user secret on a trusted pool: derive the class from the job's own
+        // event, narrow the pool ceiling by it, and enforce the admitted scope
+        // on all three axes — secrets, socket, stores.
+        let job = admission_job("pull_request", Some("mallory/base"), true);
+        let class = TrustClass::derive(&job);
+        assert_eq!(class, TrustClass::ForkPR);
+        let admitted = class.admitted_scope("trusted");
+        assert_eq!(admitted, crate::trust_scope::FAIL_CLOSED);
+
+        let error = validate_job_trust_policy(&job, "trusted", class).unwrap_err();
+        assert!(error.to_string().contains("secrets.DOCKERHUB_TOKEN"));
+
+        assert!(!crate::github_adapter::github_trust_scope_allows_host_docker(admitted));
+        assert_eq!(
+            crate::github_adapter::store_trust_class(admitted),
+            crate::container::StoreTrustClass::Untrusted
+        );
+    }
+
+    #[test]
+    fn admission_conformance_fork_pr_spec_is_untrusted_on_trusted_pool() {
+        use crate::trust_class::TrustClass;
+
+        // End to end through the container spec: a fork job without user
+        // secrets admits on a trusted pool and gets the untrusted execution
+        // path — no host socket, no privileged options, no published ports,
+        // untrusted store namespace — from its admitted scope.
+        let mut job = admission_job("pull_request", Some("mallory/base"), false);
+        job.job_container = Some(serde_json::json!({
+            "image": "ubuntu:24.04",
+            "options": "--privileged",
+        }));
+        job.job_service_containers = Some(serde_json::json!({
+            "redis": {
+                "image": "redis:7",
+                "ports": ["6379:6379"],
+                "options": "--privileged"
+            }
+        }));
+
+        let class = TrustClass::derive(&job);
+        assert_eq!(class, TrustClass::ForkPR);
+        let admitted = class.admitted_scope("trusted").to_owned();
+        validate_job_trust_policy(&job, "trusted", class).unwrap();
+
+        let temp = std::path::Path::new("/velnor/work/job/temp");
+        let spec = crate::github_adapter::github_job_container_spec(
+            &job,
+            crate::github_adapter::GitHubJobContainerPaths {
+                workspace_host: "/velnor/work/job/workspace".into(),
+                temp_host: temp.into(),
+                home_host: "/velnor/work/job/home".into(),
+                actions_host: "/velnor/work/job/actions".into(),
+                tools_host: "/velnor/work/job/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            std::num::NonZeroU32::MIN,
+            "",
+            "daemon".into(),
+            &admitted,
+        )
+        .unwrap();
+
+        assert!(!spec.mount_docker_socket);
+        assert_eq!(
+            spec.store_trust_class,
+            crate::container::StoreTrustClass::Untrusted
+        );
+        assert!(!spec.options.iter().any(|option| option == "--privileged"));
+        let service = spec.services.first().expect("one service container");
+        assert!(!service
+            .options
+            .iter()
+            .any(|option| option == "--privileged"));
+        assert!(service.ports.is_empty());
+        let mbx = spec.mbx_store_host.expect("mbx store");
+        assert!(
+            mbx.components()
+                .any(|component| component.as_os_str() == "untrusted"),
+            "mbx store is not in the untrusted namespace: {}",
+            mbx.display()
+        );
+    }
+
+    #[test]
+    fn admission_conformance_push_job_keeps_trusted_pool_capabilities() {
+        use crate::trust_class::TrustClass;
+
+        // The other side of the ceiling: a same-repo push job with complete
+        // signals keeps the trusted pool's capabilities — secrets flow and the
+        // admitted scope is the pool value itself.
+        let job = admission_job("push", None, true);
+        let class = TrustClass::derive(&job);
+        assert_eq!(class, TrustClass::Trusted);
+        assert_eq!(class.admitted_scope("trusted"), "trusted");
+        validate_job_trust_policy(&job, "trusted", class).unwrap();
+    }
+
+    #[test]
+    fn admission_regression_missing_signal_downgrades_on_trusted_pool() {
+        use crate::trust_class::TrustClass;
+
+        // Each case drops exactly one trust signal from the trusted baseline
+        // and proves admission downgrades the job rather than trusting it.
+        let baseline = serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Admission",
+            "requestId": 1,
+            "variables": {
+                "github.event_name": { "value": "push" },
+                "github.repository": { "value": "octo/base" },
+                "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            },
+            "contextData": {},
+            "resources": { "repositories": [{
+                "alias": "self",
+                "name": "octo/base",
+                "properties": { "cloneUrl": "https://github.com/octo/base.git" },
+            }] },
+        });
+        type Mutation = (&'static str, fn(&mut serde_json::Value));
+        let mutations: [Mutation; 3] = [
+            ("missing event name", |body| {
+                body["variables"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("github.event_name");
+            }),
+            ("missing base repository", |body| {
+                body["variables"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("github.repository");
+            }),
+            ("missing plan scope", |body| {
+                body["plan"] = serde_json::json!({ "planId": "plan" });
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut body = baseline.clone();
+            mutate(&mut body);
+            let job: crate::job_message::AgentJobRequestMessage =
+                serde_json::from_value(body).unwrap();
+            let class = TrustClass::derive(&job);
+            assert_eq!(class, TrustClass::Unknown, "{name}");
+            assert_eq!(
+                class.admitted_scope("trusted"),
+                crate::trust_scope::FAIL_CLOSED,
+                "{name}"
+            );
+            validate_job_trust_policy(&job, "trusted", class).unwrap_err();
+        }
+        // Sanity: the unmutated baseline is trusted and admits secrets.
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(baseline).unwrap();
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+        validate_job_trust_policy(&job, "trusted", TrustClass::Trusted).unwrap();
+    }
+
+    // Admission runs once per job on the broker thread: derive the class from
+    // the job's event, narrow the pool ceiling by it, and gate the secrets.
+    // All three are pure walks over the job message; this is the benchmark,
+    // in the style of the repo's existing timing-gated tests.
+    #[test]
+    fn admission_benchmark_trust_decision_throughput() {
+        use crate::trust_class::TrustClass;
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let push = admission_job("push", None, true);
+        let fork_pr = admission_job("pull_request", Some("mallory/base"), true);
+        assert_eq!(TrustClass::derive(&push), TrustClass::Trusted);
+        assert_eq!(TrustClass::derive(&fork_pr), TrustClass::ForkPR);
+
+        // 10k full admission decisions per class; pure message walks must stay
+        // far below the bound even on a loaded serial-gate runner.
+        let started = Instant::now();
+        for _ in 0..10_000 {
+            let class = TrustClass::derive(black_box(&push));
+            let admitted = class.admitted_scope("trusted");
+            validate_job_trust_policy(black_box(&push), "trusted", black_box(class)).unwrap();
+            assert_eq!(black_box(admitted), "trusted");
+
+            let class = TrustClass::derive(black_box(&fork_pr));
+            let admitted = class.admitted_scope("trusted");
+            validate_job_trust_policy(black_box(&fork_pr), "trusted", black_box(class))
+                .unwrap_err();
+            assert_eq!(black_box(admitted), crate::trust_scope::FAIL_CLOSED);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "20k admission decisions took {elapsed:?}",
+        );
     }
 
     #[test]

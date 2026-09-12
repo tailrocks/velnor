@@ -4,10 +4,14 @@ title: "Trust scope"
 
 # Trust scope
 
-Trust scope is the operator-selected boundary that decides what a job on this
+Trust scope is the operator-selected ceiling that bounds what a job on this
 node may reach and which persistent stores it shares. It is set once, by the
-operator, for the whole pool. It is never derived from the job payload, the
-repository, or the workflow, so a fork pull request cannot widen it.
+operator, for the whole pool. Each job's scope in effect — its admitted scope —
+is that ceiling narrowed by the job's own trust class, which Velnor derives
+from the job's event: a same-repo job is trusted, a fork pull-request job or a
+job whose trust signals are missing is untrusted. A fork pull request cannot
+widen the ceiling, and on a trusted pool it still executes on the untrusted
+path: no host Docker socket, no user secrets, untrusted store namespace.
 
 ## The default is `untrusted`, and it fails closed
 
@@ -33,7 +37,11 @@ default is the correct one.
 
 ## What `trusted` unlocks
 
-| Capability | `untrusted` / `release` | `trusted` |
+The table below is what a trusted pool grants a trusted job. Either side can
+refuse: a trusted job on a pool below `trusted` gets the untrusted column,
+and a fork or unknown job gets the untrusted column on every pool.
+
+| Capability | untrusted path | trusted pool + trusted job |
 | --- | --- | --- |
 | Host Docker socket mounted into the job | refused | allowed |
 | Privileged job-container options | refused | allowed |
@@ -42,7 +50,7 @@ default is the correct one.
 | A job carrying GitHub user secrets | job refused before execution | allowed |
 | BuildKit secrets for `docker/build-push-action` | refused | allowed |
 
-A job that arrives with user secrets in a non-`trusted` scope is refused by
+A job that arrives with user secrets on the untrusted path is refused by
 name before any side effect, not silently stripped.
 
 ## Store partitioning
@@ -66,8 +74,11 @@ boundary. It is not encryption, and it is not protection from a compromised
 host.
 
 Daemon-shared stores that hold no executable content — the Cargo registry
-cache, registry index, and Git database — are deliberately not partitioned, so
-they stay warm across scopes.
+cache, registry index, and Git database — stay warm across scopes in the
+legacy layout, where trust is namespaced below the shared root. In the
+canonical layout the root itself is namespaced by the job's admitted scope,
+so a fork job's download caches are cold there too: isolation first, warmth
+second.
 
 A missing or invalid repository identity fails closed to a job-ephemeral store
 rather than sharing one.

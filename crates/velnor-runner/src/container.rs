@@ -442,17 +442,29 @@ impl JobContainerSpec {
             // lock does not serialize that mutation across container jobs).
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("registry/cache"),
+                &cargo_store_host(
+                    &self.temp_host,
+                    store_trust_namespace(self.store_trust_class),
+                )
+                .join("registry/cache"),
                 "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("registry/index"),
+                &cargo_store_host(
+                    &self.temp_host,
+                    store_trust_namespace(self.store_trust_class),
+                )
+                .join("registry/index"),
                 "/github/home/.cargo/registry/index",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("git/db"),
+                &cargo_store_host(
+                    &self.temp_host,
+                    store_trust_namespace(self.store_trust_class),
+                )
+                .join("git/db"),
                 "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
@@ -480,7 +492,11 @@ impl JobContainerSpec {
             self.mount_arg(&self.mise_binary_store_host(), "/opt/velnor/mise-binaries"),
             "-v".into(),
             self.mount_arg(
-                &mise_store_host(&self.temp_host).join("cache"),
+                &mise_store_host(
+                    &self.temp_host,
+                    store_trust_namespace(self.store_trust_class),
+                )
+                .join("cache"),
                 "/opt/mise/cache",
             ),
             "-v".into(),
@@ -578,7 +594,10 @@ impl JobContainerSpec {
     /// The job image is not a valid OCI reference.
     pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
         let image = self.image_reference()?;
-        let store = mise_store_host(&self.temp_host);
+        let store = mise_store_host(
+            &self.temp_host,
+            store_trust_namespace(self.store_trust_class),
+        );
         let mut args = DockerArgv::new(["run"]);
         args.flags([
             "--rm".to_owned(),
@@ -1120,7 +1139,7 @@ impl JobContainerSpec {
                 self.temp_host.join("_velnor/ephemeral/cargo-bin")
             },
             |repository| {
-                cargo_executable_store_host_for_scope(
+                cargo_executable_store_host(
                     &self.temp_host,
                     store_trust_namespace(self.store_trust_class),
                     &repository,
@@ -1131,7 +1150,7 @@ impl JobContainerSpec {
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
         match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
-            (Some(repository), Some(slot)) => mise_executable_store_host_for_scope(
+            (Some(repository), Some(slot)) => mise_executable_store_host(
                 &self.temp_host,
                 store_trust_namespace(self.store_trust_class),
                 &repository,
@@ -1159,7 +1178,7 @@ impl JobContainerSpec {
                 self.temp_host.join("_velnor/ephemeral/mise-binaries")
             },
             |repository| {
-                mise_binary_store_host_for_scope(
+                mise_binary_store_host(
                     &self.temp_host,
                     store_trust_namespace(self.store_trust_class),
                     &repository,
@@ -1172,7 +1191,7 @@ impl JobContainerSpec {
         self.repository_store_key().map_or_else(
             || self.home_host.join(".cache/ms-playwright"),
             |repository| {
-                playwright_browser_store_host_for_scope(
+                playwright_browser_store_host(
                     &self.temp_host,
                     store_trust_namespace(self.store_trust_class),
                     &repository,
@@ -1415,7 +1434,10 @@ pub(crate) fn sccache_host(temp_host: &Path, trust_class: StoreTrustClass) -> Pa
     )
 }
 
-fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
+/// The store namespace a job admitted with this class mounts and writes.
+/// The one spelling shared by the container spec, the scoped store roots,
+/// and the lease scopes derived from them.
+pub(crate) fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
     match trust_class {
         StoreTrustClass::Untrusted => "untrusted",
         StoreTrustClass::Trusted => "trusted",
@@ -1426,8 +1448,17 @@ fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
 /// Host-persistent Cargo download/index store, daemon-shared like sccache.
 /// Extracted registry sources and git checkouts remain job-local because they
 /// are mutable during materialization and are unsafe to share across slots.
-pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
-    crate::storage::cache_class_path(&daemon_store_root(temp_host), "cargo", "_velnor_cargo")
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path). It selects the canonical namespace; the
+/// legacy root carries no trust segment.
+pub(crate) fn cargo_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        trust_scope,
+        "cargo",
+        "_velnor_cargo",
+    )
 }
 
 /// Remove Cargo git checkouts whose same-named bare repository is absent.
@@ -1466,26 +1497,35 @@ pub(crate) fn repair_cargo_git_store(cargo_store: &Path) -> io::Result<usize> {
 }
 
 /// Host-persistent cargo executable store, scoped by trust + repository.
-pub(crate) fn cargo_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
-    cargo_executable_store_host_for_scope(
-        temp_host,
-        &crate::github_adapter::cargo_target_trust_scope(),
-        repository,
-    )
-}
-
-fn cargo_executable_store_host_for_scope(
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path): the namespace below the root in the legacy
+/// layout, the root namespace in the canonical layout.
+pub(crate) fn cargo_executable_store_host(
     temp_host: &Path,
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    crate::storage::child_with_legacy_trust(cargo_store_host(temp_host), "bin", trust_scope)
-        .join(sanitize_store_key(repository))
+    crate::storage::child_with_legacy_trust(
+        cargo_store_host(temp_host, trust_scope),
+        "bin",
+        trust_scope,
+    )
+    .join(sanitize_store_key(repository))
 }
 
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
-pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
-    crate::storage::cache_class_path(&daemon_store_root(temp_host), "mise", "_velnor_mise")
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path). It selects the canonical namespace; the
+/// legacy root carries no trust segment.
+pub(crate) fn mise_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        trust_scope,
+        "mise",
+        "_velnor_mise",
+    )
 }
 
 pub(crate) fn git_mirror_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
@@ -1493,21 +1533,21 @@ pub(crate) fn git_mirror_store_host(temp_host: &Path, trust_scope: &str) -> Path
 }
 
 /// Host-persistent mise executable store, scoped by trust + repository.
-pub(crate) fn mise_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
-    mise_executable_store_host_for_scope(
-        temp_host,
-        &crate::github_adapter::cargo_target_trust_scope(),
-        repository,
-    )
-}
-
-fn mise_executable_store_host_for_scope(
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path): the namespace below the root in the legacy
+/// layout, the root namespace in the canonical layout.
+pub(crate) fn mise_executable_store_host(
     temp_host: &Path,
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "installs", trust_scope)
-        .join(sanitize_store_key(repository))
+    crate::storage::child_with_legacy_trust(
+        mise_store_host(temp_host, trust_scope),
+        "installs",
+        trust_scope,
+    )
+    .join(sanitize_store_key(repository))
 }
 
 /// Host-persistent per-version mise BINARY store, scoped by trust + repository.
@@ -1517,44 +1557,49 @@ fn mise_executable_store_host_for_scope(
 /// instead of mutating the read-only baked `/opt/mise/bin` bootstrap. Lives
 /// under the same `mise` cache class as `installs`/`rustup`, so the mise GC
 /// budget covers it and a per-scope lease protects it while a job holds it.
-pub(crate) fn mise_binary_store_host(temp_host: &Path, repository: &str) -> PathBuf {
-    mise_binary_store_host_for_scope(
-        temp_host,
-        &crate::github_adapter::cargo_target_trust_scope(),
-        repository,
-    )
-}
-
-fn mise_binary_store_host_for_scope(
+pub(crate) fn mise_binary_store_host(
     temp_host: &Path,
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "binaries", trust_scope)
-        .join(sanitize_store_key(repository))
+    crate::storage::child_with_legacy_trust(
+        mise_store_host(temp_host, trust_scope),
+        "binaries",
+        trust_scope,
+    )
+    .join(sanitize_store_key(repository))
 }
 
 /// Root for opt-in persistent workspace target buckets (one per job class).
-pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
-    crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
-}
-
-/// Host-persistent Playwright browser downloads, scoped by trust + repository.
-pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) -> PathBuf {
-    playwright_browser_store_host_for_scope(
-        temp_host,
-        &crate::github_adapter::cargo_target_trust_scope(),
-        repository,
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path). It selects the canonical namespace; the
+/// legacy root carries no trust segment.
+pub(crate) fn cargo_target_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        trust_scope,
+        "targets",
+        "_velnor_targets",
     )
 }
 
-fn playwright_browser_store_host_for_scope(
+/// Host-persistent Playwright browser downloads, scoped by trust + repository.
+///
+/// `trust_scope` is the scope in effect for the caller (the job's admitted
+/// scope on the execution path): the namespace below the root in the legacy
+/// layout, the root namespace in the canonical layout.
+pub(crate) fn playwright_browser_store_host(
     temp_host: &Path,
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    let root =
-        crate::storage::cache_class_path(&daemon_store_root(temp_host), "caches", "_velnor_caches");
+    let root = crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        trust_scope,
+        "caches",
+        "_velnor_caches",
+    );
     crate::storage::append_legacy_trust(root, trust_scope)
         .join(sanitize_store_key(repository))
         .join("playwright")
@@ -2086,13 +2131,13 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_eq!(
-            cargo_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            cargo_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
             PathBuf::from(
                 "/var/lib/velnor/work/_velnor_cargo/bin/trusted/ChainArgos_java-monorepo"
             )
         );
         assert_eq!(
-            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
             PathBuf::from(
                 "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
             )
@@ -2100,14 +2145,14 @@ mod tests {
         // Plan 008: the persistent mise binary store is a distinct `binaries`
         // subdir under the same trust/repository boundary as `installs`.
         assert_eq!(
-            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
             PathBuf::from(
                 "/var/lib/velnor/work/_velnor_mise/binaries/trusted/ChainArgos_java-monorepo"
             )
         );
         assert_ne!(
-            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
-            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_binary_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_executable_store_host(temp, "trusted", "ChainArgos/java-monorepo"),
         );
     }
 
@@ -2116,12 +2161,12 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_ne!(
-            cargo_executable_store_host_for_scope(temp, "trusted", "org/one"),
-            cargo_executable_store_host_for_scope(temp, "trusted", "org/two")
+            cargo_executable_store_host(temp, "trusted", "org/one"),
+            cargo_executable_store_host(temp, "trusted", "org/two")
         );
         assert_ne!(
-            mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
-            mise_executable_store_host_for_scope(temp, "trusted", "org/two")
+            mise_executable_store_host(temp, "trusted", "org/one"),
+            mise_executable_store_host(temp, "trusted", "org/two")
         );
     }
 
@@ -2130,15 +2175,15 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_eq!(
-            cargo_store_host(temp).join("registry/cache"),
+            cargo_store_host(temp, "trusted").join("registry/cache"),
             PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry/cache")
         );
         assert_eq!(
-            cargo_store_host(temp).join("git/db"),
+            cargo_store_host(temp, "trusted").join("git/db"),
             PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git/db")
         );
         assert_eq!(
-            mise_store_host(temp).join("cache"),
+            mise_store_host(temp, "trusted").join("cache"),
             PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
         );
     }
@@ -2207,17 +2252,20 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host).join("registry/cache"),
+            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+                .join("registry/cache"),
             "/github/home/.cargo/registry/cache"
         ));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host).join("registry/index"),
+            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+                .join("registry/index"),
             "/github/home/.cargo/registry/index"
         ));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host).join("git/db"),
+            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+                .join("git/db"),
             "/github/home/.cargo/git/db"
         ));
         assert!(!args
@@ -2228,7 +2276,8 @@ mod tests {
             .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
         assert!(has_mount(
             &args,
-            &mise_store_host(&job.temp_host).join("cache"),
+            &mise_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+                .join("cache"),
             "/opt/mise/cache"
         ));
         assert!(has_mount(
