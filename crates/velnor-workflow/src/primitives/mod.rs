@@ -591,6 +591,7 @@ pub(crate) fn generate(
         if config.workflow_files.iter().any(|owned| owned == file) {
             continue;
         }
+        reject_owned_file(config, file, &row.primitive)?;
         if !added_files.contains(file) {
             added_files.push(file.clone());
         }
@@ -601,6 +602,32 @@ pub(crate) fn generate(
         units,
         added_files,
     })
+}
+
+/// A file a non-surface renderer owns cannot be added by a declaration: the
+/// caller would emit the declared bytes and then have the legacy render
+/// overwrite them. Naming the renderer that owns the file turns the silent
+/// clobber into a usage error.
+fn reject_owned_file(
+    config: &ProjectConfig,
+    file: &str,
+    primitive: &str,
+) -> Result<(), GeneratorError> {
+    // The nested per-unit workflows are rendered for every scanned unit unless
+    // the surface was adopted as reviewed templates.
+    if !config.adopted_workflow_surface
+        && let Some(unit) = config
+            .units
+            .iter()
+            .find(|unit| nested_unit_workflow_file(unit) == file)
+    {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` primitive `{primitive}` declares `{file}`, which the `{}` family renders for unit `{}`; declare the unit's pipeline or adopt the workflow surface instead",
+            pipeline_id(unit.kind),
+            unit.id
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
