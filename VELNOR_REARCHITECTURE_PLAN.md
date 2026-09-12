@@ -5314,4 +5314,3 @@ tree admits trusted-pool jobs through `AdmittedTrust` and the
 `admission_conformance_*` tests assert the narrowed pair production
 persists. Main's §102 registry record stands as landed history for #663;
 the operational mechanism is §13's file-session design.
-
