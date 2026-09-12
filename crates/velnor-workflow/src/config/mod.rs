@@ -206,6 +206,12 @@ pub(crate) struct UnitSection {
     depends_on: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cache: Option<UnitCacheSection>,
+    /// Whether the unit's Cargo verification holds behind a root `Cargo.lock`
+    /// pin. The scan derives this for scanned units; a `[[unit]]` row that
+    /// adds a unit the scan did not produce states it explicitly so the
+    /// rendered Cargo source preparation matches a scanned crate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
 }
 
@@ -354,6 +360,10 @@ impl UnitSection {
 
     pub(crate) fn cache(&self) -> Option<&UnitCacheSection> {
         self.cache.as_ref()
+    }
+
+    pub(crate) fn pinned_lockfile(&self) -> Option<bool> {
+        self.pinned_lockfile
     }
 
     pub(crate) fn tool_version(&self) -> Option<&str> {

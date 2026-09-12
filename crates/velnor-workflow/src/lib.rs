@@ -1391,7 +1391,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             label: row.label().unwrap_or_default().to_owned(),
             kind,
             root: row.root().unwrap_or_default().to_owned(),
-            pinned_lockfile: false,
+            pinned_lockfile: row.pinned_lockfile().unwrap_or(false),
             watch: row.watch().unwrap_or_default().to_vec(),
             pr_commands: row.pr_commands().unwrap_or_default().to_vec(),
             full_commands: row.full_commands().unwrap_or_default().to_vec(),
@@ -1450,6 +1450,9 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             purpose: CachePurpose::Generic,
             mbx_output_cache_justification: None,
         });
+    }
+    if let Some(pinned) = row.pinned_lockfile() {
+        unit.pinned_lockfile = pinned;
     }
     if let Some(version) = row.tool_version() {
         unit.tool_version = Some(version.to_owned());

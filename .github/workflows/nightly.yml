@@ -229,6 +229,14 @@ jobs:
     with:
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
+  group-unit-rust-velnor-workflow-contract:
+    name: "Rust · velnor-workflow-contract"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-velnor-workflow-contract.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnorctl:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
@@ -248,7 +256,7 @@ jobs:
   nightly-required:
     name: nightly-required
     if: ${{ always() }}
-    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnorctl, group-unit-rust-production-topology]
+    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnor-workflow-contract, group-unit-rust-velnorctl, group-unit-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -436,6 +444,18 @@ jobs:
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
+            result="${{ needs['group-unit-rust-velnor-workflow-contract'].result }}"
+            case "$result" in
+              success) ;;
+              *) echo "selected CI unit rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
+            esac
+          else
+            case "$result" in
+              success|skipped) ;;
+              *) echo "unselected CI unit rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then

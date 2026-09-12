@@ -148,7 +148,8 @@ docker_closure = [
 "rust-velnor-workflow" = [
   "Dockerfile",
   "docker/build-mise.*",
-    "crates/velnor-workflow/README.md",
+  "crates/velnor-workflow/README.md",
+  "crates/velnor-workflow/templates/**",
 ]
 "rust-velnor-runner" = [
   ".github-gen/velnor-workflow.toml",
@@ -2729,16 +2730,6 @@ file = "maintenance.yml"
 # The workspace-wide release-topology unit: the scan sees a workspace root; the
 # repository declares the verification contract the unit carries.
 
-# The Docker image build: the repository declares its buildx contract (gha
-# cache scopes per lane) on top of the detected unit.
-
-[[units]]
-id = "docker"
-github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-
 [[units]]
 id = "rust-production-topology"
 label = "Rust production topology"
@@ -2749,10 +2740,21 @@ github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run 
 github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+pinned_lockfile = true
 
 [units.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
+
+# The Docker image build: the repository declares its buildx contract (gha
+# cache scopes per lane) on top of the detected unit.
+
+[[units]]
+id = "docker"
+github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 # The composite action the generated workflows bootstrap through: the
 # repository owns the bytes under .github-gen/sources, the generator owns the
