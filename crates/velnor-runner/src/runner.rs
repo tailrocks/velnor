@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
@@ -82,6 +82,13 @@ const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// R1-pub: cancel-path step-log mirror bounds. The executor streams one
+/// `StepLog` per live output line plus cumulative per-step snapshots, so a
+/// verbose job can stream hundreds of thousands of records; the mirror is the
+/// only durable accumulation of that stream and must stay bounded. The newest
+/// records are retained; evicted records are counted, never silently lost.
+const STREAMED_STEP_LOG_MIRROR_MAX_RECORDS: usize = 4096;
+const STREAMED_STEP_LOG_MIRROR_MAX_BYTES: usize = 64 * 1024 * 1024;
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
 const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 /// Keep lifecycle duration fields bounded to the same one-day policy used by
@@ -6744,10 +6751,18 @@ async fn handle_job_request(
             args.work_dir.clone(),
             &job,
         ));
-        // Every StepLog the executor streams is mirrored here so the
+        // R1-pub: every StepLog the executor streams is mirrored here so the
         // cancellation path (where the executor never returns its final
-        // ScriptJobResult) can still persist the partial job log.
-        let streamed_step_logs = Arc::new(Mutex::new(Vec::new()));
+        // ScriptJobResult) can still persist the partial job log. The mirror
+        // is bounded (newest 4096 records / 64MiB, oldest evicted first with a
+        // counter): the producer stream is intentionally unbounded — one
+        // record per live output line, never batched or truncated — so the
+        // live feed is never delayed and the sync executor thread never
+        // blocks; this mirror is the only durable accumulation, so the bound
+        // lives here. Evictions surface as a truncation marker in the merged
+        // cancel-path log plus a forensics drops line at publisher drain.
+        let streamed_step_logs: StreamedStepLogs =
+            Arc::new(Mutex::new(StreamedStepLogMirror::new()));
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
@@ -6810,7 +6825,13 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
-                drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+                drain_step_publishers(
+                    step_timeline,
+                    step_logs_publisher,
+                    forensics.clone(),
+                    &streamed_step_logs,
+                )
+                .await;
                 let completion = complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
@@ -6882,8 +6903,13 @@ async fn handle_job_request(
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
                     // Same contract as complete_acquired_job_failure: never complete
                     // with zero steps, or GitHub hides the rejection reason.
-                    drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone())
-                        .await;
+                    drain_step_publishers(
+                        step_timeline,
+                        step_logs_publisher,
+                        forensics.clone(),
+                        &streamed_step_logs,
+                    )
+                    .await;
                     let completion = complete_acquired_job_failure(
                         &run_service_job,
                         &AcquiredJobIdentity::from_job(&job),
@@ -6941,19 +6967,25 @@ async fn handle_job_request(
         // slower publisher deadline; abort only a stalled publisher. Drain
         // BEFORE reading the streamed-step-log mirror so a canceled job's
         // partial logs below are complete.
-        drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+        drain_step_publishers(
+            step_timeline,
+            step_logs_publisher,
+            forensics.clone(),
+            &streamed_step_logs,
+        )
+        .await;
         let outputs = job_result.outputs;
         let mut step_logs = job_result.step_logs;
         if step_logs.is_empty() && matches!(job_result.result, TaskResult::Canceled) {
             // Cancel path: the executor errored before returning its final
-            // step_logs, but the publisher mirrored every streamed StepLog.
-            // Persist what ran instead of completing with an empty log.
-            let streamed = std::mem::take(
-                &mut *streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            );
-            step_logs = merged_partial_step_logs(streamed);
+            // step_logs, but the publisher mirrored every streamed StepLog
+            // into the bounded mirror. Persist what ran instead of completing
+            // with an empty log; evictions render as a truncation marker.
+            let (streamed, evicted_records) = streamed_step_logs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            step_logs = merged_partial_step_logs(streamed, evicted_records);
         }
         let teardown = job_result.teardown;
         let execution_timings = job_result.timings;
@@ -7089,6 +7121,7 @@ async fn drain_step_publishers(
     step_timeline: JoinHandle<()>,
     step_logs_publisher: JoinHandle<()>,
     forensics: SlotForensics,
+    streamed_step_logs: &StreamedStepLogs,
 ) {
     let started = Instant::now();
     tokio::join!(
@@ -7103,6 +7136,29 @@ async fn drain_step_publishers(
         "step-publishers-drained elapsed_ms={}",
         duration_ms(started.elapsed())
     ));
+    // R1-pub forensics drops line: the bounded cancel-path mirror reports its
+    // retained/evicted totals on every terminal path (including publisher
+    // abort, where the task-exit line would never fire), so an evicted
+    // head-truncation is reconstructable from on-disk logs alone.
+    let (stored_records, stored_bytes, evicted_records, evicted_bytes) = {
+        let mirror = streamed_step_logs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            mirror.stored_records(),
+            mirror.stored_bytes(),
+            mirror.evicted_records(),
+            mirror.evicted_bytes(),
+        )
+    };
+    forensics.lifecycle(&format!(
+        "step-log-mirror-drained stored_records={stored_records} stored_bytes={stored_bytes} evicted_records={evicted_records} evicted_bytes={evicted_bytes}"
+    ));
+    if evicted_records > 0 {
+        eprintln!(
+            "Warning: step-log mirror evicted {evicted_records} streamed record(s) at the 4096-record/64MiB bound; cancel-path log is head-truncated."
+        );
+    }
 }
 
 fn should_execute_job(args: &RunArgs) -> bool {
@@ -7673,11 +7729,108 @@ fn start_step_timeline_publisher(
     })
 }
 
+/// Shared handle to the bounded cancel-path step-log mirror (R1-pub).
+type StreamedStepLogs = Arc<Mutex<StreamedStepLogMirror>>;
+
+/// Bounded mirror of every `StepLog` the executor streams, feeding ONLY the
+/// cancellation path (where the executor never returns its final
+/// `ScriptJobResult`).
+///
+/// The bound lives HERE, at the consumer — not at the producer. `StepLog.lines`
+/// is intentionally an unbounded `Vec<String>` and the live stream emits one
+/// record per output line: batching or truncating at the producer would delay
+/// the live Results Service feed and shed lines GitHub already displayed. The
+/// channel is likewise unbounded so the synchronous executor thread never
+/// blocks on a slow feed; this mirror is the only durable accumulation of that
+/// stream, so it retains the newest
+/// [`STREAMED_STEP_LOG_MIRROR_MAX_RECORDS`] records /
+/// [`STREAMED_STEP_LOG_MIRROR_MAX_BYTES`] bytes, evicts oldest-first, and
+/// counts every eviction. The cancel path renders a truncation marker and the
+/// publisher drain emits a forensics drops line whenever the counter is
+/// nonzero — nothing is silently lost.
+///
+/// A single record larger than the byte bound is still retained (eviction stops
+/// at empty) so the newest record is always present. Per-step
+/// annotations/telemetry ride along unmeasured; the record-count cap bounds
+/// their worst case.
+#[derive(Debug, Default)]
+struct StreamedStepLogMirror {
+    records: VecDeque<StepLog>,
+    bytes: usize,
+    evicted_records: u64,
+    evicted_bytes: u64,
+}
+
+impl StreamedStepLogMirror {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, log: StepLog) {
+        let size = step_log_mirror_bytes(&log);
+        while self.records.len() >= STREAMED_STEP_LOG_MIRROR_MAX_RECORDS
+            || (!self.records.is_empty()
+                && self.bytes.saturating_add(size) > STREAMED_STEP_LOG_MIRROR_MAX_BYTES)
+        {
+            let Some(old) = self.records.pop_front() else {
+                break;
+            };
+            let old_size = step_log_mirror_bytes(&old);
+            self.bytes = self.bytes.saturating_sub(old_size);
+            self.evicted_records += 1;
+            self.evicted_bytes += old_size as u64;
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        self.records.push_back(log);
+    }
+
+    /// Drain retained records plus the lifetime eviction count for the
+    /// truncation marker. Byte accounting resets; the eviction counters are
+    /// monotonic for the job so late forensics reads stay accurate.
+    fn take(&mut self) -> (Vec<StepLog>, u64) {
+        let records: Vec<StepLog> = std::mem::take(&mut self.records).into_iter().collect();
+        self.bytes = 0;
+        (records, self.evicted_records)
+    }
+
+    fn stored_records(&self) -> usize {
+        self.records.len()
+    }
+
+    fn stored_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn evicted_records(&self) -> u64 {
+        self.evicted_records
+    }
+
+    fn evicted_bytes(&self) -> u64 {
+        self.evicted_bytes
+    }
+}
+
+/// Estimated heap footprint of one mirrored `StepLog`: payload strings plus a
+/// fixed per-record allowance for timestamps, `Vec` headers, and the
+/// annotation/telemetry structs the mirror retains verbatim.
+fn step_log_mirror_bytes(log: &StepLog) -> usize {
+    const PER_RECORD_OVERHEAD: usize = 512;
+    let mut bytes = PER_RECORD_OVERHEAD
+        + log.step_id.len()
+        + log.display_name.len()
+        + log.started_at.len()
+        + log.completed_at.len()
+        + log.summary.len();
+    bytes += log.lines.iter().map(String::len).sum::<usize>();
+    bytes += log.masks.iter().map(String::len).sum::<usize>();
+    bytes
+}
+
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
     console_log_path: Option<PathBuf>,
-    streamed_step_logs: Arc<Mutex<Vec<StepLog>>>,
+    streamed_step_logs: StreamedStepLogs,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -11571,7 +11724,13 @@ async fn upload_results_step_log_with_client(
 /// cumulative, so it replaces the accumulated chunks. Steps still running when
 /// the job was canceled have no final snapshot — stamp them so the combined
 /// job log renders their partial output as a finished step.
-fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
+///
+/// `evicted_records` is the bounded mirror's lifetime eviction count: the
+/// mirror evicts oldest-first, so a nonzero count means the retained stream is
+/// head-truncated. R1-pub renders that as an explicit truncation marker — the
+/// first line of the earliest retained step, or a synthetic mirror step when
+/// nothing was retained — so the cancel-path log never silently drops its head.
+fn merged_partial_step_logs(streamed: Vec<StepLog>, evicted_records: u64) -> Vec<StepLog> {
     let mut merged: Vec<StepLog> = Vec::new();
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     for log in streamed {
@@ -11599,6 +11758,32 @@ fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
     for log in &mut merged {
         if log.completed_at.is_empty() {
             log.completed_at = now.clone();
+        }
+    }
+    if evicted_records > 0 {
+        let marker = format!(
+            "[velnor] step-log mirror truncated: {evicted_records} streamed record(s) evicted at the 4096-record/64MiB bound; earliest output above this line is missing."
+        );
+        match merged.first_mut() {
+            Some(first) => first.lines.insert(0, marker),
+            None => merged.push(StepLog {
+                step_id: "velnor-step-log-mirror".to_string(),
+                display_name: "Velnor step-log mirror".to_string(),
+                order: 0,
+                started_at: now.clone(),
+                completed_at: now,
+                lines: vec![marker],
+                masks: Vec::new(),
+                annotations: Vec::new(),
+                telemetry: Vec::new(),
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                error_count: 0,
+                warning_count: 0,
+                notice_count: 0,
+                summary: String::new(),
+            }),
         }
     }
     merged
@@ -22136,7 +22321,7 @@ runs:
             // landed must not duplicate its lines.
             partial_step_log("checkout", &["cloned"], ""),
         ];
-        let merged = merged_partial_step_logs(streamed);
+        let merged = merged_partial_step_logs(streamed, 0);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].step_id, "build");
         assert_eq!(merged[0].lines, vec!["compiling a", "compiling b"]);
@@ -22147,6 +22332,104 @@ runs:
         assert_eq!(merged[1].step_id, "checkout");
         assert_eq!(merged[1].lines, vec!["cloned"]);
         assert_eq!(merged[1].completed_at, "2026-08-31T00:00:01.0000000Z");
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_evicts_oldest_past_record_cap() {
+        let mut mirror = StreamedStepLogMirror::new();
+        for i in 0..(STREAMED_STEP_LOG_MIRROR_MAX_RECORDS + 10) {
+            mirror.push(partial_step_log(&format!("step-{i}"), &["line"], ""));
+        }
+        assert_eq!(
+            mirror.stored_records(),
+            STREAMED_STEP_LOG_MIRROR_MAX_RECORDS
+        );
+        assert_eq!(mirror.evicted_records(), 10);
+        assert!(mirror.evicted_bytes() > 0);
+        let (records, evicted) = mirror.take();
+        assert_eq!(evicted, 10);
+        assert_eq!(records.len(), STREAMED_STEP_LOG_MIRROR_MAX_RECORDS);
+        assert_eq!(records[0].step_id, "step-10");
+        assert_eq!(
+            records.last().unwrap().step_id,
+            format!("step-{}", STREAMED_STEP_LOG_MIRROR_MAX_RECORDS + 9)
+        );
+        // Counters are monotonic for the job: the drain must not reset them.
+        assert_eq!(mirror.evicted_records(), 10);
+        assert_eq!(mirror.stored_records(), 0);
+        assert_eq!(mirror.stored_bytes(), 0);
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_enforces_byte_cap() {
+        let mut mirror = StreamedStepLogMirror::new();
+        let big_line = "x".repeat(16 * 1024 * 1024);
+        for i in 0..6 {
+            mirror.push(partial_step_log(
+                &format!("big-{i}"),
+                &[big_line.as_str()],
+                "",
+            ));
+        }
+        // Six 16MiB records against a 64MiB bound: the three oldest are
+        // evicted, the three newest retained.
+        assert_eq!(mirror.evicted_records(), 3);
+        assert_eq!(mirror.stored_records(), 3);
+        assert!(mirror.stored_bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
+        let (records, evicted) = mirror.take();
+        assert_eq!(evicted, 3);
+        assert_eq!(records[0].step_id, "big-3");
+        assert_eq!(records.last().unwrap().step_id, "big-5");
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_retains_single_oversize_record() {
+        let mut mirror = StreamedStepLogMirror::new();
+        let huge_line = "x".repeat(STREAMED_STEP_LOG_MIRROR_MAX_BYTES + 1);
+        mirror.push(partial_step_log("huge", &[huge_line.as_str()], ""));
+        // Eviction stops at empty: the newest record is always present even
+        // when it alone exceeds the byte bound.
+        assert_eq!(mirror.stored_records(), 1);
+        assert_eq!(mirror.evicted_records(), 0);
+    }
+
+    #[test]
+    fn merged_partial_step_logs_marks_evicted_mirror() {
+        let streamed = vec![partial_step_log("build", &["compiling a"], "")];
+        let merged = merged_partial_step_logs(streamed, 7);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].lines.len(), 2);
+        assert!(
+            merged[0].lines[0].contains('7') && merged[0].lines[0].contains("truncated"),
+            "marker must carry the eviction count: {}",
+            merged[0].lines[0]
+        );
+        assert_eq!(merged[0].lines[1], "compiling a");
+        assert!(
+            !merged[0].completed_at.is_empty(),
+            "unfinished step must still be stamped"
+        );
+    }
+
+    #[test]
+    fn merged_partial_step_logs_without_eviction_has_no_marker() {
+        let streamed = vec![partial_step_log("build", &["compiling a"], "")];
+        let merged = merged_partial_step_logs(streamed, 0);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].lines, vec!["compiling a"]);
+    }
+
+    #[test]
+    fn merged_partial_step_logs_empty_stream_with_eviction_synthesizes_marker_step() {
+        let merged = merged_partial_step_logs(Vec::new(), 3);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].step_id, "velnor-step-log-mirror");
+        assert!(
+            merged[0].lines[0].contains('3') && merged[0].lines[0].contains("truncated"),
+            "synthetic step must carry the eviction count: {}",
+            merged[0].lines[0]
+        );
+        assert!(!merged[0].completed_at.is_empty());
     }
 
     #[cfg(feature = "test-support")]
@@ -22254,10 +22537,13 @@ runs:
 
         let job = results_job(&server.uri());
         let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
-        let step_logs = merged_partial_step_logs(vec![
-            partial_step_log("build", &["compiling a"], ""),
-            partial_step_log("build", &["compiling b"], ""),
-        ]);
+        let step_logs = merged_partial_step_logs(
+            vec![
+                partial_step_log("build", &["compiling a"], ""),
+                partial_step_log("build", &["compiling b"], ""),
+            ],
+            0,
+        );
         upload_results_job_log_with_client(&client, &job, &step_logs)
             .await
             .unwrap();
