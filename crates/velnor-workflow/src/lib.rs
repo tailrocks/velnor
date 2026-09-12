@@ -9678,6 +9678,23 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(metadata.contains("release export"));
         assert!(metadata.contains("capabilities export"));
         assert!(metadata.contains("name: preview-metadata"));
+        // The job links the host build through mold (RUSTFLAGS), so mold must be
+        // installed before the export step builds anything: without it the
+        // build dies with "cannot find 'ld'".
+        let linker = must_some(
+            metadata.find("name: Install mold linker"),
+            "preview metadata job installs the mold linker",
+        );
+        let rustflags = must_some(
+            metadata.find("RUSTFLAGS"),
+            "preview metadata job declares RUSTFLAGS",
+        );
+        let export = must_some(
+            metadata.find("name: Export metadata from one preview-build binary"),
+            "preview metadata job exports the metadata",
+        );
+        assert!(rustflags < linker && linker < export);
+        assert!(metadata.contains("uses: rui314/setup-mold@"));
     }
 
     #[test]
