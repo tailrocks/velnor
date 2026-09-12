@@ -131,19 +131,18 @@ pub enum CheckoutPhase {
     MirrorFetch,
     /// Fetching from the local mirror into the job workspace.
     WorkspaceFetch,
-    /// Materialising the tree in the workspace.
+    /// Materialising the tree in the workspace. Files keep the wall-clock
+    /// mtime git gave them; the mtime-normalization phase was deleted with
+    /// the pin (BC-14) because pinned mtimes accepted stale artifacts.
     WorkspaceCheckout,
-    /// Rewriting file mtimes for build-tool fingerprint stability.
-    MtimeNormalization,
 }
 
 impl CheckoutPhase {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 4] = [
         Self::MirrorLockWait,
         Self::MirrorFetch,
         Self::WorkspaceFetch,
         Self::WorkspaceCheckout,
-        Self::MtimeNormalization,
     ];
 
     /// Only the remote fetch is external; every other phase is Velnor's own.
@@ -151,10 +150,9 @@ impl CheckoutPhase {
     pub const fn lane(self) -> TelemetryLane {
         match self {
             Self::MirrorFetch => TelemetryLane::Github,
-            Self::MirrorLockWait
-            | Self::WorkspaceFetch
-            | Self::WorkspaceCheckout
-            | Self::MtimeNormalization => TelemetryLane::Velnor,
+            Self::MirrorLockWait | Self::WorkspaceFetch | Self::WorkspaceCheckout => {
+                TelemetryLane::Velnor
+            }
         }
     }
 
@@ -165,7 +163,6 @@ impl CheckoutPhase {
             Self::MirrorFetch => "mirror-fetch",
             Self::WorkspaceFetch => "workspace-fetch",
             Self::WorkspaceCheckout => "workspace-checkout",
-            Self::MtimeNormalization => "mtime-normalization",
         }
     }
 }

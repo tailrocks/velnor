@@ -8,7 +8,7 @@
 //! observation carries. No new runner sink was needed — spans alone.
 //!
 //! The span-name table below is pinned on the runner side by
-//! `checkout::tests::checkout_emits_the_five_bench_phase_spans`, which runs a
+//! `checkout::tests::checkout_emits_the_four_bench_phase_spans`, which runs a
 //! real checkout and asserts every name and `phase` field. This side asserts
 //! the table covers [`CheckoutPhase::ALL`](crate::stage::CheckoutPhase) exactly,
 //! and the round-trip test generates records with the real subscriber layer,
@@ -29,10 +29,6 @@ const SPAN_TABLE: &[(&str, CheckoutPhase)] = &[
     (
         "checkout.workspace.checkout",
         CheckoutPhase::WorkspaceCheckout,
-    ),
-    (
-        "checkout.workspace.mtime_normalize",
-        CheckoutPhase::MtimeNormalization,
     ),
 ];
 

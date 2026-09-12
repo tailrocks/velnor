@@ -75,12 +75,6 @@ const PAGES_ARCHIVE_MAX_PATH_DEPTH: usize = 256;
 const PAGES_ARCHIVE_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const PAGES_ARCHIVE_MAX_ARCHIVE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-const PERSISTENT_TARGET_MAX_NODES: usize = 1_000_000;
-const PERSISTENT_TARGET_MAX_DIRECTORIES: usize = 100_000;
-const PERSISTENT_TARGET_MAX_DEPTH: usize = 256;
-const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
-const PERSISTENT_TARGET_MAX_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-const PERSISTENT_TARGET_MAX_TOTAL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 static DOCKER_TIMEOUT_CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -2148,15 +2142,10 @@ where
             &container.workspace_host,
             temp_host,
         )?;
-        state.persistent_workspace_target = container.cargo_target_host.is_some();
         // The engine's scope is the job's admitted scope (installed from the
         // admission decision via `with_trust_scope`): cache paths resolved
         // from this state land in the job's namespace, not the pool's.
         state.trust_scope = self.trust_scope.clone();
-        state.cargo_target_host = container
-            .cargo_target_host
-            .as_ref()
-            .map(|_| container.workspace_host.join("target"));
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -2180,24 +2169,7 @@ where
         let mut post_actions: Vec<PostAction> = Vec::new();
         let mut timeline_order = self.initial_order;
         let mut composite_frame: Option<CompositeFrame> = None;
-        let mut target_materialized = false;
         for step in steps {
-            if !target_materialized
-                && container.cargo_target_host.is_some()
-                && !matches!(
-                    step,
-                    ExecutableStep::Native {
-                        invocation,
-                        ..
-                    } if invocation.adapter == NativeActionAdapter::Checkout
-                )
-            {
-                materialize_persistent_target(
-                    container,
-                    state.env.get("GITHUB_SHA").map(String::as_str),
-                )?;
-                target_materialized = true;
-            }
             match step {
                 ExecutableStep::CompositeStart {
                     step_id,
@@ -3186,19 +3158,6 @@ where
             };
             self.emit_step_log(&log);
             step_logs.push(log);
-        }
-        if target_materialized
-            && step_error.is_none()
-            && persistent_target_results_publishable(&results)
-            && let Err(error) = publish_persistent_target(
-                container,
-                state.env.get("GITHUB_SHA").map(String::as_str),
-            )
-        {
-            eprintln!(
-                "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
-                container.name
-            );
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -5951,7 +5910,7 @@ fn native_cache_restore_main(
     let declared_paths = cache_paths(&path);
     let persistent_paths = declared_paths
         .iter()
-        .filter(|path| velnor_persistent_cache_path(&action_state, path))
+        .filter(|path| velnor_persistent_cache_path(path))
         .count();
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
@@ -6049,8 +6008,7 @@ fn native_rust_cache(
         restore_cache_paths(&action_state, matched_key, &cache_directories, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
-    let persistent_target =
-        rust_cache_covered_by_persistent_storage(&action_state, &cache_directories);
+    let persistent_target = rust_cache_covered_by_persistent_storage(&cache_directories);
     let cache_hit = matched.is_some() || persistent_target;
     let mut outputs = BTreeMap::new();
     outputs.insert("cache-hit".to_string(), cache_hit.to_string());
@@ -6200,8 +6158,7 @@ fn validate_cache_paths(state: &JobExecutionState, paths: &str) -> Result<()> {
             };
             Glob::new(&normalize_glob_pattern(&pattern))
                 .with_context(|| format!("invalid cache glob syntax '{path}'"))?;
-        } else if !velnor_persistent_cache_path(state, &path)
-            && resolve_cache_path(state, &path).is_none()
+        } else if !velnor_persistent_cache_path(&path) && resolve_cache_path(state, &path).is_none()
         {
             bail!("cache path '{path}' cannot resolve to Velnor-mapped job storage");
         }
@@ -6314,7 +6271,7 @@ fn restore_cache_paths(
         // Paths that live on Velnor's host-persistent mounts (cargo
         // registry/git, mise installs, sccache) are always warm — copying
         // store bytes over them would be pure waste.
-        if velnor_persistent_cache_path(state, path) {
+        if velnor_persistent_cache_path(path) {
             continue;
         }
         if has_glob_pattern(path) {
@@ -6545,17 +6502,10 @@ fn cache_glob_source_overlaps_persistent_exact(
     state: &JobExecutionState,
     declared_paths: &[String],
     source: &Path,
-    relative: &Path,
 ) -> bool {
     for declared in declared_paths {
-        if has_glob_pattern(declared) || !velnor_persistent_cache_path(state, declared) {
+        if has_glob_pattern(declared) || !velnor_persistent_cache_path(declared) {
             continue;
-        }
-        if state.persistent_workspace_target
-            && let Some(target_relative) = workspace_target_relative(declared)
-            && (relative == target_relative || relative.starts_with(&target_relative))
-        {
-            return true;
         }
         if let Some(persistent_path) = resolve_cache_path(state, declared)
             && (source == persistent_path || source.starts_with(&persistent_path))
@@ -6564,18 +6514,6 @@ fn cache_glob_source_overlaps_persistent_exact(
         }
     }
     false
-}
-
-fn workspace_target_relative(path: &str) -> Option<PathBuf> {
-    let path = path.trim();
-    let relative = match path {
-        "target" | "./target" | "/__w/target" => "",
-        _ => path
-            .strip_prefix("target/")
-            .or_else(|| path.strip_prefix("./target/"))
-            .or_else(|| path.strip_prefix("/__w/target/"))?,
-    };
-    Some(Path::new("target").join(relative))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6734,12 +6672,7 @@ fn restore_cache_glob_path(
         }
         let source_path = payload.join(&relative);
         let destination = base.join(&relative);
-        if cache_glob_source_overlaps_persistent_exact(
-            state,
-            declared_paths,
-            &destination,
-            &relative,
-        ) {
+        if cache_glob_source_overlaps_persistent_exact(state, declared_paths, &destination) {
             continue;
         }
         let source = payload_directory
@@ -6817,26 +6750,6 @@ fn restore_cache_glob_path(
 }
 
 /// True for cache paths whose container locations are backed by Velnor's
-/// host-persistent or image-provided stores (mounted into every job container):
-/// the cargo registry/git stores, the mise tool store, the image-baked rustup
-/// toolchain store, and the shared sccache dir. These are always warm; the
-/// actions/cache adapter neither tars them into the store nor copies store bytes
-/// back over them.
-fn velnor_persistent_cache_path(state: &JobExecutionState, path: &str) -> bool {
-    if state.persistent_workspace_target && workspace_target_cache_path(path) {
-        return true;
-    }
-    velnor_static_persistent_cache_path(path)
-}
-
-fn workspace_target_cache_path(path: &str) -> bool {
-    let path = path.trim();
-    matches!(path, "target" | "./target" | "/__w/target")
-        || path.starts_with("target/")
-        || path.starts_with("./target/")
-        || path.starts_with("/__w/target/")
-}
-
 fn path_or_child(path: &str, root: &str) -> bool {
     path == root
         || path
@@ -6844,7 +6757,12 @@ fn path_or_child(path: &str, root: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn velnor_static_persistent_cache_path(path: &str) -> bool {
+/// Host-persistent or image-provided stores (mounted into every job container):
+/// the cargo registry/git stores, the mise tool store, the image-baked rustup
+/// toolchain store, and the shared sccache dir. These are always warm; the
+/// actions/cache adapter neither tars them into the store nor copies store bytes
+/// back over them.
+fn velnor_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     // These are the relative aliases emitted by the canonical fleet cache
     // declarations. They resolve to Velnor's mounted Cargo/mise stores even
@@ -6873,17 +6791,9 @@ fn velnor_static_persistent_cache_path(path: &str) -> bool {
         || path_or_child(path, "/var/cache/sccache")
 }
 
-fn rust_cache_covered_by_persistent_storage(
-    state: &JobExecutionState,
-    cache_directories: &str,
-) -> bool {
+fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
     let paths = cache_paths(cache_directories);
-    if !paths.is_empty() {
-        return paths
-            .iter()
-            .all(|path| velnor_persistent_cache_path(state, path));
-    }
-    state.persistent_workspace_target
+    !paths.is_empty() && paths.iter().all(|path| velnor_persistent_cache_path(path))
 }
 
 fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> {
@@ -6999,7 +6909,7 @@ fn save_cache_result(
     let mut persistent = 0usize;
     let declared_paths = cache_paths(paths);
     for (index, path) in declared_paths.iter().enumerate() {
-        if velnor_persistent_cache_path(state, path) {
+        if velnor_persistent_cache_path(path) {
             persistent += 1;
             continue;
         }
@@ -7024,12 +6934,7 @@ fn save_cache_result(
             };
             for (relative, kind) in sources {
                 let source = base.join(&relative);
-                if cache_glob_source_overlaps_persistent_exact(
-                    state,
-                    &declared_paths,
-                    &source,
-                    &relative,
-                ) {
+                if cache_glob_source_overlaps_persistent_exact(state, &declared_paths, &source) {
                     continue;
                 }
                 let relative_string = relative.to_str().ok_or_else(|| {
@@ -7180,339 +7085,6 @@ fn save_cache_result(
 
 fn cache_entry_complete(path: &Path) -> bool {
     path.is_dir() && path.join(".velnor-complete-v1").is_file()
-}
-
-const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
-const TARGET_COMPLETE_MARKER: &str = ".velnor-target-complete-v1";
-const TARGET_CURRENT_POINTER: &str = "current";
-const TARGET_POINTER_MAX_BYTES: u64 = 128;
-
-fn target_identifier(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 128
-        || value
-            .bytes()
-            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_'))
-    {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn target_identifier_file(value: &str) -> Option<String> {
-    let mut lines = value.lines();
-    let identifier = lines.next().and_then(target_identifier)?;
-    (lines.next().is_none() && value.ends_with('\n')).then_some(identifier)
-}
-
-fn read_target_file(file: &mut fs::File, maximum: u64, label: &str) -> Result<String> {
-    let mut bytes = Vec::new();
-    file.take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("read {label}"))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > maximum {
-        bail!("{label} exceeds the {maximum}-byte limit");
-    }
-    String::from_utf8(bytes).with_context(|| format!("{label} is not valid UTF-8"))
-}
-
-fn open_target_store_source(store: &Path) -> Result<Option<crate::fs_copy::NoFollowDir>> {
-    match fs::symlink_metadata(store) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "persistent target store root is a symlink: {}",
-                store.display()
-            )
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            bail!(
-                "persistent target store root is not a directory: {}",
-                store.display()
-            )
-        }
-        Ok(_) => crate::fs_copy::NoFollowDir::open_absolute(store).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(error).with_context(|| format!("inspect target store root {}", store.display()))
-        }
-    }
-}
-
-fn open_target_store_destination(store: &Path) -> Result<crate::fs_copy::NoFollowDestinationDir> {
-    match fs::symlink_metadata(store) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            bail!(
-                "persistent target store root is a symlink: {}",
-                store.display()
-            )
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            bail!(
-                "persistent target store root is not a directory: {}",
-                store.display()
-            )
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(store).with_context(|| {
-                format!("create persistent target store root {}", store.display())
-            })?;
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("inspect target store root {}", store.display()))
-        }
-    }
-    crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(store)
-}
-
-fn read_current_target_generation(
-    store: &crate::fs_copy::NoFollowDir,
-    store_path: &Path,
-) -> Result<Option<String>> {
-    let Some(source) = store.open_source(Path::new(TARGET_CURRENT_POINTER))? else {
-        return Ok(None);
-    };
-    let crate::fs_copy::NoFollowSource::File(mut file) = source else {
-        bail!(
-            "persistent target current pointer is not a regular file: {}",
-            store_path.join(TARGET_CURRENT_POINTER).display()
-        );
-    };
-    let value = read_target_file(
-        &mut file,
-        TARGET_POINTER_MAX_BYTES,
-        &format!(
-            "target current pointer {}",
-            store_path.join(TARGET_CURRENT_POINTER).display()
-        ),
-    )?;
-    let mut lines = value.lines();
-    let generation = lines.next().and_then(target_identifier);
-    if generation.is_none() || lines.next().is_some() || !value.ends_with('\n') {
-        bail!(
-            "persistent target current pointer is malformed: {}",
-            store_path.join(TARGET_CURRENT_POINTER).display()
-        );
-    }
-    Ok(generation)
-}
-
-fn complete_target_generation(
-    generation: &crate::fs_copy::NoFollowDir,
-    generation_path: &Path,
-) -> Result<Option<crate::fs_copy::NoFollowDir>> {
-    let Some(marker) = generation.open_source(Path::new(TARGET_COMPLETE_MARKER))? else {
-        return Ok(None);
-    };
-    if !matches!(marker, crate::fs_copy::NoFollowSource::File(_)) {
-        bail!(
-            "target generation completion marker is not a regular file: {}",
-            generation_path.join(TARGET_COMPLETE_MARKER).display()
-        );
-    }
-    let Some(data) = generation.open_source(Path::new("data"))? else {
-        return Ok(None);
-    };
-    let crate::fs_copy::NoFollowSource::Directory(data) = data else {
-        bail!(
-            "target generation data is not a directory: {}",
-            generation_path.join("data").display()
-        );
-    };
-    Ok(Some(data))
-}
-
-fn write_target_file(
-    directory: &crate::fs_copy::NoFollowDestinationDir,
-    name: &str,
-    value: &[u8],
-) -> Result<()> {
-    directory
-        .write_file_from_reader(
-            &mut &value[..],
-            Path::new(name),
-            u64::try_from(value.len()).unwrap_or(u64::MAX),
-            0o644,
-        )
-        .with_context(|| format!("write target metadata {name}"))?;
-    Ok(())
-}
-
-fn materialize_persistent_target(
-    container: &JobContainerSpec,
-    source_revision: Option<&str>,
-) -> Result<()> {
-    let Some(store) = container.cargo_target_host.as_deref() else {
-        return Ok(());
-    };
-    let _lock = CacheEntryLock::shared(store)?;
-    let Some(store_source) = open_target_store_source(store)? else {
-        return Ok(());
-    };
-    let Some(generation_name) = read_current_target_generation(&store_source, store)? else {
-        return Ok(());
-    };
-    let Some(crate::fs_copy::NoFollowSource::Directory(generation)) =
-        store_source.open_source(Path::new(&generation_name))?
-    else {
-        return Ok(());
-    };
-    let generation_path = store.join(&generation_name);
-    let Some(payload) = complete_target_generation(&generation, &generation_path)? else {
-        return Ok(());
-    };
-    let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision)
-        .and_then(|value| target_identifier(&value))
-    else {
-        eprintln!(
-            "forensics.lifecycle: persistent target restore skipped: invalid source revision"
-        );
-        return Ok(());
-    };
-    let Some(source_file) = generation.open_source(Path::new(TARGET_SOURCE_REVISION_MARKER))?
-    else {
-        return Ok(());
-    };
-    let crate::fs_copy::NoFollowSource::File(mut source_file) = source_file else {
-        bail!(
-            "target source revision marker is not a regular file: {}",
-            generation_path
-                .join(TARGET_SOURCE_REVISION_MARKER)
-                .display()
-        );
-    };
-    let stored_revision = target_identifier_file(&read_target_file(
-        &mut source_file,
-        TARGET_POINTER_MAX_BYTES,
-        &format!("target source revision {}", generation_path.display()),
-    )?);
-    let target = container.workspace_host.join("target");
-    if stored_revision.as_deref() != Some(revision.as_str()) {
-        // Checkout pins source mtimes to the commit timestamp. Restoring a
-        // different revision and then touching sources would poison the
-        // published fingerprints for every later unchanged run.
-        eprintln!(
-            "forensics.lifecycle: persistent target generation invalidated (stored={}, current={})",
-            stored_revision.as_deref().unwrap_or("unknown"),
-            revision
-        );
-        if fs::symlink_metadata(&target)
-            .ok()
-            .is_some_and(|metadata| metadata.file_type().is_symlink())
-        {
-            bail!("job-local target root is a symlink: {}", target.display());
-        }
-        if target.is_dir() {
-            fs::remove_dir_all(&target)
-                .with_context(|| format!("clear stale job-local target {}", target.display()))?;
-        }
-        return Ok(());
-    }
-    if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            bail!("job-local target root is a symlink: {}", target.display());
-        }
-        if !metadata.is_dir() {
-            bail!(
-                "job-local target root is not a directory: {}",
-                target.display()
-            );
-        }
-        fs::remove_dir_all(&target)
-            .with_context(|| format!("clear job-local target {}", target.display()))?;
-    }
-    let destination = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
-        &container.workspace_host,
-        Path::new("target"),
-    )
-    .with_context(|| format!("open job-local target {}", target.display()))?;
-    copy_persistent_target_contents(
-        &payload,
-        &generation_path.join("data"),
-        &destination,
-        Path::new(""),
-        true,
-    )?;
-    Ok(())
-}
-
-fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option<String> {
-    std::process::Command::new("git")
-        .args(["-C"])
-        .arg(workspace)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|revision| revision.trim().to_owned())
-        .filter(|revision| !revision.is_empty())
-        .or_else(|| fallback.map(str::to_owned))
-}
-
-fn publish_persistent_target(
-    container: &JobContainerSpec,
-    source_revision: Option<&str>,
-) -> Result<()> {
-    let Some(store) = container.cargo_target_host.as_deref() else {
-        return Ok(());
-    };
-    let target = container.workspace_host.join("target");
-    let Ok(target_metadata) = fs::symlink_metadata(&target) else {
-        return Ok(());
-    };
-    if target_metadata.file_type().is_symlink() {
-        bail!("job-local target root is a symlink: {}", target.display());
-    }
-    if !target_metadata.is_dir() {
-        bail!(
-            "job-local target root is not a directory: {}",
-            target.display()
-        );
-    }
-    let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision)
-        .and_then(|value| target_identifier(&value))
-    else {
-        eprintln!(
-            "forensics.lifecycle: persistent target publish skipped: invalid source revision"
-        );
-        return Ok(());
-    };
-
-    let _lock = CacheEntryLock::exclusive(store)?;
-    let store_directory = open_target_store_destination(store)?;
-    let (generation, generation_name) =
-        store_directory.create_unique_directory("target-generation")?;
-    let payload = generation.open_relative_directory(Path::new("data"))?;
-    let source = crate::fs_copy::NoFollowDir::open_absolute(&target)
-        .with_context(|| format!("securely open job-local target {}", target.display()))?;
-    copy_persistent_target_contents(&source, &target, &payload, Path::new(""), true)
-        .context("stage persistent target generation")?;
-    write_target_file(&generation, TARGET_COMPLETE_MARKER, b"complete\n")?;
-    write_target_file(
-        &generation,
-        TARGET_SOURCE_REVISION_MARKER,
-        format!("{revision}\n").as_bytes(),
-    )?;
-
-    let pointer_value = format!("{}\n", generation_name.to_string_lossy());
-    let (mut pointer, pointer_name) = store_directory.create_temporary_file(".current")?;
-    pointer.write_all(pointer_value.as_bytes())?;
-    pointer.flush()?;
-    pointer.sync_all()?;
-    drop(pointer);
-    store_directory
-        .publish_temporary_file(&pointer_name, std::ffi::OsStr::new(TARGET_CURRENT_POINTER))
-        .context("atomically replace persistent target current pointer")?;
-    Ok(())
-}
-
-fn persistent_target_results_publishable(results: &[StepExecutionResult]) -> bool {
-    results
-        .iter()
-        .all(|result| result.skipped || result.exit_code == 0)
 }
 
 fn cache_staging_name(cache_file_name: &str) -> String {
@@ -10443,20 +10015,6 @@ fn artifact_glob_base_and_pattern(
     {
         bail!("artifact source path contains parent traversal: {path}");
     }
-    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
-        return Ok(state
-            .cargo_target_host
-            .as_ref()
-            .map(|base| (base.clone(), String::new())));
-    }
-    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
-        if let Some(rest) = path.strip_prefix(prefix) {
-            let rest = mapped_glob_suffix(path, rest)?;
-            if let Some(base) = &state.cargo_target_host {
-                return Ok(Some((base.clone(), rest)));
-            }
-        }
-    }
     if let Some(rest) = path.strip_prefix("/__w/") {
         let rest = mapped_glob_suffix(path, rest)?;
         return Ok(state
@@ -10613,7 +10171,6 @@ fn trusted_job_destination(
 ) -> Result<TrustedJobDestination> {
     let home = state_home_host(state);
     for root in [
-        state.cargo_target_host.as_deref(),
         state.workspace_host.as_deref(),
         home.as_deref(),
         state.temp_host.as_deref(),
@@ -10691,19 +10248,6 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     let path = path.trim();
     if path.is_empty() || artifact_path_has_parent_component(path) {
         return None;
-    }
-    if (path == "target" || path == "/__w/target" || path == "/github/workspace/target")
-        && let Some(base) = &state.cargo_target_host
-    {
-        return Some(base.clone());
-    }
-    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
-        if let Some(rest) = path.strip_prefix(prefix) {
-            relative_mapped_suffix(rest)?;
-            if let Some(base) = &state.cargo_target_host {
-                return join_mapped_suffix(base, rest);
-            }
-        }
     }
     if let Some(rest) = path.strip_prefix("/__w/") {
         return state
@@ -10812,15 +10356,9 @@ fn resolve_container_path(state: &JobExecutionState, path: &str) -> String {
 
 fn artifact_source_is_hidden(state: &JobExecutionState, source: &Path) -> bool {
     let relative = state
-        .cargo_target_host
+        .workspace_host
         .as_deref()
         .and_then(|base| source.strip_prefix(base).ok())
-        .or_else(|| {
-            state
-                .workspace_host
-                .as_deref()
-                .and_then(|base| source.strip_prefix(base).ok())
-        })
         .or_else(|| {
             state
                 .temp_host
@@ -11323,126 +10861,6 @@ fn normalize_artifact_file_permissions(file: &fs::File, destination: &Path) -> R
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct PersistentTargetTraversalLimits {
-    max_nodes: usize,
-    max_directories: usize,
-    max_depth: usize,
-    max_path_bytes: u64,
-    max_file_bytes: u64,
-    max_total_bytes: u64,
-}
-
-impl PersistentTargetTraversalLimits {
-    fn bounded() -> Self {
-        Self {
-            max_nodes: PERSISTENT_TARGET_MAX_NODES,
-            max_directories: PERSISTENT_TARGET_MAX_DIRECTORIES,
-            max_depth: PERSISTENT_TARGET_MAX_DEPTH,
-            max_path_bytes: PERSISTENT_TARGET_MAX_PATH_BYTES,
-            max_file_bytes: PERSISTENT_TARGET_MAX_FILE_BYTES,
-            max_total_bytes: PERSISTENT_TARGET_MAX_TOTAL_BYTES,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct PersistentTargetTraversalBudget {
-    limits: Option<PersistentTargetTraversalLimits>,
-    nodes: usize,
-    directories: usize,
-    path_bytes: u64,
-    total_bytes: u64,
-}
-
-impl PersistentTargetTraversalBudget {
-    fn unbounded() -> Self {
-        Self::default()
-    }
-
-    fn visit(&mut self, relative: &Path, directory: bool) -> Result<()> {
-        let Some(limits) = self.limits else {
-            return Ok(());
-        };
-        let depth = relative.components().count();
-        if depth > limits.max_depth {
-            bail!(
-                "persistent target path exceeds the {}-component depth limit",
-                limits.max_depth
-            );
-        }
-        self.nodes = self
-            .nodes
-            .checked_add(1)
-            .context("persistent target node count overflowed")?;
-        if self.nodes > limits.max_nodes {
-            bail!(
-                "persistent target traversal visited more than the {}-node limit",
-                limits.max_nodes
-            );
-        }
-        self.path_bytes = self
-            .path_bytes
-            .checked_add(
-                u64::try_from(relative.as_os_str().as_encoded_bytes().len()).unwrap_or(u64::MAX),
-            )
-            .context("persistent target path byte count overflowed")?;
-        if self.path_bytes > limits.max_path_bytes {
-            bail!(
-                "persistent target paths exceed the {}-byte limit",
-                limits.max_path_bytes
-            );
-        }
-        if directory {
-            self.directories = self
-                .directories
-                .checked_add(1)
-                .context("persistent target directory count overflowed")?;
-            if self.directories > limits.max_directories {
-                bail!(
-                    "persistent target traversal visited more than the {}-directory limit",
-                    limits.max_directories
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn account_file(&mut self, relative: &Path, file: &fs::File) -> Result<()> {
-        let Some(limits) = self.limits else {
-            return Ok(());
-        };
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("inspect persistent target file {}", relative.display()))?;
-        if !metadata.is_file() {
-            bail!(
-                "persistent target source is not a regular file: {}",
-                relative.display()
-            );
-        }
-        let file_bytes = metadata.len();
-        if file_bytes > limits.max_file_bytes {
-            bail!(
-                "persistent target file {} exceeds the {}-byte limit",
-                relative.display(),
-                limits.max_file_bytes
-            );
-        }
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(file_bytes)
-            .context("persistent target byte count overflowed")?;
-        if self.total_bytes > limits.max_total_bytes {
-            bail!(
-                "persistent target files exceed the {}-byte total limit",
-                limits.max_total_bytes
-            );
-        }
-        Ok(())
-    }
-}
-
 fn copy_dir_contents_filtered(
     source: &crate::fs_copy::NoFollowDir,
     source_path: &Path,
@@ -11450,92 +10868,11 @@ fn copy_dir_contents_filtered(
     destination_relative: &Path,
     include_hidden: bool,
 ) -> Result<()> {
-    let mut budget = PersistentTargetTraversalBudget::unbounded();
-    copy_dir_contents_filtered_with_budget(
-        source,
-        source_path,
-        destination_directory,
-        destination_relative,
-        include_hidden,
-        &mut budget,
-    )
-}
-
-fn copy_persistent_target_contents(
-    source: &crate::fs_copy::NoFollowDir,
-    source_path: &Path,
-    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
-    destination_relative: &Path,
-    include_hidden: bool,
-) -> Result<()> {
-    copy_persistent_target_contents_with_limits(
-        source,
-        source_path,
-        destination_directory,
-        destination_relative,
-        include_hidden,
-        PersistentTargetTraversalLimits::bounded(),
-    )
-}
-
-fn copy_persistent_target_contents_with_limits(
-    source: &crate::fs_copy::NoFollowDir,
-    source_path: &Path,
-    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
-    destination_relative: &Path,
-    include_hidden: bool,
-    limits: PersistentTargetTraversalLimits,
-) -> Result<()> {
-    let mut budget = PersistentTargetTraversalBudget {
-        limits: Some(limits),
-        ..PersistentTargetTraversalBudget::default()
-    };
-    copy_dir_contents_filtered_with_budget(
-        source,
-        source_path,
-        destination_directory,
-        destination_relative,
-        include_hidden,
-        &mut budget,
-    )
-}
-
-fn copy_dir_contents_filtered_with_budget(
-    source: &crate::fs_copy::NoFollowDir,
-    source_path: &Path,
-    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
-    destination_relative: &Path,
-    include_hidden: bool,
-    budget: &mut PersistentTargetTraversalBudget,
-) -> Result<()> {
-    budget.visit(destination_relative, true)?;
-    copy_dir_contents_filtered_in_open_directory(
-        source,
-        source_path,
-        destination_directory,
-        destination_relative,
-        include_hidden,
-        budget,
-    )
-}
-
-fn copy_dir_contents_filtered_in_open_directory(
-    source: &crate::fs_copy::NoFollowDir,
-    source_path: &Path,
-    destination_directory: &crate::fs_copy::NoFollowDestinationDir,
-    destination_relative: &Path,
-    include_hidden: bool,
-    budget: &mut PersistentTargetTraversalBudget,
-) -> Result<()> {
     source.for_each_entry_filtered(
         |name| include_hidden || !hidden_file_name(name),
         |entry| {
             let path = source_path.join(&entry.name);
             let target_relative = destination_relative.join(&entry.name);
-            budget.visit(
-                &target_relative,
-                matches!(&entry.source, crate::fs_copy::NoFollowSource::Directory(_)),
-            )?;
             match entry.source {
                 crate::fs_copy::NoFollowSource::Directory(directory) => {
                     let child_destination = destination_directory
@@ -11543,17 +10880,15 @@ fn copy_dir_contents_filtered_in_open_directory(
                         .with_context(|| {
                             format!("create directory {}", target_relative.display())
                         })?;
-                    copy_dir_contents_filtered_in_open_directory(
+                    copy_dir_contents_filtered(
                         &directory,
                         &path,
                         &child_destination,
                         &target_relative,
                         include_hidden,
-                        budget,
                     )?;
                 }
                 crate::fs_copy::NoFollowSource::File(file) => {
-                    budget.account_file(&target_relative, &file)?;
                     destination_directory
                         .clone_or_copy_file(&file, Path::new(&entry.name))
                         .with_context(|| {
@@ -12061,10 +11396,6 @@ pub(crate) struct JobExecutionState {
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
-    /// Runner-internal storage fact; deliberately not exported to step env.
-    persistent_workspace_target: bool,
-    /// Job-local workspace target materialized from a persistent generation.
-    cargo_target_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -12176,8 +11507,6 @@ impl JobExecutionState {
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
             temp_host,
-            persistent_workspace_target: false,
-            cargo_target_host: None,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -12233,8 +11562,6 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
-            persistent_workspace_target: self.persistent_workspace_target,
-            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -12266,8 +11593,6 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
-            persistent_workspace_target: self.persistent_workspace_target,
-            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -15976,7 +15301,6 @@ esac
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
-            cargo_target_host: None,
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
@@ -17322,23 +16646,8 @@ esac
 
     #[test]
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_static_persistent_cache_path(
-            "/root/.rustup/toolchains"
-        ));
-        assert!(velnor_static_persistent_cache_path(
-            "/root/.rustup/update-hashes"
-        ));
-    }
-
-    #[test]
-    fn workspace_target_cache_paths_include_relative_workflow_inputs() {
-        assert!(workspace_target_cache_path("target"));
-        assert!(workspace_target_cache_path("./target/debug"));
-        assert!(workspace_target_cache_path("/__w/target/release"));
-        // Persistent target materialization owns only the workspace-root
-        // target. Wildcard targets stay keyed and use concrete manifests.
-        assert!(!workspace_target_cache_path("**/target"));
-        assert!(!workspace_target_cache_path("nested/target"));
+        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
+        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
     }
 
     #[test]
@@ -17636,38 +16945,41 @@ esac
     }
 
     #[test]
-    fn native_cache_glob_deduplicates_persistent_workspace_target() {
+    fn native_cache_glob_saves_workspace_target_as_keyed_path() {
         let root = temp_dir();
         let temp = root.join("job/temp");
         let workspace = temp.join("work");
-        let target_store = root.join("target-store");
         fs::create_dir_all(workspace.join("target")).unwrap();
         fs::create_dir_all(workspace.join("packages/app/target")).unwrap();
-        fs::write(workspace.join("target/root.bin"), "persistent root\n").unwrap();
+        fs::write(workspace.join("target/root.bin"), "workspace root\n").unwrap();
         fs::write(
             workspace.join("packages/app/target/nested.bin"),
             "keyed nested\n",
         )
         .unwrap();
 
-        let mut state = JobExecutionState::new_with_workspace(
+        let state = JobExecutionState::new_with_workspace(
             &[("GITHUB_REPOSITORY".into(), "Test/Repo".into())],
             &[],
             &workspace,
             &temp,
         );
-        state.persistent_workspace_target = true;
-        state.cargo_target_host = Some(target_store);
         let paths = "target\n**/target";
         let version = cache_scope_version("", "", "", paths);
         save_cache_result(&state, "glob-dedup", paths, false, &version).unwrap();
 
+        // The workspace-root target is an ordinary keyed path now: the exact
+        // path lands at index 0 and the glob still matches it at index 1.
         let cache_entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("glob-dedup");
+        assert_eq!(
+            fs::read_to_string(cache_entry.join("0").join("root.bin")).unwrap(),
+            "workspace root\n"
+        );
         let manifest: CacheGlobManifest = serde_json::from_slice(
             &fs::read(cache_entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
         )
         .unwrap();
-        assert!(!manifest
+        assert!(manifest
             .entries
             .iter()
             .any(|entry| entry.relative == "target"));
@@ -17795,7 +17107,7 @@ esac
             ".cargo/git/db",
         ] {
             assert!(
-                velnor_static_persistent_cache_path(path),
+                velnor_persistent_cache_path(path),
                 "canonical cache alias was not recognized: {path}"
             );
         }
@@ -17807,7 +17119,7 @@ esac
             ".cargo/config.toml",
         ] {
             assert!(
-                !velnor_static_persistent_cache_path(path),
+                !velnor_persistent_cache_path(path),
                 "non-canonical path was incorrectly treated as persistent: {path}"
             );
         }
@@ -17849,44 +17161,6 @@ esac
             .state
             .summary
             .contains("keyed miss; 1/2 paths host-persistent"));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_cache_skips_relative_target_when_native_target_is_persistent() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(temp.join("target-store"));
-        let steps = vec![ExecutableStep::Native {
-            step_id: "cache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::Cache,
-                cache_kind: None,
-                source_path: None,
-                inputs: [
-                    ("path".into(), "target".into()),
-                    ("key".into(), "build-output-Linux-X64-lock".into()),
-                ]
-                .into(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-
-        let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&spec, &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|result| result
-            .state
-            .summary
-            .contains("host-persistent store — restore/save skipped")));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17981,7 +17255,7 @@ esac
     }
 
     #[test]
-    fn native_cache_glob_deduplicates_persistent_target_root() {
+    fn native_cache_glob_saves_workspace_target_root() {
         let root = temp_dir();
         let save_temp = root.join("save-job/temp");
         let restore_temp = root.join("restore-job/temp");
@@ -17996,47 +17270,50 @@ esac
         .unwrap();
         let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let paths = "target\n**/target";
-        let mut save_container = container(&save_temp);
-        save_container.cargo_target_host = Some(save_temp.join("target-store"));
         let save = vec![native_cache_step(
             Some(CacheActionKind::Save),
             Some("save"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
         let save_results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&save_container, &save, &env, &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
         assert!(save_results[0]
             .stdout
             .contains("Saved cache 'target-glob-dedup'"));
 
+        // The workspace-root target is keyed like any other path: the exact
+        // entry lands at index 0 and the glob matches both roots at index 1.
         let entry = cache_scope_store_dir(&root, "Test_Repo", paths).join("target-glob-dedup");
-        assert!(!entry.join("0").exists());
+        assert_eq!(
+            fs::read_to_string(entry.join("0").join("root.txt")).unwrap(),
+            "root\n"
+        );
         let manifest: CacheGlobManifest = serde_json::from_slice(
             &fs::read(entry.join("1").join(CACHE_GLOB_MANIFEST_FILE)).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            manifest
-                .entries
-                .iter()
-                .map(|entry| entry.relative.as_str())
-                .collect::<Vec<_>>(),
-            vec!["packages/core/target"]
-        );
+        let mut relatives: Vec<&str> = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.relative.as_str())
+            .collect();
+        relatives.sort_unstable();
+        assert_eq!(relatives, vec!["packages/core/target", "target"]);
 
-        let mut restore_container = container(&restore_temp);
-        restore_container.cargo_target_host = Some(restore_temp.join("target-store"));
         let restore = vec![native_cache_step(
             Some(CacheActionKind::Restore),
             Some("restore"),
             &[("path", paths), ("key", "target-glob-dedup")],
         )];
         let restore_results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&restore_container, &restore, &env, &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
-        assert!(!restore_temp.join("work/target/root.txt").exists());
+        assert_eq!(
+            fs::read_to_string(restore_temp.join("work/target/root.txt")).unwrap(),
+            "root\n"
+        );
         assert_eq!(
             fs::read_to_string(restore_temp.join("work/packages/core/target/nested.txt")).unwrap(),
             "nested\n"
@@ -18120,11 +17397,9 @@ esac
     }
 
     #[test]
-    fn native_rust_cache_treats_persistent_cargo_target_as_warm() {
+    fn native_rust_cache_misses_without_cache_directories() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(temp.join("target-store"));
         let steps = vec![ExecutableStep::Native {
             step_id: "rust-cache".into(),
             display_name: String::new(),
@@ -18142,60 +17417,25 @@ esac
         }];
 
         let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
+        // No declared directories and no persistent target layer: restore is a
+        // plain miss and the post step has nothing to save.
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "true");
-        assert!(results[0]
-            .stdout
-            .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(!results[0].stdout.contains("Rust cache miss"));
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(results[0].stdout.contains("Rust cache miss"));
         assert!(results[0]
             .state
             .summary
             .contains("Backend: rust-cache (native)"));
-        assert!(results[1].stdout.contains("Cache hit occurred"));
+        assert!(results[1].state.summary.contains("no paths — not saved"));
         fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
-    fn native_rust_cache_sees_container_persistent_cargo_target() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(temp.join("target-store"));
-        let steps = vec![ExecutableStep::Native {
-            step_id: "rust-cache".into(),
-            display_name: String::new(),
-            invocation: NativeActionInvocation {
-                git_ref: String::new(),
-                adapter: NativeActionAdapter::RustCache,
-                cache_kind: None,
-                source_path: None,
-                inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
-                env: Vec::new(),
-            },
-            condition: None,
-            continue_on_error: false,
-            timeout_minutes: None,
-        }];
-
-        let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&spec, &steps, &[], &temp)
-            .unwrap();
-
-        assert_eq!(results[0].state.outputs["cache-hit"], "true");
-        assert!(results[0]
-            .stdout
-            .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(!results[0].stdout.contains("Rust cache miss"));
-        fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn native_rust_cache_treats_persistent_cache_directories_as_warm() {
+    fn native_rust_cache_treats_static_persistent_cache_directories_as_warm() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
@@ -18210,7 +17450,7 @@ esac
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
                         "cache-directories".into(),
-                        "/__w/target\n/var/cache/sccache\n".into(),
+                        "/var/cache/sccache\n/root/.rustup\n".into(),
                     ),
                 ]
                 .into(),
@@ -18221,10 +17461,8 @@ esac
             timeout_minutes: None,
         }];
 
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(temp.join("target-store"));
         let results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results[0].state.outputs["cache-hit"], "true");
@@ -18480,362 +17718,6 @@ esac
         assert!(error.to_string().contains("is a symlink"), "{error:#}");
         assert!(!destination.join("escape/secret").exists());
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn persistent_target_is_job_local_and_published_as_complete_generation() {
-        let root = temp_dir();
-        let temp = root.join("job/temp");
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        let store = root.join("target-store");
-        fs::create_dir_all(store.join("data/debug")).unwrap();
-        fs::write(store.join(".velnor-target-complete-v1"), "complete\n").unwrap();
-        fs::write(store.join(TARGET_SOURCE_REVISION_MARKER), "old-revision\n").unwrap();
-        fs::write(store.join("data/debug/seed"), "warm\n").unwrap();
-        fs::create_dir_all(&spec.workspace_host).unwrap();
-        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
-        fs::File::options()
-            .append(true)
-            .open(spec.workspace_host.join("Cargo.toml"))
-            .unwrap()
-            .set_modified(stale_time)
-            .unwrap();
-        spec.cargo_target_host = Some(store.clone());
-        assert!(!spec
-            .start_args()
-            .unwrap()
-            .args()
-            .iter()
-            .any(|arg| arg.contains(":/__w/target")));
-
-        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
-        let target = spec.workspace_host.join("target");
-        assert!(!target.exists());
-        assert_eq!(
-            fs::metadata(spec.workspace_host.join("Cargo.toml"))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            stale_time
-        );
-
-        // Both paths remain inside the workspace mount, so the workflow's
-        // ordinary atomic promotion cannot fail with EXDEV.
-        fs::create_dir_all(target.join("debug")).unwrap();
-        fs::write(target.join("debug/seed"), "compiled\n").unwrap();
-        fs::create_dir_all(spec.workspace_host.join(".ci-target-cache")).unwrap();
-        fs::rename(
-            target.join("debug/seed"),
-            spec.workspace_host.join(".ci-target-cache/target.tar.zst"),
-        )
-        .unwrap();
-        fs::write(target.join("new-output"), "compiled\n").unwrap();
-        publish_persistent_target(&spec, Some("new-revision")).unwrap();
-
-        let generation = fs::read_to_string(store.join(TARGET_CURRENT_POINTER))
-            .unwrap()
-            .trim()
-            .to_string();
-        assert!(target_identifier(&generation).is_some());
-        let generation_path = store.join(&generation);
-        assert!(generation_path.join(TARGET_COMPLETE_MARKER).is_file());
-        assert_eq!(
-            fs::read_to_string(generation_path.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
-            "new-revision\n"
-        );
-        assert_eq!(
-            fs::read_to_string(generation_path.join("data/new-output")).unwrap(),
-            "compiled\n"
-        );
-        fs::File::options()
-            .append(true)
-            .open(spec.workspace_host.join("Cargo.toml"))
-            .unwrap()
-            .set_modified(stale_time)
-            .unwrap();
-        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
-        assert_eq!(
-            fs::read_to_string(target.join("new-output")).unwrap(),
-            "compiled\n"
-        );
-        assert_eq!(
-            fs::metadata(spec.workspace_host.join("Cargo.toml"))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            stale_time
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn persistent_target_copy_enforces_traversal_budgets_before_recursion() {
-        let cases = [
-            (
-                "directory",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 16,
-                    max_directories: 1,
-                    max_depth: 16,
-                    max_path_bytes: 1024,
-                    max_file_bytes: 1024,
-                    max_total_bytes: 1024,
-                },
-                "directory limit",
-            ),
-            (
-                "node",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 1,
-                    max_directories: 16,
-                    max_depth: 16,
-                    max_path_bytes: 1024,
-                    max_file_bytes: 1024,
-                    max_total_bytes: 1024,
-                },
-                "node limit",
-            ),
-            (
-                "depth",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 16,
-                    max_directories: 16,
-                    max_depth: 1,
-                    max_path_bytes: 1024,
-                    max_file_bytes: 1024,
-                    max_total_bytes: 1024,
-                },
-                "depth limit",
-            ),
-            (
-                "path",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 16,
-                    max_directories: 16,
-                    max_depth: 16,
-                    max_path_bytes: 4,
-                    max_file_bytes: 1024,
-                    max_total_bytes: 1024,
-                },
-                "byte limit",
-            ),
-        ];
-
-        for (name, limits, expected_error) in cases {
-            let root = temp_dir().join(format!("target-budget-{name}"));
-            let source = root.join("source");
-            let destination = root.join("destination");
-            fs::create_dir_all(source.join("nested/deeper")).unwrap();
-            fs::create_dir_all(&destination).unwrap();
-            fs::write(source.join("nested/deeper/output"), b"output").unwrap();
-
-            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
-            let destination_directory =
-                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
-                    .unwrap();
-            let error = copy_persistent_target_contents_with_limits(
-                &source_directory,
-                &source,
-                &destination_directory,
-                Path::new(""),
-                true,
-                limits,
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected_error), "{error:#}");
-            assert!(!destination.join("nested/deeper/output").exists());
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn persistent_target_copy_enforces_per_file_and_total_byte_budgets() {
-        let cases = [
-            (
-                "file",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 16,
-                    max_directories: 16,
-                    max_depth: 16,
-                    max_path_bytes: 1024,
-                    max_file_bytes: 3,
-                    max_total_bytes: 1024,
-                },
-                "exceeds the 3-byte limit",
-            ),
-            (
-                "total",
-                PersistentTargetTraversalLimits {
-                    max_nodes: 16,
-                    max_directories: 16,
-                    max_depth: 16,
-                    max_path_bytes: 1024,
-                    max_file_bytes: 4,
-                    max_total_bytes: 5,
-                },
-                "files exceed the 5-byte total limit",
-            ),
-        ];
-
-        for (name, limits, expected_error) in cases {
-            let root = temp_dir().join(format!("target-byte-budget-{name}"));
-            let source = root.join("source");
-            let destination = root.join("destination");
-            fs::create_dir_all(&source).unwrap();
-            fs::create_dir_all(&destination).unwrap();
-            fs::write(source.join("nested-output"), b"four").unwrap();
-            fs::write(source.join("second-output"), b"four").unwrap();
-
-            let source_directory = crate::fs_copy::NoFollowDir::open_absolute(&source).unwrap();
-            let destination_directory =
-                crate::fs_copy::NoFollowDestinationDir::open_absolute_no_follow(&destination)
-                    .unwrap();
-            let error = copy_persistent_target_contents_with_limits(
-                &source_directory,
-                &source,
-                &destination_directory,
-                Path::new(""),
-                true,
-                limits,
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected_error), "{error:#}");
-            let copied_files = fs::read_dir(&destination).unwrap().count();
-            assert_eq!(copied_files, usize::from(name == "total"));
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[test]
-    fn incomplete_target_generation_is_not_restored() {
-        let root = temp_dir();
-        let temp = root.join("job/temp");
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        let store = root.join("target-store");
-        let generation = store.join("target-generation-incomplete");
-        fs::create_dir_all(generation.join("data")).unwrap();
-        fs::write(generation.join("data/poison"), "must-not-restore\n").unwrap();
-        fs::write(store.join(TARGET_CURRENT_POINTER), "../outside\n").unwrap();
-        fs::write(
-            generation.join(TARGET_SOURCE_REVISION_MARKER),
-            "new-revision\n",
-        )
-        .unwrap();
-        fs::create_dir_all(&spec.workspace_host).unwrap();
-        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
-        spec.cargo_target_host = Some(store);
-
-        assert!(materialize_persistent_target(&spec, Some("new-revision")).is_err());
-        fs::write(
-            spec.cargo_target_host
-                .as_ref()
-                .unwrap()
-                .join(TARGET_CURRENT_POINTER),
-            "target-generation-incomplete\n",
-        )
-        .unwrap();
-        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
-        assert!(!spec.workspace_host.join("target").exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn persistent_target_rejects_symlinked_store_root_and_current_pointer() {
-        let root = temp_dir();
-        let temp = root.join("job/temp");
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        fs::create_dir_all(&spec.workspace_host).unwrap();
-        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
-
-        let real_store = root.join("real-store");
-        fs::create_dir_all(&real_store).unwrap();
-        let linked_store = root.join("linked-store");
-        std::os::unix::fs::symlink(&real_store, &linked_store).unwrap();
-        spec.cargo_target_host = Some(linked_store);
-        assert!(materialize_persistent_target(&spec, Some("revision")).is_err());
-        fs::create_dir_all(spec.workspace_host.join("target")).unwrap();
-        assert!(publish_persistent_target(&spec, Some("revision")).is_err());
-
-        spec.cargo_target_host = Some(real_store.clone());
-        let outside = root.join("outside-pointer");
-        fs::write(&outside, "target-generation-1\n").unwrap();
-        std::os::unix::fs::symlink(&outside, real_store.join(TARGET_CURRENT_POINTER)).unwrap();
-        assert!(materialize_persistent_target(&spec, Some("revision")).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn failed_target_publication_keeps_previous_current_generation() {
-        let root = temp_dir();
-        let temp = root.join("job/temp");
-        fs::create_dir_all(&temp).unwrap();
-        let mut spec = container(&temp);
-        let store = root.join("target-store");
-        let previous = store.join("target-generation-previous");
-        fs::create_dir_all(previous.join("data")).unwrap();
-        fs::write(previous.join(TARGET_COMPLETE_MARKER), "complete\n").unwrap();
-        fs::write(previous.join(TARGET_SOURCE_REVISION_MARKER), "revision\n").unwrap();
-        fs::write(previous.join("data/previous"), "old\n").unwrap();
-        fs::write(
-            store.join(TARGET_CURRENT_POINTER),
-            "target-generation-previous\n",
-        )
-        .unwrap();
-        fs::create_dir_all(&spec.workspace_host).unwrap();
-        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
-        let target = spec.workspace_host.join("target");
-        fs::create_dir_all(&target).unwrap();
-        fs::write(target.join("new"), "new\n").unwrap();
-        let outside = root.join("outside");
-        fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, target.join("escape")).unwrap();
-        spec.cargo_target_host = Some(store.clone());
-
-        assert!(publish_persistent_target(&spec, Some("revision")).is_err());
-        assert_eq!(
-            fs::read_to_string(store.join(TARGET_CURRENT_POINTER)).unwrap(),
-            "target-generation-previous\n"
-        );
-        assert_eq!(
-            fs::read_to_string(previous.join("data/previous")).unwrap(),
-            "old\n"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn persistent_target_publishes_only_after_successful_steps() {
-        let result = |exit_code, skipped| StepExecutionResult {
-            exit_code,
-            state: StepCommandState::default(),
-            skipped,
-            failure_ignored: false,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
-
-        assert!(persistent_target_results_publishable(&[
-            result(0, false),
-            result(0, true),
-        ]));
-        assert!(!persistent_target_results_publishable(&[
-            result(0, false),
-            result(1, false),
-        ]));
-        assert!(!persistent_target_results_publishable(&[
-            StepExecutionResult {
-                failure_ignored: true,
-                ..result(1, false)
-            },
-        ]));
     }
 
     #[test]
@@ -26133,7 +25015,7 @@ fi"#
     fn resolve_artifact_sources_preserves_explicit_mapped_globs() {
         let root = temp_dir();
         let workspace = root.join("work");
-        let target = root.join("target-store");
+        let target = workspace.join("target");
         fs::create_dir_all(workspace.join("dist")).unwrap();
         fs::create_dir_all(root.join("logs")).unwrap();
         fs::create_dir_all(target.join("release")).unwrap();
@@ -26145,8 +25027,7 @@ fi"#
         std::os::unix::fs::symlink(root.join("logs/temp.txt"), workspace.join("unrelated-link"))
             .unwrap();
 
-        let mut state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &root);
-        state.cargo_target_host = Some(target.clone());
+        let state = JobExecutionState::new_with_workspace(&[], &[], &workspace, &root);
         let workspace_matches = vec![
             workspace.join("dist/a.txt"),
             workspace.join("dist/workspace.txt"),
@@ -26366,15 +25247,14 @@ fi"#
     }
 
     #[test]
-    fn native_upload_artifact_reads_job_local_persistent_workspace_target() {
+    fn native_upload_artifact_reads_job_local_workspace_target() {
         let temp = temp_dir();
-        let mut spec = container(&temp);
+        let spec = container(&temp);
         let target = spec.workspace_host.join("target");
         fs::create_dir_all(target.join("cargo-timings")).unwrap();
         fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
         fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
         fs::write(target.join(".private"), "hidden\n").unwrap();
-        spec.cargo_target_host = Some(temp.join("persistent-target-generation"));
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),
@@ -29848,18 +28728,14 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn mapped_paths_reject_absolute_suffixes() {
-        let mut state = JobExecutionState::new_with_workspace(
+        let state = JobExecutionState::new_with_workspace(
             &[],
             &[],
             Path::new("/host/work"),
             Path::new("/host/temp"),
         );
-        state.cargo_target_host = Some(PathBuf::from("/host/target"));
 
         for path in [
-            "target//escape",
-            "/__w/target//escape",
-            "/github/workspace/target//escape",
             "/__w//escape",
             "/github/workspace//escape",
             "/__t//escape",
@@ -29876,9 +28752,6 @@ bitcoin-processor-app.push=true")
         assert_eq!(resolve_cache_path(&state, "~//escape"), None);
 
         for path in [
-            "target//*.txt",
-            "/__w/target//*.txt",
-            "/github/workspace/target//*.txt",
             "/__w//*.txt",
             "/github/workspace//*.txt",
             "/__t//*.txt",

@@ -6332,19 +6332,6 @@ async fn handle_job_request(
                     crate::container::cargo_store_host(&work_root, &effective_trust_scope);
                 let mise_root =
                     crate::container::mise_store_host(&work_root, &effective_trust_scope);
-                let target_root = crate::storage::append_legacy_trust(
-                    crate::container::cargo_target_store_host(&work_root, &effective_trust_scope),
-                    &trust_key,
-                );
-                let target_job = crate::github_adapter::github_cargo_target_store_host(
-                    &job, &work_root, &trust_key,
-                );
-                let target_scope = target_job
-                    .parent()
-                    .and_then(|path| path.strip_prefix(&target_root).ok())
-                    .context("derive persistent target GC scope")?
-                    .to_string_lossy()
-                    .to_string();
                 let cargo_bin_scope = crate::storage::gc_scope_below_root(
                     &crate::container::cargo_executable_store_host(
                         &work_root,
@@ -6401,7 +6388,6 @@ async fn handle_job_request(
                 let stale_after = Duration::from_secs(24 * 3600);
                 let lease_holder = crate::container::sanitize_store_key(&job.job_id);
                 [
-                    ("targets", target_scope),
                     ("actions-cache", actions_cache_scope),
                     ("artifacts", artifact_run_scope),
                     ("cargo", "registry".into()),
@@ -21969,7 +21955,6 @@ runs:
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
-            cargo_target_host: None,
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,

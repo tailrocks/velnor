@@ -12,10 +12,6 @@ use crate::{
 use serde_json::Value;
 use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf};
 
-/// Bump whenever target mounting or compiler-visible path semantics change.
-/// Old generations remain inactive, owned cache data and are reclaimed by GC.
-const CARGO_TARGET_GENERATION: &str = "workspace-v4-success-only";
-
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
     pub temp_host: PathBuf,
@@ -47,18 +43,25 @@ pub fn github_job_container_spec(
         crate::manifest::validate_microvm_compiler_cache(job)?;
     }
     let explicit_sccache = crate::manifest::declares_sccache(job);
-    // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
-    // trust boundary plus workflow/job class so warm state cannot cross repos
-    // or unrelated workflows when an operator enables the speed-up per daemon.
-    let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
+    // The persistent Cargo target layer was deleted with wall-clock checkout
+    // (BC-14): wall-clock sources made its mtime-based reuse always dirty,
+    // and pinned mtimes made it accept stale artifacts as fresh. An operator
+    // who still opts in must hear that loudly instead of silently losing the
+    // feature: fail the spec, do not ignore the flag.
+    if std::env::var("VELNOR_CARGO_TARGET_PERSIST")
         .ok()
-        .filter(|value| {
+        .is_some_and(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             )
         })
-        .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
+    {
+        anyhow::bail!(
+            "VELNOR_CARGO_TARGET_PERSIST was removed with the persistent Cargo target layer; \
+             unset it — compiler reuse is content-addressed (mbx/sccache) now"
+        );
+    }
     Ok(JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -82,7 +85,6 @@ pub fn github_job_container_spec(
         verify_bind_mounts: true,
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
-        cargo_target_host,
         store_trust_scope: crate::trust_scope::normalize_scope(trust_scope).to_owned(),
         sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
             && explicit_sccache)
@@ -142,83 +144,6 @@ fn github_rust_store_host(
         &format!("_velnor_{store}"),
     )
     .join(repository_id.to_string())
-}
-
-pub(crate) fn github_cargo_target_store_host(
-    job: &AgentJobRequestMessage,
-    temp_host: &std::path::Path,
-    trust_scope: &str,
-) -> PathBuf {
-    let ephemeral = || {
-        temp_host
-            .join("_velnor/ephemeral/targets")
-            .join(crate::container::sanitize_store_key(&job.job_id))
-    };
-    let Some(repository_raw) =
-        job_variable(job, "github.repository").filter(|value| !value.trim().is_empty())
-    else {
-        eprintln!(
-            "forensics.lifecycle: persistent target store refused: missing github.repository"
-        );
-        return ephemeral();
-    };
-    let Some(repository) = target_path_component(repository_raw) else {
-        eprintln!(
-            "forensics.lifecycle: persistent target store refused: invalid github.repository"
-        );
-        return ephemeral();
-    };
-    let workflow = job_variable(job, "github.workflow_ref")
-        .and_then(|value| value.split('@').next())
-        .and_then(|value| value.strip_prefix(&format!("{repository_raw}/")))
-        .or_else(|| job_variable(job, "github.workflow"))
-        .and_then(target_path_component);
-    let Some(workflow) = workflow else {
-        eprintln!(
-            "forensics.lifecycle: persistent target store refused: missing github.workflow_ref and github.workflow"
-        );
-        return ephemeral();
-    };
-    let Some(job_name) = target_path_component(&job.job_display_name) else {
-        eprintln!("forensics.lifecycle: persistent target store refused: invalid job display name");
-        return ephemeral();
-    };
-    // Normalize once, without resolving: this is the job's admitted scope,
-    // and re-resolving it through the process cell would hand back the pool.
-    let scope = crate::trust_scope::normalize_scope(trust_scope);
-    crate::storage::append_legacy_trust(
-        crate::container::cargo_target_store_host(temp_host, scope),
-        scope,
-    )
-    .join(CARGO_TARGET_GENERATION)
-    .join(repository)
-    .join(workflow)
-    .join(job_name)
-}
-
-/// Convert one external identity into the existing one-directory-name form.
-/// Slashes are encoded by the established store-key sanitizer, but traversal
-/// components, controls, truncation, and empty identities fail closed instead
-/// of silently aliasing another target bucket.
-fn target_path_component(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || value.len() > 128
-        || value.chars().any(char::is_control)
-        || value
-            .split(['/', '\\'])
-            .any(|part| matches!(part, "." | ".."))
-    {
-        return None;
-    }
-    let key = crate::container::sanitize_store_key(value);
-    let mut components = std::path::Path::new(&key).components();
-    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
-        || components.next().is_some()
-    {
-        return None;
-    }
-    Some(key)
 }
 
 /// Whether the scope in effect for a job unlocks host-level capability.
@@ -1066,7 +991,6 @@ mod tests {
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
-            cargo_target_host: None,
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
@@ -1119,74 +1043,15 @@ mod tests {
     }
 
     #[test]
-    fn github_cargo_target_store_is_scoped_by_trust_repo_workflow_and_job() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "RunnerJobRequest",
-            "plan": { "planId": "plan-1" },
-            "timeline": { "id": "timeline-1" },
-            "jobId": "job-1",
-            "jobName": "test",
-            "jobDisplayName": "Rust / test (ubuntu)",
-            "requestId": 42,
-            "variables": {
-                "github.workflow": { "value": "CI / Preview", "isSecret": false },
-                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
-            }
-        }))
-        .unwrap();
-
-        let host =
-            github_cargo_target_store_host(&job, std::path::Path::new("/velnor/work"), "trusted");
-
-        assert_eq!(
-            host,
-            std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/trusted/workspace-v4-success-only/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
-            )
-        );
-    }
-
-    #[test]
-    fn target_bucket_honors_its_scope_parameter_over_the_process_pool() {
-        // Regression: this path used to re-resolve its scope argument through
-        // the process-wide cell, whose first-wins rule hands back the pool in
-        // production and silently discards the job's admitted scope. A fork
-        // job's untrusted target bucket landed in the trusted namespace.
+    fn removed_cargo_target_persist_flag_fails_loudly() {
         let _serial = crate::trust_scope::test_support::serialized();
-        let pool = crate::trust_scope::resolve("trusted");
-        assert_eq!(pool.as_str(), "trusted");
-
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "RunnerJobRequest",
-            "plan": { "planId": "plan-1" },
-            "timeline": { "id": "timeline-1" },
-            "jobId": "job-1",
-            "jobName": "test",
-            "jobDisplayName": "Rust / test (ubuntu)",
-            "requestId": 42,
-            "variables": {
-                "github.workflow": { "value": "CI", "isSecret": false },
-                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
-            }
-        }))
-        .unwrap();
-
-        let host = github_cargo_target_store_host(
-            &job,
-            std::path::Path::new("/velnor/work"),
-            crate::trust_scope::FAIL_CLOSED,
-        );
-
-        assert_eq!(
-            host,
-            std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/untrusted/workspace-v4-success-only/ChainArgos_java-monorepo/CI/Rust___test__ubuntu_"
-            )
-        );
-    }
-
-    #[test]
-    fn target_bucket_refuses_missing_repository_identity() {
+        let previous = std::env::var_os("VELNOR_CARGO_TARGET_PERSIST");
+        // SAFETY: this synchronous test owns the process environment for the
+        // body below (serialized against the other tests that touch it) and
+        // restores the value before returning.
+        unsafe {
+            std::env::set_var("VELNOR_CARGO_TARGET_PERSIST", "1");
+        }
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
             "plan": { "planId": "plan-1" },
@@ -1196,42 +1061,38 @@ mod tests {
             "requestId": 42
         }))
         .unwrap();
-        let host = github_cargo_target_store_host(
+        let error = github_job_container_spec(
             &job,
-            std::path::Path::new("/velnor/work/job/temp"),
+            GitHubJobContainerPaths {
+                workspace_host: "/velnor/work/job/workspace".into(),
+                temp_host: "/velnor/work/job/temp".into(),
+                home_host: "/velnor/work/job/home".into(),
+                actions_host: "/velnor/work/job/actions".into(),
+                tools_host: "/velnor/work/job/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            NonZeroU32::MIN,
+            "",
+            "daemon".into(),
             "trusted",
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("was removed with the persistent Cargo target layer"),
+            "{error:#}"
         );
-        assert_eq!(
-            host,
-            std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
-        );
-        assert!(!host.to_string_lossy().contains("_velnor_targets"));
-    }
-
-    #[test]
-    fn target_bucket_refuses_traversal_in_repository_workflow_or_job() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "RunnerJobRequest",
-            "plan": { "planId": "plan-1" },
-            "timeline": { "id": "timeline-1" },
-            "jobId": "job-1",
-            "jobDisplayName": "Rust",
-            "requestId": 42,
-            "variables": {
-                "github.workflow": { "value": "../escape", "isSecret": false },
-                "github.repository": { "value": "tailrocks/../escape", "isSecret": false }
+        // SAFETY: restore the value owned by this synchronous test.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("VELNOR_CARGO_TARGET_PERSIST", value),
+                None => std::env::remove_var("VELNOR_CARGO_TARGET_PERSIST"),
             }
-        }))
-        .unwrap();
-        let host = github_cargo_target_store_host(
-            &job,
-            std::path::Path::new("/velnor/work/job/temp"),
-            "trusted",
-        );
-        assert_eq!(
-            host,
-            std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
-        );
+        }
     }
 
     /// The split brain this test exists to keep closed: `VELNOR_TRUST_SCOPE`
@@ -1325,13 +1186,12 @@ mod tests {
         // admitted scope) and live stores become GC-reclaimable mid-job.
         assert_eq!(spec.store_trust_scope, "public");
 
-        // Every trust-scoped store path, including the six that used to read
+        // Every trust-scoped store path, including the five that used to read
         // the environment variable behind the gate's back. All of them carry
         // a `public` component now — the compiler stores used to collapse to
         // `untrusted` here while the leases pinned `public`. None may ever
         // carry `trusted`.
         let scoped_stores = [
-            github_cargo_target_store_host(&job, temp, resolved.as_str()),
             crate::container::cargo_executable_store_host(
                 temp,
                 resolved.as_str(),

@@ -142,12 +142,13 @@ runner's `velnor.docker` totals instead.
 ### 2. Per-phase checkout spans and GIT_TRACE2 counters
 
 The runner emits one `tracing` span per checkout phase — mirror lock wait,
-mirror fetch, workspace fetch, workspace checkout, mtime normalization — and
-the trace file layer records span close events with busy/idle timings
-(`crates/velnor-runner/src/telemetry.rs`). `trace::checkout_phases_from_trace`
-parses those close records back into `CheckoutPhase` timings; the span-name
-table is pinned on the runner side by a test that runs a real checkout
-(`checkout_emits_the_five_bench_phase_spans`). No new sink was needed.
+mirror fetch, workspace fetch, workspace checkout (wall-clock since BC-14
+deleted mtime normalization) — and the trace file layer records span close
+events with busy/idle timings (`crates/velnor-runner/src/telemetry.rs`).
+`trace::checkout_phases_from_trace` parses those close records back into
+`CheckoutPhase` timings; the span-name table is pinned on the runner side by
+a test that runs a real checkout (`checkout_emits_the_four_bench_phase_spans`).
+No new sink was needed.
 
 Byte and ref counters do **not** need a runner change: `gittrace` sets
 `GIT_TRACE2_EVENT` on the Git processes Cargo spawns and reads the documented

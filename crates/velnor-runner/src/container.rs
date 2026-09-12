@@ -166,12 +166,6 @@ pub struct JobContainerSpec {
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
     pub repository: Option<String>,
-    /// Host-persistent incremental-build generation. The runner reflink/copies
-    /// it into the job-local workspace target after checkout and publishes the
-    /// completed job tree back atomically. It is never a nested bind mount:
-    /// one would make rename(2) across `target` return EXDEV even though the
-    /// same workflow succeeds on GitHub-hosted runners.
-    pub cargo_target_host: Option<PathBuf>,
     /// The job's admitted scope (the pool ceiling narrowed by the job's
     /// trust class), normalized once at admission. This is the one spelling
     /// shared by the container mounts, the storage leases, and GC: every
@@ -1522,20 +1516,6 @@ pub(crate) fn mise_binary_store_host(
     .join(sanitize_store_key(repository))
 }
 
-/// Root for opt-in persistent workspace target buckets (one per job class).
-///
-/// `trust_scope` is the scope in effect for the caller (the job's admitted
-/// scope on the execution path). It selects the canonical namespace; the
-/// legacy root carries no trust segment.
-pub(crate) fn cargo_target_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "targets",
-        "_velnor_targets",
-    )
-}
-
 /// Host-persistent Playwright browser downloads, scoped by trust + repository.
 ///
 /// `trust_scope` is the scope in effect for the caller (the job's admitted
@@ -1719,7 +1699,6 @@ mod tests {
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
-            cargo_target_host: None,
             store_trust_scope: "trusted".to_owned(),
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
