@@ -30,6 +30,7 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
         .file
         .filter(|file| !file.is_empty())
         .map_or_else(|| crate::nested_unit_workflow_file(unit), str::to_owned);
+    super::validate_cache_transports_for_unit(ctx.lanes.ir(), unit)?;
     let contract = UnitContract {
         lanes: declared_lanes(ctx, args)?,
         timeout_minutes: declared_timeout(ctx, args)?,

@@ -104,6 +104,16 @@ jobs:
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Restore "Rust dependency policy" cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ci-${{ runner.os }}-rust-policy-
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -229,6 +239,14 @@ jobs:
             echo "| compiling_lines | $compiling_count |"
           } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           exit 0
+      - name: Save "Rust dependency policy" cache
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
 
   velnor:
     name: Velnor
@@ -249,6 +267,16 @@ jobs:
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
+      - name: Restore "Rust dependency policy" cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ci-${{ runner.os }}-rust-policy-
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}

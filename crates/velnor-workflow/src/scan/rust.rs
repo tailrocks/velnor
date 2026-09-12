@@ -10,9 +10,14 @@ use super::file_walk::{
 };
 use super::{RepositoryShape, ScanContext};
 use crate::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CacheSpec, GeneratorError, Unit,
-    UnitKind,
+    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
+    GeneratorError, Unit, UnitKind,
 };
+
+/// The scanner's Rust dependency-policy unit. Its commands resolve the
+/// advisory databases themselves, so the Cargo-network restrictions applied to
+/// ordinary Rust units deliberately do not apply to it.
+const POLICY_UNIT_ID: &str = "rust-policy";
 
 fn cargo_deny_has_license_policy(root: &Path, file_set: &BTreeSet<String>) -> bool {
     ["deny.toml", ".cargo/deny.toml"].into_iter().any(|path| {
@@ -290,9 +295,12 @@ fn analyze_rust_manifests(
             velnor_pr_commands: None,
             velnor_full_commands: None,
             depends_on: Vec::new(),
+            pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
                 key_files: cache_key_files,
                 paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
+                purpose: CachePurpose::CargoSources,
+                mbx_output_cache_justification: None,
             }),
             tool_version: None,
         });
@@ -315,7 +323,7 @@ fn analyze_rust_manifests(
             commands.push("cargo audit".to_owned());
         }
         result.units.push(Unit {
-            id: "rust-policy".to_owned(),
+            id: POLICY_UNIT_ID.to_owned(),
             label: "Rust dependency policy".to_owned(),
             kind: UnitKind::Rust,
             root: ".".to_owned(),
@@ -334,6 +342,7 @@ fn analyze_rust_manifests(
             velnor_pr_commands: None,
             velnor_full_commands: None,
             depends_on: Vec::new(),
+            pinned_lockfile: file_set.contains("Cargo.lock"),
             cache: Some(CacheSpec {
                 key_files: vec![
                     ".cargo/**".to_owned(),
@@ -341,6 +350,8 @@ fn analyze_rust_manifests(
                     "Cargo.lock".to_owned(),
                 ],
                 paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
+                purpose: CachePurpose::CargoSources,
+                mbx_output_cache_justification: None,
             }),
             tool_version: None,
         });

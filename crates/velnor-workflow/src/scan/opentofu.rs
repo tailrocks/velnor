@@ -2,7 +2,7 @@
 
 use super::file_walk::has_extension;
 use super::{unit, RepositoryShape, ScanContext};
-use crate::{CacheSpec, UnitKind};
+use crate::{CachePurpose, CacheSpec, UnitKind};
 
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
     if context
@@ -27,6 +27,8 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             Some(CacheSpec {
                 key_files: vec!["**/.terraform.lock.hcl".to_owned()],
                 paths: vec!["~/.terraform.d/plugin-cache".to_owned()],
+                purpose: CachePurpose::Generic,
+                mbx_output_cache_justification: None,
             }),
         ));
     }

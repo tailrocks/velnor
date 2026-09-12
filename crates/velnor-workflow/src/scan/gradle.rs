@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use super::file_walk::{is_test_support_path, join_repo_path, path_prefix, roots_for_manifests};
 use super::{unit, RepositoryShape, ScanContext};
-use crate::{shell_change_dir, CacheSpec, UnitKind};
+use crate::{shell_change_dir, CachePurpose, CacheSpec, UnitKind};
 
 fn gradle_roots(files: &BTreeSet<String>) -> Vec<String> {
     let manifests = files
@@ -55,6 +55,8 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
                     "~/.gradle/caches".to_owned(),
                     "~/.gradle/wrapper".to_owned(),
                 ],
+                purpose: CachePurpose::Generic,
+                mbx_output_cache_justification: None,
             }),
         ));
     }
