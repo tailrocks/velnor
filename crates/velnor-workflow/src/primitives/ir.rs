@@ -20,6 +20,138 @@ use crate::{
     VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
 };
 
+/// Shell body of the post-checks report step.
+///
+/// Classifies the captured unit log into the three outcome classes the
+/// performance contract is measured against — package-origin downloads,
+/// compiler-cache outcomes (mbx counters, Cargo compile segments), and queue
+/// time — then emits one machine-readable `VELNOR_CI_REPORT` line plus a
+/// step-summary table. The step never fails the job.
+const CHECKS_REPORT_SCRIPT: &str = r#"set -uo pipefail
+log="$RUNNER_TEMP/velnor-unit-log.txt"
+log_present=false
+if [[ -s "$log" ]]; then log_present=true; fi
+started="${VELNOR_CHECKS_STARTED_EPOCH:-}"
+ended="${VELNOR_CHECKS_ENDED_EPOCH:-}"
+wall=""
+if [[ "$started" =~ ^[0-9]+$ && "$ended" =~ ^[0-9]+$ ]]; then
+  wall=$((ended - started))
+fi
+queue=""
+job_name=""
+expected_job="$VELNOR_WORKFLOW_NAME / $VELNOR_LANE_NAME"
+if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  run_started="$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at // empty' 2>/dev/null || true)"
+  jobs_json="$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" 2>/dev/null || true)"
+  job_name="$(printf '%s' "$jobs_json" | jq -r --arg wf "$VELNOR_WORKFLOW_NAME" --arg lane "$VELNOR_LANE_NAME" '[.jobs[]? | select(.name == ($wf + " / " + $lane))][0].name // empty' 2>/dev/null | head -n1 || true)"
+  if [[ -z "$job_name" ]]; then
+    job_name="$(printf '%s' "$jobs_json" | jq -r --arg lane "$VELNOR_LANE_NAME" '[.jobs[]? | select(.name | endswith(" / " + $lane))][0].name // empty' 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -n "$job_name" && -n "$run_started" ]]; then
+    job_started="$(printf '%s' "$jobs_json" | jq -r --arg name "$job_name" '.jobs[]? | select(.name == $name) | .started_at' 2>/dev/null | head -n1 || true)"
+    if [[ -n "$job_started" ]]; then
+      queue="$(jq -n --arg job "$job_started" --arg run "$run_started" '($job | fromdateiso8601) - ($run | fromdateiso8601)' 2>/dev/null || true)"
+    fi
+  fi
+fi
+if [[ -z "$job_name" ]]; then
+  job_name="$expected_job"
+fi
+updating_index=0
+updating_git=0
+downloading_crates=0
+compiling_count=0
+downloaded_lines=""
+mbx_lines=""
+finished_lines=""
+if [[ -s "$log" ]]; then
+  updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"
+  updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"
+  downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"
+  compiling_count="$(grep -c 'Compiling ' "$log" || true)"
+  downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"
+  mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"
+  finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"
+fi
+positive_int() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] || value=0
+  printf '%s' "$value"
+}
+report_json="$(jq -nc \
+  --arg job "$job_name" \
+  --arg queue "$queue" \
+  --arg wall "$wall" \
+  --argjson log_present "$log_present" \
+  --argjson updating_index "$(positive_int "$updating_index")" \
+  --argjson updating_git "$(positive_int "$updating_git")" \
+  --argjson downloading_crates "$(positive_int "$downloading_crates")" \
+  --argjson compiling_count "$(positive_int "$compiling_count")" \
+  --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+  --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+  --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
+  '{
+    job: $job,
+    log_present: $log_present,
+    queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
+    checks_wall_seconds: ($wall | if test("^[0-9]+$") then tonumber else null end),
+    origin_downloads: {
+      updating_crates_io_index: $updating_index,
+      updating_git: $updating_git,
+      downloading_crates: $downloading_crates,
+      downloaded_lines: $downloaded_lines
+    },
+    compiler: {
+      mbx_outcomes: $mbx,
+      finished_segments: $finished,
+      compiling_lines: $compiling_count
+    }
+  }' 2>/dev/null || true)"
+if [[ -z "$report_json" ]]; then
+  report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"
+fi
+echo "VELNOR_CI_REPORT $report_json"
+{
+  echo ""
+  echo '### Phase timings and cache outcomes'
+  echo ""
+  echo '```json'
+  echo "$report_json"
+  echo '```'
+  echo ""
+  echo "| metric | value |"
+  echo "| --- | --- |"
+  echo "| queue_seconds | ${queue:-unknown} |"
+  echo "| checks_wall_seconds | ${wall:-unknown} |"
+  echo "| updating_crates_io_index | $updating_index |"
+  echo "| updating_git | $updating_git |"
+  echo "| downloading_crates | $downloading_crates |"
+  echo "| compiling_lines | $compiling_count |"
+} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+exit 0
+"#;
+
+/// Emit the post-checks report step shared by both render paths.
+///
+/// `workflow_name` and `lane_name` compose the job name the Actions API
+/// reports for this job (`<workflow name> / <job name>` for a `workflow_call`
+/// callee), which the queue-time lookup matches on.
+pub(crate) fn render_phase_report_step(output: &mut String, workflow_name: &str, lane_name: &str) {
+    output.push_str("      - name: Report phase timings and cache outcomes\n");
+    output.push_str("        if: always()\n");
+    output.push_str("        env:\n");
+    let _ = writeln!(output, "          VELNOR_WORKFLOW_NAME: {workflow_name}");
+    let _ = writeln!(output, "          VELNOR_LANE_NAME: {lane_name}");
+    output.push_str("          GH_TOKEN: ${{ github.token }}\n");
+    output.push_str("          GH_REPO: ${{ github.repository }}\n");
+    output.push_str("        run: |\n");
+    for line in CHECKS_REPORT_SCRIPT.lines() {
+        output.push_str("          ");
+        output.push_str(line);
+        output.push('\n');
+    }
+}
+
 /// The resolved render environment: lanes, runners, and unit tool needs.
 ///
 /// Rendering is kept separate from scanning so output policy is inspectable
@@ -595,10 +727,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
             yaml_scalar(&unit.id)
+        );
+        render_phase_report_step(
+            output,
+            &yaml_scalar(&sidebar_group_name(unit)),
+            yaml_scalar(lane.display_name()).as_str(),
         );
         if cache_save
             && lane == RunnerMode::Github
@@ -807,10 +944,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
                 verify_name,
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id),
+            );
+            render_phase_report_step(
+                output,
+                &yaml_scalar(&format!("{lane_label} / {group}")),
+                yaml_scalar(label).as_str(),
             );
             if cache_save
                 && lane == RunnerMode::Github
