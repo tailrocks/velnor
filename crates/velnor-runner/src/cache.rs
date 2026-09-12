@@ -825,13 +825,21 @@ fn reclaim_work_root_with_layout(
             }
         }
     }
-    // Deliberate safety decision: emergency reclaim does not prune BuildKit.
-    // `prune_owned_builder` can enumerate Velnor's builders, but this reclaimer
-    // has no BuildKit lease or job-claim covering the builder's content. A
-    // builder can therefore be live while its cache path is idle, and
-    // `buildx prune --max-used-space 0B` is destructive in exactly that window.
-    // Keep the explicit operator function available; only a future caller that
-    // holds the matching BuildKit lease may invoke it.
+    // The claim boundary this path used to lack now exists: builders with any
+    // job hold are skipped no matter how large, and holds from vanished job
+    // containers are repaired first. Only when the file stores cannot satisfy
+    // the target does emergency reclaim stop and prune unclaimed builders,
+    // largest first — bounded, measured, and cold-only. This is what makes
+    // the old dead reclaim (enumerate, then deliberately do nothing) live.
+    if emergency && report.freed_bytes < target_bytes {
+        let remaining = target_bytes.saturating_sub(report.freed_bytes);
+        let pruned = crate::buildkit::pressure_prune_builders(run_root, remaining);
+        report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
+        for builder in pruned.pruned {
+            tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
+        }
+        report.failures.extend(pruned.failures);
+    }
     Ok(report)
 }
 
@@ -873,47 +881,6 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
     }
     fs::remove_dir_all(&candidate.path)
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
-}
-
-/// Explicitly prune every Velnor-owned BuildKit builder down to
-/// `max_used_space_bytes`. Emergency reclaim intentionally does not call this:
-/// the builder content has no lease/claim boundary yet.
-#[allow(
-    dead_code,
-    reason = "operator action requires an explicit BuildKit lease"
-)]
-pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
-    // Best-effort listing: a daemon that cannot even list builders has
-    // nothing prunable through this path.
-    let builders = match crate::docker::Docker::host().buildx_builders() {
-        Ok(builders) => builders,
-        Err(_) => return Ok(false),
-    };
-    let limit = format!("{max_used_space_bytes}B");
-    let mut pruned = false;
-    for builder in builders {
-        let args = vec![
-            "buildx".to_string(),
-            "prune".to_string(),
-            "--builder".to_string(),
-            builder.clone(),
-            "--force".to_string(),
-            "--max-used-space".to_string(),
-            limit.clone(),
-        ];
-        match crate::docker::client::host_call(&args) {
-            Ok(_) => pruned = true,
-            Err(error) => {
-                let detail = format!("{error:#}");
-                if detail.contains("No such container") || detail.contains("no builder") {
-                    continue;
-                }
-                return Err(error)
-                    .with_context(|| format!("prune Velnor-owned buildx builder {builder}"));
-            }
-        }
-    }
-    Ok(pruned)
 }
 
 fn reclaim_priority(store: CacheStore) -> u8 {

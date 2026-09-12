@@ -101,6 +101,20 @@
           "pattern": "toolchain is Rust (?<version>\\d+\\.\\d+\\.\\d+)"
         }
       ]
+    },
+    {
+      "name": "cosign",
+      "description": "Cosign is not a mise key: it serves exactly the cosign-installer adapter, which fetches the pinned release itself. The adapter's pinned version is the authority; the fixture workflow must request exactly it, because any other release fails closed at job time.",
+      "authority": {
+        "file": "crates/velnor-runner/src/executor.rs",
+        "pattern": "COSIGN_LOCKED_VERSION: &str = \"(?<version>[0-9][0-9.]*)\""
+      },
+      "mirrors": [
+        {
+          "file": "crates/velnor-workflow/templates/fixture/workflows/_docker-suite.yml",
+          "pattern": "cosign-release: v(?<version>[0-9][0-9.]*)"
+        }
+      ]
     }
   ]
 }

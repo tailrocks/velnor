@@ -21,6 +21,7 @@ mod action;
 mod admission;
 pub mod args;
 mod attestation;
+mod buildkit;
 mod cache;
 mod capacity;
 mod checkout;

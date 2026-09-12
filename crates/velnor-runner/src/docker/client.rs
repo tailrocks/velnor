@@ -157,6 +157,16 @@ pub(crate) struct CgroupDriver {
     pub version: String,
 }
 
+/// A container's lifecycle word plus when it last stopped, for maintenance
+/// idleness decisions. `finished` is `None` while running (the Engine
+/// reports the zero time) and whenever the timestamp does not parse: `None`
+/// never proves idleness, so callers treat it as recently active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExitInfo {
+    pub status: Option<ContainerState>,
+    pub finished: Option<std::time::SystemTime>,
+}
+
 /// A `docker` object the daemon positively reports missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NotFound {
@@ -180,8 +190,9 @@ pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
 /// The daemon's missing-object vocabulary, both generations: modern Engines
 /// answer `No such container|object|image|volume`, older ones `no such ...`.
 /// Deliberately narrow: the cancellation ladder treats any other failure as
-/// "still alive", so a loose match here would stop the ladder early.
-fn daemon_reports_missing(stderr: &str) -> bool {
+/// "still alive", so a loose match here would stop the ladder early. Shared
+/// by every maintenance tolerant path so the vocabulary stays single-sourced.
+pub(crate) fn daemon_reports_missing(stderr: &str) -> bool {
     stderr.contains("No such") || stderr.contains("no such")
 }
 
@@ -198,6 +209,7 @@ const CONTAINER_READINESS_FORMAT: &str =
     "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}";
 const CONTAINER_RUNNING_FORMAT: &str = "{{.State.Running}}";
 const CONTAINER_ID_FORMAT: &str = "{{.Id}}";
+const CONTAINER_EXIT_FORMAT: &str = "{{.State.Status}} {{.State.FinishedAt}}";
 const IMAGE_ID_FORMAT: &str = "{{.Id}}";
 const CGROUP_FORMAT: &str = "{{.CgroupDriver}} {{.CgroupVersion}}";
 
@@ -239,6 +251,24 @@ pub(crate) fn image_id_args(reference: &str) -> Vec<String> {
         IMAGE_ID_FORMAT.to_string(),
         "--".to_string(),
         reference.to_string(),
+    ]
+}
+
+pub(crate) fn exit_info_args(name: &str) -> Vec<String> {
+    vec![
+        "inspect".to_string(),
+        format!("--format={CONTAINER_EXIT_FORMAT}"),
+        "--".to_string(),
+        name.to_string(),
+    ]
+}
+
+pub(crate) fn buildx_disk_usage_args(builder: &str) -> Vec<String> {
+    vec![
+        "buildx".to_string(),
+        "du".to_string(),
+        "--builder".to_string(),
+        builder.to_string(),
     ]
 }
 
@@ -301,6 +331,83 @@ pub(crate) fn parse_cgroup_projection(output: &str) -> Result<CgroupDriver> {
         driver: driver.to_string(),
         version: version.to_string(),
     })
+}
+
+/// Parse the exit projection (`<status> <RFC3339 finished-at>`).
+pub(crate) fn parse_exit_info(output: &str) -> Result<ExitInfo> {
+    let (status, finished) = output
+        .trim()
+        .split_once(char::is_whitespace)
+        .context("docker exit probe answered a single word")?;
+    let finished = finished.trim();
+    Ok(ExitInfo {
+        status: ContainerState::parse(status),
+        finished: parse_finished_at(finished),
+    })
+}
+
+/// Parse an Engine `FinishedAt`. The zero time (still running) and anything
+/// unparseable yield `None`, which never proves idleness.
+fn parse_finished_at(value: &str) -> Option<std::time::SystemTime> {
+    if value.starts_with("0001-01-01") {
+        return None;
+    }
+    let parsed =
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()?;
+    let nanos = parsed.unix_timestamp_nanos();
+    if nanos < 0 {
+        return None;
+    }
+    let nanos = u64::try_from(nanos).ok()?;
+    std::time::UNIX_EPOCH.checked_add(Duration::from_nanos(nanos))
+}
+
+/// Parse `buildx du` into the builder's total cache bytes, from the `Total:`
+/// footer. Sizes are 1000-based (`4.096kB` is 4096 bytes, proven live) and
+/// display-rounded to four significant figures, so callers treat the answer
+/// as approximate — exact enough to order builders largest-first and to
+/// account reclaimed bytes within a percent.
+pub(crate) fn parse_buildx_disk_usage(output: &str) -> Result<u64> {
+    for line in output.lines() {
+        let Some(total) = line.trim().strip_prefix("Total:") else {
+            continue;
+        };
+        return parse_human_size(total.trim())
+            .with_context(|| format!("parse buildx du total {total:?}"));
+    }
+    anyhow::bail!("buildx du reported no Total line: {output:?}")
+}
+
+fn parse_human_size(value: &str) -> Option<u64> {
+    let (number, multiplier) = [
+        ("B", 1_u128),
+        ("kB", 1_000),
+        ("MB", 1_000_000),
+        ("GB", 1_000_000_000),
+        ("TB", 1_000_000_000_000),
+        ("PB", 1_000_000_000_000_000),
+    ]
+    .iter()
+    .find_map(|(unit, multiplier)| {
+        value.strip_suffix(unit).and_then(|number| {
+            // `kB` ends in `B`: only accept the bare-`B` split when nothing
+            // longer matched, i.e. the number itself carries no unit letter.
+            if *unit == "B" && number.ends_with(|ch: char| ch.is_ascii_alphabetic()) {
+                None
+            } else {
+                Some((number, *multiplier))
+            }
+        })
+    })?;
+    let number = number.trim().parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let bytes = (number * multiplier as f64).round();
+    if bytes > u64::MAX as f64 {
+        return None;
+    }
+    Some(bytes as u64)
 }
 
 /// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
@@ -424,8 +531,12 @@ pub(crate) fn owned_container_ids_excluding_buildkit(formatted: &str) -> Vec<Str
     ids
 }
 
-/// Current-job builders including Created/removing. Job-end must delete them
-/// even while the job container is still running (cleanup happens before rm).
+/// Current-job LEGACY builders including Created/removing. Job-end must
+/// delete them even while the job container is still running (cleanup happens
+/// before rm). Persistent builders are excluded from both disjuncts: they
+/// carry the creating job's label by design, and matching it here would
+/// destroy a daemon other jobs share. They outlive teardown; the claim
+/// release stops them, and the reclaim paths own them.
 pub(crate) fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &str) -> Vec<String> {
     let needle = format!(
         "{}{scope}",
@@ -438,6 +549,9 @@ pub(crate) fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &st
         let names = parts.next().unwrap_or("").trim();
         let labeled_job = parts.next().unwrap_or("").trim();
         if id.is_empty() {
+            continue;
+        }
+        if crate::buildkit::is_persistent_builder_object(names) {
             continue;
         }
         if labeled_job == job_id || names.contains(&needle) {
@@ -469,6 +583,7 @@ pub(crate) fn orphan_job_buildkit_ids(
         };
         if id.is_empty()
             || !names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
+            || crate::buildkit::is_persistent_builder_object(names)
             || !state.safe_to_reclaim()
         {
             continue;
@@ -706,6 +821,7 @@ pub(crate) fn daemon_owned_buildkit_volume_names(
             if name.is_empty()
                 || job_id.is_empty()
                 || !name.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
+                || crate::buildkit::is_persistent_builder_object(name)
                 || !daemon_owns_label(owner, daemon_id)
                 || protected_jobs.contains(job_id)
                 || protected_jobs
@@ -1057,6 +1173,18 @@ impl<'r> Docker<'r> {
         let args = vec!["buildx".to_string(), "ls".to_string()];
         Ok(owned_builder_names(&self.call(&args, "buildx builders")?))
     }
+
+    /// Lifecycle word and last stop time of one container.
+    pub(crate) fn inspect_exit(&mut self, name: &str) -> Result<ExitInfo> {
+        let args = exit_info_args(name);
+        parse_exit_info(&self.call(&args, name)?)
+    }
+
+    /// Total cache bytes one builder holds, from `buildx du`.
+    pub(crate) fn buildx_disk_usage(&mut self, builder: &str) -> Result<u64> {
+        let args = buildx_disk_usage_args(builder);
+        parse_buildx_disk_usage(&self.call(&args, builder)?)
+    }
 }
 
 #[cfg(test)]
@@ -1177,6 +1305,8 @@ mod tests {
             daemon_cgroup_args(),
             mapped_ports_args("velnor-service-postgres"),
             image_id_args("velnor/job-ubuntu:26.04"),
+            exit_info_args("buildx_buildkit_velnor-builder-shared-trusted-owner_repo0"),
+            buildx_disk_usage_args("velnor-builder-shared-trusted-owner_repo"),
             vec!["buildx".to_string(), "ls".to_string()],
         ];
         // The listing builders the reclaim decisions consume through this
@@ -1325,6 +1455,89 @@ mod tests {
         assert!(
             format!("{error:#}").contains("Cannot connect"),
             "stderr must survive: {error:#}"
+        );
+    }
+
+    #[test]
+    fn exit_info_reports_stop_time_and_never_proves_running_idle() {
+        let exited = parse_exit_info("exited 2026-09-12T20:11:02.437775991Z\n").expect("parse");
+        assert_eq!(exited.status, Some(ContainerState::Exited));
+        let finished = exited.finished.expect("stopped has a stop time");
+        assert!(
+            finished < std::time::SystemTime::now(),
+            "a past stop reads as past"
+        );
+
+        // Running reports the zero time: no idleness proof.
+        let running = parse_exit_info("running 0001-01-01T00:00:00Z\n").expect("parse");
+        assert_eq!(running.status, Some(ContainerState::Running));
+        assert_eq!(running.finished, None);
+
+        // Garbage timestamps never prove idleness either.
+        let broken = parse_exit_info("exited not-a-time\n").expect("parse");
+        assert_eq!(broken.status, Some(ContainerState::Exited));
+        assert_eq!(broken.finished, None);
+
+        assert!(parse_exit_info("exited\n").is_err());
+    }
+
+    #[test]
+    fn buildx_disk_usage_reads_the_total_footer_in_decimal_units() {
+        // `docker buildx du`, live: per-record rows plus the footer.
+        let output = "\
+ID                           RECLAIMABLE   SIZE      LAST ACCESSED
+qoyzm9h3t5d8kc4avc1jzrft8*   true          0B        Less than a second ago
+ut03rtsmqbdemi4moqok6mtc2    true          6.054MB   Less than a second ago
+Reclaimable:\t6.054MB
+Total:\t\t6.054MB
+";
+        assert_eq!(parse_buildx_disk_usage(output).expect("total"), 6_054_000);
+        assert_eq!(parse_buildx_disk_usage("Total:\t\t0B\n").expect("zero"), 0);
+        // 4096 bytes display as 4.096kB: units are 1000-based, proven live.
+        assert_eq!(parse_human_size("4.096kB"), Some(4096));
+        assert_eq!(parse_human_size("27.03MB"), Some(27_030_000));
+        assert_eq!(parse_human_size("1.5GB"), Some(1_500_000_000));
+        assert_eq!(parse_human_size("2TB"), Some(2_000_000_000_000));
+        assert_eq!(parse_human_size("bogus"), None);
+        assert_eq!(parse_human_size("-1MB"), None);
+        assert!(parse_buildx_disk_usage("no footer here\n").is_err());
+    }
+
+    #[test]
+    fn teardown_matcher_skips_persistent_builders_by_label_and_needle() {
+        // A persistent builder carries its creating job's label BY DESIGN;
+        // matching it here would destroy a daemon other jobs share.
+        let listed = "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-9\n\
+             bbb222\tbuildx_buildkit_velnor-builder-slot-30\tvelnor-job-9\n\
+             ccc333\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-1\n";
+        // Label match: only the legacy builder.
+        assert_eq!(
+            job_buildkit_ids_for_job(listed, "velnor-job-9", "other-scope"),
+            vec!["bbb222".to_string()]
+        );
+        // Slot-needle match: the persistent daemon can never carry a slot
+        // suffix, and is skipped even so.
+        assert_eq!(
+            job_buildkit_ids_for_job(listed, "velnor-job-nobody", "slot-3"),
+            vec!["bbb222".to_string()]
+        );
+    }
+
+    #[test]
+    fn orphan_matcher_skips_persistent_builders_and_volumes() {
+        let live = BTreeSet::new();
+        let daemons = "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tvelnor-job-9\t/daemon\texited\n\
+             bbb222\tbuildx_buildkit_velnor-builder-slot-30\tvelnor-job-9\t/daemon\texited\n";
+        assert_eq!(
+            orphan_job_buildkit_ids(daemons, &live, Some("/daemon")),
+            vec!["bbb222".to_string()]
+        );
+        let volumes =
+            "buildx_buildkit_velnor-builder-shared-trusted-o_r0_state\tvelnor-job-9\t/daemon\n\
+             buildx_buildkit_velnor-builder-slot-30_state\tvelnor-job-9\t/daemon\n";
+        assert_eq!(
+            daemon_owned_buildkit_volume_names(volumes, "/daemon", &live),
+            vec!["buildx_buildkit_velnor-builder-slot-30_state".to_string()]
         );
     }
 

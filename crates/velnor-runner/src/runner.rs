@@ -4587,6 +4587,24 @@ fn maybe_startup_host_docker_reclaim_with(
             sanitized_retry_error(&error)
         );
     }
+    // Converge persistent-builder leaks: builders are shared across jobs by
+    // design, so orphan reclaim above deliberately skips them. The horizon
+    // path stops unclaimed daemons and deletes builders idle past the
+    // horizon. Gated on storage: unit tests run without VELNOR_STORAGE_ROOT
+    // and must not touch the Engine.
+    if let Some(run_root) = crate::buildkit::claims_run_root() {
+        let report = crate::buildkit::reap_idle_builders(&run_root, std::time::SystemTime::now());
+        for failure in &report.failures {
+            eprintln!("Warning: startup builder horizon reap: {failure}");
+        }
+        if !report.stopped.is_empty() || !report.deleted.is_empty() {
+            eprintln!(
+                "startup builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
+                report.stopped.len(),
+                report.deleted.len()
+            );
+        }
+    }
 }
 
 /// Remove leftover Velnor Docker resources from previous (possibly crashed)
@@ -13674,6 +13692,22 @@ fn doctor_host_docker_reclaim(
     }
     if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(&mut docker) {
         eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
+    }
+    // Same horizon pass as startup: stop unclaimed builder daemons, delete
+    // builders idle past the horizon. Gated on storage so unit tests (no
+    // VELNOR_STORAGE_ROOT) never touch the Engine.
+    if let Some(run_root) = crate::buildkit::claims_run_root() {
+        let report = crate::buildkit::reap_idle_builders(&run_root, std::time::SystemTime::now());
+        for failure in &report.failures {
+            eprintln!("Warning: doctor builder horizon reap: {failure}");
+        }
+        if !report.stopped.is_empty() || !report.deleted.is_empty() {
+            println!(
+                "doctor builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
+                report.stopped.len(),
+                report.deleted.len()
+            );
+        }
     }
 }
 

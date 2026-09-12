@@ -3542,7 +3542,7 @@ where
 
     fn execute_native_post_action(
         &mut self,
-        _container: &JobContainerSpec,
+        container: &JobContainerSpec,
         step_id: &str,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
@@ -3554,7 +3554,7 @@ where
             // Sccache post: show stats then stop server. Soft-fail if not running.
             NativeActionAdapter::Sccache => {
                 let result = self.native_shell(
-                    _container,
+                    container,
                     state,
                     "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
                     timeout,
@@ -3565,29 +3565,103 @@ where
                 let action_state = state.with_env(state.resolve_env(&action.env)?);
                 let requested_name =
                     native_input_or(&action_state, action, "name", "velnor-builder")?;
-                let name = job_scoped_buildx_builder_name(&requested_name, state);
-                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?) {
-                    return Ok(StepExecutionResult {
-                        exit_code: 0,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    });
-                }
+                let name = crate::buildkit::persistent_builder_name(
+                    &requested_name,
+                    &state.trust_scope,
+                    container.repository.as_deref(),
+                );
+                // `keep-state` is accepted and always honored: persistent
+                // builders keep their daemon and cache by construction. It is
+                // read (and logged below) so the input is never silently
+                // ignored.
                 let keep_state = input_truthy(&native_input_or(
                     &action_state,
                     action,
                     "keep-state",
                     "false",
                 )?);
-                let keep_state_arg = if keep_state { " --keep-state" } else { "" };
-                let script = format!(
-                    "docker buildx rm{keep_state_arg} {name} 2>/dev/null || true; echo \"Removing builder {name}\""
-                );
-                let result = self.native_shell(_container, state, &script, timeout)?;
-                Ok(native_command_result(result, StepCommandState::default()))
+                let cleanup =
+                    input_truthy(&native_input_or(&action_state, action, "cleanup", "true")?);
+                // The post never destroys the builder: destroying it here is
+                // what kept every job's builds cold. It releases this job's
+                // hold and stops the daemon only when no holder remains; a
+                // workflow that wants destruction runs `docker buildx rm`
+                // itself. Like the old `|| true` script, the post never fails
+                // the job: a stop that fails is a maintenance failure the
+                // reclaim paths converge, reported on stderr.
+                let mut stdout =
+                    format!("Releasing builder {name} (persistent; keep-state={keep_state})\n");
+                let mut stderr = String::new();
+                // cleanup=false releases the hold but never stops: the
+                // no-op stop keeps the decision atomic under the claim lock
+                // without acting.
+                let stop = || {
+                    if cleanup {
+                        crate::buildkit::stop_builder_daemon(&name)
+                    } else {
+                        Ok(false)
+                    }
+                };
+                let outcome = match (
+                    state.temp_host.as_deref(),
+                    crate::buildkit::claims_run_root(),
+                ) {
+                    (Some(_temp), Some(run_root)) => {
+                        match crate::buildkit::release_and_stop_if_last(
+                            &run_root,
+                            &name,
+                            &container.name,
+                            stop,
+                        ) {
+                            Ok(outcome) => Some(outcome),
+                            Err(error) => {
+                                use std::fmt::Write as _;
+                                let _ = writeln!(
+                                    stderr,
+                                    "buildx post: release of {name} failed ({error:#}); \
+                                     the hold converges via slot repair"
+                                );
+                                stdout
+                                    .push_str("Release failed: daemon left running (see stderr)\n");
+                                None
+                            }
+                        }
+                    }
+                    _ => {
+                        stdout.push_str(
+                            "No temp dir or run root: hold skipped, builder left running\n",
+                        );
+                        None
+                    }
+                };
+                match outcome {
+                    None => {}
+                    Some(outcome) if !outcome.removed_last => {
+                        stdout.push_str("Other holders remain: daemon left running\n");
+                    }
+                    // Reached only with removed_last: shared releases
+                    // matched the arm above.
+                    Some(_) if !cleanup => {
+                        stdout
+                            .push_str("No other holders: cleanup disabled, daemon left running\n");
+                    }
+                    Some(outcome) if outcome.stopped => {
+                        stdout.push_str(
+                            "No other holders: daemon stopped, cache kept for the next job\n",
+                        );
+                    }
+                    Some(_) => {
+                        stdout.push_str("No other holders: daemon already stopped, cache kept\n");
+                    }
+                }
+                Ok(StepExecutionResult {
+                    exit_code: 0,
+                    state: StepCommandState::default(),
+                    skipped: false,
+                    failure_ignored: false,
+                    stdout,
+                    stderr,
+                })
             }
             NativeActionAdapter::DockerLogin => {
                 let action_state = state.with_env(state.resolve_env(&action.env)?);
@@ -3597,7 +3671,7 @@ where
                 } else {
                     format!("docker logout {registry} 2>/dev/null || true")
                 };
-                let result = self.native_shell(_container, state, &script, timeout)?;
+                let result = self.native_shell(container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             NativeActionAdapter::CreateGitHubAppToken => native_revoke_github_app_token(state),
@@ -3891,10 +3965,10 @@ where
         ))
     }
 
-    /// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
-    /// mise key fail-closed, link it into install-dir (added to PATH like the
+    /// Native `sigstore/cosign-installer`: fetch the pinned `cosign` release
+    /// fail-closed, install it into install-dir (added to PATH like the
     /// action), and verify the version. A requested release differing from the
-    /// committed lock fails closed — Velnor never downloads cosign outside mise.
+    /// pinned version fails closed; the checksum pins the bytes.
     fn native_cosign_installer(
         &mut self,
         container: &JobContainerSpec,
@@ -4118,7 +4192,30 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
-        let name = job_scoped_buildx_builder_name(&requested_name, state);
+        let name = crate::buildkit::persistent_builder_name(
+            &requested_name,
+            &state.trust_scope,
+            container.repository.as_deref(),
+        );
+        // Claim before first use, and record the claim for teardown in the
+        // same breath: a builder this job claimed but never recorded would
+        // leak its hold until slot repair. Claim failure is hard — an
+        // uncounted job sharing a counted builder is the one state in which
+        // another job's release could stop a daemon mid-build. Without a
+        // temp dir or run root there are no claims at all, so nobody stops
+        // and the builder only ever leaks (converged by the horizon path).
+        if let (Some(temp), Some(run_root)) = (
+            state.temp_host.as_deref(),
+            crate::buildkit::claims_run_root(),
+        ) {
+            crate::buildkit::record_job_builder(temp, &name)?;
+            crate::buildkit::claim_builder(
+                &run_root,
+                &name,
+                &job_scope_from_temp(Some(temp)),
+                &container.name,
+            )?;
+        }
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
@@ -4663,6 +4760,24 @@ where
     }
 
     fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
+        // Release this job's persistent builders first: the post step already
+        // did this on the happy path (making this a no-op), but the cancel
+        // path skips posts, so teardown is the backstop. Stopping only
+        // happens when the release removed the final hold. Errors propagate
+        // like the removal errors below: a broken run root must be loud.
+        for builder in crate::buildkit::read_job_builders(&container.temp_host)? {
+            if !crate::buildkit::is_persistent_builder_name(&builder) {
+                continue;
+            }
+            if let Some(run_root) = crate::buildkit::claims_run_root() {
+                crate::buildkit::release_and_stop_if_last(
+                    &run_root,
+                    &builder,
+                    &container.name,
+                    || crate::buildkit::stop_builder_daemon(&builder),
+                )?;
+            }
+        }
         let scope = job_scope_from_temp(Some(&container.temp_host));
         let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
         let ids = crate::docker::client::job_buildkit_ids_for_job(
@@ -4695,6 +4810,10 @@ where
             .lines()
             .map(str::trim)
             .filter(|name| !name.is_empty())
+            // The engine `name=` filter is a substring match: a slot scope
+            // that prefixes a persistent builder name would destroy shared
+            // cache. Persistent state volumes belong to the reclaim paths.
+            .filter(|name| !crate::buildkit::is_persistent_builder_object(name))
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
         if !volumes.is_empty() {
@@ -5369,7 +5488,7 @@ if [ -n "$install_requested" ]; then
   # missing) and fail every later job on this store. The sweep covers the
   # backends whose install layout guarantees a bin/ directory (cargo-* source
   # compiles, pipx-* venv entry points); other backends legitimately place the
-  # binary directly in the version dir (for example aqua cosign), so a missing
+  # binary directly in the version dir (for example aqua cargo-nextest), so a missing
   # bin/ is only a poison signal for these. Treat a covered version dir as
   # valid only when bin/ exists and is non-empty; dropping the dir makes the
   # locked install below perform a real reinstall.
@@ -5620,13 +5739,23 @@ fn hadolint_script(inputs: &HadolintInputs) -> String {
     script
 }
 
-// Exact versions of the admitted locked mise keys backing the mold/just/cosign
+// Exact versions of the admitted locked mise keys backing the mold/just
 // adapters. These MUST match docker/job-mise.lock (Plan 008 Step 3); the job
 // image bakes these versions, so a job-time `mise install --locked` is an
 // integrity re-check, never a download over an unlocked path.
 const MOLD_LOCKED_VERSION: &str = "2.41.0";
 const JUST_LOCKED_VERSION: &str = "1.58.0";
+// Cosign is NOT in the job image: it serves exactly one adapter, so baking
+// 127 MB unpacked into every job for it is pure waste. The adapter below
+// fetches the pinned release directly instead. Version plus per-arch
+// checksums are this tool's lock (mirrored from the aqua entries
+// `mise lock` used to carry; the asset URLs follow sigstore's stable
+// release-asset convention the lock recorded verbatim).
 const COSIGN_LOCKED_VERSION: &str = "3.1.3";
+const COSIGN_LINUX_AMD64_SHA256: &str =
+    "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71";
+const COSIGN_LINUX_ARM64_SHA256: &str =
+    "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a";
 
 /// Shared prologue for the project-tool adapters (Plan 008 N8): point mise at
 /// the baked global locked config and install one admitted tool key in
@@ -5642,34 +5771,46 @@ fn locked_mise_install(key: &str) -> String {
     )
 }
 
-/// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
-/// mise key, verify the version, and expose install-dir on PATH (matching the
-/// action). A requested release that differs from the committed lock fails
-/// closed — Velnor never downloads cosign outside mise.
+/// Native `sigstore/cosign-installer`: fetch the pinned `cosign` release
+/// binary straight into install-dir (matching the action, which downloads
+/// rather than links), verify its checksum, and expose install-dir on PATH.
+/// A requested release that differs from the pinned version fails closed.
+/// Cosign is deliberately not a mise key: it serves exactly this adapter,
+/// and the pinned version plus per-arch checksums above are its lock.
 fn cosign_installer_script(release: &str, install_dir: &str) -> String {
     let want = shell_single_quote(release.trim().trim_start_matches('v'));
     // install_dir may contain $HOME by contract (the action default) — expand
     // in-shell, so single-quoting must not apply to the whole value.
     let dir = install_dir.trim().replace('\'', "'\"'\"'");
-    let mut script = locked_mise_install("cosign");
+    let mut script = String::from("set -e\n");
     script.push_str(&format!(
         r#"WANT={want}
 DIR="{dir}"
 LOCKED='{ver}'
 if [ -n "$WANT" ] && [ "$WANT" != "$LOCKED" ]; then
-  echo "cosign release '$WANT' requested but the committed locked version is '$LOCKED'; refusing a non-mise download" >&2
+  echo "cosign release '$WANT' requested but the committed locked version is '$LOCKED'; refusing an unpinned download" >&2
   exit 1
 fi
+case "$(uname -m)" in
+  x86_64) ASSET="cosign-linux-amd64"; SHA="{sha_amd64}";;
+  aarch64|arm64) ASSET="cosign-linux-arm64"; SHA="{sha_arm64}";;
+  *) echo "cosign $LOCKED has no pinned build for $(uname -m)" >&2; exit 1;;
+esac
 mkdir -p "$DIR"
-resolved="$(command -v cosign)"
-ln -sf "$resolved" "$DIR/cosign"
-cosign version 2>&1 | grep -F "$LOCKED"
-echo "cosign $LOCKED (locked mise) linked into $DIR"
+TMP="$DIR/.cosign-download"
+curl -fsSL --retry 3 "https://github.com/sigstore/cosign/releases/download/v$LOCKED/$ASSET" -o "$TMP"
+echo "$SHA  $TMP" | sha256sum -c -
+chmod 0755 "$TMP"
+mv "$TMP" "$DIR/cosign"
+"$DIR/cosign" version 2>&1 | grep -F "$LOCKED"
+echo "cosign $LOCKED (pinned release) installed into $DIR"
 echo "__VELNOR_COSIGN_DIR__$DIR"
 "#,
         want = want,
         dir = dir,
         ver = COSIGN_LOCKED_VERSION,
+        sha_amd64 = COSIGN_LINUX_AMD64_SHA256,
+        sha_arm64 = COSIGN_LINUX_ARM64_SHA256,
     ));
     script
 }
@@ -11565,14 +11706,6 @@ fn sanitize_artifact_name(name: &str) -> String {
     }
 }
 
-fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) -> String {
-    format!(
-        "{}-{}",
-        sanitize_artifact_name(requested),
-        job_scope_from_temp(state.temp_host.as_deref())
-    )
-}
-
 fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<String>> {
     let mut options = Vec::new();
     let (chunks, remainder) = resource_options.as_chunks::<2>();
@@ -16057,6 +16190,68 @@ esac
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn cleanup_keeps_persistent_builders_and_their_state_volumes() {
+        struct PersistentCleanupRunner {
+            calls: Vec<Vec<String>>,
+        }
+        impl CommandRunner for PersistentCleanupRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let args: &[String] = &crate::execution::expand_env_file_args(args);
+                self.calls.push(args.to_vec());
+                let stdout = match args.first().map(String::as_str) {
+                    // The persistent daemon carries this job's label BY
+                    // DESIGN. Matching it here would destroy a daemon other
+                    // jobs share.
+                    Some("ps") => {
+                        "aaa111\tbuildx_buildkit_velnor-builder-shared-trusted-o_r0\tjob\ttrusted\tcreated\n"
+                    }
+                    Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
+                        "buildx_buildkit_velnor-builder-shared-trusted-o_r0_state\n"
+                    }
+                    _ => "",
+                };
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = temp_dir();
+        let temp = root.join("job-scope").join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        crate::buildkit::record_job_builder(&temp, "velnor-builder-shared-trusted-o_r").unwrap();
+        let mut executor = DockerJobEngine::inert(PersistentCleanupRunner { calls: Vec::new() });
+
+        executor.cleanup_job_buildkit(&spec).unwrap();
+
+        let calls = &executor.runner().calls;
+        assert!(
+            calls
+                .iter()
+                .any(|args| args == &crate::docker_lease::list_job_buildkit_format_args()),
+            "teardown still lists builders: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|args| args.first().is_some_and(|arg| arg == "rm")
+                    && args.iter().any(|arg| arg == "aaa111")),
+            "teardown must never remove a persistent daemon: {calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|args| args.first().is_some_and(|arg| arg == "volume")
+                    && args.get(1).is_some_and(|arg| arg == "rm")),
+            "teardown must never remove a persistent state volume: {calls:?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_aborts_docker_lease_before_buildkit_rm() {
@@ -19401,10 +19596,14 @@ type=sha,format=long,prefix=,enable=true"
         ));
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
-        let builder = format!(
-            "velnor-builder-{}",
-            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        // Persistent builder: default requested name, trusted test scope,
+        // unknown-repository fixture repo.
+        let builder = crate::buildkit::persistent_builder_name(
+            "velnor-builder",
+            "trusted",
+            Some("unknown-repository"),
         );
+        assert_eq!(builder, "velnor-builder-shared-trusted-unknown-repository");
         assert!(calls.iter().any(|c| c
             .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
             && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
@@ -19430,8 +19629,8 @@ type=sha,format=long,prefix=,enable=true"
                 && c.contains("'--tag' 'chainargos/rust-bitcoin-processor:abcdef1234567890'")
         });
         assert!(build_call.is_some());
-        // The builder is job-scoped and removed after completion, so external
-        // cache import/export must survive to make the next isolated job hot.
+        // The builder persists across jobs by name, and external cache
+        // import/export additionally survives for runners that never warm it.
         assert!(calls[build_call.unwrap()]
             .contains("'--cache-from' 'type=gha,scope=bitcoin-processor-app-pr'"));
         assert!(calls[build_call.unwrap()]
@@ -27293,9 +27492,14 @@ fi"#
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        let builder = format!(
-            "jackin-construct-{}",
-            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        let builder = crate::buildkit::persistent_builder_name(
+            "jackin-construct",
+            "untrusted",
+            Some("unknown-repository"),
+        );
+        assert_eq!(
+            builder,
+            "velnor-builder-shared-untrusted-unknown-repository-jackin-construct"
         );
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], builder);
@@ -27321,16 +27525,11 @@ fi"#
     }
 
     #[test]
-    fn native_setup_buildx_honors_cleanup_controls() {
-        for (cleanup, keep_state, expected_rm) in [
-            ("false", "false", None),
-            ("true", "false", Some("docker buildx rm builder")),
-            (
-                "true",
-                "true",
-                Some("docker buildx rm --keep-state builder"),
-            ),
-        ] {
+    fn native_setup_buildx_post_never_destroys_the_builder() {
+        // Every cleanup/keep-state combination releases the hold host-side
+        // and never runs `buildx rm`: destroying the builder here is what
+        // kept every job's builds cold.
+        for (cleanup, keep_state) in [("false", "false"), ("true", "false"), ("true", "true")] {
             let temp = temp_dir();
             fs::create_dir_all(&temp).unwrap();
             let steps = vec![ExecutableStep::Native {
@@ -27355,7 +27554,7 @@ fi"#
             }];
             let mut executor = DockerJobEngine::inert(RecordingRunner::default());
 
-            executor
+            let results = executor
                 .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
                 .unwrap();
 
@@ -27365,9 +27564,31 @@ fi"#
                 .iter()
                 .map(|(program, args)| format!("{program} {}", args.join(" ")))
                 .collect::<Vec<_>>();
-            match expected_rm {
-                Some(expected) => assert!(calls.iter().any(|call| call.contains(expected))),
-                None => assert!(!calls.iter().any(|call| call.contains("buildx rm"))),
+            assert!(
+                !calls.iter().any(|call| call.contains("buildx rm")),
+                "post must never destroy the builder (cleanup={cleanup}, keep-state={keep_state}): {calls:?}"
+            );
+            let post = results.last().expect("post result");
+            assert_eq!(post.exit_code, 0);
+            assert!(
+                post.stdout.contains(
+                    "Releasing builder velnor-builder-shared-untrusted-unknown-repository-builder"
+                ),
+                "post names the persistent builder: {:?}",
+                post.stdout
+            );
+            assert!(
+                post.stdout.contains(&format!("keep-state={keep_state}")),
+                "keep-state is logged, never silently ignored: {:?}",
+                post.stdout
+            );
+            if cleanup == "false" {
+                assert!(
+                    post.stdout.contains("No temp dir or run root")
+                        || post.stdout.contains("cleanup disabled"),
+                    "cleanup=false leaves the daemon: {:?}",
+                    post.stdout
+                );
             }
             fs::remove_dir_all(temp).unwrap();
         }
@@ -29761,25 +29982,33 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn cosign_installer_uses_locked_mise_and_rejects_other_releases() {
-        // Requesting the locked version installs via mise, links install-dir,
-        // verifies the version, and never downloads over curl.
+    fn cosign_installer_uses_pinned_release_and_rejects_other_releases() {
+        // Requesting the locked version fetches the pinned release asset for
+        // the host arch, verifies its checksum, installs into install-dir,
+        // and verifies the version. No mise: cosign serves exactly this
+        // adapter and is not in the job image.
         let script = cosign_installer_script("v3.1.3", "$HOME/.cosign");
-        assert!(script.contains("mise install --locked --yes 'cosign'"));
-        assert!(script.contains("MISE_LOCKED=1"));
         assert!(script.contains("WANT='3.1.3'"));
         assert!(script.contains("LOCKED='3.1.3'"));
         assert!(script.contains("DIR=\"$HOME/.cosign\""));
-        assert!(script.contains("command -v cosign"));
+        assert!(script.contains("cosign-linux-amd64"));
+        assert!(script.contains("cosign-linux-arm64"));
+        assert!(script.contains(COSIGN_LINUX_AMD64_SHA256));
+        assert!(script.contains(COSIGN_LINUX_ARM64_SHA256));
+        assert!(script.contains("sha256sum -c -"));
+        assert!(script.contains("releases/download/v$LOCKED/$ASSET"));
         assert!(script.contains("__VELNOR_COSIGN_DIR__"));
-        assert!(!script.contains("curl"));
-        assert!(!script.contains("releases/download"));
+        assert!(!script.contains("mise install"));
+        assert!(!script.contains("command -v cosign"));
 
         // A different requested release fails closed (no fallback download).
         let mismatch = cosign_installer_script("v3.1.1", "$HOME/.cosign");
         assert!(mismatch.contains("WANT='3.1.1'"));
-        assert!(mismatch.contains("refusing a non-mise download"));
-        assert!(!mismatch.contains("curl"));
+        assert!(mismatch.contains("refusing an unpinned download"));
+
+        // An arch with no pinned build fails closed instead of fetching a
+        // best-effort asset.
+        assert!(script.contains("has no pinned build"));
     }
 
     #[test]

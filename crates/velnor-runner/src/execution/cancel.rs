@@ -450,7 +450,8 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
     match docker_bounded(&args) {
         Ok(_) => Ok(()),
         Err(detail)
-            if detail.contains("No such container") || detail.contains("is not running") =>
+            if crate::docker::client::daemon_reports_missing(&detail)
+                || detail.contains("is not running") =>
         {
             Ok(())
         }
