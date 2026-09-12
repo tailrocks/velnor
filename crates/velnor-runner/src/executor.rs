@@ -40,7 +40,8 @@ use tokio::sync::mpsc::Sender;
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
 const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
-const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
+pub(crate) const DEFAULT_STEP_TIMEOUT: Duration =
+    Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
 /// `docker rm --force` of a Created/removing BuildKit daemon can block until
 /// dockerd finishes. Job teardown must not inherit the 6h step timeout or the
 /// job container (and every guest sibling) stays Up for hours.
@@ -834,7 +835,7 @@ impl CommandRunner for ProcessCommandRunner {
         let (op, timeout) = docker_deadline(program, args, timeout);
         let started = std::time::Instant::now();
         let rm_claim = if program == "docker" {
-            crate::docker_lease::claim_docker_container_rm(args)
+            crate::docker::client::claim_docker_container_rm(args)
         } else {
             None
         };
@@ -847,9 +848,9 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr: String::new(),
             });
         }
-        let claimed_args = rm_claim
-            .as_ref()
-            .map(|claim| crate::docker_lease::container_rm_args_with_claimed_ids(args, &claim.ids));
+        let claimed_args = rm_claim.as_ref().map(|claim| {
+            crate::docker::client::container_rm_args_with_claimed_ids(args, &claim.ids)
+        });
         let args = claimed_args.as_deref().unwrap_or(args);
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
@@ -2093,23 +2094,17 @@ where
         }
         let mut services = serde_json::Map::new();
         for service in &container.services {
-            let id = self
-                .run_docker(&service.id_args())?
-                .stdout
-                .trim()
-                .to_string();
-            let ports_output = self.run_docker(&service.mapped_ports_args())?.stdout;
+            let mut docker = crate::docker::Docker::job(&mut self.runner);
+            let id = docker.container_id(&service.name)?;
             let mut ports = serde_json::Map::new();
-            for line in ports_output.lines() {
-                let Some((container_port, address)) = line.split_once(" -> ") else {
-                    continue;
-                };
-                let Some((_, host_port)) = address.rsplit_once(':') else {
+            for mapping in docker.mapped_ports(&service.name)? {
+                let Some((_, host_port)) = mapping.host_address.rsplit_once(':') else {
                     continue;
                 };
                 ports
                     .entry(
-                        container_port
+                        mapping
+                            .container_port
                             .trim_end_matches("/tcp")
                             .trim_end_matches("/udp")
                             .to_string(),
@@ -4670,8 +4665,11 @@ where
     fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
         let scope = job_scope_from_temp(Some(&container.temp_host));
         let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
-        let ids =
-            crate::docker_lease::job_buildkit_ids_for_job(&listed.stdout, &container.name, &scope);
+        let ids = crate::docker::client::job_buildkit_ids_for_job(
+            &listed.stdout,
+            &container.name,
+            &scope,
+        );
         if !ids.is_empty() {
             crate::docker_lease::force_remove_containers_serially(&ids, |args| {
                 self.run_docker_remove_container(args).map(|_| ())
@@ -4882,22 +4880,13 @@ where
             &container.temp_host,
             container.store_trust_scope.as_str(),
         );
-        let inspect = self.runner.run(
-            "docker",
-            &[
-                "image".to_string(),
-                "inspect".to_string(),
-                "-f".to_string(),
-                "{{.Id}}".to_string(),
-                container.image.clone(),
-            ],
-        )?;
-        if inspect.code != 0 {
+        let image_id = match crate::docker::Docker::job(&mut self.runner).image_id(&container.image)
+        {
+            Ok(id) => id,
             // Image not present yet — container start will surface the real
             // error; a missing seed must not mask it.
-            return Ok(());
-        }
-        let image_id = inspect.stdout.trim().to_string();
+            Err(_) => return Ok(()),
+        };
         if image_id.is_empty() {
             return Ok(());
         }
@@ -5076,24 +5065,23 @@ where
         let mut waited = Duration::ZERO;
         let budget = Duration::from_secs(30);
         loop {
-            let result = self.run_docker(&service.health_status_args())?;
-            match result.stdout.trim() {
-                "healthy" | "running" | "" => return Ok(()),
-                "exited" | "dead" => {
-                    bail!(
-                        "service container '{}' stopped before becoming ready",
-                        service.name
-                    )
-                }
-                _ => {
-                    if waited >= budget {
-                        break;
-                    }
-                    thread::sleep(delay);
-                    waited += delay;
-                    delay = (delay * 2).min(Duration::from_millis(1600));
-                }
+            let readiness =
+                crate::docker::Docker::job(&mut self.runner).container_readiness(&service.name)?;
+            if readiness.ready() {
+                return Ok(());
             }
+            if readiness.stopped() {
+                bail!(
+                    "service container '{}' stopped before becoming ready",
+                    service.name
+                );
+            }
+            if waited >= budget {
+                break;
+            }
+            thread::sleep(delay);
+            waited += delay;
+            delay = (delay * 2).min(Duration::from_millis(1600));
         }
         bail!("service container '{}' did not become ready", service.name)
     }

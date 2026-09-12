@@ -875,31 +875,6 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
 }
 
-/// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
-///
-/// The builder name is always `velnor-builder-<scope>`; inspecting the literal
-/// prefix `velnor-builder` therefore never succeeded, which made the whole
-/// disk-pressure BuildKit reclaim a silent no-op. Ownership is the prefix, so
-/// enumerate and match the prefix instead of guessing one name.
-pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in buildx_ls_stdout.lines() {
-        let Some(first) = line.split_whitespace().next() else {
-            continue;
-        };
-        // `docker buildx ls` marks the selected builder with a trailing `*` and
-        // indents each builder's nodes; nodes are not builders.
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let name = first.trim_end_matches('*');
-        if name.starts_with(OWNED_BUILDER_PREFIX) && !names.iter().any(|seen| seen == name) {
-            names.push(name.to_string());
-        }
-    }
-    names
-}
-
 /// Explicitly prune every Velnor-owned BuildKit builder down to
 /// `max_used_space_bytes`. Emergency reclaim intentionally does not call this:
 /// the builder content has no lease/claim boundary yet.
@@ -908,44 +883,35 @@ pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
     reason = "operator action requires an explicit BuildKit lease"
 )]
 pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
-    let Ok(listed) = std::process::Command::new("docker")
-        .args(["buildx", "ls"])
-        .output()
-    else {
-        return Ok(false);
+    // Best-effort listing: a daemon that cannot even list builders has
+    // nothing prunable through this path.
+    let builders = match crate::docker::Docker::host().buildx_builders() {
+        Ok(builders) => builders,
+        Err(_) => return Ok(false),
     };
-    if !listed.status.success() {
-        return Ok(false);
-    }
-    let builders = owned_builder_names(&String::from_utf8_lossy(&listed.stdout));
     let limit = format!("{max_used_space_bytes}B");
     let mut pruned = false;
     for builder in builders {
-        let output = std::process::Command::new("docker")
-            .args([
-                "buildx",
-                "prune",
-                "--builder",
-                &builder,
-                "--force",
-                "--max-used-space",
-                &limit,
-            ])
-            .output()
-            .context("prune Velnor-owned buildx builder")?;
-        if output.status.success() {
-            pruned = true;
-            continue;
+        let args = vec![
+            "buildx".to_string(),
+            "prune".to_string(),
+            "--builder".to_string(),
+            builder.clone(),
+            "--force".to_string(),
+            "--max-used-space".to_string(),
+            limit.clone(),
+        ];
+        match crate::docker::client::host_call(&args) {
+            Ok(_) => pruned = true,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if detail.contains("No such container") || detail.contains("no builder") {
+                    continue;
+                }
+                return Err(error)
+                    .with_context(|| format!("prune Velnor-owned buildx builder {builder}"));
+            }
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("No such container") || stderr.contains("no builder") {
-            continue;
-        }
-        bail!(
-            "Velnor-owned buildx builder prune failed for {builder}: {}: {}",
-            output.status,
-            stderr.trim()
-        );
     }
     Ok(pruned)
 }
@@ -2099,17 +2065,17 @@ velnor-builder-untrusted      docker-container
 someone-elses-builder         docker-container
 ";
         assert_eq!(
-            owned_builder_names(listing),
+            crate::docker::client::owned_builder_names(listing),
             vec![
                 "velnor-builder-trusted".to_string(),
                 "velnor-builder-untrusted".to_string()
             ],
             "the bare name never exists; ownership is the prefix"
         );
-        assert!(owned_builder_names(listing)
+        assert!(crate::docker::client::owned_builder_names(listing)
             .iter()
             .all(|name| name.starts_with(OWNED_BUILDER_PREFIX)));
-        assert!(owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
+        assert!(crate::docker::client::owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
     }
 
     /// Every store the emergency reclaimer may delete must declare a lease

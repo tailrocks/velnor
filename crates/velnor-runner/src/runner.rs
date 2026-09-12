@@ -4558,12 +4558,7 @@ fn maybe_startup_host_docker_reclaim(
         backend,
         daemon_id,
         prune_stale_velnor_docker_resources,
-        |id| {
-            crate::docker_lease::reclaim_daemon_orphan_jobs(
-                id,
-                crate::docker_lease::run_host_docker,
-            )
-        },
+        |id| crate::docker_lease::reclaim_daemon_orphan_jobs(id, crate::docker::client::host_call),
     );
 }
 
@@ -4608,7 +4603,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         let deadline = crate::docker::deadline_for(&owned, STARTUP_DOCKER_CLEANUP_TIMEOUT)
             .1
             .min(STARTUP_DOCKER_CLEANUP_TIMEOUT);
-        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
+        crate::docker::client::host_call_bounded(&owned, deadline)
             .ok()
             .map(|stdout| std::process::Output {
                 status: success_exit_status(),
@@ -4705,7 +4700,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
-    crate::docker_lease::daemon_owns_label(owner, daemon_id)
+    crate::docker::client::daemon_owns_label(owner, daemon_id)
 }
 
 const DOCKER_NETWORK_INSPECT_FORMAT: &str =
@@ -4758,7 +4753,7 @@ fn prune_empty_velnor_networks(daemon_id: &str) -> usize {
         let deadline = crate::docker::deadline_for(&owned, EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT)
             .1
             .min(EMPTY_JOB_NETWORK_SWEEP_DOCKER_TIMEOUT);
-        crate::docker_lease::run_host_docker_bounded(&owned, deadline)
+        crate::docker::client::host_call_bounded(&owned, deadline)
             .ok()
             .map(|stdout| std::process::Output {
                 status: success_exit_status(),
@@ -11516,7 +11511,7 @@ fn seed_mise_store_from_image(container: &crate::container::JobContainerSpec) {
         let deadline = crate::docker::deadline_for(&args, MISE_SEED_DOCKER_TIMEOUT)
             .1
             .min(MISE_SEED_DOCKER_TIMEOUT);
-        crate::docker_lease::run_host_docker_bounded(&args, deadline)
+        crate::docker::client::host_call_bounded(&args, deadline)
             .context("run bounded Docker mise store seed")?;
         Ok(())
     })();
@@ -13768,7 +13763,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let backend = crate::execution::load_execution_file(&config_base, None)
         .ok()
         .map(|file| file.backend());
-    doctor_host_docker_reclaim(backend, crate::docker_lease::run_host_docker);
+    doctor_host_docker_reclaim(backend, crate::docker::client::host_call);
     let sample_size = usize::try_from(env_u64(
         "VELNOR_SLO_SAMPLE_SIZE",
         DEFAULT_SLO_SAMPLE_SIZE as u64,

@@ -1301,27 +1301,6 @@ impl ServiceContainerSpec {
             .operand(self.name.clone())
             .into_argv()
     }
-
-    pub fn health_status_args(&self) -> Vec<String> {
-        let mut args = DockerArgv::new(["inspect"]);
-        args.flag(
-            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
-        );
-        args.operands().operand(self.name.clone()).into_argv()
-    }
-
-    pub fn id_args(&self) -> Vec<String> {
-        let mut args = DockerArgv::new(["inspect"]);
-        args.flag("--format={{.Id}}");
-        args.operands().operand(self.name.clone()).into_argv()
-    }
-
-    pub fn mapped_ports_args(&self) -> Vec<String> {
-        DockerArgv::new(["port"])
-            .operands()
-            .operand(self.name.clone())
-            .into_argv()
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3330,15 +3309,6 @@ mod tests {
         assert_eq!(
             service.remove_args(),
             vec!["rm", "--force", "--", "velnor-service-postgres"]
-        );
-        assert_eq!(
-            service.health_status_args(),
-            vec![
-                "inspect",
-                "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
-                "--",
-                "velnor-service-postgres"
-            ]
         );
     }
 

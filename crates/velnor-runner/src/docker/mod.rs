@@ -15,15 +15,20 @@
 //!   each class of call takes. This is the measurement the pending Engine-API
 //!   client migration will be judged against, so it has to exist first.
 //!
-//! Nothing here talks to the Engine itself. The classification input is the
-//! `docker` argument vector, which keeps the policy usable unchanged when the
-//! CLI is replaced by an API client: the classes and their deadlines survive,
-//! only the classifier's input changes.
+//! [`client::Docker`] is the typed owner of the calls themselves: every query
+//! returns a typed value, and control-plane methods take no timeout because
+//! both transports apply [`deadline_for`]. Nothing here talks to the Engine
+//! itself. The classification input is the `docker` argument vector, which
+//! keeps the policy usable unchanged when the CLI is replaced by an API
+//! client: the classes and their deadlines survive, only the classifier's
+//! input changes.
 
+pub(crate) mod client;
 pub mod deadline;
 pub mod facts;
 pub mod metrics;
 
+pub(crate) use client::Docker;
 pub use deadline::{classify, deadline_for, DockerOp, DockerTimeout};
 pub use facts::{Fact, FactKey, FactLifetime};
 pub use metrics::{begin_job, observe, snapshot, ClassTotal, JobDockerScope, Snapshot};

@@ -492,7 +492,7 @@ pub fn remove_dir_all(path: &Path) -> Result<()> {
 }
 
 pub fn live_job_ids_from_host_docker() -> Result<BTreeSet<String>> {
-    let listed = crate::docker_lease::run_host_docker(&list_live_job_names_args())?;
+    let listed = crate::docker::client::host_call(&list_live_job_names_args())?;
     Ok(live_job_ids_from_docker_ps(&listed))
 }
 
@@ -602,7 +602,7 @@ fn host_docker_if_safe(args: &[String]) -> Result<String> {
     if leftover_docker_args_are_unsafe(args) {
         bail!("refusing unsafe docker reclaim {args:?}");
     }
-    crate::docker_lease::run_host_docker(args)
+    crate::docker::client::host_call(args)
 }
 
 fn leftover_docker_args_are_unsafe(args: &[String]) -> bool {

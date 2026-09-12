@@ -13,6 +13,7 @@
 //! dockerd itself was killed. The proxy now splices both directions and Drop
 //! shuts down every live Engine stream before reclaim.
 
+use crate::docker::client as docker_client;
 use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -33,7 +34,6 @@ pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
 pub const JOB_CGROUP_PARENT: &str = "velnor-jobs.slice";
 pub const TESTCONTAINERS_LABEL: &str = "org.testcontainers.managed-by=testcontainers";
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
-const HOST_DOCKER_ENDPOINT: &str = "unix:///var/run/docker.sock";
 /// Host-visible runtime dir. systemd `PrivateTmp=yes` remaps daemon `/tmp`, so
 /// a lease socket there is invisible to host dockerd and the guest bind-mount
 /// of `/tmp/vdl-*.sock` is not the proxy.
@@ -709,7 +709,7 @@ impl Drop for JobNetworkGuard {
         }
         self.armed = false;
         let args = force_remove_network_args(std::slice::from_ref(&self.network));
-        if let Err(error) = run_host_docker(&args) {
+        if let Err(error) = docker_client::host_call(&args) {
             eprintln!(
                 "Warning: job network drop-guard removal failed for {}: {error:#}",
                 self.network
@@ -730,410 +730,16 @@ pub fn remove_volume_args(ids: &[String]) -> Vec<String> {
     args
 }
 
-pub fn parse_docker_id_list(stdout: &str) -> Vec<String> {
-    let mut ids = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DockerContainerState {
-    Created,
-    Running,
-    Restarting,
-    Removing,
-    Paused,
-    Exited,
-    Dead,
-}
-
-impl DockerContainerState {
-    fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "created" => Some(Self::Created),
-            "running" => Some(Self::Running),
-            "restarting" => Some(Self::Restarting),
-            "removing" => Some(Self::Removing),
-            "paused" => Some(Self::Paused),
-            "exited" => Some(Self::Exited),
-            "dead" => Some(Self::Dead),
-            _ => None,
-        }
-    }
-
-    fn safe_to_reclaim(self) -> bool {
-        matches!(
-            self,
-            Self::Created | Self::Removing | Self::Exited | Self::Dead
-        )
-    }
-}
-
-struct StaleJobOwnedSnapshot {
-    stopped_container_ids: Vec<String>,
-    job_container_absent_or_stopped: bool,
-}
-
-/// Parse a reclaim snapshot only when it is structurally valid. The explicit
-/// job-container proof is checked on both the initial and immediate snapshots
-/// before any owned network or volume can be removed.
-fn stale_job_owned_snapshot(job_id: &str, formatted: &str) -> Option<StaleJobOwnedSnapshot> {
-    let mut ids = Vec::new();
-    let mut job_container_present = false;
-    let mut job_container_stopped = true;
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 4 {
-            return None;
-        }
-        let id = fields[0].trim();
-        let name = fields[1].trim();
-        let label = fields[2].trim();
-        let state = DockerContainerState::parse(fields[3])?;
-        if id.is_empty() || name.is_empty() || label != job_id {
-            return None;
-        }
-        if name == job_id {
-            job_container_present = true;
-            job_container_stopped &= state.safe_to_reclaim();
-        }
-        if !name.contains(BUILDKIT_CONTAINER_NAME_PREFIX) && state.safe_to_reclaim() {
-            ids.push(id.to_string());
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    Some(StaleJobOwnedSnapshot {
-        stopped_container_ids: ids,
-        job_container_absent_or_stopped: !job_container_present || job_container_stopped,
-    })
-}
-
-/// Labeled job containers minus docker-container BuildKit daemons.
-///
-/// BuildKit carries `velnor.job-id`, so the generic owned-container reclaim
-/// used to `docker rm --force` it with the 6h step timeout while job-end
-/// and doctor also rm'd the same id. Concurrent Engine deletes of a Created
-/// `buildx_buildkit_velnor-builder-*` deadlock; the leftover stays. BuildKit
-/// has its own prefix reclaim with a 20s bound.
-pub fn owned_container_ids_excluding_buildkit(formatted: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (id, names) = line.split_once('\t').unwrap_or((line, line));
-        let id = id.trim();
-        let names = names.trim();
-        if id.is_empty() || names.contains(BUILDKIT_CONTAINER_NAME_PREFIX) {
-            continue;
-        }
-        ids.push(id.to_string());
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-/// Host maintenance runs no job step, so a payload-classified command reaching
-/// [`run_host_docker`] has no step deadline to inherit. Thirty minutes is the
-/// registry-transfer bound: long enough for any maintenance pull, finite.
-const MAINTENANCE_PAYLOAD_DEADLINE: Duration = Duration::from_secs(1800);
-
-fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
-    if args.first().map(String::as_str) != Some("rm") {
-        return Vec::new();
-    }
-    args.iter()
-        .skip(1)
-        .filter(|arg| !arg.starts_with('-'))
-        .cloned()
-        .collect()
-}
-
-pub(crate) fn container_rm_args_with_claimed_ids(args: &[String], ids: &[String]) -> Vec<String> {
-    let mut claimed = vec![args[0].clone()];
-    claimed.extend(
-        args.iter()
-            .skip(1)
-            .filter(|arg| arg.starts_with('-'))
-            .cloned(),
-    );
-    claimed.extend(ids.iter().cloned());
-    claimed
-}
-
-static IN_FLIGHT_CONTAINER_RM: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
-
-/// Claim container ids for a `docker rm` so job-end and doctor never start a
-/// second Engine delete of the same Created BuildKit (that deadlock is the
-/// leftover class). Empty `ids` means every id is already in flight: skip.
-pub struct DockerContainerRmClaim {
-    pub ids: Vec<String>,
-}
-
-impl Drop for DockerContainerRmClaim {
-    fn drop(&mut self) {
-        if self.ids.is_empty() {
-            return;
-        }
-        let mut held = IN_FLIGHT_CONTAINER_RM
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        for id in &self.ids {
-            held.remove(id);
-        }
-    }
-}
-
-pub fn claim_docker_container_rm(args: &[String]) -> Option<DockerContainerRmClaim> {
-    let ids = container_ids_from_rm_args(args);
-    if ids.is_empty() {
-        return None;
-    }
-    let mut held = IN_FLIGHT_CONTAINER_RM
-        .lock()
-        .unwrap_or_else(|err| err.into_inner());
-    let claimed = ids
-        .into_iter()
-        .filter(|id| held.insert(id.clone()))
-        .collect::<Vec<_>>();
-    Some(DockerContainerRmClaim { ids: claimed })
-}
-
-/// Job ids whose job container is not running. Guest objects for those jobs are orphans.
-pub fn orphan_job_ids(formatted: &str) -> Vec<String> {
-    let mut seen_jobs = std::collections::BTreeSet::new();
-    let mut protected_jobs = std::collections::BTreeSet::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 3 {
-            continue;
-        }
-        let name = fields[0].trim();
-        let job_id = fields[1].trim();
-        if job_id.is_empty() {
-            continue;
-        }
-        let Some(state) = DockerContainerState::parse(fields[2]) else {
-            protected_jobs.insert(job_id.to_string());
-            continue;
-        };
-        seen_jobs.insert(job_id.to_string());
-        if name == job_id && !state.safe_to_reclaim() {
-            protected_jobs.insert(job_id.to_string());
-        }
-    }
-    seen_jobs
-        .into_iter()
-        .filter(|job_id| !protected_jobs.contains(job_id))
-        .collect()
-}
-
-/// True when a `velnor.daemon-id` label value belongs to `daemon_id`: either
-/// the shared work root itself or one of its direct `slot-N` children (job
-/// containers are labelled with the slot work directory, while daemon
-/// startup knows only the shared root).
-pub fn daemon_owns_label(owner: &str, daemon_id: &str) -> bool {
-    if owner == daemon_id {
-        return true;
-    }
-    Path::new(owner).parent() == Some(Path::new(daemon_id))
-        && Path::new(owner)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                name.strip_prefix("slot-").is_some_and(|slot| {
-                    !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit())
-                })
-            })
-}
-
-/// Orphan job ids restricted to containers owned by `daemon_id` (see
-/// [`daemon_owns_label`]). Input is the
-/// `name \t job-id \t daemon-id \t state` row format from
-/// [`list_daemon_owned_job_format_args`].
-pub fn daemon_orphan_job_ids(formatted: &str, daemon_id: &str) -> Vec<String> {
-    let mut seen_jobs = std::collections::BTreeSet::new();
-    let mut protected_jobs = std::collections::BTreeSet::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 4 {
-            continue;
-        }
-        let name = fields[0].trim();
-        let job_id = fields[1].trim();
-        let owner = fields[2].trim();
-        if job_id.is_empty() || !daemon_owns_label(owner, daemon_id) {
-            continue;
-        }
-        let Some(state) = DockerContainerState::parse(fields[3]) else {
-            protected_jobs.insert(job_id.to_string());
-            continue;
-        };
-        seen_jobs.insert(job_id.to_string());
-        if name == job_id && !state.safe_to_reclaim() {
-            protected_jobs.insert(job_id.to_string());
-        }
-    }
-    seen_jobs
-        .into_iter()
-        .filter(|job_id| !protected_jobs.contains(job_id))
-        .collect()
-}
-
-/// IDs of `velnor/job-ubuntu` siblings with no job label (docker-generated names).
-pub fn unlabeled_job_image_ids(formatted: &str) -> Vec<String> {
-    unlabeled_testcontainer_ids(formatted)
-}
-
-pub fn live_job_ids(formatted: &str) -> std::collections::BTreeSet<String> {
-    let mut live = std::collections::BTreeSet::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        let Some(job_id) = fields.get(1).map(|field| field.trim()) else {
-            continue;
-        };
-        if job_id.is_empty() {
-            continue;
-        }
-        if fields.len() != 3 {
-            live.insert(job_id.to_string());
-            continue;
-        }
-        let name = fields[0].trim();
-        let Some(state) = DockerContainerState::parse(fields[2]) else {
-            live.insert(job_id.to_string());
-            continue;
-        };
-        if name == job_id && !state.safe_to_reclaim() {
-            live.insert(job_id.to_string());
-        }
-    }
-    live
-}
-
-pub fn live_daemon_job_ids(formatted: &str, daemon_id: &str) -> std::collections::BTreeSet<String> {
-    let mut live = std::collections::BTreeSet::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        let Some(job_id) = fields.get(1).map(|field| field.trim()) else {
-            continue;
-        };
-        if job_id.is_empty() {
-            continue;
-        }
-        if fields.len() != 4 {
-            live.insert(job_id.to_string());
-            continue;
-        }
-        let name = fields[0].trim();
-        let owner = fields[2].trim();
-        if owner.is_empty() {
-            live.insert(job_id.to_string());
-            continue;
-        }
-        if !daemon_owns_label(owner, daemon_id) {
-            continue;
-        }
-        let Some(state) = DockerContainerState::parse(fields[3]) else {
-            live.insert(job_id.to_string());
-            continue;
-        };
-        if name == job_id && !state.safe_to_reclaim() {
-            live.insert(job_id.to_string());
-        }
-    }
-    live
-}
-
-/// Rows from [`list_job_buildkit_format_args`]: id, names, job-id, daemon-id, state.
-/// A builder is leftover when its job is not running (Created/removing/exited of a
-/// finished/cancelled job) or never carried a job label. Live jobs keep their
-/// bootstrapping Created builders.
-pub fn orphan_job_buildkit_ids(
-    formatted: &str,
-    live_jobs: &std::collections::BTreeSet<String>,
-    daemon_id: Option<&str>,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 5 {
-            continue;
-        }
-        let id = fields[0].trim();
-        let names = fields[1].trim();
-        let job_id = fields[2].trim();
-        let owner = fields[3].trim();
-        let Some(state) = DockerContainerState::parse(fields[4]) else {
-            continue;
-        };
-        if id.is_empty()
-            || !names.contains(BUILDKIT_CONTAINER_NAME_PREFIX)
-            || !state.safe_to_reclaim()
-        {
-            continue;
-        }
-        // Startup reclaim is daemon-scoped. An absent ownership label is
-        // not proof that this daemon owns the builder; fail closed so a
-        // co-located daemon cannot reclaim an unlabeled live resource.
-        if let Some(daemon_id) = daemon_id
-            && (owner.is_empty() || !daemon_owns_label(owner, daemon_id))
-        {
-            continue;
-        }
-        let job_live = if job_id.is_empty() {
-            live_jobs
-                .iter()
-                .any(|live| names.contains(live.trim_start_matches("velnor-job-")))
-        } else {
-            live_jobs.contains(job_id)
-        };
-        if !job_live {
-            ids.push(id.to_string());
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-/// Current-job builders including Created/removing. Job-end must delete them
-/// even while the job container is still running (cleanup happens before rm).
-pub fn job_buildkit_ids_for_job(formatted: &str, job_id: &str, scope: &str) -> Vec<String> {
-    let needle = format!("{BUILDKIT_CONTAINER_NAME_PREFIX}{scope}");
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let mut parts = line.split('\t');
-        let id = parts.next().unwrap_or("").trim();
-        let names = parts.next().unwrap_or("").trim();
-        let labeled_job = parts.next().unwrap_or("").trim();
-        if id.is_empty() {
-            continue;
-        }
-        if labeled_job == job_id || names.contains(&needle) {
-            ids.push(id.to_string());
-        }
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
 fn reclaim_orphan_job_buildkit(
     job_formatted: &str,
     daemon_id: Option<&str>,
     docker: &mut impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    reclaim_orphan_job_buildkit_with_live(&live_job_ids(job_formatted), daemon_id, docker)
+    reclaim_orphan_job_buildkit_with_live(
+        &docker_client::live_job_ids(job_formatted),
+        daemon_id,
+        docker,
+    )
 }
 
 fn reclaim_orphan_job_buildkit_with_live(
@@ -1142,14 +748,14 @@ fn reclaim_orphan_job_buildkit_with_live(
     docker: &mut impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
     let formatted = docker(&list_job_buildkit_format_args())?;
-    let initial_ids = orphan_job_buildkit_ids(&formatted, live_jobs, daemon_id);
+    let initial_ids = docker_client::orphan_job_buildkit_ids(&formatted, live_jobs, daemon_id);
     let job_formatted = match daemon_id {
         Some(_) => docker(&list_daemon_owned_job_format_args())?,
         None => docker(&list_owned_job_format_args())?,
     };
     let protected_jobs = match daemon_id {
-        Some(daemon_id) => live_daemon_job_ids(&job_formatted, daemon_id),
-        None => live_job_ids(&job_formatted),
+        Some(daemon_id) => docker_client::live_daemon_job_ids(&job_formatted, daemon_id),
+        None => docker_client::live_job_ids(&job_formatted),
     };
     let ids = if initial_ids.is_empty() {
         Vec::new()
@@ -1159,7 +765,8 @@ fn reclaim_orphan_job_buildkit_with_live(
         // unknown/malformed job state is protected, and deletion still needs
         // the same BuildKit id to be a stopped orphan in both scans.
         let revalidated = docker(&list_job_buildkit_format_args())?;
-        let revalidated = orphan_job_buildkit_ids(&revalidated, &protected_jobs, daemon_id);
+        let revalidated =
+            docker_client::orphan_job_buildkit_ids(&revalidated, &protected_jobs, daemon_id);
         initial_ids
             .into_iter()
             .filter(|id| revalidated.binary_search(id).is_ok())
@@ -1176,13 +783,17 @@ fn reclaim_orphan_job_buildkit_with_live(
         None => docker(&list_owned_job_format_args())?,
     };
     let volume_protected_jobs = match daemon_id {
-        Some(daemon_id) => live_daemon_job_ids(&volume_protected_jobs, daemon_id),
-        None => live_job_ids(&volume_protected_jobs),
+        Some(daemon_id) => docker_client::live_daemon_job_ids(&volume_protected_jobs, daemon_id),
+        None => docker_client::live_job_ids(&volume_protected_jobs),
     };
     let volume_ids = match daemon_id {
         Some(daemon_id) => {
             let volumes = docker(&list_daemon_owned_job_buildkit_volume_format_args())?;
-            daemon_owned_buildkit_volume_names(&volumes, daemon_id, &volume_protected_jobs)
+            docker_client::daemon_owned_buildkit_volume_names(
+                &volumes,
+                daemon_id,
+                &volume_protected_jobs,
+            )
         }
         None => {
             let volumes = docker(&list_job_buildkit_volume_args())?;
@@ -1210,106 +821,6 @@ fn reclaim_orphan_job_buildkit_with_live(
         docker(&remove_volume_args(&volume_ids)).map(|_| ())?;
     }
     Ok(())
-}
-
-fn daemon_owned_buildkit_volume_names(
-    formatted: &str,
-    daemon_id: &str,
-    protected_jobs: &std::collections::BTreeSet<String>,
-) -> Vec<String> {
-    let mut names = formatted
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split('\t').collect::<Vec<_>>();
-            if fields.len() != 3 {
-                return None;
-            }
-            let name = fields[0].trim();
-            let job_id = fields[1].trim();
-            let owner = fields[2].trim();
-            if name.is_empty()
-                || job_id.is_empty()
-                || !name.contains(BUILDKIT_CONTAINER_NAME_PREFIX)
-                || !daemon_owns_label(owner, daemon_id)
-                || protected_jobs.contains(job_id)
-                || protected_jobs
-                    .iter()
-                    .any(|live| name.contains(live.trim_start_matches("velnor-job-")))
-            {
-                return None;
-            }
-            Some(name.to_string())
-        })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// IDs of testcontainers that were created before the lease proxy (no job label).
-///
-/// This remains a best-effort inspection helper for compatibility. Automatic
-/// cleanup must use [`validate_legacy_testcontainer_listing`], which refuses
-/// both malformed rows and every unlabeled container before any delete call.
-pub fn unlabeled_testcontainer_ids(formatted: &str) -> Vec<String> {
-    let mut ids = formatted
-        .lines()
-        .filter_map(|line| {
-            let (id, job_id) = line.split_once('\t')?;
-            let id = id.trim();
-            if id.is_empty() || !job_id.trim().is_empty() {
-                return None;
-            }
-            Some(id.to_string())
-        })
-        .collect::<Vec<_>>();
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-/// A legacy Testcontainers listing is not an ownership proof. Keep its
-/// failure modes typed so callers cannot accidentally turn an inspection
-/// result into a destructive cleanup decision.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum LegacyTestcontainerReclaimError {
-    #[error("refusing legacy Testcontainers reclaim: malformed docker ps row {line}: {row:?}")]
-    MalformedRow { line: usize, row: String },
-    #[error(
-        "refusing legacy Testcontainers reclaim: unlabeled containers have no Velnor ownership proof: {ids:?}"
-    )]
-    Unlabeled { ids: Vec<String> },
-}
-
-/// Validate the legacy Testcontainers listing without producing deleteable
-/// IDs. Rows carrying a Velnor job label are intentionally ignored here;
-/// their cleanup belongs to [`reclaim_job_owned`] or
-/// [`reclaim_stale_job_owned`]. An unlabeled row is a hard refusal because the
-/// `org.testcontainers.managed-by` label proves only Testcontainers origin,
-/// not Velnor ownership.
-pub fn validate_legacy_testcontainer_listing(
-    formatted: &str,
-) -> std::result::Result<(), LegacyTestcontainerReclaimError> {
-    let mut unlabeled = Vec::new();
-    for (line_number, row) in formatted.lines().enumerate() {
-        let fields = row.split('\t').collect::<Vec<_>>();
-        if fields.len() != 2 || fields[0].trim().is_empty() {
-            return Err(LegacyTestcontainerReclaimError::MalformedRow {
-                line: line_number + 1,
-                row: row.to_string(),
-            });
-        }
-        if fields[1].trim().is_empty() {
-            unlabeled.push(fields[0].trim().to_string());
-        }
-    }
-
-    if unlabeled.is_empty() {
-        return Ok(());
-    }
-    unlabeled.sort();
-    unlabeled.dedup();
-    Err(LegacyTestcontainerReclaimError::Unlabeled { ids: unlabeled })
 }
 
 #[allow(dead_code)]
@@ -1971,7 +1482,7 @@ pub fn reclaim_job_owned(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
     let listed = docker(&list_owned_containers_args(job_id))?;
-    let ids = owned_container_ids_excluding_buildkit(&listed);
+    let ids = docker_client::owned_container_ids_excluding_buildkit(&listed);
     if !ids.is_empty() {
         docker(&force_remove_container_args(&ids)).map(|_| ())?;
     }
@@ -2000,14 +1511,14 @@ pub fn reclaim_stale_job_owned(
 ) -> Result<()> {
     let list_args = list_owned_containers_state_args(job_id);
     let initial = docker(&list_args)?;
-    let Some(initial) = stale_job_owned_snapshot(job_id, &initial) else {
+    let Some(initial) = docker_client::stale_job_owned_snapshot(job_id, &initial) else {
         return Ok(());
     };
     if !initial.job_container_absent_or_stopped {
         return Ok(());
     }
     let revalidated = docker(&list_args)?;
-    let Some(revalidated) = stale_job_owned_snapshot(job_id, &revalidated) else {
+    let Some(revalidated) = docker_client::stale_job_owned_snapshot(job_id, &revalidated) else {
         return Ok(());
     };
     if !revalidated.job_container_absent_or_stopped {
@@ -2036,7 +1547,7 @@ pub fn reclaim_stale_job_owned(
 
 pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) -> Result<()> {
     let formatted = docker(&list_owned_job_format_args())?;
-    for job_id in orphan_job_ids(&formatted) {
+    for job_id in docker_client::orphan_job_ids(&formatted) {
         reclaim_stale_job_owned(&job_id, &mut docker)?;
     }
     reclaim_orphan_job_buildkit(&formatted, None, &mut docker)
@@ -2053,10 +1564,10 @@ pub fn reclaim_daemon_orphan_jobs(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
     let formatted = docker(&list_daemon_owned_job_format_args())?;
-    for job_id in daemon_orphan_job_ids(&formatted, daemon_id) {
+    for job_id in docker_client::daemon_orphan_job_ids(&formatted, daemon_id) {
         reclaim_stale_job_owned(&job_id, &mut docker)?;
     }
-    let live = live_daemon_job_ids(&formatted, daemon_id);
+    let live = docker_client::live_daemon_job_ids(&formatted, daemon_id);
     reclaim_orphan_job_buildkit_with_live(&live, Some(daemon_id), &mut docker)
 }
 
@@ -2064,14 +1575,14 @@ pub fn reclaim_unlabeled_testcontainers(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
     let formatted = docker(&list_testcontainers_format_args())?;
-    validate_legacy_testcontainer_listing(&formatted).map_err(Into::into)
+    docker_client::validate_legacy_testcontainer_listing(&formatted).map_err(Into::into)
 }
 
 pub fn reclaim_unlabeled_job_image_siblings(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    let mut ids = unlabeled_job_image_ids(&docker(&list_job_image_format_args())?);
-    ids.extend(unlabeled_job_image_ids(&docker(
+    let mut ids = docker_client::unlabeled_job_image_ids(&docker(&list_job_image_format_args())?);
+    ids.extend(docker_client::unlabeled_job_image_ids(&docker(
         &list_preflight_format_args(),
     )?));
     ids.sort();
@@ -2082,150 +1593,13 @@ pub fn reclaim_unlabeled_job_image_siblings(
     docker(&force_remove_container_args(&ids)).map(|_| ())
 }
 
-/// Run one host `docker` command under the deadline its operation class earns.
-///
-/// Every path is bounded. Before the deadline policy existed only the `rm`
-/// family was, and every other maintenance call — `ps`, `inspect`, reclaim
-/// listings — waited on a wedged daemon forever.
-pub fn run_host_docker(args: &[String]) -> Result<String> {
-    let (_, deadline) = crate::docker::deadline_for(args, MAINTENANCE_PAYLOAD_DEADLINE);
-    run_host_docker_bounded(args, deadline)
-}
-
-/// Run one host `docker` command under an explicit deadline.
-///
-/// Expiry is a failure. The process is SIGKILLed and the caller gets a typed
-/// [`crate::docker::DockerTimeout`] naming the operation class and what to look
-/// at, never an empty success.
-pub(crate) fn run_host_docker_bounded(
-    args: &[String],
-    timeout: std::time::Duration,
-) -> Result<String> {
-    let op = crate::docker::classify(args);
-    let rm_claim = claim_docker_container_rm(args);
-    if let Some(claim) = rm_claim.as_ref()
-        && claim.ids.is_empty()
-    {
-        return Ok(String::new());
-    }
-    let claimed_args = rm_claim
-        .as_ref()
-        .map(|claim| container_rm_args_with_claimed_ids(args, &claim.ids));
-    let args = claimed_args.as_deref().unwrap_or(args);
-    let mut command = host_docker_command(args)?;
-    let child = command
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run docker {}", args.join(" ")))?;
-    let started = std::time::Instant::now();
-    let (output, expired) = wait_for_child_with_timeout(child, timeout)
-        .with_context(|| format!("wait docker {}", args.join(" ")))?;
-    crate::docker::observe(
-        op,
-        started.elapsed(),
-        output.status.code().unwrap_or(-1),
-        expired,
-    );
-    if expired {
-        // We killed it. Reporting that as success turned a resource leak into
-        // a silent one: teardown believed the object was gone.
-        return Err(anyhow::Error::new(crate::docker::DockerTimeout::new(
-            op, timeout,
-        )));
-    }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already in progress") {
-            return Ok(String::new());
-        }
-        bail!("docker {} failed: {}", args.join(" "), stderr);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Reap a Docker CLI child while keeping its timeout kill tied to the live
-/// [`std::process::Child`] handle.
-///
-/// A watchdog that retains only `Child::id()` has a PID-reuse race: the child
-/// can exit and be reaped just before the watchdog's timeout branch runs, and
-/// the numeric PID can then belong to an unrelated host process. Polling and
-/// killing through the owned handle closes that race. The pipes are drained on
-/// reader threads so a verbose Docker CLI cannot deadlock while this thread
-/// waits for its exit.
-fn wait_for_child_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Result<(std::process::Output, bool)> {
-    let mut stdout = child.stdout.take().context("capture timed child stdout")?;
-    let mut stderr = child.stderr.take().context("capture timed child stderr")?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
-    let started = std::time::Instant::now();
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => {
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    timed_out = true;
-                    // `Child::kill` addresses the still-owned child handle,
-                    // never a bare PID that may already have been recycled.
-                    let _ = child.kill();
-                    break child.wait().context("reap timed-out Docker child");
-                }
-                std::thread::sleep(Duration::from_millis(10).min(remaining));
-            }
-            Err(error) => {
-                // Do not leave a child running if the status probe itself
-                // fails. Reap it before returning the probe error.
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(anyhow::Error::new(error).context("poll Docker child status"));
-            }
-        }
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("timed child stdout reader panicked"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("timed child stderr reader panicked"))??;
-    Ok((
-        std::process::Output {
-            status: status?,
-            stdout,
-            stderr,
-        },
-        timed_out,
-    ))
-}
-
-fn host_docker_command(args: &[String]) -> Result<std::process::Command> {
-    let mut command = std::process::Command::new("docker");
-    crate::executor::configure_host_docker_command(&mut command, "docker", args)?;
-    command
-        .env("DOCKER_HOST", HOST_DOCKER_ENDPOINT)
-        .env_remove("DOCKER_CONTEXT");
-    Ok(command)
-}
-
 fn reclaim_listed(
     list_args: &[String],
     docker: &mut impl FnMut(&[String]) -> Result<String>,
     remove_args: fn(&[String]) -> Vec<String>,
 ) -> Result<()> {
     let listed = docker(list_args)?;
-    let ids = parse_docker_id_list(&listed);
+    let ids = docker_client::parse_id_list(&listed);
     if ids.is_empty() {
         return Ok(());
     }
@@ -3774,21 +3148,6 @@ mod tests {
     use anyhow::anyhow;
 
     #[test]
-    fn timed_child_kill_uses_owned_handle_and_reaps_child() {
-        let child = std::process::Command::new("sh")
-            .args(["-c", "exec sleep 5"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn timed child");
-        let (output, timed_out) =
-            wait_for_child_with_timeout(child, Duration::from_millis(20)).expect("wait child");
-
-        assert!(timed_out);
-        assert!(!output.status.success());
-    }
-
-    #[test]
     fn job_network_guard_defused_drop_is_noop() {
         // No panic, no docker invocation: the guard type runs `docker` only
         // when armed, so a defused drop must be silent even on a real host.
@@ -4046,12 +3405,12 @@ mod tests {
     fn claimed_container_rm_args_preserve_force_mode() {
         let non_force = remove_container_args(&["id-a".into(), "id-b".into()]);
         assert_eq!(
-            container_rm_args_with_claimed_ids(&non_force, &["id-a".into()]),
+            docker_client::container_rm_args_with_claimed_ids(&non_force, &["id-a".into()]),
             remove_container_args(&["id-a".into()])
         );
         let force = force_remove_container_args(&["id-a".into(), "id-b".into()]);
         assert_eq!(
-            container_rm_args_with_claimed_ids(&force, &["id-b".into()]),
+            docker_client::container_rm_args_with_claimed_ids(&force, &["id-b".into()]),
             force_remove_container_args(&["id-b".into()])
         );
     }
@@ -4680,7 +4039,7 @@ guest-old\tvelnor-job-dead\trunning
 velnor-job-dead\tvelnor-job-dead\texited
 ";
         assert_eq!(
-            orphan_job_ids(formatted),
+            docker_client::orphan_job_ids(formatted),
             vec!["velnor-job-dead".to_string()]
         );
     }
@@ -4736,7 +4095,7 @@ bbb\tbuildx_buildkit_velnor-builder-dead0
 ccc\tvelnor-docker-action-velnor-job-dead
 ";
         assert_eq!(
-            owned_container_ids_excluding_buildkit(formatted),
+            docker_client::owned_container_ids_excluding_buildkit(formatted),
             vec!["aaa".to_string(), "ccc".to_string()]
         );
     }
@@ -4750,14 +4109,15 @@ ccc\tvelnor-docker-action-velnor-job-dead
             vec!["ps".into(), "--all".into()],
             list_daemon_owned_job_format_args(),
         ] {
-            let (op, deadline) = crate::docker::deadline_for(&args, MAINTENANCE_PAYLOAD_DEADLINE);
+            let (op, deadline) =
+                crate::docker::deadline_for(&args, docker_client::MAINTENANCE_PAYLOAD_DEADLINE);
             assert!(op.is_control_plane(), "{args:?} classified as {op}");
             assert!(deadline < step_default, "{args:?} ({op}) is unbounded");
         }
         assert_eq!(
             crate::docker::deadline_for(
                 &force_remove_container_args(&["id".into()]),
-                MAINTENANCE_PAYLOAD_DEADLINE
+                docker_client::MAINTENANCE_PAYLOAD_DEADLINE
             )
             .1,
             Duration::from_secs(20)
@@ -4767,18 +4127,18 @@ ccc\tvelnor-docker-action-velnor-job-dead
     #[test]
     fn claim_docker_container_rm_single_flights_same_id() {
         let args = force_remove_container_args(&["same-id".into()]);
-        let first = claim_docker_container_rm(&args).unwrap();
+        let first = docker_client::claim_docker_container_rm(&args).unwrap();
         assert_eq!(first.ids, vec!["same-id".to_string()]);
-        let second = claim_docker_container_rm(&args).unwrap();
+        let second = docker_client::claim_docker_container_rm(&args).unwrap();
         assert!(second.ids.is_empty());
         drop(first);
-        let third = claim_docker_container_rm(&args).unwrap();
+        let third = docker_client::claim_docker_container_rm(&args).unwrap();
         assert_eq!(third.ids, vec!["same-id".to_string()]);
     }
 
     #[test]
     fn orphan_job_buildkit_ids_keep_live_created_and_reclaim_ended_created_removing() {
-        let live = live_job_ids(
+        let live = docker_client::live_job_ids(
             "velnor-job-live\tvelnor-job-live\trunning\n\
              velnor-job-dead\tvelnor-job-dead\texited\n",
         );
@@ -4790,7 +4150,7 @@ id-unlabeled\tbuildx_buildkit_velnor-builder-orphan0\t\t\tcreated
 id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
 ";
         assert_eq!(
-            orphan_job_buildkit_ids(formatted, &live, None),
+            docker_client::orphan_job_buildkit_ids(formatted, &live, None),
             vec![
                 "id-dead-created".to_string(),
                 "id-dead-removing".to_string(),
@@ -4808,7 +4168,7 @@ foreign\tbuildx_buildkit_velnor-builder-foreign0\tvelnor-job-foreign\t/var/lib/v
 unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcreated
 ";
         assert_eq!(
-            orphan_job_buildkit_ids(formatted, &BTreeSet::new(), Some(daemon)),
+            docker_client::orphan_job_buildkit_ids(formatted, &BTreeSet::new(), Some(daemon)),
             vec!["owned".to_string()]
         );
     }
@@ -4967,7 +4327,7 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
     fn unlabeled_testcontainer_ids_keep_only_pre_lease_orphans() {
         let formatted = "aaa\t\nbbb\tvelnor-job-live\nccc\t\n";
         assert_eq!(
-            unlabeled_testcontainer_ids(formatted),
+            docker_client::unlabeled_testcontainer_ids(formatted),
             vec!["aaa".to_string(), "ccc".to_string()]
         );
     }
@@ -4981,8 +4341,8 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
         });
         let error = result.expect_err("unlabeled rows must refuse legacy reclaim");
         assert!(matches!(
-            error.downcast_ref::<LegacyTestcontainerReclaimError>(),
-            Some(LegacyTestcontainerReclaimError::Unlabeled { ids })
+            error.downcast_ref::<docker_client::LegacyTestcontainerReclaimError>(),
+            Some(docker_client::LegacyTestcontainerReclaimError::Unlabeled { ids })
                 if ids == &vec!["dead1".to_string(), "dead2".to_string()]
         ));
         assert_eq!(calls[0], list_testcontainers_format_args());
@@ -4998,8 +4358,8 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
         });
         let error = result.expect_err("malformed rows must refuse legacy reclaim");
         assert!(matches!(
-            error.downcast_ref::<LegacyTestcontainerReclaimError>(),
-            Some(LegacyTestcontainerReclaimError::MalformedRow { line: 1, row })
+            error.downcast_ref::<docker_client::LegacyTestcontainerReclaimError>(),
+            Some(docker_client::LegacyTestcontainerReclaimError::MalformedRow { line: 1, row })
                 if row == "malformed-row-without-tab"
         ));
         assert_eq!(calls, vec![list_testcontainers_format_args()]);
@@ -5055,21 +4415,24 @@ unlabeled\tbuildx_buildkit_velnor-builder-unlabeled0\tvelnor-job-unlabeled\t\tcr
     #[test]
     fn daemon_owns_label_accepts_root_and_direct_slot_children_only() {
         let daemon = "/var/lib/velnor-fleet/work";
-        assert!(daemon_owns_label(daemon, daemon));
-        assert!(daemon_owns_label(
+        assert!(docker_client::daemon_owns_label(daemon, daemon));
+        assert!(docker_client::daemon_owns_label(
             "/var/lib/velnor-fleet/work/slot-3",
             daemon
         ));
-        assert!(!daemon_owns_label("/var/lib/velnor-other/work", daemon));
-        assert!(!daemon_owns_label(
+        assert!(!docker_client::daemon_owns_label(
+            "/var/lib/velnor-other/work",
+            daemon
+        ));
+        assert!(!docker_client::daemon_owns_label(
             "/var/lib/velnor-fleet/work/slot-3/nested",
             daemon
         ));
-        assert!(!daemon_owns_label(
+        assert!(!docker_client::daemon_owns_label(
             "/var/lib/velnor-fleet/work/slots",
             daemon
         ));
-        assert!(!daemon_owns_label("", daemon));
+        assert!(!docker_client::daemon_owns_label("", daemon));
     }
 
     #[test]
@@ -5083,7 +4446,7 @@ velnor-job-dead\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-2\texited
 other-dead\tother-dead\t/var/lib/velnor-other/work\texited
 ";
         assert_eq!(
-            daemon_orphan_job_ids(formatted, daemon),
+            docker_client::daemon_orphan_job_ids(formatted, daemon),
             vec!["velnor-job-dead".to_string()]
         );
     }
@@ -5099,7 +4462,7 @@ buildx_buildkit_velnor-builder-foreign0_state\tvelnor-job-foreign\t/var/lib/veln
 buildx_buildkit_velnor-builder-unlabeled0_state\tvelnor-job-unlabeled\t
 ";
         assert_eq!(
-            daemon_owned_buildkit_volume_names(formatted, daemon, &protected),
+            docker_client::daemon_owned_buildkit_volume_names(formatted, daemon, &protected),
             vec!["buildx_buildkit_velnor-builder-dead0_state".to_string()]
         );
     }
