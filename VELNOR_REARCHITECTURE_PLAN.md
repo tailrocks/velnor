@@ -232,6 +232,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | Line convergence: one `perf/docker-rust-mbx` head now contains the perf trust line, the fix cache half, and `origin/main` — merges `02c2e9db` + `0f2b02f5`, full SHA record in §104. |
 | 2026-09-12 | R0-fv2v5 closed red-team F-V2 (`workflow_run` numeric ids), F-V3 (clone-URL host + SSH), F-V4 (case-insensitive secret prefix) in `fe5ea25f`; F-V5 verified closed by the §104 convergence with the shared trust predicate pinned by test (§105). |
 | 2026-09-12 | R0-fv2v5 correction fixed the clone-URL identity to exactly two path segments (`evil/octo/base` no longer corroborates `octo/base`) and re-verified the custom-pool lease report against the converged tree — the `StoreTrustClass` divergence it names was deleted by the convergence, and a lease-vs-mount conformance test now pins the admitted-verbatim contract (§105). |
+| 2026-09-12 | R1-post merged the native + JavaScript post-action lists into one LIFO stack per upstream `PostJobSteps`, keeping per-entry post conditions; the mixed-order conformance test matches upstream LIFO (§106). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5445,3 +5446,55 @@ Tests, 3 new, all passing; gates observed in this worktree:
 --all-targets` zero warnings; strict clippy clean workspace-wide
 (with `test-support`); full runner package 1816 passed, 0 failed, 1
 skipped; targeted trust/admission 156/156; velnorctl 78/78.
+
+## 106. R1-post: unified LIFO post-action stack — 2026-09-12
+
+`executor.rs` kept post steps as two separately-reversed lists
+(`post_actions`, then `native_post_actions`), so a mixed job ran every
+native post before every JavaScript post regardless of registration
+order (the BC-23 ordering item). Upstream keeps a single
+`Stack<IStep> PostJobSteps` on the job context, re-verified against
+`actions/runner` `main` for this package
+(`src/Runner.Worker/ExecutionContext.cs:222`, drained with `TryPop` by
+`src/Runner.Worker/StepsRunner.cs`), so mixed jobs run posts in exact
+reverse registration order.
+
+`001cd4d0` replaces both lists with one `Vec<PostAction>` (a
+JavaScript/Native enum with a shared `condition()` accessor):
+registration pushes in step order at the three existing sites, the
+drain is one reverse-then-filter with the unchanged
+`post_condition_met` predicate against the job's final status, and one
+loop executes entries in LIFO position. Both execution bodies are
+byte-identical in behavior — native consecutive-same-umbrella grouping
+and single-step JavaScript posts — so the merge changes ORDER only; an
+interleaved JavaScript post keeps its own step record between two
+native group records rather than joining either group. No manifest,
+fixture, or API surface changes: the enum is private and no step
+contract moved.
+
+Tests, 3 new, all passing:
+`executes_mixed_native_and_javascript_post_actions_in_reverse_registration_order`
+pins runner-call and step-log order for a native/JS/native job
+(LIFO `native-post, js-post, native-post`; verified to fail on the
+true pre-fix code, which drains `native-post, native-post, js-post`);
+`unified_post_stack_still_gates_each_post_on_its_condition` pins that
+a false `failure()` JavaScript post drops out while the `always()`
+native and unconditional JavaScript posts run in LIFO order; and
+`unified_post_stack_drain_benchmark` drains a 3-entry mixed stack 20k
+times in the repo's timing-gated style (bound 10 s, observed ~0.1 s).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`); serial runner lib 1768
+passed, 0 failed, 1 ignored (1765 base + 3 new); focused post-action
+13/13; full runner package all targets green. One transient single-test
+failure appeared in a 4-thread full-package run and did not reproduce
+in two full re-runs; parallel runner execution is
+documented-unstable and serial remains the accepted gate.
+
+R1-post status: complete. Open follow-up outside this bounded package:
+upstream never pushes embedded-composite posts to `PostJobSteps` at
+all (one `EmbeddedStepsWithPostRegistered` entry per composite, one
+`Post Run <composite>` record), while Velnor still renders JavaScript
+embedded posts as own records and only groups consecutive natives —
+unifying that rendering is a separate lifecycle work package.
