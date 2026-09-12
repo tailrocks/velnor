@@ -30,7 +30,7 @@ The original starting SHAs in the table above
 `5c8b57aa64dcbfd8fe6b2f6edae625ae344fc496`) are retained as program history.
 Lineage note: the original commits are not direct ancestors of the recreated
 tips (the Sep-4/5 work reached main through PR merges, e.g. Velnor main
-#567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
+PRs #567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
 the recreated tip). All §93–§95 handoff SHAs (`f5f28ca`, `976516f`, `e8223f5`,
 fixture `9d03639`) likewise predate the recreation and are history, not heads.
 Remote state at recreation: Velnor `origin` carries `main` +
