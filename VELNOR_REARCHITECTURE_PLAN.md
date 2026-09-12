@@ -233,6 +233,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R0-fv2v5 closed red-team F-V2 (`workflow_run` numeric ids), F-V3 (clone-URL host + SSH), F-V4 (case-insensitive secret prefix) in `fe5ea25f`; F-V5 verified closed by the §104 convergence with the shared trust predicate pinned by test (§105). |
 | 2026-09-12 | R0-fv2v5 correction fixed the clone-URL identity to exactly two path segments (`evil/octo/base` no longer corroborates `octo/base`) and re-verified the custom-pool lease report against the converged tree — the `StoreTrustClass` divergence it names was deleted by the convergence, and a lease-vs-mount conformance test now pins the admitted-verbatim contract (§105). |
 | 2026-09-12 | R1-post merged the native + JavaScript post-action lists into one LIFO stack per upstream `PostJobSteps`, keeping per-entry post conditions; the mixed-order conformance test matches upstream LIFO (§106). |
+| 2026-09-12 | R1-cond gave the step loop cancel re-evaluation (a killed step records failure and remaining conditions re-evaluate fresh instead of breaking), failed pre/post records on unevaluable conditions instead of silent skips, and a `status-conditions` dual-lane workflow pinning all four status functions plus the fail-closed unevaluable step for R2-v2v4's live run (§107). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5498,3 +5499,83 @@ all (one `EmbeddedStepsWithPostRegistered` entry per composite, one
 `Post Run <composite>` record), while Velnor still renders JavaScript
 embedded posts as own records and only groups consecutive natives —
 unifying that rendering is a separate lifecycle work package.
+
+## 107. R1-cond: condition-function semantics + dual-lane pins — 2026-09-12
+
+Re-verified against `actions/runner` `main` for this package
+(`StepsRunner.cs`, `ActionRunner.cs`, `ExecutionContext.cs`
+`ApplyContinueOnError`/post children, `SuccessFunction.cs`,
+`FailureFunction.cs`, `AlwaysFunction.cs`, `CancelledFunction.cs`,
+`PipelineTemplateConverter.cs:670-729`, `FromJson.cs`). The status
+functions themselves already matched: composite-scoped
+`success()`/`failure()` vs job-scoped `cancelled()`, the implicit
+`success() && (...)` prefix with AST status-function detection, and
+fail-the-step on unevaluable main conditions. Three divergences
+remained, all fixed here:
+
+- Cancel re-evaluation. A step killed by cancellation surfaced as
+  `Err("process terminated by signal")` from the signaled host child,
+  and the `Err` arm broke the step loop — remaining `always()` and
+  `cancelled()` main steps never ran, exactly the cleanup upstream
+  runs after its `RunStepAsync` cancellation catch. The arm now
+  records the killed step as failed and CONTINUES when the job token
+  is cancelled, so every remaining condition re-evaluates fresh
+  (ordinary steps skip, `failure()` stays false, cleanup runs); no
+  `step_error` is set, because the runner reports the job `Canceled`
+  from its own flag and returning `Ok` preserves the cleanup step
+  logs the `Err` path would discard. The JavaScript pre-step `?` got
+  the same treatment (a killed pre records failure and skips main
+  while its post stays registered, since the pre ran).
+- Pre/post unevaluable conditions. The old `post_condition_met`
+  swallowed evaluation errors into silent skips (a documented
+  deferred root cause). An unevaluable `runs.pre-if` now fails the
+  step row without running main or registering post; an unevaluable
+  `runs.post-if` now emits a failed `Post <name>` record in its LIFO
+  position while the remaining posts still execute, and the failed
+  result flips the job conclusion like any step failure. The
+  bool-returning helper is deleted; both call sites use the
+  `Result`-returning evaluator.
+- Dual-lane pins. New `status-conditions` dual-lane workflow
+  (generator template + regen wiring; standalone so the designed
+  failure cannot redden `ci.yml`'s lane verdict): a real failure,
+  `failure()`/`success()`/`cancelled()` branches, an unevaluable
+  `fromJSON`-over-runtime-output step, an `always()` assert on all
+  six outcomes plus `job.status`, and `steps.json` evidence compared
+  across lanes by its own `compare-status` job. The unevaluable shape
+  is deliberately runtime-only — actionlint statically rejects
+  unknown functions, wrong arities, unknown contexts, bad format
+  placeholders, and invalid `fromJSON` literals, so a literal
+  unevaluable condition would break the fixture's own lint gate.
+  Regen verified in a scratch fixture worktree (exactly the two new
+  files plus the `project.toml` file list and generator state;
+  byte-stable otherwise; idempotent; surface audit, `test_audits.py`,
+  and actionlint green). The fixture regen commit and the live run
+  belong to R2-v2v4.
+
+Tests, 7 new, all passing: pre-cancelled and mid-loop cancel
+re-evaluation (ordinary + `failure()` skip undispatched,
+`always()`/`cancelled()` run); killed-step error continues to
+cleanup (verified to fail on the pre-fix arm); unevaluable main
+condition fails the step and continues with `failure()` true after;
+unevaluable pre fails without dispatching main or post; unevaluable
+post fails in LIFO position while the sibling post runs; and a
+status-function benchmark (180k evaluations over fresh/failed/
+cancelled states, bound 10 s, observed 0.7 s). D-7 additionally pins
+the live `fromJSON`-over-invalid-JSON shape.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`); serial runner lib 1775
+passed, 0 failed, 1 ignored (1768 base + 7 new); full runner package
+all targets green; focused condition/cancel/post 73/73; model
+129+4+6+4; control 237+8+18+7; velnorctl 24+19+2+8; velnor-workflow
+197+2+2+8.
+
+R1-cond status: complete. Known deltas, kept explicit: a killed step
+records `Failure` (Velnor's outcome has no cancelled value; under
+cancellation the status functions read identically either way — only
+the `steps.<id>.outcome` string differs); a running `always()` step
+is killed by the ladder where upstream's re-evaluation would let it
+finish (BC-6 lifecycle, architectural follow-up); non-cancel
+execution errors still break the loop where upstream continues them
+as failures (same arm, deliberately untouched — separate package).
