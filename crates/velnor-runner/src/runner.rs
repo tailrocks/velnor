@@ -6082,14 +6082,14 @@ async fn handle_job_request(
     }
     run_service_job.journal_state = RunServiceJobJournalState::Accepted;
 
-    // The job's trust class, derived once from the job's own event, before
-    // the admission row persists. The pool flag is only the ceiling: fork
-    // and unknown jobs run under the untrusted floor on every pool. The
+    // The job's admitted trust, bound once from the job's own event,
+    // before the admission row persists. The pool flag is only the ceiling:
+    // fork and unknown jobs run under the untrusted floor on every pool. The
     // admission row and every observation below record this admitted scope,
     // never the raw pool flag — the secrets gate, the storage leases, the
     // container spec, and the executor all enforce it.
-    let job_trust = crate::trust_class::TrustClass::derive(&job);
-    let effective_trust_scope = job_trust.admitted_scope(&args.trust_scope).to_owned();
+    let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
+    let effective_trust_scope = admitted_trust.effective_scope().to_owned();
 
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
@@ -6125,7 +6125,7 @@ async fn handle_job_request(
                     .and_then(|value| value.value.clone())
             }),
             runner_name: Some(runner_name.to_owned()),
-            trust: crate::trust_class::AdmittedTrust::narrow(job_trust, &args.trust_scope),
+            trust: admitted_trust.clone(),
             resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
@@ -6181,8 +6181,9 @@ async fn handle_job_request(
     };
 
     apply_workflow_script_step_names(&mut job, &early_context, &broker_cancellation.stored).await;
-    // `job_trust` and `effective_trust_scope` were derived above, before the
-    // admission row persisted; everything below enforces that admitted scope.
+    // `admitted_trust` and `effective_trust_scope` were bound above, before
+    // the admission row persisted; everything below enforces that admitted
+    // scope.
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -6329,7 +6330,9 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
-        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope, job_trust) {
+        if let Err(error) =
+            validate_job_trust_policy(&job, &args.trust_scope, admitted_trust.class())
+        {
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -14592,17 +14595,20 @@ mod tests {
         // event, narrow the pool ceiling by it, and enforce the admitted scope
         // on all three axes — secrets, socket, stores.
         let job = admission_job("pull_request", Some("mallory/base"), true);
-        let class = TrustClass::derive(&job);
-        assert_eq!(class, TrustClass::ForkPR);
-        let admitted = class.admitted_scope("trusted");
-        assert_eq!(admitted, crate::trust_scope::FAIL_CLOSED);
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::ForkPR);
+        assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
 
-        let error = validate_job_trust_policy(&job, "trusted", class).unwrap_err();
+        let error = validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap_err();
         assert!(error.to_string().contains("secrets.DOCKERHUB_TOKEN"));
 
-        assert!(!crate::github_adapter::github_trust_scope_allows_host_docker(admitted));
+        assert!(
+            !crate::github_adapter::github_trust_scope_allows_host_docker(
+                admitted.effective_scope()
+            )
+        );
         assert_eq!(
-            crate::github_adapter::store_trust_class(admitted),
+            crate::github_adapter::store_trust_class(admitted.effective_scope()),
             crate::container::StoreTrustClass::Untrusted
         );
     }
@@ -14628,10 +14634,10 @@ mod tests {
             }
         }));
 
-        let class = TrustClass::derive(&job);
-        assert_eq!(class, TrustClass::ForkPR);
-        let admitted = class.admitted_scope("trusted").to_owned();
-        validate_job_trust_policy(&job, "trusted", class).unwrap();
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::ForkPR);
+        let admitted_scope = admitted.effective_scope().to_owned();
+        validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
 
         let temp = std::path::Path::new("/velnor/work/job/temp");
         let spec = crate::github_adapter::github_job_container_spec(
@@ -14650,7 +14656,7 @@ mod tests {
             std::num::NonZeroU32::MIN,
             "",
             "daemon".into(),
-            &admitted,
+            &admitted_scope,
         )
         .unwrap();
 
@@ -14683,10 +14689,10 @@ mod tests {
         // signals keeps the trusted pool's capabilities — secrets flow and the
         // admitted scope is the pool value itself.
         let job = admission_job("push", None, true);
-        let class = TrustClass::derive(&job);
-        assert_eq!(class, TrustClass::Trusted);
-        assert_eq!(class.admitted_scope("trusted"), "trusted");
-        validate_job_trust_policy(&job, "trusted", class).unwrap();
+        let admitted = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
+        assert_eq!(admitted.class(), TrustClass::Trusted);
+        assert_eq!(admitted.effective_scope(), "trusted");
+        validate_job_trust_policy(&job, "trusted", admitted.class()).unwrap();
     }
 
     #[test]
@@ -14695,9 +14701,12 @@ mod tests {
 
         // F-V1: trust derives before the admission row persists, and the row
         // plus its telemetry record the job's class and effective scope —
-        // never the raw pool flag. Each case binds trust through the same
-        // constructor `handle_job_request` uses, narrowing the raw pool flag,
-        // so the test cannot hand-assemble a pair production cannot produce.
+        // never the raw pool flag. Each case binds trust through the exact
+        // production binding `handle_job_request` calls
+        // (`AdmittedTrust::admit`: derive from the job message, then narrow
+        // the raw pool ceiling), so the narrowed pair the test asserts is
+        // the one production persists — never a hand-assembled pair
+        // production cannot produce.
         for (event, head, class, scope) in [
             ("push", None, TrustClass::Trusted, "trusted"),
             (
@@ -14709,7 +14718,7 @@ mod tests {
         ] {
             let job = admission_job(event, head, false);
             assert_eq!(TrustClass::derive(&job), class);
-            let trust = crate::trust_class::AdmittedTrust::narrow(class, "trusted");
+            let trust = crate::trust_class::AdmittedTrust::admit(&job, "trusted");
             assert_eq!(trust.class(), class);
             assert_eq!(trust.effective_scope(), scope);
 

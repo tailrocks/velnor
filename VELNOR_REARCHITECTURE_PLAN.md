@@ -143,7 +143,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
-| `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; correction `d37ad166`) |
+| `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; corrections `d37ad166`, `admit` binding) |
 
 ## 8. Discovered bug classes
 
@@ -219,6 +219,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
 | 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §101). |
 | 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §101). |
+| 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§101). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -4864,3 +4865,21 @@ runner/model/control pass; targeted trust/admission 93/93;
 `telemetry_integration` 5/5; model 129; control 237+8+18+7; full serial
 runner lib 1710 passed with the same 3 pre-existing environmental
 `action::tests::fetched_*` failures; `trust_scope_single_source` 2/2.
+
+F-V1 second correction: review observed the remaining test gap — the
+conformance tests called `narrow` with a hand-supplied class while
+production derived the class inline, so the production binding itself
+(derive-from-message plus narrow-the-ceiling, computed twice at separate
+lines) had no test caller. The enabling condition was the split
+derivation: `TrustClass::derive` plus `admitted_scope`/`narrow` at three
+call sites that could diverge by editing one line. `trust_class.rs` now
+exposes the single production binding `AdmittedTrust::admit(job,
+pool_scope)`; `handle_job_request` binds once and threads the class,
+scope, and row from it, and all four admission conformance tests call
+`admit` — the narrowed pair the suite asserts is the one production
+persists. Behavior byte-identical. Gates: fmt pass; strict clippy on
+runner/model/control pass; targeted ops/trust/admission/blocking 93/93;
+`telemetry_integration` 5/5; model 129; control 237+8+18+7; full serial
+runner lib 1710 passed with the same 3 pre-existing environmental
+`action::tests::fetched_*` failures (re-verified on the untouched base);
+`trust_scope_single_source` 2/2.

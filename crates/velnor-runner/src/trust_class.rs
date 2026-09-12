@@ -147,10 +147,11 @@ impl TrustClass {
 /// A job's admitted trust: the derived class bound to the effective scope
 /// it narrows the pool ceiling to.
 ///
-/// Constructible only through [`AdmittedTrust::narrow`], which runs the
-/// class's narrowing over the raw pool flag. The fields are private, so no
-/// call site can pair a class with a scope it forbids (`fork-pr` with
-/// `trusted`) — the wrong value is inexpressible, not merely untested.
+/// Constructible only through [`AdmittedTrust::narrow`] or
+/// [`AdmittedTrust::admit`], which run the class narrowing over the raw pool
+/// flag. The fields are private, so no call site can pair a class with a
+/// scope it forbids (`fork-pr` with `trusted`) — the wrong value is
+/// inexpressible, not merely untested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedTrust {
     class: TrustClass,
@@ -168,6 +169,16 @@ impl AdmittedTrust {
             class,
             effective_scope,
         }
+    }
+
+    /// The production admission binding: derive the job's class from its own
+    /// event, then narrow the pool ceiling by it. The single entry point both
+    /// `handle_job_request` and its conformance test call, so the narrowed
+    /// pair the test asserts is the one production persists — never a
+    /// hand-assembled pair production cannot produce.
+    #[must_use]
+    pub fn admit(job: &AgentJobRequestMessage, pool_scope: &str) -> Self {
+        Self::narrow(TrustClass::derive(job), pool_scope)
     }
 
     /// The derived class this binding narrows.
