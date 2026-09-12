@@ -17,8 +17,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::container::StoreTrustClass;
-
 /// Directory name of the legacy (pre-`VELNOR_STORAGE_ROOT`) artifact store.
 ///
 /// This literal exists once in the tree. `store_catalog` tests assert that,
@@ -222,12 +220,10 @@ impl StoreCatalog {
         )
     }
 
-    pub(crate) fn sccache(&self, trust_class: StoreTrustClass) -> PathBuf {
-        let trust_scope = match trust_class {
-            StoreTrustClass::Untrusted => "untrusted",
-            StoreTrustClass::Trusted => "trusted",
-            StoreTrustClass::Release => "release",
-        };
+    /// Root of the sccache compiler store for one trust scope: the pool
+    /// scope or the untrusted floor on the GC path, the job's admitted scope
+    /// on the execution path. Namespaced by the scope in both layouts.
+    pub(crate) fn sccache(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_for_trust_with_layout(
             &self.work_root,
             trust_scope,
@@ -237,13 +233,6 @@ impl StoreCatalog {
         )
     }
 }
-
-/// Trust scopes the compiler stores are partitioned by.
-pub(crate) const TRUST_SCOPES: [(StoreTrustClass, &str); 3] = [
-    (StoreTrustClass::Untrusted, "untrusted"),
-    (StoreTrustClass::Trusted, "trusted"),
-    (StoreTrustClass::Release, "release"),
-];
 
 /// Root of the hosted GitHub Actions cache service storage.
 ///

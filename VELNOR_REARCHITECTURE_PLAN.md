@@ -4795,3 +4795,59 @@ pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
 `/tmp/velnor-actions` exists but is empty — verified identical on the
 untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
 WP-6 status: complete (derivation §97+§98, enforcement this section).
+
+## 101. trust-admission-fork correction: one scope spelling through leases, mounts, and GC, plus admission forensics — 2026-09-12
+
+Review of §100 found two holes on the same path, both fixed here.
+
+First, the mounts collapsed what the leases kept raw. The storage leases
+used the admitted scope verbatim, but `JobContainerSpec` carried a
+`StoreTrustClass` that folded every custom pool scope (and the `Trusted`
+case variant) to `untrusted`. On a custom pool the legacy executable stores
+were therefore leased at `bin/<custom>/<repo>` and mounted at
+`bin/untrusted/<repo>` — live stores GC-reclaimable mid-job — and in both
+layouts a trusted-class job shared mutable untrusted cargo/mise stores with
+fork jobs, contradicting the namespaced-by-admitted-scope docs. The
+collapsed enum is deleted (`StoreTrustClass`,
+`store_trust_namespace`, `github_adapter::store_trust_class`,
+`store_catalog::TRUST_SCOPES`); the spec now carries
+`store_trust_scope: String`, normalized once at admission, and every
+mount-side path (cargo/mise roots, executable and binary stores,
+Playwright, compiler stores, mise seeding in both `runner.rs` and
+`executor.rs`) derives from it. GC sweeps the compiler stores under the
+pool namespace plus the untrusted floor through the same
+`trust_partitioned_roots` as every other class, so custom-pool compiler
+stores are reclaimed instead of leaking. New regression coverage:
+`container_spec_preserves_the_admitted_scope_verbatim` and
+`custom_pool_leases_and_mounts_share_one_scope_spelling` (lease-vs-mount
+equality for `public-forks` and `Trusted` in both layouts, and no
+untrusted-floor collapse for trusted-class jobs); the
+`every_consumer_observes_one_resolved_trust_scope` split-brain test now
+asserts the compiler stores carry the resolved custom scope too.
+
+Second, admission forensics recorded only the pool ceiling
+(`JobAdmission.trust_scope`), never the derived decision, so RunQueued
+records could not distinguish a fork job downgraded to the untrusted path
+from a trusted job. `TrustClass::derive` now runs before the admission row
+persists (step-name hydration touches only display names, so the earlier
+derivation is stable), the slot forensics log records
+`trust=<class> admitted_scope=<scope> pool_scope=<pool>` per job, and the
+RunQueued telemetry carries `job_trust` plus the projected
+`admitted_scope` (optional `String` fields in the model contract and
+`schemas/velnor.telemetry.v1.json`; `JobAdmission::project` is `pub(crate)`
+for the sanitization). Docs updated where the behavior changed
+(`reference/trust-scope.mdx`: partitioning by admitted scope, custom
+scopes select a namespace of their own, and the stale "unrecognized values
+resolve to untrusted" claim corrected to absent/empty).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `cargo clippy -p velnor-model
+--all-targets --locked -- -D warnings` pass; store suites
+(`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`/`trust_class`)
+209/209 pass; `velnor-model` telemetry 24/24 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1706 passed with the same 3 pre-existing environmental
+failures as §100 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — cause re-verified, `action.rs` untouched);
+`velnorctl` `trust_scope_single_source` 2/2 pass. WP-6 status: complete.

@@ -240,7 +240,9 @@
       "required": ["queued_for_ms", "queue_time_present"],
       "properties": {
         "queued_for_ms": {"type": "integer", "minimum": 0},
-        "queue_time_present": {"type": "boolean"}
+        "queue_time_present": {"type": "boolean"},
+        "job_trust": {"type": "string"},
+        "admitted_scope": {"type": "string"}
       },
       "additionalProperties": true
     },

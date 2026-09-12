@@ -4539,7 +4539,7 @@ where
     fn seed_mise_store(&mut self, container: &JobContainerSpec) -> Result<()> {
         let store = crate::container::mise_store_host(
             &container.temp_host,
-            crate::container::store_trust_namespace(container.store_trust_class),
+            container.store_trust_scope.as_str(),
         );
         let inspect = self.runner.run(
             "docker",
@@ -15393,7 +15393,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         }

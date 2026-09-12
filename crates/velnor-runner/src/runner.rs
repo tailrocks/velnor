@@ -1289,7 +1289,12 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTreeMap<String, Value> {
+fn run_queued_telemetry_fields(
+    queue_ms: u64,
+    queue_time_present: bool,
+    job_trust: &str,
+    admitted_scope: &str,
+) -> BTreeMap<String, Value> {
     BTreeMap::from([
         (
             "queued_for_ms".to_owned(),
@@ -1298,6 +1303,15 @@ fn run_queued_telemetry_fields(queue_ms: u64, queue_time_present: bool) -> BTree
         (
             "queue_time_present".to_owned(),
             Value::from(queue_time_present),
+        ),
+        // The admission decision, not just the pool ceiling: without these
+        // two a RunQueued record cannot distinguish a fork job downgraded to
+        // the untrusted path from a trusted job. Both values are secret-safe
+        // by construction (a fixed class label and a projected scope).
+        ("job_trust".to_owned(), Value::from(job_trust.to_owned())),
+        (
+            "admitted_scope".to_owned(),
+            Value::from(admitted_scope.to_owned()),
         ),
     ])
 }
@@ -6082,6 +6096,27 @@ async fn handle_job_request(
     }
     run_service_job.journal_state = RunServiceJobJournalState::Accepted;
 
+    // The job's trust class, derived once from the job's own event. The pool
+    // flag is only the ceiling: fork and unknown jobs run under the untrusted
+    // floor on every pool. Everything below — the admission forensics, the
+    // secrets gate, the storage leases, the container spec, the executor —
+    // enforces this admitted scope, never the raw pool flag. Derived before
+    // the admission row persists so the forensics record the decision, not
+    // just the ceiling: without the class and the admitted scope, a fork job
+    // downgraded to the untrusted path is indistinguishable from a trusted
+    // job. (Step-name hydration below touches only display names, never the
+    // trust signals, so deriving here is stable.)
+    let job_trust = crate::trust_class::TrustClass::derive(&job);
+    let effective_trust_scope =
+        crate::trust_scope::normalize_scope(job_trust.admitted_scope(&args.trust_scope)).to_owned();
+    forensics.lifecycle(&format!(
+        "job admitted job_id={} trust={} admitted_scope={} pool_scope={}",
+        job.job_id,
+        job_trust.as_str(),
+        effective_trust_scope,
+        args.trust_scope,
+    ));
+
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing
@@ -6124,7 +6159,12 @@ async fn handle_job_request(
         let _ = sink.emit_telemetry_for_admission(
             &admission,
             TelemetryEvent::RunQueued,
-            run_queued_telemetry_fields(queue_ms, queue_time_present),
+            run_queued_telemetry_fields(
+                queue_ms,
+                queue_time_present,
+                job_trust.as_str(),
+                &admission.project(&effective_trust_scope),
+            ),
         );
         let telemetry_admission = admission.clone();
         let admission_outcome =
@@ -6172,13 +6212,6 @@ async fn handle_job_request(
     };
 
     apply_workflow_script_step_names(&mut job, &early_context, &broker_cancellation.stored).await;
-    // The job's trust class, derived once from the job's own event. The pool
-    // flag is only the ceiling: fork and unknown jobs run under the untrusted
-    // floor on every pool. Everything below — the secrets gate, the storage
-    // leases, the container spec, the executor — enforces this admitted scope,
-    // never the raw pool flag.
-    let job_trust = crate::trust_class::TrustClass::derive(&job);
-    let effective_trust_scope = job_trust.admitted_scope(&args.trust_scope).to_owned();
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -11167,7 +11200,7 @@ fn seed_mise_store_from_image(container: &crate::container::JobContainerSpec) {
     let docker_image = &container.image;
     let mise_store = crate::container::mise_store_host(
         &container.temp_host,
-        crate::container::store_trust_namespace(container.store_trust_class),
+        container.store_trust_scope.as_str(),
     );
     let marker = mise_store.join(".image-seeded");
     let lock_path = mise_store.join(".image-seed.lock");
@@ -14597,10 +14630,7 @@ mod tests {
         assert!(error.to_string().contains("secrets.DOCKERHUB_TOKEN"));
 
         assert!(!crate::github_adapter::github_trust_scope_allows_host_docker(admitted));
-        assert_eq!(
-            crate::github_adapter::store_trust_class(admitted),
-            crate::container::StoreTrustClass::Untrusted
-        );
+        assert_eq!(admitted, crate::trust_scope::FAIL_CLOSED);
     }
 
     #[test]
@@ -14651,10 +14681,7 @@ mod tests {
         .unwrap();
 
         assert!(!spec.mount_docker_socket);
-        assert_eq!(
-            spec.store_trust_class,
-            crate::container::StoreTrustClass::Untrusted
-        );
+        assert_eq!(spec.store_trust_scope, crate::trust_scope::FAIL_CLOSED);
         assert!(!spec.options.iter().any(|option| option == "--privileged"));
         let service = spec.services.first().expect("one service container");
         assert!(!service
@@ -16713,13 +16740,18 @@ jobs:
 
     #[test]
     fn run_queued_telemetry_fields_are_bounded_and_secret_free() {
-        let fields = run_queued_telemetry_fields(u64::MAX, true);
+        let fields = run_queued_telemetry_fields(u64::MAX, true, "fork-pr", "untrusted");
 
         assert_eq!(
             fields["queued_for_ms"],
             Value::from(MAX_TELEMETRY_DURATION_MS)
         );
         assert_eq!(fields["queue_time_present"], Value::from(true));
+        // The admission decision travels with the record: a fork job
+        // downgraded to the untrusted path is distinguishable from a trusted
+        // job without consulting any other row.
+        assert_eq!(fields["job_trust"], Value::from("fork-pr"));
+        assert_eq!(fields["admitted_scope"], Value::from("untrusted"));
         assert!(!serde_json::to_string(&fields)
             .unwrap()
             .contains("timestamp"));
@@ -21224,7 +21256,7 @@ runs:
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
