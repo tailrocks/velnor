@@ -1,21 +1,21 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	489081d94ffe14c9
-scan	b2a9a9e28635f510
+config	8a0f0a89e6384cdb
+scan	f738d950fd53d1c7
 generator	4
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
-.github/ci/project.toml	c11969cee4abc75a
+.github/ci/project.toml	8bcd24dae8ed31b3
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-bun-velnor.yml	ced11e7fdc400203
 .github/workflows/ci-docker-docker.yml	276a5bf013e44c5a
 .github/workflows/ci-docs-docs.yml	0a8d98419cb893ef
-.github/workflows/ci-main.yml	1c746a56dc223003
+.github/workflows/ci-main.yml	3a4fb82f52b18d17
 .github/workflows/ci-opentofu-opentofu.yml	53cf867cbf7adc59
 .github/workflows/ci-policy.yml	0dd63c8b9225efbe
-.github/workflows/ci-pr.yml	9bd4e8cc81eb6c5d
+.github/workflows/ci-pr.yml	8f5b248b7784ac3a
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-rust-policy.yml	dcd72a5db5572740
 .github/workflows/ci-rust-production-topology.yml	dea3d208c9709f6a
@@ -27,9 +27,10 @@ generator	4
 .github/workflows/ci-rust-velnor-render.yml	a47b6ed6f30b77dc
 .github/workflows/ci-rust-velnor-runner.yml	f311cc3a3d2975ee
 .github/workflows/ci-rust-velnor-tools.yml	7335b05fec95266f
+.github/workflows/ci-rust-velnor-workflow-contract.yml	e072c4406ff0a8f8
 .github/workflows/ci-rust-velnor-workflow.yml	5622d611523e3ddf
 .github/workflows/ci-rust-velnorctl.yml	fb5cee04c1db275e
 .github/workflows/maintenance.yml	6f95b9c9d9c1040d
-.github/workflows/nightly.yml	bb57b6f6cad6650b
+.github/workflows/nightly.yml	76863cd8643a5dc1
 .github/workflows/preview.yml	fb9ce5ebf288cd3b
 .github/workflows/release.yml	64515faa2b71edcb

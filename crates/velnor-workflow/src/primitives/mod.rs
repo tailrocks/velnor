@@ -499,33 +499,6 @@ impl Declaration {
     }
 }
 
-/// The unit contracts a config declares, so the legacy paths that predate the
-/// registry can step aside for the families the config owns.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DeclaredContracts {
-    /// The config declares a `watch-graph` row.
-    pub(crate) watch_graph: bool,
-    /// The config declares a `regen-gate` row.
-    pub(crate) regen_gate: bool,
-}
-
-/// Which unit contracts the config declares.
-pub(crate) fn declared_contracts(generation: Option<&RepoGenerationConfig>) -> DeclaredContracts {
-    let Some(generation) = generation else {
-        return DeclaredContracts::default();
-    };
-    DeclaredContracts {
-        watch_graph: generation
-            .declare()
-            .iter()
-            .any(|row| row.primitive() == WATCH_GRAPH),
-        regen_gate: generation
-            .declare()
-            .iter()
-            .any(|row| row.primitive() == REGEN_GATE),
-    }
-}
-
 /// The declared CI surface: the files, the workflow names they cover, and the
 /// unit contracts the surface was rendered from.
 pub(crate) struct Surface {
@@ -1192,12 +1165,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Without config, no contract is declared and the legacy paths render.
-    #[test]
-    fn no_config_declares_no_contracts() {
-        assert_eq!(declared_contracts(None), DeclaredContracts::default());
     }
 
     /// A contract primitive that returns a unit the scan did not produce is a

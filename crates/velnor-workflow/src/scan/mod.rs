@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::{
     default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
-    ProjectConfig, RepositoryProfile, RunnerMode, Unit, UnitKind,
+    ProjectConfig, RunnerMode, Unit, UnitKind,
 };
 
 /// Run the detector pipeline over `root` and return what it proved.
@@ -191,7 +191,7 @@ impl From<RepositoryShape> for ProjectConfig {
     fn from(shape: RepositoryShape) -> Self {
         Self {
             repository: String::new(),
-            profile: RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: AnalysisSummary {
                 method: "static-filesystem-and-manifest-inspection".to_owned(),
                 detected: shape.detected,
@@ -204,7 +204,7 @@ impl From<RepositoryShape> for ProjectConfig {
             default_branch: shape.default_branch,
             runners: shape.runners,
             github_runner: "ubuntu-24.04".to_owned(),
-            velnor_labels: crate::default_velnor_runner_labels(),
+            velnor_labels: Vec::new(),
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
             release: None,
@@ -214,6 +214,9 @@ impl From<RepositoryShape> for ProjectConfig {
             actionlint_config_variables_null: false,
             ci_required: true,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         }
     }
 }

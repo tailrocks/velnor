@@ -933,11 +933,7 @@ fn version_bump_matches(
         else {
             return Ok(false);
         };
-        let unit_id = if crate_name == "velnorctl" {
-            "rust-velnorctl".to_owned()
-        } else {
-            format!("rust-{crate_name}")
-        };
+        let unit_id = format!("rust-{crate_name}");
         if !allowlist.iter().any(|allowed| allowed == &unit_id) {
             return Ok(false);
         }
@@ -2299,6 +2295,70 @@ mod tests {
         Ok((root, base, head))
     }
 
+    /// A repo-owned project config written for these tests: one docker unit,
+    /// a small rust crate graph, and a version-bump allowlist. The selection
+    /// engine consumes whatever the file declares, so the fixture stays
+    /// independent of any repository the workspace happens to live in.
+    const SELECTION_PROJECT_CONFIG: &str = r#"schema = 2
+repository = "example/selection"
+profile = "generic"
+verified = true
+default_branch = "main"
+runners = "github"
+
+[analysis]
+method = "static-filesystem-and-manifest-inspection"
+detected = []
+limitations = []
+
+[workflow]
+github_runner = "ubuntu-24.04"
+files = ["ci-docker-docker.yml", "ci-rust-base.yml", "ci-rust-leaf.yml", "ci-pr.yml", "ci-main.yml", "ci-policy.yml", "maintenance.yml", "nightly.yml"]
+version_bump_units = ["docker", "rust-bench", "rust-leaf"]
+
+[[unit]]
+id = "docker"
+kind = "docker"
+root = "."
+watch = ["Dockerfile"]
+github_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_full_commands = ["docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+
+[[unit]]
+id = "rust-base"
+kind = "rust"
+root = "crates/base"
+watch = ["crates/base/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/base/Cargo.toml'"]
+
+[[unit]]
+id = "rust-leaf"
+kind = "rust"
+root = "crates/leaf"
+depends_on = ["rust-base"]
+watch = ["crates/leaf/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/leaf/Cargo.toml'"]
+
+[[unit]]
+id = "rust-bench"
+kind = "rust"
+root = "crates/bench"
+depends_on = ["rust-base"]
+watch = ["crates/bench/**", "Cargo.lock"]
+github_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+github_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+velnor_pr_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
+"#;
+
     fn current_project_selection_git_fixture(
         name: &str,
         changed: &str,
@@ -2330,10 +2390,7 @@ mod tests {
 
         let config = root.join(".github/ci/project.toml");
         std::fs::create_dir_all(config.parent().ok_or("project config parent")?)?;
-        std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/ci/project.toml"),
-            &config,
-        )?;
+        std::fs::write(&config, SELECTION_PROJECT_CONFIG)?;
 
         let changed_path = root.join(changed);
         std::fs::create_dir_all(changed_path.parent().ok_or("changed file parent")?)?;
@@ -2579,15 +2636,10 @@ mod tests {
         )?;
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected = [
-            "docker",
-            "rust-velnor-bench",
-            "rust-velnor-runner",
-            "rust-velnorctl",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
+        let expected = ["docker", "rust-bench", "rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
         assert_eq!(selected_id_set(&selection), expected);
         assert_eq!(selection.full_units, expected);
         std::fs::remove_dir_all(root)?;
@@ -2595,40 +2647,26 @@ mod tests {
     }
 
     #[test]
-    fn current_project_velnor_client_change_selects_exact_dependency_closure(
-    ) -> Result<(), Box<dyn Error>> {
+    fn current_project_leaf_change_selects_exact_dependency_closure() -> Result<(), Box<dyn Error>>
+    {
         let (root, base, head) = current_project_selection_git_fixture(
-            "velnor-client-source",
-            "crates/velnor-client/src/lib.rs",
+            "leaf-source",
+            "crates/leaf/src/lib.rs",
             "pub fn fixture() {}\n",
             "pub fn fixture() { let _ = 1; }\n",
         )?;
         let config = read_config(&root.join(".github/ci/project.toml"))?;
         let selection = selection_for_diff(&root, &config, Scope::Affected, &base, &head)?;
-        let expected_selected = [
-            "docker",
-            "rust-velnor-client",
-            "rust-velnor-control",
-            "rust-velnor-model",
-            "rust-velnor-render",
-            "rust-velnor-runner",
-            "rust-velnor-tools",
-            "rust-velnorctl",
-            "rust-production-topology",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-        let expected_full = [
-            "docker",
-            "rust-velnor-client",
-            "rust-velnor-tools",
-            "rust-velnorctl",
-            "rust-production-topology",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
+        let expected_selected = ["rust-base", "rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        // `full_units` carries the affected set (the changed unit and its
+        // dependents); the dependency closure lives on the selected side.
+        let expected_full = ["rust-leaf"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
         assert_eq!(selected_id_set(&selection), expected_selected);
         assert_eq!(selection.full_units, expected_full);
         std::fs::remove_dir_all(root)?;
@@ -2879,7 +2917,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: [self-hosted, velnor]
+          - runner: [self-hosted, example-label]
     runs-on: ${{ matrix.runner }}
 ";
         let root = policy_fixture("matrix-trusted", workflow, "github")?;
@@ -2897,8 +2935,8 @@ jobs:
   verify:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on:
-      group: velnor-trusted
-      labels: [self-hosted, velnor-target-mvp]
+      group: example-trusted
+      labels: [self-hosted, example-label]
 ";
         let root = policy_fixture("runner-group-trusted", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -2910,8 +2948,8 @@ jobs:
   verify:
     if: ${{ inputs.consumer_repository != '' && inputs.lane == 'velnor' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on:
-      group: velnor-trusted
-      labels: [self-hosted, velnor-target-mvp]
+      group: example-trusted
+      labels: [self-hosted, example-label]
 ";
         let root = policy_fixture("runner-group-trusted-with-conjunction", workflow, "github")?;
         assert!(run_policy(root)?);
@@ -2928,7 +2966,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on:
       group: ${{ inputs.group }}
-      labels: [self-hosted, velnor-target-mvp]
+      labels: [self-hosted, example-label]
 ";
         let root = policy_fixture("runner-group-dynamic", dynamic, "github")?;
         assert!(!run_policy(root)?);
@@ -2940,8 +2978,8 @@ jobs:
   verify:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on:
-      group: velnor-trusted
-      labels: [self-hosted, velnor-target-mvp]
+      group: example-trusted
+      labels: [self-hosted, example-label]
       environment: production
 ";
         let root = policy_fixture("runner-group-unknown-key", unknown, "github")?;
@@ -2959,7 +2997,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: [self-hosted, velnor]
+          - runner: [self-hosted, example-label]
     runs-on: ${{ matrix.runner }}
 ";
         let root = policy_fixture("matrix-untrusted", workflow, "github")?;

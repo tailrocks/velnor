@@ -973,7 +973,7 @@ mod tests {
     fn config() -> crate::ProjectConfig {
         crate::ProjectConfig {
             repository: "test".to_owned(),
-            profile: crate::RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
                 detected: Vec::new(),
@@ -1005,6 +1005,9 @@ mod tests {
             actionlint_config_variables_null: false,
             ci_required: true,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         }
     }
 

@@ -6,9 +6,11 @@
 //! keeps the generator's default behavior), and is fail-closed: a config that
 //! fails to parse or validate stops generation instead of being ignored.
 //!
-//! The scan pass applies the supported workflow, scan, and policy overrides
-//! after it has resolved the repository shape. Declared primitives and the
-//! remaining policy contract are consumed by their owning later phases.
+//! The config is where a repository states everything the generator used to
+//! know for it: its identity, its runner placement, its profile label, its
+//! release contract, the units it adds or overrides, the adopted template
+//! directory it renders from, and the repository-local files the generated
+//! output owns. Nothing about a specific repository lives in the generator.
 
 mod canonical;
 
@@ -98,6 +100,12 @@ pub(crate) struct RepoGenerationConfig {
     #[serde(default)]
     policy: PolicySection,
     #[serde(default)]
+    release: ReleaseSection,
+    #[serde(default)]
+    units: Vec<UnitSection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    static_files: Vec<StaticFileSection>,
+    #[serde(default)]
     declare: Vec<DeclareRow>,
 }
 
@@ -113,10 +121,30 @@ struct GeneratorSection {
 struct WorkflowSection {
     /// GitHub-hosted runner label for hosted lanes.
     github_runner: Option<String>,
-    /// Velnor runner labels for self-hosted lanes.
+    /// Velnor runner labels for self-hosted lanes. A surface that renders
+    /// self-hosted jobs without them is a configuration error, never an empty
+    /// `runs-on`.
     velnor_labels: Option<Vec<String>>,
     /// Velnor runner group for self-hosted lanes.
     velnor_runner_group: Option<String>,
+    /// The repository profile recorded in the generated `project.toml`. A free
+    /// label: it describes the surface, it never selects one.
+    profile: Option<String>,
+    /// The review flag recorded in the generated `project.toml`.
+    verified: Option<bool>,
+    /// The owned workflow file list, replacing the generator's default list.
+    /// Declaring it is what makes the surface authoritative over whatever is
+    /// checked in under `.github/workflows`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<String>>,
+    /// Repository directory the adopted workflow surface renders from, instead
+    /// of the legacy `.github/ci/workflow-templates` location. The declared
+    /// directory must exist and own every workflow it names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    templates: Option<String>,
+    /// Units whose release bumps are recorded in the generated `project.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version_bump_units: Option<Vec<String>>,
     /// Per-owner-block update channel grants for the rendered
     /// `package-update.yml` matrix; the `default` key covers owner blocks
     /// without their own row. Absent from the canonical form, so configs that
@@ -125,6 +153,88 @@ struct WorkflowSection {
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
+}
+
+/// The release contract a repository declares for itself. `kind` names the
+/// publisher the renderer implements; every other field is the contract that
+/// publisher renders from, so an incomplete contract is a configuration error
+/// instead of a partially rendered workflow.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseSection {
+    enabled: Option<bool>,
+    reason: Option<String>,
+    kind: Option<String>,
+    package: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    packages: Vec<String>,
+    binary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    targets: Vec<String>,
+    image: Option<String>,
+    source_repository: Option<String>,
+    consumer_repository: Option<String>,
+    artifact_path: Option<String>,
+    description: Option<String>,
+}
+
+/// One verification unit the repository adds to, or overrides in, the scanned
+/// shape. A row whose `id` the scan produced overrides only the fields it
+/// names; any other id adds a unit, and then `kind` is required.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnitSection {
+    id: Option<String>,
+    label: Option<String>,
+    kind: Option<String>,
+    root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    watch: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    full_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_pr_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_full_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_pr_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    velnor_full_commands: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    depends_on: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache: Option<UnitCacheSection>,
+    /// Whether the unit's Cargo verification holds behind a root `Cargo.lock`
+    /// pin. The scan derives this for scanned units; a `[[unit]]` row that
+    /// adds a unit the scan did not produce states it explicitly so the
+    /// rendered Cargo source preparation matches a scanned crate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pinned_lockfile: Option<bool>,
+    tool_version: Option<String>,
+}
+
+/// The cache contract of a `[[unit]]` row. Each field is independent, so an
+/// override can replace one side of the contract without restating the other.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnitCacheSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    key_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<String>>,
+}
+
+/// A repository-local file outside the workflow surface that the generated
+/// output owns verbatim, such as a composite action the emitted workflows
+/// call. `source` is read from the repository at generation time, so the
+/// repository owns the bytes and the generator owns the write.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct StaticFileSection {
+    file: Option<String>,
+    source: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -146,6 +256,138 @@ struct PolicySection {
     action_pin_admission: Option<String>,
     /// Emit `config-variables: null` in the generated actionlint config.
     actionlint_config_variables_null: Option<bool>,
+}
+
+impl ReleaseSection {
+    pub(crate) fn enabled(&self) -> Option<bool> {
+        self.enabled
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    pub(crate) fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    pub(crate) fn package(&self) -> Option<&str> {
+        self.package.as_deref()
+    }
+
+    pub(crate) fn packages(&self) -> &[String] {
+        &self.packages
+    }
+
+    pub(crate) fn binary(&self) -> Option<&str> {
+        self.binary.as_deref()
+    }
+
+    pub(crate) fn targets(&self) -> &[String] {
+        &self.targets
+    }
+
+    pub(crate) fn image(&self) -> Option<&str> {
+        self.image.as_deref()
+    }
+
+    pub(crate) fn source_repository(&self) -> Option<&str> {
+        self.source_repository.as_deref()
+    }
+
+    pub(crate) fn consumer_repository(&self) -> Option<&str> {
+        self.consumer_repository.as_deref()
+    }
+
+    pub(crate) fn artifact_path(&self) -> Option<&str> {
+        self.artifact_path.as_deref()
+    }
+
+    pub(crate) fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+impl UnitSection {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub(crate) fn kind(&self) -> Option<&str> {
+        self.kind.as_deref()
+    }
+
+    pub(crate) fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+
+    pub(crate) fn watch(&self) -> Option<&[String]> {
+        self.watch.as_deref()
+    }
+
+    pub(crate) fn pr_commands(&self) -> Option<&[String]> {
+        self.pr_commands.as_deref()
+    }
+
+    pub(crate) fn full_commands(&self) -> Option<&[String]> {
+        self.full_commands.as_deref()
+    }
+
+    pub(crate) fn github_pr_commands(&self) -> Option<&[String]> {
+        self.github_pr_commands.as_deref()
+    }
+
+    pub(crate) fn github_full_commands(&self) -> Option<&[String]> {
+        self.github_full_commands.as_deref()
+    }
+
+    pub(crate) fn velnor_pr_commands(&self) -> Option<&[String]> {
+        self.velnor_pr_commands.as_deref()
+    }
+
+    pub(crate) fn velnor_full_commands(&self) -> Option<&[String]> {
+        self.velnor_full_commands.as_deref()
+    }
+
+    pub(crate) fn depends_on(&self) -> Option<&[String]> {
+        self.depends_on.as_deref()
+    }
+
+    pub(crate) fn cache(&self) -> Option<&UnitCacheSection> {
+        self.cache.as_ref()
+    }
+
+    pub(crate) fn pinned_lockfile(&self) -> Option<bool> {
+        self.pinned_lockfile
+    }
+
+    pub(crate) fn tool_version(&self) -> Option<&str> {
+        self.tool_version.as_deref()
+    }
+}
+
+impl UnitCacheSection {
+    pub(crate) fn key_files(&self) -> Option<&[String]> {
+        self.key_files.as_deref()
+    }
+
+    pub(crate) fn paths(&self) -> Option<&[String]> {
+        self.paths.as_deref()
+    }
+}
+
+impl StaticFileSection {
+    pub(crate) fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    pub(crate) fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
 }
 
 /// One declared render primitive and the units it applies to.
@@ -202,30 +444,81 @@ impl RepoGenerationConfig {
         self.workflow.package_update_channels.clone()
     }
 
-    /// The repository paths excluded from the scan.
-    pub(crate) fn scan_exclude(&self) -> Result<&[String], GeneratorError> {
-        validate_excludes(&self.scan.exclude)?;
-        Ok(&self.scan.exclude)
+    /// The repository directory the adopted workflow surface renders from.
+    pub(crate) fn templates_dir(&self) -> Option<&str> {
+        self.workflow.templates.as_deref()
     }
 
-    /// Hosted runner override, when declared.
+    /// The `owner/repository` slug the config declares, if any.
+    pub(crate) fn repository(&self) -> Option<&str> {
+        self.generator.repository.as_deref()
+    }
+
+    /// The GitHub-hosted runner label, when the config declares one.
     pub(crate) fn github_runner(&self) -> Option<&str> {
         self.workflow.github_runner.as_deref()
     }
 
-    /// Velnor label override, when declared.
+    /// The declared self-hosted runner labels.
     pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
         self.workflow.velnor_labels.as_deref()
     }
 
-    /// Default branch override, when declared.
+    /// The declared self-hosted runner group.
+    pub(crate) fn velnor_runner_group(&self) -> Option<&str> {
+        self.workflow.velnor_runner_group.as_deref()
+    }
+
+    /// The declared profile label.
+    pub(crate) fn profile(&self) -> Option<&str> {
+        self.workflow.profile.as_deref()
+    }
+
+    /// The declared review flag.
+    pub(crate) fn verified(&self) -> Option<bool> {
+        self.workflow.verified
+    }
+
+    /// The declared owned workflow file list.
+    pub(crate) fn files(&self) -> Option<&[String]> {
+        self.workflow.files.as_deref()
+    }
+
+    /// The declared version-bump unit ids.
+    pub(crate) fn version_bump_units(&self) -> Option<&[String]> {
+        self.workflow.version_bump_units.as_deref()
+    }
+
+    /// The declared default-branch override.
     pub(crate) fn default_branch(&self) -> Option<&str> {
         self.workflow.default_branch.as_deref()
     }
 
-    /// Whether the generated actionlint config should emit null variables.
+    /// Whether the generated actionlint config declares no configuration
+    /// variables.
     pub(crate) fn actionlint_config_variables_null(&self) -> Option<bool> {
         self.policy.actionlint_config_variables_null
+    }
+
+    /// The declared release contract.
+    pub(crate) fn release(&self) -> &ReleaseSection {
+        &self.release
+    }
+
+    /// The declared unit rows, in the order the config declares them.
+    pub(crate) fn units(&self) -> &[UnitSection] {
+        &self.units
+    }
+
+    /// The declared repository-local files the generated output owns.
+    pub(crate) fn static_files(&self) -> &[StaticFileSection] {
+        &self.static_files
+    }
+
+    /// The repository paths excluded from the scan.
+    pub(crate) fn scan_exclude(&self) -> Result<&[String], GeneratorError> {
+        validate_excludes(&self.scan.exclude)?;
+        Ok(&self.scan.exclude)
     }
 
     /// Whether the generated CI aggregate should be required.
@@ -275,6 +568,15 @@ impl RepoGenerationConfig {
             self.workflow.package_update_channels.as_ref(),
             package_update_blocks,
         )?;
+        validate_workflow_files(self.workflow.files.as_deref())?;
+        validate_units(&self.units)?;
+        validate_unit_references(
+            &self.units,
+            self.workflow.version_bump_units.as_deref(),
+            unit_ids,
+        )?;
+        validate_static_files(&self.static_files)?;
+        self.validate_release()?;
         Ok(())
     }
 
@@ -443,6 +745,13 @@ fn validate_package_update_channels(
     let Some(grants) = grants else {
         return Ok(());
     };
+    // A grant table with no rendered matrix to grant is a configuration that
+    // narrowed nothing and said so: name the file or drop the table.
+    if blocks.is_empty() {
+        return Err(GeneratorError::usage(
+            "[workflow] package_update_channels is declared, but the generated surface renders no `package-update.yml`; declare its template or drop the grant table",
+        ));
+    }
     for (block, channels) in grants {
         if channels.is_empty() {
             return Err(GeneratorError::usage(format!(
@@ -477,6 +786,199 @@ fn validate_package_update_channels(
         }
     }
     Ok(())
+}
+
+/// The declared workflow file list replaces the generator's default list, so
+/// every entry has to be a bare workflow file name: the list is a surface, not
+/// a set of paths.
+fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorError> {
+    let Some(files) = files else {
+        return Ok(());
+    };
+    if files.is_empty() {
+        return Err(GeneratorError::usage(
+            "[workflow] files must not be empty; omit the list to keep the generator's default surface",
+        ));
+    }
+    for file in files {
+        validate_workflow_file_name(file)?;
+    }
+    Ok(())
+}
+
+/// Unit rows either override a scanned unit by id or add one. Two rows for one
+/// id would make the effective contract depend on which one the reader trusts,
+/// so the second row is refused instead of merged.
+fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
+    for row in units {
+        let id = row.id.as_deref().unwrap_or_default();
+        if id.is_empty() {
+            return Err(GeneratorError::usage(
+                "[[unit]] is missing `id`; name the unit the row adds or overrides",
+            ));
+        }
+        if let Some(kind) = row.kind.as_deref()
+            && unit_kind_prefix(kind).is_none()
+        {
+            return Err(GeneratorError::usage(format!(
+                    "[[unit]] {id} declares kind `{kind}`, which the generator does not implement; implemented kinds: {}",
+                    UNIT_KIND_PREFIXES.join(", ")
+                )));
+        }
+        if let Some(cache) = &row.cache
+            && (cache.key_files.as_ref().is_none_or(std::vec::Vec::is_empty)
+                || cache.paths.as_ref().is_none_or(std::vec::Vec::is_empty))
+        {
+            return Err(GeneratorError::usage(format!(
+                    "[[unit]] {id} declares `[unit.cache]` without both `key_files` and `paths`; a partial cache contract cannot be keyed"
+                )));
+        }
+    }
+    for (index, left) in units.iter().enumerate() {
+        let duplicate = units[index + 1..].iter().any(|right| right.id == left.id);
+        if duplicate {
+            return Err(GeneratorError::usage(format!(
+                "[[unit]] declares `{}` twice; one row per unit",
+                left.id.as_deref().unwrap_or_default()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Every unit a row or a bump list names has to exist once the declared rows
+/// are applied: a bumped or depended-on unit that is not there would silently
+/// release or order nothing.
+fn validate_unit_references(
+    units: &[UnitSection],
+    version_bump_units: Option<&[String]>,
+    scanned: &[String],
+) -> Result<(), GeneratorError> {
+    let mut known = scanned.to_vec();
+    known.extend(units.iter().filter_map(|row| row.id.clone()));
+    let report = |role: &str, id: &str| -> Result<(), GeneratorError> {
+        if known.iter().any(|candidate| candidate == id) {
+            Ok(())
+        } else {
+            Err(GeneratorError::usage(format!(
+                "`{role}` names `{id}`, a unit the repository does not declare; known units: {}",
+                known.join(", ")
+            )))
+        }
+    };
+    for row in units {
+        for id in row.depends_on.iter().flatten() {
+            report("depends_on", id)?;
+        }
+    }
+    for id in version_bump_units.into_iter().flatten() {
+        report("version_bump_units", id)?;
+    }
+    Ok(())
+}
+
+/// Static file rows write inside `.github/` only, from a repository file that
+/// stays inside the repository: anything else would turn configuration into an
+/// arbitrary filesystem write.
+fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorError> {
+    for row in rows {
+        let file = row.file.as_deref().unwrap_or_default();
+        let source = row.source.as_deref().unwrap_or_default();
+        if !is_contained_github_path(file) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] file must be a repository-relative path inside `.github/`, found `{file}`"
+            )));
+        }
+        if !is_contained_repository_path(source) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must be a repository-relative path, found `{source}`"
+            )));
+        }
+        let duplicate = rows
+            .iter()
+            .filter(|other| other.file.as_deref() == Some(file))
+            .count();
+        if duplicate > 1 {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] declares `{file}` twice; one row per owned file"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_contained_github_path(path: &str) -> bool {
+    is_contained_repository_path(path) && Path::new(path).starts_with(".github/")
+}
+
+fn is_contained_repository_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.split('/').any(|segment| segment == "..")
+}
+
+/// The publishers the renderer implements, and the contract fields each one
+/// renders from.
+const RELEASE_KINDS: &[&str] = &["crates", "rust-binary", "pages"];
+
+/// A `kind` the renderer does not implement has no rendered `release.yml`: it
+/// is accepted only from a repository that renders its own publisher verbatim
+/// as a `static-workflow` row, and is a configuration error anywhere else.
+impl RepoGenerationConfig {
+    fn validate_release(&self) -> Result<(), GeneratorError> {
+        let release = &self.release;
+        if release.enabled != Some(true) {
+            return Ok(());
+        }
+        let kind = release.kind.as_deref().unwrap_or_default();
+        let complete = match kind {
+            "crates" => !release.packages.is_empty(),
+            "rust-binary" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .binary
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && !release.targets.is_empty()
+            }
+            "pages" => release
+                .artifact_path
+                .as_deref()
+                .is_some_and(|value| !value.is_empty()),
+            _ => false,
+        };
+        if complete {
+            return Ok(());
+        }
+        let declared = self.declare.iter().any(|row| {
+            row.primitive() == crate::primitives::STATIC_WORKFLOW
+                && row.file.as_deref() == Some(crate::RELEASE_WORKFLOW)
+        });
+        if declared && !kind.is_empty() {
+            return Ok(());
+        }
+        Err(GeneratorError::usage(format!(
+            "[release] enabled repositories must declare `kind`, one of {}, each with the contract fields that publisher renders from; a `kind` the renderer does not implement requires a `static-workflow` row that renders `{}` verbatim",
+            RELEASE_KINDS.join(", "),
+            crate::RELEASE_WORKFLOW
+        )))
+    }
+}
+
+/// The unit kinds the generator implements, as the `[[unit]]` `kind` strings.
+const UNIT_KIND_PREFIXES: &[&str] = &[
+    "rust", "gradle", "node", "bun", "swift", "opentofu", "docker", "homebrew", "docs",
+];
+
+fn unit_kind_prefix(kind: &str) -> Option<&'static str> {
+    UNIT_KIND_PREFIXES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == kind)
 }
 
 fn validate_arg_value(key: &str, value: &toml::Value) -> Result<(), GeneratorError> {
@@ -552,10 +1054,27 @@ mod tests {
         )
     }
 
-    /// The owner blocks the rendered `package-update.yml` really declares, so
-    /// the channel-grant rules are tested against the render surface itself.
+    /// A test-owned `package-update.yml` body: the grant rules are validated
+    /// against the surface the repository renders, never against a
+    /// generator-side copy of a template.
+    const PACKAGE_UPDATE_TEMPLATE: &str = concat!(
+        "# Generated by velnor-workflow. Regenerate; do not hand-edit.\n",
+        "name: Package update\n",
+        "\n",
+        "jobs:\n",
+        "  example_owner:\n",
+        "    runs-on: ubuntu-24.04\n",
+        "    steps:\n",
+        "      - run: echo update\n",
+        "  other_owner:\n",
+        "    runs-on: ubuntu-24.04\n",
+        "    steps:\n",
+        "      - run: echo update\n",
+    );
+
+    /// The owner blocks that body really declares, in template order.
     fn package_update_blocks() -> Vec<&'static str> {
-        crate::apt_package_update_owner_blocks(crate::APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE)
+        crate::estate::apt_package_update_owner_blocks(PACKAGE_UPDATE_TEMPLATE)
     }
 
     fn full_config(unit: &str) -> String {
