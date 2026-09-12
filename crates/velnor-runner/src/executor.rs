@@ -1393,6 +1393,38 @@ struct PostNativeAction {
     umbrella_display: Option<String>,
 }
 
+/// One registered post step on the unified LIFO stack.
+///
+/// Upstream keeps a single `Stack<IStep> PostJobSteps` on the job context
+/// (`src/Runner.Worker/ExecutionContext.cs:222`) which StepsRunner drains
+/// with `TryPop` (`src/Runner.Worker/StepsRunner.cs`), so a mixed job runs
+/// native and JavaScript posts in exact reverse registration order. Two
+/// separately-reversed lists ran every native post before every JavaScript
+/// post regardless of registration order; this enum is what makes that
+/// mis-ordering unrepresentable — there is only one stack to drain.
+#[derive(Debug, Clone)]
+enum PostAction {
+    JavaScript(PostJavaScriptAction),
+    Native(PostNativeAction),
+}
+
+impl PostAction {
+    fn condition(&self) -> Option<&str> {
+        match self {
+            PostAction::JavaScript(post) => post.condition.as_deref(),
+            PostAction::Native(post) => post.condition.as_deref(),
+        }
+    }
+
+    #[cfg(test)]
+    fn step_id(&self) -> &str {
+        match self {
+            PostAction::JavaScript(post) => post.step_id.as_str(),
+            PostAction::Native(post) => post.step_id.as_str(),
+        }
+    }
+}
+
 impl ExecutableStep {
     pub(crate) fn id(&self) -> &str {
         match self {
@@ -2073,8 +2105,9 @@ where
         // cancellation target without any call site naming it.
         let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
         let mut step_error = None;
-        let mut post_actions = Vec::new();
-        let mut native_post_actions = Vec::new();
+        // The single post-action stack, in registration (step) order; drained
+        // LIFO below like upstream's `PostJobSteps`.
+        let mut post_actions: Vec<PostAction> = Vec::new();
         let mut timeline_order = self.initial_order;
         let mut composite_frame: Option<CompositeFrame> = None;
         let mut target_materialized = false;
@@ -2274,7 +2307,7 @@ where
                 && step_state.post_condition_met(invocation.pre_condition.as_deref())
             {
                 if invocation.post_container_path.is_some() {
-                    post_actions.push(PostJavaScriptAction {
+                    post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
                         step_id: step_id.clone(),
                         display_name: display_name.clone(),
                         invocation: invocation.clone(),
@@ -2284,7 +2317,7 @@ where
                         umbrella_display: composite_frame
                             .as_ref()
                             .map(|frame| frame.display_name.clone()),
-                    });
+                    }));
                     post_registered = true;
                 }
                 let pre_step_id = uuid::Uuid::new_v4().to_string();
@@ -2346,7 +2379,7 @@ where
                 } = step
                 && invocation.post_container_path.is_some()
             {
-                post_actions.push(PostJavaScriptAction {
+                post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
                     step_id: step_context_id.clone(),
                     display_name: display_name.clone(),
                     invocation: invocation.clone(),
@@ -2356,7 +2389,7 @@ where
                     umbrella_display: composite_frame
                         .as_ref()
                         .map(|frame| frame.display_name.clone()),
-                });
+                }));
             }
             if let ExecutableStep::Native {
                 invocation,
@@ -2367,7 +2400,7 @@ where
                 && let Some(condition) =
                     native_post_condition(invocation.adapter, invocation.cache_kind)
             {
-                native_post_actions.push(PostNativeAction {
+                post_actions.push(PostAction::Native(PostNativeAction {
                     step_id: step_context_id.clone(),
                     display_name: display_name.clone(),
                     invocation: invocation.clone(),
@@ -2377,7 +2410,7 @@ where
                     umbrella_display: composite_frame
                         .as_ref()
                         .map(|frame| frame.display_name.clone()),
-                });
+                }));
             }
             let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
@@ -2684,15 +2717,13 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        let native_post_actions = native_post_actions
-            .into_iter()
-            .rev()
-            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
-            .collect::<Vec<_>>();
+        // Registration order above is step order, so reverse-then-filter is
+        // upstream's `TryPop` sequence; every entry keeps its own post
+        // condition evaluated against the job's final status.
         let post_actions = post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
+            .filter(|post_action| state.post_condition_met(post_action.condition()))
             .collect::<Vec<_>>();
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
@@ -2708,20 +2739,85 @@ where
         let _post_cancellation = crate::execution::cancel::set_active(post_cancellation);
         reserve_github_post_step_orders(
             &mut timeline_order,
-            native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
+            post_actions.len() + self.trailing_post_action_count,
         );
         // GitHub runs all embedded-composite posts as ONE `Post Run
         // <composite>` step (EmbeddedStepsWithPostRegistered); consecutive
-        // posts sharing an umbrella collapse into a single step record.
-        let mut native_post_iter = native_post_actions.into_iter().peekable();
-        while let Some(first) = native_post_iter.next() {
+        // native posts sharing an umbrella collapse into a single step
+        // record. A JavaScript post between two natives keeps its own record —
+        // only consecutive natives group — but every entry still executes in
+        // the stack's LIFO position.
+        let mut post_iter = post_actions.into_iter().peekable();
+        while let Some(post_action) = post_iter.next() {
+            let first = match post_action {
+                PostAction::JavaScript(post_action) => {
+                    let js_post_step_id = uuid::Uuid::new_v4().to_string();
+                    let js_post_name = post_step_display_name(&post_action.display_name);
+                    let js_post_started_at = self.emit_step_started(
+                        js_post_step_id.clone(),
+                        js_post_name.clone(),
+                        &mut timeline_order,
+                    );
+                    let result = self.execute_javascript_action_in_started_container(
+                        container,
+                        &js_post_step_id,
+                        &post_action.invocation,
+                        post_action
+                            .invocation
+                            .post_container_path
+                            .as_deref()
+                            .expect("post action must have post entrypoint"),
+                        &state.action_state_env(&post_action.step_id),
+                        temp_host,
+                        &state,
+                        effective_step_timeout(
+                            post_action.timeout_minutes,
+                            self.job_timeout_minutes,
+                        ),
+                    );
+                    match result {
+                        Ok(mut result) => {
+                            if result.exit_code != 0 && post_action.continue_on_error {
+                                result.failure_ignored = true;
+                            }
+                            let log = step_log_with_name(
+                                &js_post_step_id,
+                                &js_post_name,
+                                timeline_order,
+                                &js_post_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &javascript_post_log_prelude(&post_action.invocation, &state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                            state.apply(&js_post_step_id, &result);
+                            executed_physical_actions += 1;
+                            results.push(result);
+                        }
+                        Err(error) => {
+                            if step_error.is_none() {
+                                step_error = Some(error);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                PostAction::Native(first) => first,
+            };
             let mut group = vec![first];
             if let Some(umbrella) = group[0].umbrella_display.clone() {
-                while native_post_iter
-                    .peek()
-                    .is_some_and(|next| next.umbrella_display.as_deref() == Some(umbrella.as_str()))
-                {
-                    group.push(native_post_iter.next().expect("peeked"));
+                while post_iter.peek().is_some_and(|next| {
+                    matches!(
+                        next,
+                        PostAction::Native(candidate)
+                            if candidate.umbrella_display.as_deref() == Some(umbrella.as_str())
+                    )
+                }) {
+                    let Some(PostAction::Native(next)) = post_iter.next() else {
+                        unreachable!("peeked a native post sharing the umbrella");
+                    };
+                    group.push(next);
                 }
             }
             let display_base = group[0]
@@ -2814,55 +2910,6 @@ where
             };
             self.emit_step_log(&log);
             step_logs.push(log);
-        }
-        for post_action in post_actions {
-            let js_post_step_id = uuid::Uuid::new_v4().to_string();
-            let js_post_name = post_step_display_name(&post_action.display_name);
-            let js_post_started_at = self.emit_step_started(
-                js_post_step_id.clone(),
-                js_post_name.clone(),
-                &mut timeline_order,
-            );
-            let result = self.execute_javascript_action_in_started_container(
-                container,
-                &js_post_step_id,
-                &post_action.invocation,
-                post_action
-                    .invocation
-                    .post_container_path
-                    .as_deref()
-                    .expect("post action must have post entrypoint"),
-                &state.action_state_env(&post_action.step_id),
-                temp_host,
-                &state,
-                effective_step_timeout(post_action.timeout_minutes, self.job_timeout_minutes),
-            );
-            match result {
-                Ok(mut result) => {
-                    if result.exit_code != 0 && post_action.continue_on_error {
-                        result.failure_ignored = true;
-                    }
-                    let log = step_log_with_name(
-                        &js_post_step_id,
-                        &js_post_name,
-                        timeline_order,
-                        &js_post_started_at,
-                        &unix_now_rfc3339(),
-                        &result,
-                        &javascript_post_log_prelude(&post_action.invocation, &state),
-                    );
-                    self.emit_step_log(&log);
-                    step_logs.push(log);
-                    state.apply(&js_post_step_id, &result);
-                    executed_physical_actions += 1;
-                    results.push(result);
-                }
-                Err(error) => {
-                    if step_error.is_none() {
-                        step_error = Some(error);
-                    }
-                }
-            }
         }
         if target_materialized
             && step_error.is_none()
@@ -26617,6 +26664,297 @@ bitcoin-processor-app.push=true")
             ]
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_mixed_native_and_javascript_post_actions_in_reverse_registration_order() {
+        // Upstream conformance: `PostJobSteps` is ONE stack drained LIFO
+        // (`src/Runner.Worker/ExecutionContext.cs:222`,
+        // `src/Runner.Worker/StepsRunner.cs`), so a JavaScript post registered
+        // between two native posts runs between them — not after both.
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let sccache = |step_id: &str, display_name: &str| ExecutableStep::Native {
+            step_id: step_id.into(),
+            display_name: display_name.into(),
+            invocation: NativeActionInvocation {
+                git_ref: "v1".into(),
+                adapter: NativeActionAdapter::Sccache,
+                cache_kind: None,
+                source_path: None,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let steps = vec![
+            sccache("sccache-first", "Run sccache-first"),
+            ExecutableStep::JavaScript {
+                step_id: "middle".into(),
+                display_name: "Run middle-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/middle/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/middle/dist/post.js".into()),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/middle".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            sccache("sccache-last", "Run sccache-last"),
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        })
+        .with_initial_order(1)
+        .with_step_log_sender(sender);
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        // Three mains plus three posts.
+        assert_eq!(results.len(), 6);
+        // Post-execution markers in runner-call order: each sccache post runs
+        // `--stop-server` (the main runs `--start-server`), the JavaScript
+        // post runs its post entrypoint. LIFO puts the JavaScript post between
+        // the two native posts; the old grouped drain ran both natives first.
+        let post_markers = executor
+            .runner()
+            .calls
+            .iter()
+            .filter_map(|(_, args)| {
+                if args.contains(&"node:20-bookworm".into())
+                    && args.last().is_some_and(|arg| arg.ends_with("post.js"))
+                {
+                    Some("js-post")
+                } else if args
+                    .last()
+                    .is_some_and(|arg| arg.contains("sccache --stop-server"))
+                {
+                    Some("native-post")
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(post_markers, vec!["native-post", "js-post", "native-post"]);
+
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        assert_eq!(
+            logs.iter()
+                .map(|log| (log.order, log.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "Run sccache-first"),
+                (3, "Run middle-action"),
+                (4, "Run sccache-last"),
+                (6, "Post Run sccache-last"),
+                (7, "Post Run middle-action"),
+                (8, "Post Run sccache-first"),
+            ]
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unified_post_stack_still_gates_each_post_on_its_condition() {
+        // The merge unifies ORDER only: every entry keeps its own post
+        // condition evaluated against the job's final status.
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "sccache".into(),
+                display_name: "Run sccache".into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("failure()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "plain".into(),
+                display_name: "Run plain".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/plain/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/plain/dist/post.js".into()),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/plain".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        })
+        .with_initial_order(1)
+        .with_step_log_sender(sender);
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        // All mains succeed, so `failure()` is false: the guarded post is
+        // skipped while the `always()` native post and the unconditional
+        // JavaScript post run in LIFO order.
+        assert_eq!(results.len(), 5);
+        let node_posts = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.contains(&"node:20-bookworm".into())
+                    && args.last().is_some_and(|arg| arg.ends_with("post.js"))
+            })
+            .count();
+        assert_eq!(node_posts, 1);
+        assert!(executor.runner().calls.iter().any(|(_, args)| {
+            args.last()
+                .is_some_and(|arg| arg.contains("sccache --stop-server"))
+        }));
+
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        assert_eq!(
+            logs.iter()
+                .map(|log| (log.order, log.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "Run sccache"),
+                (3, "Run guarded"),
+                (4, "Run plain"),
+                // Two surviving posts: complete order 9, first post 7.
+                (7, "Post Run plain"),
+                (8, "Post Run sccache"),
+            ]
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unified_post_stack_drain_benchmark() {
+        use std::hint::black_box;
+
+        // A mixed stack like the conformance tests above: two `always()`
+        // native posts around one `failure()` JavaScript post.
+        let native = |step_id: &str| {
+            PostAction::Native(PostNativeAction {
+                step_id: step_id.into(),
+                display_name: step_id.into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: Some("always()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+                umbrella_display: None,
+            })
+        };
+        let stack = vec![
+            native("sccache-first"),
+            PostAction::JavaScript(PostJavaScriptAction {
+                step_id: "guarded".into(),
+                display_name: "guarded".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("failure()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: Some("failure()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+                umbrella_display: None,
+            }),
+            native("sccache-last"),
+        ];
+        let state = JobExecutionState::default();
+        // LIFO survivors on a successful job: the `failure()` post drops out.
+        assert_eq!(
+            stack
+                .iter()
+                .rev()
+                .filter(|post| state.post_condition_met(post.condition()))
+                .map(PostAction::step_id)
+                .collect::<Vec<_>>(),
+            vec!["sccache-last", "sccache-first"]
+        );
+
+        // 20k drains of the mixed stack; pure expression evaluation must stay
+        // far below the bound even on a loaded serial-gate runner.
+        let started = Instant::now();
+        for _ in 0..20_000 {
+            let drained: Vec<&PostAction> = black_box(&stack)
+                .iter()
+                .rev()
+                .filter(|post| state.post_condition_met(post.condition()))
+                .collect();
+            assert_eq!(drained.len(), 2);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "20k mixed post-stack drains took {elapsed:?}",
+        );
     }
 
     #[test]
