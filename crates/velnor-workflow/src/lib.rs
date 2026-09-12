@@ -9630,6 +9630,12 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(delete.contains("dpkg --compare-versions \"$live_version\" gt \"$VERSION\""));
         assert!(delete.contains("re-run the LATEST preview run"));
         assert!(delete.contains("^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{7}$"));
+        // A missing rolling release is the first publish, not a version: the
+        // live release must be read with its HTTP status so a 404 proceeds to
+        // create and the error body can never be parsed as a release name.
+        assert!(delete.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\""));
+        assert!(delete.contains("[ \"$live_http\" = \"404\" ]"));
+        assert!(delete.contains("jq -er '.name | strings'"));
     }
 
     #[test]
