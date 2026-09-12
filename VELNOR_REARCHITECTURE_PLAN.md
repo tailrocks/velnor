@@ -146,6 +146,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 | `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; corrections `d37ad166`, `admit` binding) |
 | `crates/velnor-runner/src/{trust_class.rs (workflow_run numeric ids, clone-URL host + SSH), runner.rs (case-insensitive secret prefix), github_adapter.rs (shared trust predicate contract)}` (red-team F-V2..F-V5 trust fixes, fail-closed) | codex-lead | complete — R0-fv2v5 (`fe5ea25f`) |
+| `crates/velnor-runner/src/{trust_class.rs (exact-two clone-URL segments), storage.rs (shared lease-scope derivation), runner.rs (lease call sites), cache.rs (custom-pool lease-vs-mount conformance)}` (R0-fv2v5 review corrections: fail-closed clone-URL identity, converged lease/mount contract pinned) | codex-lead | complete — R0-fv2v5 correction |
 | *(convergence 2026-09-12: both rows kept as landed history. The two `gha-cache-repo-namespace` mechanisms collided — main's in-memory live-job registry (§102) vs the accepted wave package's durable file-session registry with fork read-through chains (§13, `aeb1f257`/`abe0a07b`); the converged tree keeps the file-session design and drops the registry. See the convergence record at the end of this file.)* | | |
 
 ## 8. Discovered bug classes
@@ -230,6 +231,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§103). |
 | 2026-09-12 | Line convergence: one `perf/docker-rust-mbx` head now contains the perf trust line, the fix cache half, and `origin/main` — merges `02c2e9db` + `0f2b02f5`, full SHA record in §104. |
 | 2026-09-12 | R0-fv2v5 closed red-team F-V2 (`workflow_run` numeric ids), F-V3 (clone-URL host + SSH), F-V4 (case-insensitive secret prefix) in `fe5ea25f`; F-V5 verified closed by the §104 convergence with the shared trust predicate pinned by test (§105). |
+| 2026-09-12 | R0-fv2v5 correction fixed the clone-URL identity to exactly two path segments (`evil/octo/base` no longer corroborates `octo/base`) and re-verified the custom-pool lease report against the converged tree — the `StoreTrustClass` divergence it names was deleted by the convergence, and a lease-vs-mount conformance test now pins the admitted-verbatim contract (§105). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5402,3 +5404,44 @@ survives on `main` via #667, byte-identical for every file this
 package touches); the two commits were replayed onto the `main` tip
 and pushed as `r0-fv2v5` for PR-based integration — `main` itself was
 not pushed directly, and the deleted branch was not resurrected.
+
+Correction round (same date): two review issues were fixed on top of
+`r0-fv2v5`, each re-verified against this converged tree rather than
+taken on the report's pointers (which were read on the
+pre-convergence perf branch, like F-V1..F-V5 before them):
+
+- Clone-URL identity (real bug, fixed): `clone_url_repository`
+  took the last two path segments, so `https://host/a/b/c` parsed as
+  `b/c` and `https://github.com/evil/octo/base` corroborated a base
+  of `octo/base`; the unparseable-URL regression passed only via
+  mismatch. Any path that is not exactly `owner/repo` is now
+  unparseable, fail-closed. Two pinning tests (derive-level deep
+  paths with a friendly name signal, plus the direct parser
+  contract) fail on the old code and pass on the new — verified by
+  running them against the true pre-fix block.
+- Custom-pool legacy lease (reported against the perf branch; no
+  divergence on this tree, pinned by test): on the perf branch the
+  mounts collapse the admitted scope through
+  `store_trust_namespace(store_trust_class(...))` (custom pools to
+  `untrusted`) while the runner leases admitted-verbatim
+  `bin/public-forks/<repo>`, leaving the live store unleased. The
+  convergence deleted that enum and both helpers; on this tree
+  mounts and leases both derive from the admitted scope through the
+  same shared store-path helpers, so the divergence is already
+  structurally absent. Reintroducing the class collapse here would
+  break the admitted-verbatim contract the `public-forks`
+  conformance tests pin. The lease-scope strip moved into the one
+  shared `storage::gc_scope_below_root` helper the runner and the
+  new `custom_pool_legacy_leases_protect_mounted_executable_stores`
+  conformance test both call: a trusted job on pool `public-forks`
+  mounts and leases `bin/public-forks/<repo>` in the legacy layout,
+  real leases round-trip through `active_scopes`, and binding class
+  budgets evict idle same-pool and floor stores while every live
+  store survives. The test fails when the lease names another
+  namespace than the mount.
+
+Tests, 3 new, all passing; gates observed in this worktree:
+`cargo fmt --all --check` clean; `cargo check --workspace
+--all-targets` zero warnings; strict clippy clean workspace-wide
+(with `test-support`); full runner package 1816 passed, 0 failed, 1
+skipped; targeted trust/admission 156/156; velnorctl 78/78.
