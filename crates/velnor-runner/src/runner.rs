@@ -6,21 +6,21 @@ use serde_json::{Map, Value};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot, Semaphore},
+    sync::{mpsc::Receiver, oneshot, Semaphore},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
@@ -42,8 +42,9 @@ use crate::{
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, CommandRunner, DockerJobEngine, ExecutableStep,
-        JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
+        condition_is_statically_false, BoundedStepSender, CommandRunner, DockerJobEngine,
+        ExecutableStep, JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
+        STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -82,6 +83,17 @@ const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-call deadline for every best-effort step-publish network operation
+/// (Results Service, live feed, timeline). A stalled backend wedges at most
+/// one publish: the feed drops its connection and reconnects on the next
+/// send, and stateless HTTP publishes simply retry on the next event.
+const STEP_PUBLISH_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Memory ceiling for the streamed-step-log mirror (cancel-path partial
+/// logs): evict oldest first once either bound is exceeded. A single record
+/// larger than the byte cap is still retained alone — it is already bounded
+/// by the producer's own line buffering.
+const STREAMED_STEP_LOG_MIRROR_MAX_LOGS: usize = 4096;
+const STREAMED_STEP_LOG_MIRROR_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
 const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 /// Keep lifecycle duration fields bounded to the same one-day policy used by
@@ -6736,9 +6748,17 @@ async fn handle_job_request(
                 None,
             );
         }
-        let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (step_start_tx, step_start_receiver) =
+            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let step_start_sender = BoundedStepSender::new(step_start_tx);
+        // Counter handles only: cloning the senders here would hold the
+        // channels open past execution and the publishers would never drain.
+        let step_start_drops = step_start_sender.drops_handle();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
-        let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (step_log_tx, step_log_receiver) =
+            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let step_log_sender = BoundedStepSender::new(step_log_tx);
+        let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
             args.work_dir.clone(),
@@ -6746,8 +6766,10 @@ async fn handle_job_request(
         ));
         // Every StepLog the executor streams is mirrored here so the
         // cancellation path (where the executor never returns its final
-        // ScriptJobResult) can still persist the partial job log.
-        let streamed_step_logs = Arc::new(Mutex::new(Vec::new()));
+        // ScriptJobResult) can still persist the partial job log. The mirror
+        // is entry- and byte-capped (oldest evicted first) so a stalled
+        // publisher plus a chatty job cannot grow it without bound.
+        let streamed_step_logs = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
@@ -6810,7 +6832,14 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
-                drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+                drain_step_publishers(
+                    step_timeline,
+                    step_logs_publisher,
+                    forensics.clone(),
+                    &step_start_drops,
+                    &step_log_drops,
+                )
+                .await;
                 let completion = complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
@@ -6882,8 +6911,14 @@ async fn handle_job_request(
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
                     // Same contract as complete_acquired_job_failure: never complete
                     // with zero steps, or GitHub hides the rejection reason.
-                    drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone())
-                        .await;
+                    drain_step_publishers(
+                        step_timeline,
+                        step_logs_publisher,
+                        forensics.clone(),
+                        &step_start_drops,
+                        &step_log_drops,
+                    )
+                    .await;
                     let completion = complete_acquired_job_failure(
                         &run_service_job,
                         &AcquiredJobIdentity::from_job(&job),
@@ -6941,18 +6976,24 @@ async fn handle_job_request(
         // slower publisher deadline; abort only a stalled publisher. Drain
         // BEFORE reading the streamed-step-log mirror so a canceled job's
         // partial logs below are complete.
-        drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+        drain_step_publishers(
+            step_timeline,
+            step_logs_publisher,
+            forensics.clone(),
+            &step_start_drops,
+            &step_log_drops,
+        )
+        .await;
         let outputs = job_result.outputs;
         let mut step_logs = job_result.step_logs;
         if step_logs.is_empty() && matches!(job_result.result, TaskResult::Canceled) {
             // Cancel path: the executor errored before returning its final
             // step_logs, but the publisher mirrored every streamed StepLog.
             // Persist what ran instead of completing with an empty log.
-            let streamed = std::mem::take(
-                &mut *streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            );
+            let streamed = streamed_step_logs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take_logs();
             step_logs = merged_partial_step_logs(streamed);
         }
         let teardown = job_result.teardown;
@@ -7089,6 +7130,8 @@ async fn drain_step_publishers(
     step_timeline: JoinHandle<()>,
     step_logs_publisher: JoinHandle<()>,
     forensics: SlotForensics,
+    step_start_drops: &AtomicU64,
+    step_log_drops: &AtomicU64,
 ) {
     let started = Instant::now();
     tokio::join!(
@@ -7100,9 +7143,32 @@ async fn drain_step_publishers(
         drain_step_publisher("log", step_logs_publisher, STEP_LOG_PUBLISH_DRAIN_TIMEOUT),
     );
     forensics.lifecycle(&format!(
-        "step-publishers-drained elapsed_ms={}",
-        duration_ms(started.elapsed())
+        "step-publishers-drained elapsed_ms={} dropped_step_starts={} dropped_step_logs={}",
+        duration_ms(started.elapsed()),
+        step_start_drops.load(Ordering::Relaxed),
+        step_log_drops.load(Ordering::Relaxed),
     ));
+}
+
+/// Bound one best-effort step-publish network call: a stalled backend must
+/// fail this call, never wedge the publisher task behind it.
+async fn publish_with_timeout<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    publish_with_timeout_for(STEP_PUBLISH_SEND_TIMEOUT, future).await
+}
+
+async fn publish_with_timeout_for<T>(
+    timeout: Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "step publish timed out after {}s",
+            timeout.as_secs()
+        )),
+    }
 }
 
 fn should_execute_job(args: &RunArgs) -> bool {
@@ -7618,9 +7684,63 @@ fn start_broker_cancellation_poll(
     })
 }
 
+/// Entry- and byte-capped mirror of every streamed `StepLog`, read only by
+/// the cancel path (where the executor never returns its final
+/// `ScriptJobResult`). Oldest evicted first; arrival order is preserved so
+/// `merged_partial_step_logs` still folds live chunks under completions.
+#[derive(Debug, Default)]
+struct StreamedStepLogMirror {
+    logs: VecDeque<StepLog>,
+    bytes: u64,
+}
+
+impl StreamedStepLogMirror {
+    fn push(&mut self, log: StepLog) {
+        let size = step_log_mirror_bytes(&log);
+        while !self.logs.is_empty()
+            && (self.logs.len() >= STREAMED_STEP_LOG_MIRROR_MAX_LOGS
+                || self.bytes.saturating_add(size) > STREAMED_STEP_LOG_MIRROR_MAX_BYTES)
+        {
+            if let Some(evicted) = self.logs.pop_front() {
+                self.bytes = self.bytes.saturating_sub(step_log_mirror_bytes(&evicted));
+            }
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        self.logs.push_back(log);
+    }
+
+    fn take_logs(&mut self) -> Vec<StepLog> {
+        self.bytes = 0;
+        std::mem::take(&mut self.logs).into_iter().collect()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.logs.len()
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// Approximate retained heap of a mirrored record: the string payloads.
+/// (Annotations and telemetry are small fixed-shape records; skipping them
+/// keeps the accounting proportional to the log text that dominates it.)
+fn step_log_mirror_bytes(log: &StepLog) -> u64 {
+    (log.step_id.len()
+        + log.display_name.len()
+        + log.started_at.len()
+        + log.completed_at.len()
+        + log.summary.len()
+        + log.lines.iter().map(String::len).sum::<usize>()
+        + log.masks.iter().map(String::len).sum::<usize>()) as u64
+}
+
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
-    mut receiver: UnboundedReceiver<StepStartEvent>,
+    mut receiver: Receiver<StepStartEvent>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -7657,9 +7777,13 @@ fn start_step_timeline_publisher(
                     completed_at: None,
                     conclusion: crate::protocol::StepConclusion::Unknown as u8,
                 };
-                if let Err(e) = client
-                    .update_steps(&[step], &plan_id, &job_id, change_order)
-                    .await
+                if let Err(e) = publish_with_timeout(client.update_steps(
+                    &[step],
+                    &plan_id,
+                    &job_id,
+                    change_order,
+                ))
+                .await
                 {
                     eprintln!(
                         "Best-effort Twirp step start failed for '{}': {}",
@@ -7671,7 +7795,9 @@ fn start_step_timeline_publisher(
             }
 
             // Also update the distributed task timeline (legacy path)
-            if let Err(error) = publish_timeline_step_started(&job, &event).await {
+            if let Err(error) =
+                publish_with_timeout(publish_timeline_step_started(&job, &event)).await
+            {
                 eprintln!(
                     "Best-effort timeline step start update failed for '{}': {}",
                     event.step_id,
@@ -7684,9 +7810,9 @@ fn start_step_timeline_publisher(
 
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
-    mut receiver: UnboundedReceiver<StepLog>,
+    mut receiver: Receiver<StepLog>,
     console_log_path: Option<PathBuf>,
-    streamed_step_logs: Arc<Mutex<Vec<StepLog>>>,
+    streamed_step_logs: Arc<Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -7747,9 +7873,11 @@ fn start_step_log_publisher(
 
         // Open ONE persistent WebSocket connection for the entire job (matching the
         // official GitHub runner which keeps a single connection open per job).
+        // The connect is deadline-bound: a stalled handshake must not wedge
+        // the publisher before the first log line.
         let mut ws_conn = if let Some(client) = &feed_client {
             eprintln!("[feed] Connecting to WebSocket feed...");
-            match client.connect().await {
+            match publish_with_timeout(client.connect()).await {
                 Ok(ws) => {
                     eprintln!("[feed] WebSocket connected.");
                     Some(ws)
@@ -7780,7 +7908,11 @@ fn start_step_log_publisher(
                 },
                 _ = ping_interval.tick() => {
                     if let Some(ws) = ws_conn.as_mut()
-                        && let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
+                        && let Err(e) = publish_with_timeout(
+                            crate::protocol::FeedStreamClient::send_ping(ws),
+                        )
+                        .await
+                    {
                             eprintln!(
                                 "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
                                 sanitized_retry_error(&e)
@@ -7869,9 +8001,13 @@ fn start_step_log_publisher(
                         }),
                         conclusion: conclusion as u8,
                     };
-                    if let Err(e) = client
-                        .update_steps(&[step], &plan_id, &job_id, change_order)
-                        .await
+                    if let Err(e) = publish_with_timeout(client.update_steps(
+                        &[step],
+                        &plan_id,
+                        &job_id,
+                        change_order,
+                    ))
+                    .await
                     {
                         eprintln!(
                             "Best-effort Twirp step completion failed for '{}': {}",
@@ -7888,9 +8024,13 @@ fn start_step_log_publisher(
                     // into the "Show timestamps" toggle column.
                     if !log.skipped {
                         let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
-                        if let Err(e) = client
-                            .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
-                            .await
+                        if let Err(e) = publish_with_timeout(client.upload_step_log(
+                            &plan_id,
+                            &job_id,
+                            &log.step_id,
+                            &timestamped,
+                        ))
+                        .await
                         {
                             tracing::warn!(
                                 job_id = %job_id,
@@ -7907,14 +8047,13 @@ fn start_step_log_publisher(
                         // Upstream scrubs the file line by line before
                         // queueing it (Runner.Worker/FileCommandManager.cs:256-267).
                         if !masked_summary.is_empty()
-                            && let Err(e) = client
-                                .upload_step_summary(
-                                    &plan_id,
-                                    &job_id,
-                                    &log.step_id,
-                                    &masked_summary,
-                                )
-                                .await
+                            && let Err(e) = publish_with_timeout(client.upload_step_summary(
+                                &plan_id,
+                                &job_id,
+                                &log.step_id,
+                                &masked_summary,
+                            ))
+                            .await
                         {
                             eprintln!(
                                 "Best-effort step summary upload failed for '{}': {}",
@@ -7925,7 +8064,9 @@ fn start_step_log_publisher(
                     }
                 }
 
-                if let Err(error) = publish_timeline_step_log(&job, &log).await {
+                if let Err(error) =
+                    publish_with_timeout(publish_timeline_step_log(&job, &log)).await
+                {
                     eprintln!(
                         "Best-effort timeline step log upload failed for '{}': {}",
                         log.step_id,
@@ -7961,7 +8102,7 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-fn step_log_batch(first: StepLog, receiver: &mut UnboundedReceiver<StepLog>) -> Vec<StepLog> {
+fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
     let mut logs = vec![first];
     loop {
         match receiver.try_recv() {
@@ -7999,9 +8140,12 @@ async fn send_live_feed_batch(
     job_id: &str,
     batch: LiveFeedBatch,
 ) {
+    // Drop-and-reconnect on stall: every feed operation is deadline-bound,
+    // and a failed or timed-out send drops the connection so the next batch
+    // reconnects instead of queueing behind a wedged socket.
     if ws_conn.is_none()
         && let Some(client) = feed_client
-        && let Ok(ws) = client.connect().await
+        && let Ok(ws) = publish_with_timeout(client.connect()).await
     {
         eprintln!("[feed] WebSocket reconnected.");
         *ws_conn = Some(ws);
@@ -8013,14 +8157,14 @@ async fn send_live_feed_batch(
     // LOG FORMAT CONTRACT (docs/reference/interface.md): live feed frames are
     // rendered VERBATIM by the GitHub UI, which adds its own timestamp column.
     let feed_lines = live_feed_lines(&batch.lines);
-    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
+    if let Err(e) = publish_with_timeout(crate::protocol::FeedStreamClient::send_log_lines(
         ws,
         &batch.step_id,
         feed_lines.clone(),
         Some(batch.start_line),
         Some(plan_id),
         Some(job_id),
-    )
+    ))
     .await
     {
         eprintln!(
@@ -8030,15 +8174,15 @@ async fn send_live_feed_batch(
         *ws_conn = None;
         // Reconnect once and resend this batch so no step's live log is lost.
         if let Some(client) = feed_client
-            && let Ok(mut ws2) = client.connect().await
-            && crate::protocol::FeedStreamClient::send_log_lines(
+            && let Ok(mut ws2) = publish_with_timeout(client.connect()).await
+            && publish_with_timeout(crate::protocol::FeedStreamClient::send_log_lines(
                 &mut ws2,
                 &batch.step_id,
                 feed_lines,
                 Some(batch.start_line),
                 Some(plan_id),
                 Some(job_id),
-            )
+            ))
             .await
             .is_ok()
         {
@@ -8453,8 +8597,8 @@ fn execute_script_job(
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
@@ -8974,8 +9118,8 @@ fn execute_script_job_inner(
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
@@ -9055,7 +9199,7 @@ fn execute_script_job_inner(
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
     if let Some(sender) = &step_start_sender {
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: setup_step_id.clone(),
             display_name: "Set up job".to_string(),
             order: 1,
@@ -9081,7 +9225,7 @@ fn execute_script_job_inner(
         summary: String::new(),
     };
     if let Some(sender) = &step_log_sender {
-        let _ = sender.send(setup_log.clone());
+        sender.send_best_effort(setup_log.clone());
     }
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
@@ -9106,7 +9250,7 @@ fn execute_script_job_inner(
     let initialize_containers_step = (!container.services.is_empty()).then(|| {
         let step_id = uuid::Uuid::new_v4().to_string();
         if let Some(sender) = &step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: step_id.clone(),
                 display_name: "Initialize containers".to_string(),
                 order: 2,
@@ -9135,7 +9279,7 @@ fn execute_script_job_inner(
         let backend_step_id = crate::executor::github_backend_step_id(&plan.step_id);
         // Emit step events so GitHub shows the checkout step in the job's step list.
         if let Some(sender) = &step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: backend_step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
@@ -9178,7 +9322,7 @@ fn execute_script_job_inner(
                 summary: String::new(),
             };
             if let Some(sender) = &step_log_sender {
-                let _ = sender.send(log.clone());
+                sender.send_best_effort(log.clone());
             }
             eager_checkout_step_logs.push(log);
         }
@@ -9327,7 +9471,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &step_log_sender {
-            let _ = sender.send(log.clone());
+            sender.send_best_effort(log.clone());
         }
         log
     });
@@ -9473,7 +9617,7 @@ fn execute_script_job_inner(
         let post_name = post_step_display_name(&plan.display_name);
         let post_ts = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: post_step_id.clone(),
                 display_name: post_name.clone(),
                 order: post_order,
@@ -9501,7 +9645,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &post_step_log_sender {
-            let _ = sender.send(post_log.clone());
+            sender.send_best_effort(post_log.clone());
         }
         extra_step_logs.push(post_log);
     }
@@ -9512,7 +9656,7 @@ fn execute_script_job_inner(
         let stop_step_id = uuid::Uuid::new_v4().to_string();
         let stop_started_at = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: stop_step_id.clone(),
                 display_name: "Stop containers".to_string(),
                 order: post_order,
@@ -9542,7 +9686,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &post_step_log_sender {
-            let _ = sender.send(stop_log.clone());
+            sender.send_best_effort(stop_log.clone());
         }
         extra_step_logs.push(stop_log);
     }
@@ -9551,7 +9695,7 @@ fn execute_script_job_inner(
     let complete_step_id = uuid::Uuid::new_v4().to_string();
     let complete_order = post_order + 1;
     if let Some(sender) = &post_step_start_sender {
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: complete_step_id.clone(),
             display_name: "Complete job".to_string(),
             order: complete_order,
@@ -9577,7 +9721,7 @@ fn execute_script_job_inner(
         summary: String::new(),
     };
     if let Some(sender) = &post_step_log_sender {
-        let _ = sender.send(complete_log.clone());
+        sender.send_best_effort(complete_log.clone());
     }
     extra_step_logs.push(complete_log);
 
@@ -22227,6 +22371,175 @@ runs:
             notice_count: 0,
             summary: String::new(),
         }
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_evicts_oldest_at_entry_cap() {
+        let mut mirror = StreamedStepLogMirror::default();
+        for index in 0..STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 10 {
+            mirror.push(partial_step_log(&format!("step-{index}"), &["line"], ""));
+        }
+        assert_eq!(mirror.len(), STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        let logs = mirror.take_logs();
+        assert_eq!(logs.len(), STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        // Oldest evicted first, arrival order preserved for the merge.
+        assert_eq!(logs[0].step_id, "step-10");
+        assert_eq!(
+            logs[STREAMED_STEP_LOG_MIRROR_MAX_LOGS - 1].step_id,
+            format!("step-{}", STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 9)
+        );
+        assert_eq!(mirror.len(), 0);
+        assert_eq!(mirror.bytes(), 0);
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_evicts_oldest_at_byte_cap() {
+        let mut mirror = StreamedStepLogMirror::default();
+        let big_line = "x".repeat(1024 * 1024);
+        for index in 0..100 {
+            let mut log = partial_step_log(&format!("step-{index}"), &[], "");
+            log.lines = vec![big_line.clone()];
+            mirror.push(log);
+        }
+        assert!(mirror.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
+        assert!(mirror.len() < 100);
+        // The most recent window survives the byte cap.
+        let logs = mirror.take_logs();
+        assert_eq!(logs[logs.len() - 1].step_id, "step-99");
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_keeps_single_oversize_record() {
+        let mut mirror = StreamedStepLogMirror::default();
+        let mut log = partial_step_log("huge", &[], "");
+        log.lines = vec!["x".repeat(STREAMED_STEP_LOG_MIRROR_MAX_BYTES as usize + 1)];
+        mirror.push(log);
+        // One record is retained alone: it is already bounded by the
+        // producer's own line buffering, so dropping it would lose the
+        // cancel-path log without bounding anything further.
+        assert_eq!(mirror.len(), 1);
+        assert_eq!(mirror.take_logs()[0].step_id, "huge");
+    }
+
+    #[tokio::test]
+    async fn publish_with_timeout_for_bounds_stalled_publish() {
+        let err = publish_with_timeout_for::<()>(
+            Duration::from_millis(10),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        // Fast and failed publishes pass through unchanged.
+        assert_eq!(
+            publish_with_timeout_for(Duration::from_secs(5), async { Ok::<_, anyhow::Error>(7) })
+                .await
+                .unwrap(),
+            7
+        );
+        let inner = publish_with_timeout_for(Duration::from_secs(5), async {
+            Err::<(), _>(anyhow::anyhow!("backend exploded"))
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(inner.contains("backend exploded"), "{inner}");
+    }
+
+    #[tokio::test]
+    async fn drain_step_publishers_waits_for_both_publishers_before_exit() {
+        let timeline_done = Arc::new(AtomicBool::new(false));
+        let logs_done = Arc::new(AtomicBool::new(false));
+        let timeline_flag = Arc::clone(&timeline_done);
+        let logs_flag = Arc::clone(&logs_done);
+        let timeline = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            timeline_flag.store(true, Ordering::SeqCst);
+        });
+        let logs_publisher = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            logs_flag.store(true, Ordering::SeqCst);
+        });
+        let forensics = SlotForensics::new(std::env::temp_dir(), "r1pub-drain-test".to_string());
+        let start_drops = AtomicU64::new(4);
+        let log_drops = AtomicU64::new(9);
+        drain_step_publishers(
+            timeline,
+            logs_publisher,
+            forensics,
+            &start_drops,
+            &log_drops,
+        )
+        .await;
+        // Drain-before-exit: terminal completion is ordered after both
+        // publishers finish, so both flags are set when drain returns.
+        assert!(timeline_done.load(Ordering::SeqCst));
+        assert!(logs_done.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn drain_step_publisher_aborts_a_stalled_publisher() {
+        let stalled = tokio::spawn(std::future::pending::<()>());
+        let started = Instant::now();
+        drain_step_publisher("test", stalled, Duration::from_millis(10)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain did not abort the stalled publisher: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn bounded_step_publish_soak_proves_memory_ceiling() {
+        // Soak: a chatty job (100k live log lines) against a stalled
+        // publisher (no receiver progress). The bounded channel must absorb
+        // the burst as counted drops and the mirror must hold the ceiling —
+        // neither may grow with the number of emitted events.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        let mirror = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        let started = Instant::now();
+        let events: u64 = 100_000;
+        for index in 0..events {
+            let mut log = partial_step_log("soak", &[], "");
+            log.lines = vec![format!("soak line {index}")];
+            sender.send_best_effort(log.clone());
+            // Same push the log publisher performs per streamed record.
+            mirror
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(log);
+        }
+        let elapsed = started.elapsed();
+        let mirror_guard = mirror
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        eprintln!(
+            "step-publish soak: {events} events in {elapsed:?}, drops={}, mirror_len={}, mirror_bytes={}",
+            sender.drops(),
+            mirror_guard.len(),
+            mirror_guard.bytes(),
+        );
+        assert_eq!(
+            sender.drops(),
+            events - STEP_PUBLISH_CHANNEL_CAPACITY as u64
+        );
+        assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
+        drop(mirror_guard);
+        // The sender never blocked: 100k events must stream in bounded time.
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "soak sender blocked: {elapsed:?}"
+        );
+        // The stalled publisher still drains exactly one capacity once it
+        // makes progress — nothing was lost except the counted drops.
+        let mut drained = 0u64;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, STEP_PUBLISH_CHANNEL_CAPACITY as u64);
     }
 
     #[test]

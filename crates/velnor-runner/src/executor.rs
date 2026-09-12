@@ -35,7 +35,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -1273,6 +1273,52 @@ pub struct StepStartEvent {
     pub order: i32,
 }
 
+/// Capacity of the bounded step-publish channels (step starts and step logs).
+/// The executor runs on a dedicated synchronous thread, so every send is a
+/// non-blocking `try_send`: a stalled publisher surfaces as counted drops,
+/// never as executor backpressure or unbounded queue memory.
+pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
+
+/// Best-effort step-publish sender over a bounded channel.
+///
+/// Publishing is advisory — the authoritative step records travel in
+/// `ScriptJobResult` — so a full channel (stalled publisher) drops the event
+/// and bumps the counter instead of blocking the execution thread. The runner
+/// reads the counter at drain time for the forensics line.
+#[derive(Debug, Clone)]
+pub struct BoundedStepSender<T> {
+    sender: Sender<T>,
+    drops: Arc<AtomicU64>,
+}
+
+impl<T> BoundedStepSender<T> {
+    pub fn new(sender: Sender<T>) -> Self {
+        Self {
+            sender,
+            drops: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Cloneable handle to the drop counter; the runner keeps this (not a
+    /// sender clone, which would hold the channel open past drain).
+    pub fn drops_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.drops)
+    }
+
+    pub fn drops(&self) -> u64 {
+        self.drops.load(Ordering::Relaxed)
+    }
+
+    /// Non-blocking best-effort send. A full channel (stalled publisher) or
+    /// a gone publisher drops the event and counts it; both are fine because
+    /// the authoritative records travel in `ScriptJobResult`.
+    pub fn send_best_effort(&self, value: T) {
+        if self.sender.try_send(value).is_err() {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Aggregates an executing composite action into ONE step record. GitHub
 /// registers a single timeline step per composite; embedded steps append
 /// `##[group]<name>`-headed sections into the parent's log instead of
@@ -1697,8 +1743,8 @@ impl LifecycleTelemetry {
 /// a second executor and must not be constructed on the microvm path.
 pub(crate) struct DockerJobEngine<R> {
     runner: R,
-    step_start_sender: Option<UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     initial_order: i32,
     trailing_post_action_count: usize,
     /// Workflow-level env from the job message — shown first in every step's
@@ -1811,12 +1857,12 @@ where
         self
     }
 
-    pub fn with_step_start_sender(mut self, sender: UnboundedSender<StepStartEvent>) -> Self {
+    pub fn with_step_start_sender(mut self, sender: BoundedStepSender<StepStartEvent>) -> Self {
         self.step_start_sender = Some(sender);
         self
     }
 
-    pub fn with_step_log_sender(mut self, sender: UnboundedSender<StepLog>) -> Self {
+    pub fn with_step_log_sender(mut self, sender: BoundedStepSender<StepLog>) -> Self {
         self.step_log_sender = Some(sender);
         self
     }
@@ -1868,7 +1914,7 @@ where
         let Some(sender) = &self.step_start_sender else {
             return started_at;
         };
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: step_id.into(),
             display_name: display_name.into(),
             order: *order,
@@ -1878,7 +1924,7 @@ where
 
     fn emit_step_log(&self, log: &StepLog) {
         if let Some(sender) = &self.step_log_sender {
-            let _ = sender.send(log.clone());
+            sender.send_best_effort(log.clone());
         }
     }
 
@@ -5086,7 +5132,7 @@ fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
 }
 
 fn emit_live_step_log(
-    sender: &Option<UnboundedSender<StepLog>>,
+    sender: &Option<BoundedStepSender<StepLog>>,
     step_id: &str,
     display_name: &str,
     order: i32,
@@ -5097,7 +5143,7 @@ fn emit_live_step_log(
     let Some(sender) = sender else {
         return;
     };
-    let _ = sender.send(StepLog {
+    sender.send_best_effort(StepLog {
         step_id: step_id.to_string(),
         display_name: display_name.to_string(),
         order,
@@ -21984,12 +22030,12 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
-        .with_step_start_sender(sender);
+        .with_step_start_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22037,9 +22083,9 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor =
-            DockerJobEngine::inert(StdoutCommandRunner::default()).with_step_log_sender(sender);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(StdoutCommandRunner::default())
+            .with_step_log_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -22058,6 +22104,92 @@ fi"#
     }
 
     #[test]
+    fn bounded_step_sender_drops_instead_of_blocking_when_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let sender = BoundedStepSender::new(tx);
+        let started = Instant::now();
+        for order in 0..5 {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order,
+            });
+        }
+        // Five sends into capacity 2 with no receiver progress must return
+        // immediately: the execution thread never blocks on publishing.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "best-effort send blocked: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(sender.drops(), 3);
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event);
+        }
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].step_id, "step-0");
+        assert_eq!(received[1].step_id, "step-1");
+    }
+
+    #[test]
+    fn bounded_step_sender_counts_drops_after_publisher_exit() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<StepLog>(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        drop(rx);
+        sender.send_best_effort(StepLog {
+            step_id: "gone".to_string(),
+            display_name: String::new(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["line".to_string()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        });
+        assert_eq!(sender.drops(), 1);
+    }
+
+    #[test]
+    fn step_publish_channel_throughput_brief() {
+        // Brief benchmark: fill/drain cycles over the production capacity.
+        // Asserts the ceiling generously (loaded CI must not flake); the
+        // printed line is the measurement.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        let started = Instant::now();
+        let mut received = 0u64;
+        for _ in 0..100 {
+            for order in 0..STEP_PUBLISH_CHANNEL_CAPACITY {
+                sender.send_best_effort(StepStartEvent {
+                    step_id: "bench".to_string(),
+                    display_name: String::new(),
+                    order: order as i32,
+                });
+            }
+            while rx.try_recv().is_ok() {
+                received += 1;
+            }
+        }
+        let elapsed = started.elapsed();
+        eprintln!("step-publish throughput: {received} events in {elapsed:?}");
+        assert_eq!(received, 100 * STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+        assert_eq!(sender.drops(), 0);
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "step-publish throughput regressed: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn live_stream_carries_add_mask_values_after_registration() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -22072,9 +22204,9 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor =
-            DockerJobEngine::inert(StreamingMaskRunner::default()).with_step_log_sender(sender);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(StreamingMaskRunner::default())
+            .with_step_log_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -28064,13 +28196,13 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
         .with_initial_order(1)
-        .with_step_log_sender(sender);
+        .with_step_log_sender(BoundedStepSender::new(sender));
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -28168,13 +28300,13 @@ bitcoin-processor-app.push=true")
             },
             sccache("sccache-last", "Run sccache-last"),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
         .with_initial_order(1)
-        .with_step_log_sender(sender);
+        .with_step_log_sender(BoundedStepSender::new(sender));
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -28286,13 +28418,13 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
         .with_initial_order(1)
-        .with_step_log_sender(sender);
+        .with_step_log_sender(BoundedStepSender::new(sender));
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)

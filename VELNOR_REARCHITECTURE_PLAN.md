@@ -238,6 +238,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R1-cmd finished the command surface: warn-and-honor `set-output`/`save-state` with the name-required error (correcting the env-files-only premise against hosted behavior), loud `add-matcher`/`remove-matcher` rejection, job-env unsecure opt-ins, a real `hashFiles --follow-symbolic-links` mode, and a `command-surface` dual-lane pin for R2-v2v4's live run (§108). |
 | 2026-09-12 | R1-cmd correction fixed no-follow file-link hashing (target content, not empty) with the GitHub-lane pin assertion, follow-mode sibling double-yield behind an ancestor-chain guard, the no-follow broken-link expression error, and job-scoped deprecated-command telemetry (§108). |
 | 2026-09-13 | R1-cmd second correction re-ran the four review issues: all four cited `main`-tree line numbers, so each was re-verified against the `r0-fv2v5` tree and the fetched upstream sources instead of re-fixed, and the glob-reached-link gap the review named got a unit assertion plus a single-file `pin/l*.txt` pin the GitHub lane can prove (§108). |
+| 2026-09-13 | R1-pub bounded the step publishers: bounded channels with counted best-effort drops, a 30s deadline on every publish network call, feed drop-and-reconnect on stall, and an entry- plus byte-capped streamed-log mirror; drain-before-exit kept, with the drop counts on the forensics line (§109). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5860,3 +5861,75 @@ clean; strict clippy clean workspace-wide (with `test-support`,
 129+4+6+4; control 237+8+18+7; velnorctl all green;
 velnor-workflow 197+2+2+8; actionlint on the reworked template
 reports only the pre-existing `ubuntu-26.04` runner-label note.
+
+## 109. R1-pub: bounded step publishers + publish deadlines — 2026-09-13
+
+The step publishers (`runner.rs` step-timeline and step-log tasks) were
+an unbounded-memory path in the job hot loop: two unbounded
+channels fed by the execution thread, a publisher loop whose network
+calls had no deadline, and a streamed-log mirror `Vec` that grew with
+every streamed record. One stalled backend (hung Results Service,
+wedged feed socket) therefore grew all three without bound while the
+job kept running.
+
+The enabling condition is removed at all three layers; publishing
+stays best-effort throughout (the authoritative step records travel
+in `ScriptJobResult`, never the channel):
+
+- Bounded channels (capacity 1024): both step channels are now
+  `mpsc::channel`, sent through the new `BoundedStepSender`, whose
+  `send_best_effort` is a non-blocking `try_send` that counts a drop
+  on full-or-closed instead of blocking the synchronous execution
+  thread. All 12 runner-side synthetic-step sends, the engine's
+  step-start/step-log emits, and the live per-line stream go through
+  it; the six engine tests that built unbounded channels now build
+  bounded ones.
+- 30s publish deadline: `publish_with_timeout` wraps every network
+  call inside both publisher tasks — Twirp step updates, step-log and
+  step-summary uploads, timeline step/log publishes, and feed
+  connect/ping/send — so a stalled backend fails one publish instead
+  of wedging the task behind it.
+- Drop-and-reconnect on stall: a failed or timed-out feed send or
+  ping drops the WebSocket (`ws_conn = None`) and the next batch
+  reconnects, extending the existing error-path pattern to timeouts;
+  stateless HTTP publishes simply retry on the next event.
+- Capped streamed-log mirror: the cancel-path mirror is now a
+  `StreamedStepLogMirror` capped at 4096 entries and 64 MiB of string
+  payload, oldest evicted first, arrival order preserved so
+  `merged_partial_step_logs` still folds live chunks under
+  completions. A single oversize record is retained alone (it is
+  already bounded by the producer's line buffering).
+- Drain-before-exit kept: terminal completion is still ordered after
+  both publishers drain, and the forensics line now carries the
+  counted drops
+  (`step-publishers-drained elapsed_ms=… dropped_step_starts=…
+  dropped_step_logs=…`). The runner keeps counter handles, not sender
+  clones — a cloned sender would hold the channel open past execution
+  and the publishers would never drain.
+
+Tests, 10 new, all passing: bounded-drop counting (full channel,
+exited publisher), mirror entry/byte/single-oversize caps, publish
+deadline (timeout, passthrough, inner-error), drain ordering (both
+publishers finish before drain returns) plus drain abort of a stalled
+publisher, and the soak that proves the memory ceiling — 100k live
+log lines against a stalled publisher: 98,976 counted drops, mirror
+pinned at 4096 entries / ~204 KiB, sender never blocks. Benchmarks
+in brief (printed lines, generous ceilings so loaded CI cannot
+flake): 102,400 channel events in ~24ms; the 100k-event soak in
+~59ms.
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets` zero warnings; strict
+clippy clean workspace-wide and with `test-support` (`-D warnings`);
+serial runner lib 1756 passed, 0 failed, 1 ignored (1747 on the
+base tree + 10 new); no other crate uses the changed sender APIs
+(verified by grep; workspace check covers the `velnor-runner`
+dependents).
+
+R1-pub status: complete. Known deltas, kept explicit: drops are
+counted but the dropped events themselves are unrecoverable by
+design (advisory channel; authority stays in `ScriptJobResult`); the
+finalize-path timeline/log uploads outside the publisher tasks keep
+their existing behavior (separate package if they need deadlines);
+no fixture dual-lane pin — publish transport behavior is not
+observable through workflow outputs.
