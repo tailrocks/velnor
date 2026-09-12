@@ -35,8 +35,9 @@ pub(crate) fn scan_shape(
     root: &Path,
     runners: RunnerMode,
     default_branch: &str,
+    exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root)?;
+    let files = file_walk::repository_files(root, exclude)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
@@ -211,6 +212,7 @@ impl From<RepositoryShape> for ProjectConfig {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
         }
     }
