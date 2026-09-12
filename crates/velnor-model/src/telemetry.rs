@@ -151,7 +151,10 @@ define_telemetry_contracts! {
             "queued_for_ms" => NonNegativeInteger,
             "queue_time_present" => Boolean,
         ],
-        optional: []
+        optional: [
+            "job_trust" => String,
+            "admitted_scope" => String,
+        ]
     },
     RunAdmitted => "run_admitted" {
         lane: None,

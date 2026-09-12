@@ -138,13 +138,6 @@ fn parse_docker_memory_bytes(value: &str) -> Option<u64> {
     Some(bytes.floor() as u64)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StoreTrustClass {
-    Untrusted,
-    Trusted,
-    Release,
-}
-
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
     pub name: String,
@@ -179,8 +172,14 @@ pub struct JobContainerSpec {
     /// one would make rename(2) across `target` return EXDEV even though the
     /// same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
-    /// Trust namespace admitted for executable and build stores.
-    pub store_trust_class: StoreTrustClass,
+    /// The job's admitted scope (the pool ceiling narrowed by the job's
+    /// trust class), normalized once at admission. This is the one spelling
+    /// shared by the container mounts, the storage leases, and GC: every
+    /// trust-scoped store path in the spec derives from it, so a custom pool
+    /// scope (or a case variant of a known one) names the same namespace on
+    /// the lease side and the mount side instead of collapsing to `untrusted`
+    /// on one of them.
+    pub store_trust_scope: String,
     /// Docker-only Mr Boxington store. `None` for MicroVM jobs.
     pub mbx_store_host: Option<PathBuf>,
     /// Docker-only explicit sccache action store.
@@ -442,29 +441,19 @@ impl JobContainerSpec {
             // lock does not serialize that mutation across container jobs).
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(
-                    &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
-                )
-                .join("registry/cache"),
+                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/cache"),
                 "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(
-                    &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
-                )
-                .join("registry/index"),
+                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str())
+                    .join("registry/index"),
                 "/github/home/.cargo/registry/index",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(
-                    &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
-                )
-                .join("git/db"),
+                &cargo_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("git/db"),
                 "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
@@ -492,11 +481,7 @@ impl JobContainerSpec {
             self.mount_arg(&self.mise_binary_store_host(), "/opt/velnor/mise-binaries"),
             "-v".into(),
             self.mount_arg(
-                &mise_store_host(
-                    &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
-                )
-                .join("cache"),
+                &mise_store_host(&self.temp_host, self.store_trust_scope.as_str()).join("cache"),
                 "/opt/mise/cache",
             ),
             "-v".into(),
@@ -594,10 +579,7 @@ impl JobContainerSpec {
     /// The job image is not a valid OCI reference.
     pub fn seed_mise_store_args(&self) -> io::Result<Vec<String>> {
         let image = self.image_reference()?;
-        let store = mise_store_host(
-            &self.temp_host,
-            store_trust_namespace(self.store_trust_class),
-        );
+        let store = mise_store_host(&self.temp_host, self.store_trust_scope.as_str());
         let mut args = DockerArgv::new(["run"]);
         args.flags([
             "--rm".to_owned(),
@@ -1141,7 +1123,7 @@ impl JobContainerSpec {
             |repository| {
                 cargo_executable_store_host(
                     &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
+                    self.store_trust_scope.as_str(),
                     &repository,
                 )
             },
@@ -1152,7 +1134,7 @@ impl JobContainerSpec {
         match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
             (Some(repository), Some(slot)) => mise_executable_store_host(
                 &self.temp_host,
-                store_trust_namespace(self.store_trust_class),
+                self.store_trust_scope.as_str(),
                 &repository,
             )
             .join("slots")
@@ -1180,7 +1162,7 @@ impl JobContainerSpec {
             |repository| {
                 mise_binary_store_host(
                     &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
+                    self.store_trust_scope.as_str(),
                     &repository,
                 )
             },
@@ -1193,7 +1175,7 @@ impl JobContainerSpec {
             |repository| {
                 playwright_browser_store_host(
                     &self.temp_host,
-                    store_trust_namespace(self.store_trust_class),
+                    self.store_trust_scope.as_str(),
                     &repository,
                 )
             },
@@ -1425,24 +1407,15 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-pub(crate) fn sccache_host(temp_host: &Path, trust_class: StoreTrustClass) -> PathBuf {
+/// Host-persistent sccache compiler store, namespaced by the job's admitted
+/// scope like every other trust-partitioned store.
+pub(crate) fn sccache_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
     crate::storage::cache_class_path_for_trust(
         &daemon_store_root(temp_host),
-        store_trust_namespace(trust_class),
+        trust_scope,
         "compiler/sccache",
         "_velnor_sccache",
     )
-}
-
-/// The store namespace a job admitted with this class mounts and writes.
-/// The one spelling shared by the container spec, the scoped store roots,
-/// and the lease scopes derived from them.
-pub(crate) fn store_trust_namespace(trust_class: StoreTrustClass) -> &'static str {
-    match trust_class {
-        StoreTrustClass::Untrusted => "untrusted",
-        StoreTrustClass::Trusted => "trusted",
-        StoreTrustClass::Release => "release",
-    }
 }
 
 /// Host-persistent Cargo download/index store, daemon-shared like sccache.
@@ -1768,7 +1741,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
-            store_trust_class: StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
@@ -2194,14 +2167,14 @@ mod tests {
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                StoreTrustClass::Trusted,
+                "trusted",
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
         assert_eq!(
             sccache_host(
                 Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                StoreTrustClass::Trusted,
+                "trusted",
             ),
             PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
@@ -2252,20 +2225,19 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+            &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str())
                 .join("registry/cache"),
             "/github/home/.cargo/registry/cache"
         ));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
+            &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str())
                 .join("registry/index"),
             "/github/home/.cargo/registry/index"
         ));
         assert!(has_mount(
             &args,
-            &cargo_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
-                .join("git/db"),
+            &cargo_store_host(&job.temp_host, job.store_trust_scope.as_str()).join("git/db"),
             "/github/home/.cargo/git/db"
         ));
         assert!(!args
@@ -2276,8 +2248,7 @@ mod tests {
             .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
         assert!(has_mount(
             &args,
-            &mise_store_host(&job.temp_host, store_trust_namespace(job.store_trust_class))
-                .join("cache"),
+            &mise_store_host(&job.temp_host, job.store_trust_scope.as_str()).join("cache"),
             "/opt/mise/cache"
         ));
         assert!(has_mount(

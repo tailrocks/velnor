@@ -990,6 +990,7 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            package_update_channels: None,
         }
     }
 

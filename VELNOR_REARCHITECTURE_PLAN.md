@@ -30,7 +30,7 @@ The original starting SHAs in the table above
 `5c8b57aa64dcbfd8fe6b2f6edae625ae344fc496`) are retained as program history.
 Lineage note: the original commits are not direct ancestors of the recreated
 tips (the Sep-4/5 work reached main through PR merges, e.g. Velnor main
-#567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
+PRs #567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
 the recreated tip). All §93–§95 handoff SHAs (`f5f28ca`, `976516f`, `e8223f5`,
 fixture `9d03639`) likewise predate the recreation and are history, not heads.
 Remote state at recreation: Velnor `origin` carries `main` +
@@ -144,6 +144,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
 | `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; corrections `d37ad166`, `admit` binding) |
+| `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 
 ## 8. Discovered bug classes
 
@@ -217,9 +218,10 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
 | 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
-| 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §101). |
-| 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §101). |
-| 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§101). |
+| 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §103). |
+| 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §103). |
+| 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§103). |
+| 2026-09-12 | Merged `main` (#662–#666): adopted the one-scope-spelling store/lease/GC design and the repo-identity GHA cache namespace; kept the F-V1 typed `AdmittedTrust::admit` binding, the `jobs.trust_class` column (schema v18), and the `trust_class` telemetry fact (§103). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -4607,8 +4609,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 --locked -- -D warnings` pass; module suite 32/32 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1679 passed with 3 pre-existing environmental failures
-(`action::tests::fetched_*`: host `/tmp/velnor-actions` exists but is
-empty, 0 files — untouched code path, fails identically without this
+(`action::tests::fetched_*`: a stale empty host scratch directory under
+`/tmp`, 0 files — untouched code path, fails identically without this
 package). WP-6 status: derivation complete; pool-refuses-out-of-class
 enforcement and the flag-as-ceiling wiring remain unclaimed.
 
@@ -4697,8 +4699,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 --locked -- -D warnings` pass; module suite 41/41 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1688 passed with the same 3 pre-existing environmental
-failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
-exists but is empty — untouched code path). WP-6 status: derivation
+failures as §97 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — untouched code path). WP-6 status: derivation
 complete incl. this correction; pool-refuses-out-of-class enforcement and
 the flag-as-ceiling wiring remain unclaimed.
 
@@ -4795,12 +4797,140 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 suites (`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`)
 166/166 pass; full serial `cargo test -p velnor-runner --lib --features
 test-support --locked -- --test-threads=1` 1705 passed with the same 3
-pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
-`/tmp/velnor-actions` exists but is empty — verified identical on the
+pre-existing environmental failures as §97 (`action::tests::fetched_*`: a
+stale empty host scratch directory under `/tmp` — verified identical on the
 untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
 WP-6 status: complete (derivation §97+§98, enforcement this section).
 
-## 101. F-V1: trust derived before admission persistence; class + effective scope on the row — 2026-09-12
+## 101. trust-admission-fork correction: one scope spelling through leases, mounts, and GC, plus admission forensics — 2026-09-12
+
+Review of §100 found two holes on the same path, both fixed here.
+
+First, the mounts collapsed what the leases kept raw. The storage leases
+used the admitted scope verbatim, but `JobContainerSpec` carried a
+`StoreTrustClass` that folded every custom pool scope (and the `Trusted`
+case variant) to `untrusted`. On a custom pool the legacy executable stores
+were therefore leased at `bin/<custom>/<repo>` and mounted at
+`bin/untrusted/<repo>` — live stores GC-reclaimable mid-job — and in both
+layouts a trusted-class job shared mutable untrusted cargo/mise stores with
+fork jobs, contradicting the namespaced-by-admitted-scope docs. The
+collapsed enum is deleted (`StoreTrustClass`,
+`store_trust_namespace`, `github_adapter::store_trust_class`,
+`store_catalog::TRUST_SCOPES`); the spec now carries
+`store_trust_scope: String`, normalized once at admission, and every
+mount-side path (cargo/mise roots, executable and binary stores,
+Playwright, compiler stores, mise seeding in both `runner.rs` and
+`executor.rs`) derives from it. GC sweeps the compiler stores under the
+pool namespace plus the untrusted floor through the same
+`trust_partitioned_roots` as every other class, so custom-pool compiler
+stores are reclaimed instead of leaking. New regression coverage:
+`container_spec_preserves_the_admitted_scope_verbatim` and
+`custom_pool_leases_and_mounts_share_one_scope_spelling` (lease-vs-mount
+equality for `public-forks` and `Trusted` in both layouts, and no
+untrusted-floor collapse for trusted-class jobs); the
+`every_consumer_observes_one_resolved_trust_scope` split-brain test now
+asserts the compiler stores carry the resolved custom scope too.
+
+Second, admission forensics recorded only the pool ceiling
+(`JobAdmission.trust_scope`), never the derived decision, so RunQueued
+records could not distinguish a fork job downgraded to the untrusted path
+from a trusted job. `TrustClass::derive` now runs before the admission row
+persists (step-name hydration touches only display names, so the earlier
+derivation is stable), the slot forensics log records
+`trust=<class> admitted_scope=<scope> pool_scope=<pool>` per job, and the
+RunQueued telemetry carries `job_trust` plus the projected
+`admitted_scope` (optional `String` fields in the model contract and
+`schemas/velnor.telemetry.v1.json`; `JobAdmission::project` is `pub(crate)`
+for the sanitization). Docs updated where the behavior changed
+(`reference/trust-scope.mdx`: partitioning by admitted scope, custom
+scopes select a namespace of their own, and the stale "unrecognized values
+resolve to untrusted" claim corrected to absent/empty).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `cargo clippy -p velnor-model
+--all-targets --locked -- -D warnings` pass; store suites
+(`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`/`trust_class`)
+209/209 pass; `velnor-model` telemetry 24/24 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1706 passed with the same 3 pre-existing environmental
+failures as §100 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — cause re-verified, `action.rs` untouched);
+`velnorctl` `trust_scope_single_source` 2/2 pass. WP-6 status: complete.
+
+## 102. gha-cache-repo-namespace: GHA cache namespaced by repo identity, not job token — 2026-09-12
+
+The cache service hashed the per-job `ACTIONS_RUNTIME_TOKEN` into the
+storage namespace, so a save was visible only to the job that wrote it and
+every abandoned tenant kept up to its budget outside any sharing. The
+namespace is now `sha256(cache-repo domain separator ‖ repository_id ‖
+ref_scope ‖ trust)` where `repository_id` (`github.repository_id`),
+`ref_scope` (`github.ref`), and the trust floor
+(`TrustClass::is_trusted`, §97) come from the server-attested job message —
+never from workflow-supplied data and never from the token. Jobs in the
+same repository and ref share one namespace, so a save is visible to later
+jobs on that exact ref; different repositories, refs, or trust classes
+select disjoint namespaces, so a fork job can neither read trusted entries
+nor poison them (BC-21 read-write invariant). Intentional deviation from
+GitHub's branch scoping, recorded here and in the `gha_cache.rs` module
+docs: lookups use strict ref equality with no base-branch or
+default-branch fallback, so a branch or `refs/pull/N/merge` job starts
+cold where GitHub would restore the base branch's entries. A fallback
+would let untrusted readers consult trusted namespaces, which BC-21
+forbids; restoring GitHub parity needs new server-attested
+base/default-ref signals plus a read-only fallback chain that never
+crosses the trust floor.
+
+The token remains only the credential: the runner binds it to the job's
+cache identity at admission (next to the §100 trust derivation) and holds
+the RAII `CacheSession` for the whole job lifetime, so every return path —
+including early fail-closed exits — unbinds it. The registry stores only
+the keyed token hash, never the credential, as a stack so a duplicate
+registration cannot unbind a live job. The registry API
+(`CacheIdentity`, `CacheSession`, `register_job_cache_session`) is
+`pub(crate)`: the only caller is the admission hook in `runner.rs`, so no
+in-process caller can bind an arbitrary token to a victim Shared
+identity. Route auth rejects unknown tokens
+with 401 (previously any non-empty string was accepted); a job whose
+identity signals are incomplete fails closed to a per-token namespace —
+today's isolation, never another job's entries — with a
+`forensics.lifecycle` line emitted at the admission call site, naming the
+job id and the raw signals (`repository_id`, `ref`, `scope_present`,
+`trusted`) so an identity-signal outage is diagnosable; the registry
+itself stays silent. Both the binding and the `ACTIONS_CACHE_URL`
+injection read the credential through one new accessor
+(`runtime_env::job_runtime_token`), so registration and presentation
+cannot drift. Each daemon's service authenticates its own jobs only:
+credentials from another daemon 401. Previously written per-token tenants
+are no longer addressed and age out under the existing GC, which already
+manages the tenants root (`cache.rs` `GhaCache` store root).
+
+New coverage (14 tests in `gha_cache.rs`): namespace determinism and
+per-input sensitivity, shared/isolated domain non-aliasing, the
+same-repo-and-branch sharing conformance test (save under one credential,
+lookup under another), ref/repository/trust non-sharing tests,
+derive-fails-closed table, isolated fallback resolution, route-level
+401/204 auth tests through the now-generic `route`, session drop and
+duplicate-session release tests, plus the
+`cache_namespace_benchmark_derivation_and_lookup_throughput` timing-gated
+benchmark in the §97 style.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `gha_cache` 44/44 pass; `runtime_env` 8/8
+pass; `trust_class` 42/42 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1720 passed with the same 3 pre-existing environmental
+failures as §101 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — cause re-verified, `action.rs` untouched).
+Review-correction re-run (strict-ref deviation documented, registry API
+narrowed to `pub(crate)`, isolated-fallback forensics moved to the
+admission call site with job context): identical gates — fmt clean,
+clippy clean, `gha_cache` 44/44, `runtime_env` 8/8, `trust_class` 42/42,
+full serial 1720 passed with the same 3 pre-existing environmental
+failures (cause re-verified, `action.rs` untouched).
+gha-cache-repo-namespace status: complete.
+## 103. F-V1: trust derived before admission persistence; class + effective scope on the row — 2026-09-12
 
 Follow-up to §100: enforcement narrowed the pool ceiling per job, but the
 admission row still persisted *before* derivation ran and recorded the raw
@@ -4844,8 +4974,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 92/92 pass; `telemetry_integration` 5/5 pass (incl. golden); full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1709 passed with the same 3 pre-existing environmental
-failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
-exists but is empty — untouched code path); `velnorctl`
+failures as §97 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — untouched code path); `velnorctl`
 `trust_scope_single_source` 2/2 pass.
 F-V1 status: complete.
 
@@ -4883,3 +5013,16 @@ runner/model/control pass; targeted ops/trust/admission/blocking 93/93;
 runner lib 1710 passed with the same 3 pre-existing environmental
 `action::tests::fetched_*` failures (re-verified on the untouched base);
 `trust_scope_single_source` 2/2.
+
+Merge adaptation (2026-09-12, integrating `main` #662–#666): main's §101
+deleted the `StoreTrustClass` mount spelling in favour of the admitted scope
+itself, and §102 moved the GHA cache namespace to server-attested repo
+identity. This merge keeps both: the spec, the mounts, the leases, and GC
+carry `store_trust_scope` (main's one spelling), while F-V1's contribution
+stays the typed admission binding — `AdmittedTrust::admit` is the only
+producer of the (class, effective scope) pair, `handle_job_request` binds it
+once before the row persists, and the row column (`jobs.trust_class`,
+schema v18) plus the `trust_class` telemetry fact are read back from it.
+`narrow` now normalizes the pool ceiling with
+`trust_scope::normalize_scope`, so the binding also carries the
+normalization that previously lived at the derivation call site.

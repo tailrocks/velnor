@@ -392,3 +392,119 @@ fn tempfile() -> PathBuf {
     fs::create_dir_all(&base).unwrap();
     base
 }
+
+/// The synthetic release fixture: one Rust crate. The release and preview
+/// lanes exist only when a config declares them, so the fixture pins that a
+/// declared lane is added to — never guessed from — the scanned surface.
+fn copy_release_fixture(destination: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-release");
+    copy_tree(&source, destination);
+    destination.to_path_buf()
+}
+
+const RELEASE_CONFIG: &str = r#"schema = 1
+
+[generator]
+repository = "example/synthetic-release"
+
+[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "app"
+binary = "app"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[[declare]]
+primitive = "preview"
+file = "preview.yml"
+
+[declare.args]
+package = "app"
+binary = "app"
+targets = ["x86_64-unknown-linux-gnu"]
+"#;
+
+#[test]
+fn a_declared_release_lane_adds_exactly_the_release_files() {
+    let workspace = tempfile();
+    let root = copy_release_fixture(&workspace.join("fixture"));
+    let without = generate(&root);
+    let without_count = without.workflow_files().len();
+    assert!(
+        !without.workflow_files().contains(&"release.yml".to_owned()),
+        "release.yml must not exist before the lane is declared"
+    );
+    assert!(
+        !without.workflow_files().contains(&"preview.yml".to_owned()),
+        "preview.yml must not exist before the lane is declared"
+    );
+
+    write_config(&root, RELEASE_CONFIG);
+    let with = generate(&root);
+    let files = with.workflow_files();
+    assert!(files.contains(&"release.yml".to_owned()), "{files:?}");
+    assert!(files.contains(&"preview.yml".to_owned()), "{files:?}");
+    assert_eq!(
+        files.len(),
+        without_count + 2,
+        "declaring the lanes must add exactly the two lane files: {files:?}"
+    );
+    let release = with.workflow("release.yml");
+    assert!(release.contains("name: Release"), "{release}");
+    assert!(release.contains("Publish GitHub release"), "{release}");
+    assert!(
+        release.contains("target: x86_64-unknown-linux-gnu"),
+        "{release}"
+    );
+    assert!(
+        release.contains("target: aarch64-unknown-linux-gnu"),
+        "{release}"
+    );
+    let preview = with.workflow("preview.yml");
+    assert!(preview.contains("Publish rolling preview"), "{preview}");
+}
+
+#[test]
+fn the_declared_release_surface_is_repo_name_independent() {
+    let workspace = tempfile();
+    let one = copy_release_fixture(&workspace.join("release-lane-one"));
+    let other = copy_release_fixture(&workspace.join("release-lane-two"));
+    write_config(&one, RELEASE_CONFIG);
+    write_config(&other, RELEASE_CONFIG);
+    let one = generate(&one);
+    let other = generate(&other);
+    assert_eq!(one.workflow_files(), other.workflow_files());
+    for file in one.workflow_files() {
+        assert_eq!(one.workflow(&file), other.workflow(&file), "{file}");
+    }
+}
+
+#[test]
+fn an_incomplete_declared_release_stops_generation() {
+    let incomplete = RELEASE_CONFIG
+        .lines()
+        .filter(|line| !line.starts_with("targets ="))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let workspace = tempfile();
+    let root = copy_release_fixture(&workspace.join("fixture"));
+    write_config(&root, &incomplete);
+    let status = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "--plain",
+            "--default-branch",
+            "main",
+            "--output",
+            workspace.join("out").to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run velnor-workflow");
+    assert!(
+        !status.status.success(),
+        "an incomplete declared release must fail closed, and did not"
+    );
+}

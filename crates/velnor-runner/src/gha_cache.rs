@@ -11,33 +11,53 @@
 //!   `ACTIONS_CACHE_SERVICE_V2=True`): `CreateCacheEntryUpload`,
 //!   `FinalizeCacheEntryUpload`, `GetCacheEntryDownloadURL`
 //!
-//! Storage is content-addressed under a bearer-token tenant beneath the
-//! durable cache root: `tenants/<token-sha256>/blobs/<sha256>` plus tiny JSON
-//! entry records keyed by `sha256(key \0 version)`. Key matching follows
-//! GitHub semantics: exact `(key, version)` first, then restore-keys prefix
-//! order, newest wins. The token is never persisted; its hash is only a
-//! storage namespace, so one job cannot address another job's entries by key.
-//! Insertion enforces an LRU byte budget by deleting oldest-hit entries.
+//! Storage is content-addressed beneath the durable cache root:
+//! `tenants/<repo-namespace>/blobs/<sha256>` plus tiny JSON entry records
+//! keyed by `sha256(key \0 version)`. Key matching follows GitHub semantics:
+//! exact `(key, version)` first, then restore-keys prefix order, newest wins.
+//! The namespace is `sha256("velnor-runner-cache-repo\0" ‖ repository_id ‖
+//! ref_scope ‖ trust)` where the repository id (`github.repository_id`), the
+//! ref scope (`github.ref`), and the trust floor come from the server-attested
+//! job message the runner binds to the job's runtime token at admission —
+//! never from workflow-supplied data and never from the token itself. Jobs in
+//! the same repository and ref therefore share one namespace, so a save is
+//! visible to later jobs on that exact ref, while different repositories,
+//! refs, or trust classes never alias. Insertion enforces an
+//! LRU byte budget by deleting oldest-hit entries.
+//!
+//! Intentional deviation from GitHub's branch scoping: lookups use strict
+//! ref equality with no base-branch or default-branch fallback, so a branch
+//! or `refs/pull/N/merge` job starts cold where GitHub would restore the
+//! base branch's entries. A fallback would let untrusted readers consult
+//! trusted namespaces, which BC-21 forbids (a fork job can neither read
+//! trusted entries nor poison them); restoring GitHub parity needs new
+//! server-attested base/default-ref signals plus a read-only fallback chain
+//! that never crosses the trust floor, so strict equality stands until then.
 //!
 //! The service is OFF unless the operator exports `VELNOR_ACTIONS_CACHE_URL`
 //! into the runner environment (strict capability contract: no behavior
 //! change without explicit enablement). Requests must carry the job-scoped
 //! `ACTIONS_RUNTIME_TOKEN`; the operator's enablement variable is never used
-//! as a job credential.
+//! as a job credential. The token only authenticates the request against the
+//! runner's live-job registry — an unknown token gets 401 — and selects the
+//! job's repo namespace; it never enters the namespace hash. A job whose
+//! identity signals are incomplete fails closed to a per-token namespace
+//! (worse sharing, never another job's entries).
 
 use anyhow::{Context, Result};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Channel, Full, Limited};
-use hyper::body::{Body, Bytes, Incoming};
+use hyper::body::{Body, Bytes};
 use hyper::header::CONTENT_LENGTH;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const DEFAULT_BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -76,7 +96,8 @@ struct CacheHit {
 pub struct CacheService {
     /// Durable storage root; tenant directories live beneath it.
     pub root: PathBuf,
-    /// LRU byte budget per bearer-token tenant.
+    /// LRU byte budget per repo-namespace tenant, shared by every job that
+    /// resolves to the namespace.
     pub budget_bytes: u64,
 }
 
@@ -392,11 +413,172 @@ fn clear_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Re
     Ok(())
 }
 
-fn cache_namespace(token: &str) -> String {
+/// Server-attested cache identity for one job: the namespace inputs the
+/// runner captures from the job message at admission and binds to the job's
+/// runtime token for the job's lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CacheIdentity {
+    /// Shared repo namespace: `github.repository_id`, `github.ref`, and the
+    /// trust floor (`TrustClass::is_trusted`). Jobs that agree on all three
+    /// share one namespace, so a save is visible to later jobs in the same
+    /// repository and branch; any disagreement selects a disjoint namespace.
+    Shared {
+        repository_id: u64,
+        ref_scope: String,
+        trusted: bool,
+    },
+    /// Fail-closed: at least one identity signal was missing or unparseable,
+    /// so the job keeps a per-token namespace — today's isolation, never
+    /// another job's entries.
+    Isolated,
+}
+
+impl CacheIdentity {
+    /// Derive the identity from server-attested job-message signals. Pure:
+    /// no I/O, so the fail-closed branch is exactly `Isolated`. The
+    /// admission call site owns the isolated-fallback forensics line, where
+    /// the job id and the raw signals are available; the registry stays
+    /// silent so a signal outage is diagnosed once, with context.
+    #[must_use]
+    pub(crate) fn derive(
+        repository_id: Option<&str>,
+        ref_scope: Option<&str>,
+        scope_present: bool,
+        trusted: bool,
+    ) -> Self {
+        let repository_id = repository_id
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|id| *id != 0);
+        let ref_scope = ref_scope
+            .map(str::trim)
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_owned);
+        match (repository_id, ref_scope, scope_present) {
+            (Some(repository_id), Some(ref_scope), true) => Self::Shared {
+                repository_id,
+                ref_scope,
+                trusted,
+            },
+            _ => Self::Isolated,
+        }
+    }
+}
+
+/// Repo-identity namespace: `sha256(domain ‖ repository_id ‖ ref-scope ‖
+/// trust)`. The bearer token is never an input — it only authenticates the
+/// request against the live-job registry that selects this namespace.
+fn repo_cache_namespace(repository_id: u64, ref_scope: &str, trusted: bool) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-tenant\0");
+    hasher.update(b"velnor-runner-cache-repo\0");
+    hasher.update(repository_id.to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(ref_scope.as_bytes());
+    hasher.update(b"\0");
+    hasher.update([u8::from(trusted)]);
+    hex(&hasher.finalize())
+}
+
+/// Fail-closed per-token namespace for jobs whose identity signals are
+/// incomplete. Its domain differs from the repo namespace so an isolated job
+/// can never alias a shared namespace.
+fn isolated_cache_namespace(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-runner-cache-tenant\0");
     hasher.update(token.as_bytes());
     hex(&hasher.finalize())
+}
+
+/// Live-job registry: token key → the stack of sessions bound to that token.
+/// The bearer token itself is never stored, only its keyed hash. One token
+/// belongs to one job, so the stack holds one entry; it is a stack rather
+/// than a single slot so a duplicate registration cannot unbind a live job
+/// when the duplicate session drops.
+fn registry() -> &'static Mutex<HashMap<String, Vec<CacheIdentity>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Vec<CacheIdentity>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn token_key(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-runner-cache-token-key\0");
+    hasher.update(token.as_bytes());
+    hex(&hasher.finalize())
+}
+
+fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, Vec<CacheIdentity>>> {
+    registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// RAII binding of one job's runtime token to its cache identity. The runner
+/// holds one for the whole job lifetime; dropping it unbinds exactly one
+/// registration, so every return path — including early fail-closed exits —
+/// releases the credential.
+#[must_use]
+pub(crate) struct CacheSession {
+    key: Option<String>,
+    identity: CacheIdentity,
+}
+
+impl Drop for CacheSession {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        let mut guard = lock_registry();
+        if let Some(stack) = guard.get_mut(&key)
+            && let Some(index) = stack.iter().position(|entry| *entry == self.identity)
+        {
+            stack.swap_remove(index);
+            if stack.is_empty() {
+                guard.remove(&key);
+            }
+        }
+    }
+}
+
+/// Bind `token` — the same credential `runtime_env` injects as
+/// `ACTIONS_RUNTIME_TOKEN` — to `identity` until the returned session drops.
+/// A missing or empty token binds nothing: without a credential the job gets
+/// no `ACTIONS_CACHE_URL`, so no client can present it. Deliberately silent:
+/// the admission call site emits the isolated-fallback forensics line with
+/// the job id and the failed signals, where that context exists.
+pub(crate) fn register_job_cache_session(
+    token: Option<&str>,
+    identity: CacheIdentity,
+) -> CacheSession {
+    let Some(token) = token.filter(|token| !token.is_empty()) else {
+        return CacheSession {
+            key: None,
+            identity,
+        };
+    };
+    let key = token_key(token);
+    lock_registry()
+        .entry(key.clone())
+        .or_default()
+        .push(identity.clone());
+    CacheSession {
+        key: Some(key),
+        identity,
+    }
+}
+
+/// Resolve the storage namespace for a presented bearer token, or `None`
+/// when the token belongs to no live job. Unknown tokens are rejected by the
+/// caller with 401; the token authenticates and selects, never namespaces.
+fn namespace_for_token(token: &str) -> Option<String> {
+    let key = token_key(token);
+    let identity = lock_registry().get(&key)?.last().cloned()?;
+    Some(match identity {
+        CacheIdentity::Shared {
+            repository_id,
+            ref_scope,
+            trusted,
+        } => repo_cache_namespace(repository_id, &ref_scope, trusted),
+        CacheIdentity::Isolated => isolated_cache_namespace(token),
+    })
 }
 
 pub async fn serve(listener: tokio::net::TcpListener, service: CacheService) -> Result<()> {
@@ -435,13 +617,16 @@ async fn serve_with_public_base(
     }
 }
 
-async fn route(
-    req: Request<Incoming>,
-    ctx: &mut Ctx,
-) -> Result<Response<ResponseBody>, hyper::Error> {
-    // Auth: every route requires a non-empty job-scoped bearer capability.
-    // The credential is never persisted or surfaced in errors; its hash is
-    // the only namespace input used by the storage layer.
+async fn route<B>(req: Request<B>, ctx: &mut Ctx) -> Result<Response<ResponseBody>, hyper::Error>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    // Auth: every route requires the job-scoped runtime credential the
+    // runner bound to a live job at admission. The credential authenticates
+    // the request and selects the job's repo namespace; it is never
+    // persisted, never surfaced in errors, and never enters the namespace
+    // hash.
     let token = req
         .headers()
         .get("authorization")
@@ -451,7 +636,9 @@ async fn route(
     let Some(token) = token else {
         return Ok(respond_unauthorized());
     };
-    let namespace = cache_namespace(token);
+    let Some(namespace) = namespace_for_token(token) else {
+        return Ok(respond_unauthorized());
+    };
     if let Err(error) = ctx.service.ensure_tenant(&namespace) {
         eprintln!("Warning: gha cache tenant initialization: {error:#}");
         return Ok(Response::builder()
@@ -641,7 +828,11 @@ where
     Ok(json!({"cacheId": hash}))
 }
 
-async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
+async fn reserve_v2<B>(req: Request<B>, ctx: &Ctx, namespace: &str) -> Result<Value>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -952,7 +1143,11 @@ fn validate_cache_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn finalize_v2(req: Request<Incoming>, ctx: &Ctx, namespace: &str) -> Result<Value> {
+async fn finalize_v2<B>(req: Request<B>, ctx: &Ctx, namespace: &str) -> Result<Value>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -1370,10 +1565,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_namespace_is_deterministic_token_specific_and_redacted() {
-        let first = cache_namespace("job-token-a");
-        assert_eq!(first, cache_namespace("job-token-a"));
-        assert_ne!(first, cache_namespace("job-token-b"));
+    fn isolated_namespace_is_deterministic_token_specific_and_redacted() {
+        let first = isolated_cache_namespace("job-token-a");
+        assert_eq!(first, isolated_cache_namespace("job-token-a"));
+        assert_ne!(first, isolated_cache_namespace("job-token-b"));
         assert_eq!(first.len(), 64);
         assert!(!first.contains("job-token-a"));
     }
@@ -2123,6 +2318,347 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("length limit exceeded"));
+    }
+
+    fn shared_identity(repository_id: u64, ref_scope: &str, trusted: bool) -> CacheIdentity {
+        CacheIdentity::Shared {
+            repository_id,
+            ref_scope: ref_scope.to_owned(),
+            trusted,
+        }
+    }
+
+    fn register_shared(
+        credential: &str,
+        repository_id: u64,
+        ref_scope: &str,
+        trusted: bool,
+    ) -> CacheSession {
+        register_job_cache_session(
+            Some(credential),
+            shared_identity(repository_id, ref_scope, trusted),
+        )
+    }
+
+    fn authed_get(path: &str, credential: &str) -> Request<Full<Bytes>> {
+        Request::builder()
+            .uri(format!("http://cache.test{path}"))
+            .header("authorization", format!("Bearer {credential}"))
+            .body(Full::new(Bytes::new()))
+            .expect("build request")
+    }
+
+    fn commit_blob_in(
+        service: &CacheService,
+        namespace: &str,
+        key: &str,
+        version: &str,
+        contents: &[u8],
+    ) {
+        let hash = entry_hash(key, version);
+        let blobs = service.tenant_root(Some(namespace)).join("blobs");
+        std::fs::create_dir_all(&blobs).expect("create blobs");
+        std::fs::write(blobs.join(&hash), contents).expect("write blob");
+        commit_entry(
+            service,
+            key,
+            version,
+            u64::try_from(contents.len()).expect("blob length fits u64"),
+            Some(namespace),
+        )
+        .expect("commit blob");
+    }
+
+    #[test]
+    fn repo_namespace_is_deterministic_and_input_sensitive() {
+        let base = repo_cache_namespace(42, "refs/heads/main", true);
+        assert_eq!(base, repo_cache_namespace(42, "refs/heads/main", true));
+        assert_eq!(base.len(), 64);
+        assert!(base.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!base.contains("refs/heads/main"));
+        assert_ne!(base, repo_cache_namespace(43, "refs/heads/main", true));
+        assert_ne!(base, repo_cache_namespace(42, "refs/heads/other", true));
+        assert_ne!(base, repo_cache_namespace(42, "refs/heads/main", false));
+        // Neighboring ids and one-character ref edits must not collide.
+        assert_ne!(base, repo_cache_namespace(41, "refs/heads/main", true));
+        assert_ne!(base, repo_cache_namespace(42, "refs/heads/maiN", true));
+    }
+
+    #[test]
+    fn repo_namespace_never_aliases_isolated_namespace() {
+        // The two domains differ, so a fail-closed job can never address a
+        // shared namespace even when the inputs look alike.
+        let shared = repo_cache_namespace(42, "refs/heads/main", true);
+        for credential in ["42", "refs/heads/main", "42refs/heads/main", ""] {
+            assert_ne!(shared, isolated_cache_namespace(credential));
+        }
+        assert_ne!(
+            repo_cache_namespace(42, "refs/heads/main", false),
+            isolated_cache_namespace("refs/heads/main")
+        );
+    }
+
+    #[test]
+    fn same_repo_and_branch_share_one_namespace_across_credentials() {
+        // Same-ref sharing (GitHub's branch scoping minus the
+        // base/default-branch fallback, which BC-21 forbids — see module
+        // docs): a save by one job is visible to a later job in the same
+        // repository and ref, even though the two jobs carry different
+        // per-job credentials.
+        let first = register_shared("share-conformance-first", 42, "refs/heads/main", true);
+        let second = register_shared("share-conformance-second", 42, "refs/heads/main", true);
+        let first_ns = namespace_for_token("share-conformance-first").expect("first resolves");
+        let second_ns = namespace_for_token("share-conformance-second").expect("second resolves");
+        assert_eq!(first_ns, second_ns);
+
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        commit_blob_in(&service, &first_ns, "linux-rust", "v1", b"shared");
+        let hit = service
+            .lookup(&["linux-rust"], "v1", Some(&second_ns))
+            .expect("later job sees the save");
+        assert_eq!(hit.key, "linux-rust");
+        drop(first);
+        drop(second);
+    }
+
+    #[test]
+    fn different_ref_scopes_do_not_share() {
+        let main = register_shared("ref-scope-main", 42, "refs/heads/main", true);
+        let feature = register_shared("ref-scope-feature", 42, "refs/heads/feature", true);
+        let main_ns = namespace_for_token("ref-scope-main").expect("main resolves");
+        let feature_ns = namespace_for_token("ref-scope-feature").expect("feature resolves");
+        assert_ne!(main_ns, feature_ns);
+
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        commit_blob_in(&service, &main_ns, "linux-rust", "v1", b"main-only");
+        assert!(service
+            .lookup(&["linux-rust"], "v1", Some(&feature_ns))
+            .is_none());
+        drop(main);
+        drop(feature);
+    }
+
+    #[test]
+    fn different_repositories_do_not_share() {
+        let repo_a = register_shared("repo-scope-a", 42, "refs/heads/main", true);
+        let repo_b = register_shared("repo-scope-b", 43, "refs/heads/main", true);
+        let ns_a = namespace_for_token("repo-scope-a").expect("a resolves");
+        let ns_b = namespace_for_token("repo-scope-b").expect("b resolves");
+        assert_ne!(ns_a, ns_b);
+
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        commit_blob_in(&service, &ns_a, "linux-rust", "v1", b"repo-a-only");
+        assert!(service.lookup(&["linux-rust"], "v1", Some(&ns_b)).is_none());
+        drop(repo_a);
+        drop(repo_b);
+    }
+
+    #[test]
+    fn untrusted_jobs_do_not_share_with_trusted() {
+        // The trust floor is a namespace input: a fork job on the same repo
+        // and ref can neither read trusted entries nor poison them.
+        let trusted = register_shared("trust-scope-trusted", 42, "refs/pull/7/merge", true);
+        let fork = register_shared("trust-scope-fork", 42, "refs/pull/7/merge", false);
+        let trusted_ns = namespace_for_token("trust-scope-trusted").expect("trusted resolves");
+        let fork_ns = namespace_for_token("trust-scope-fork").expect("fork resolves");
+        assert_ne!(trusted_ns, fork_ns);
+
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        commit_blob_in(&service, &trusted_ns, "linux-rust", "v1", b"trusted-only");
+        assert!(service
+            .lookup(&["linux-rust"], "v1", Some(&fork_ns))
+            .is_none());
+        commit_blob_in(&service, &fork_ns, "linux-rust", "v1", b"fork-only");
+        let hit = service
+            .lookup(&["linux-rust"], "v1", Some(&trusted_ns))
+            .expect("trusted entry intact");
+        assert_eq!(hit.key, "linux-rust");
+        drop(trusted);
+        drop(fork);
+    }
+
+    #[test]
+    fn identity_derive_fails_closed_to_isolated() {
+        assert_eq!(
+            CacheIdentity::derive(Some("42"), Some("refs/heads/main"), true, true),
+            shared_identity(42, "refs/heads/main", true)
+        );
+        assert_eq!(
+            CacheIdentity::derive(Some(" 42 "), Some(" refs/heads/main "), true, false),
+            shared_identity(42, "refs/heads/main", false)
+        );
+        // Every incomplete or unparseable signal fails closed to Isolated:
+        // missing, zero, or non-numeric repository id; missing or blank ref;
+        // absent plan scope.
+        for (repository_id, ref_scope, scope_present) in [
+            (None, Some("refs/heads/main"), true),
+            (Some(""), Some("refs/heads/main"), true),
+            (Some("0"), Some("refs/heads/main"), true),
+            (Some("not-a-number"), Some("refs/heads/main"), true),
+            (Some("42"), None, true),
+            (Some("42"), Some(""), true),
+            (Some("42"), Some("   "), true),
+            (Some("42"), Some("refs/heads/main"), false),
+            (None, None, false),
+        ] {
+            assert_eq!(
+                CacheIdentity::derive(repository_id, ref_scope, scope_present, true),
+                CacheIdentity::Isolated,
+                "repository_id={repository_id:?} ref_scope={ref_scope:?} scope_present={scope_present}",
+            );
+        }
+    }
+
+    #[test]
+    fn isolated_identity_resolves_to_the_per_credential_namespace() {
+        let session = register_job_cache_session(
+            Some("isolated-fallback-credential"),
+            CacheIdentity::Isolated,
+        );
+        assert_eq!(
+            namespace_for_token("isolated-fallback-credential").expect("isolated resolves"),
+            isolated_cache_namespace("isolated-fallback-credential"),
+        );
+        drop(session);
+        assert!(namespace_for_token("isolated-fallback-credential").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_rejects_unknown_missing_and_empty_credentials() {
+        let dir = tempfile_dir();
+        let mut ctx = test_ctx(test_service(dir.path()));
+        let miss = "/_apis/artifactcache/cache?keys=absent&version=v1";
+        let unknown = route(authed_get(miss, "never-registered-credential"), &mut ctx)
+            .await
+            .expect("route");
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+        let missing = route(get("keys=absent&version=v1"), &mut ctx)
+            .await
+            .expect("route");
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        let empty = route(authed_get(miss, ""), &mut ctx).await.expect("route");
+        assert_eq!(empty.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn route_accepts_registered_job_credential() {
+        let dir = tempfile_dir();
+        let mut ctx = test_ctx(test_service(dir.path()));
+        let session = register_shared("route-accept-credential", 42, "refs/heads/main", true);
+        // A lookup miss reaches the service and reports 204 (the toolkit's
+        // only "no cache" status), proving the credential authenticated and
+        // the repo namespace was consulted.
+        let miss = route(
+            authed_get(
+                "/_apis/artifactcache/cache?keys=absent&version=v1",
+                "route-accept-credential",
+            ),
+            &mut ctx,
+        )
+        .await
+        .expect("route");
+        assert_eq!(miss.status(), StatusCode::NO_CONTENT);
+        drop(session);
+        let after_drop = route(
+            authed_get(
+                "/_apis/artifactcache/cache?keys=absent&version=v1",
+                "route-accept-credential",
+            ),
+            &mut ctx,
+        )
+        .await
+        .expect("route");
+        assert_eq!(after_drop.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn session_guard_unregisters_on_drop() {
+        let session = register_shared("session-drop-credential", 42, "refs/heads/main", true);
+        assert!(namespace_for_token("session-drop-credential").is_some());
+        drop(session);
+        assert!(namespace_for_token("session-drop-credential").is_none());
+    }
+
+    #[test]
+    fn missing_credential_binds_nothing() {
+        let without_token =
+            register_job_cache_session(None, shared_identity(42, "refs/heads/main", true));
+        let empty_token =
+            register_job_cache_session(Some(""), shared_identity(42, "refs/heads/main", true));
+        drop(without_token);
+        drop(empty_token);
+    }
+
+    #[test]
+    fn duplicate_sessions_release_one_registration_each() {
+        let first = register_shared("duplicate-session-credential", 42, "refs/heads/main", true);
+        let second = register_shared("duplicate-session-credential", 42, "refs/heads/main", true);
+        assert!(namespace_for_token("duplicate-session-credential").is_some());
+        drop(first);
+        assert!(
+            namespace_for_token("duplicate-session-credential").is_some(),
+            "one live session keeps the binding"
+        );
+        drop(second);
+        assert!(namespace_for_token("duplicate-session-credential").is_none());
+    }
+
+    // Benchmark: namespace derivation and registry lookup sit on every cache
+    // request, so their cost is gated. No criterion/divan harness exists in
+    // this workspace; the bound below is the benchmark, in the style of the
+    // repo's existing timing-gated tests.
+    #[test]
+    fn cache_namespace_benchmark_derivation_and_lookup_throughput() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let derived = CacheIdentity::derive(Some("42"), Some("refs/heads/main"), true, true);
+        assert!(matches!(derived, CacheIdentity::Shared { .. }));
+        let sessions: Vec<CacheSession> = (0..64)
+            .map(|index| {
+                register_shared(
+                    &format!("bench-credential-{index}"),
+                    42,
+                    "refs/heads/main",
+                    true,
+                )
+            })
+            .collect();
+
+        // 20k derivation + hash + registry-lookup rounds; pure hashing and a
+        // short mutex hold must stay far below the bound even on a loaded
+        // serial-gate runner.
+        let started = Instant::now();
+        for _ in 0..20_000 {
+            let identity = CacheIdentity::derive(
+                black_box(Some("42")),
+                black_box(Some("refs/heads/main")),
+                true,
+                true,
+            );
+            let CacheIdentity::Shared {
+                repository_id,
+                ref_scope,
+                trusted,
+            } = identity
+            else {
+                panic!("complete signals must derive Shared");
+            };
+            let namespace =
+                repo_cache_namespace(repository_id, black_box(ref_scope.as_str()), trusted);
+            assert_eq!(namespace.len(), 64);
+            assert!(namespace_for_token(black_box("bench-credential-7")).is_some());
+        }
+        let elapsed = started.elapsed();
+        drop(sessions);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "20k namespace rounds took {elapsed:?}",
+        );
     }
 
     fn tempfile_dir() -> TestDir {

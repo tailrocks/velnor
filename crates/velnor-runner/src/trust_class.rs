@@ -162,9 +162,15 @@ impl AdmittedTrust {
     /// Bind `class` to the scope it admits on a pool whose flag is
     /// `pool_scope`: the ceiling for [`TrustClass::Trusted`], the untrusted
     /// floor for every other class.
+    ///
+    /// The ceiling is normalized here (`trust_scope::normalize_scope`), so the
+    /// bound scope is always in the canonical spelling — the normalization is
+    /// part of the binding, not a step a call site can forget.
     #[must_use]
     pub fn narrow(class: TrustClass, pool_scope: &str) -> Self {
-        let effective_scope = class.admitted_scope(pool_scope).to_owned();
+        let effective_scope = class
+            .admitted_scope(crate::trust_scope::normalize_scope(pool_scope))
+            .to_owned();
         Self {
             class,
             effective_scope,

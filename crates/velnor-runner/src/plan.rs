@@ -116,7 +116,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Release,
+            store_trust_scope: "release".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
