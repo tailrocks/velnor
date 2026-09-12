@@ -143,6 +143,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
+| `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`) |
 
 ## 8. Discovered bug classes
 
@@ -216,6 +217,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | I-02 (protocol/completion) and I-07 (dependency freshness) reported; bug classes BC-1 … BC-4 recorded. |
 | 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
+| 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §101). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -4795,3 +4797,52 @@ pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
 `/tmp/velnor-actions` exists but is empty — verified identical on the
 untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
 WP-6 status: complete (derivation §97+§98, enforcement this section).
+
+## 101. F-V1: trust derived before admission persistence; class + effective scope on the row — 2026-09-12
+
+Follow-up to §100: enforcement narrowed the pool ceiling per job, but the
+admission row still persisted *before* derivation ran and recorded the raw
+pool flag — so a fork job on a trusted pool was stored and observed as
+trusted while executing untrusted. The enabling condition was ordering plus
+an untyped row: nothing forced derivation ahead of persistence, and the
+scope column carried whatever the call site passed.
+
+Fix: `handle_job_request` derives `TrustClass` and narrows the admitted
+scope before constructing the admission row (the reorder is
+semantics-preserving — only step display names mutate between the two
+points, and derivation reads variables/context/resources/plan). The
+ordering is now structural: `JobAdmission` gains a required typed
+`trust_class` field, so no admission row can exist without a derivation.
+The existing `trust_scope` column carries the effective admitted scope,
+and schema v18 adds a nullable `jobs.trust_class` column (historical rows
+keep NULL; replay-safe via the established existence skip). Telemetry
+keeps the effective scope as `trust_domain` and gains `trust_class` on
+every admission-bound observation (`run_queued`, `run_admitted`,
+`passive_wait`, `plan_summary`, `no_progress`, cache/tool lookups).
+
+One deliberate bypass: the class label is a code-generated closed label
+and skips mask projection, so a job secret equal to `trusted` or `fork-pr`
+cannot rewrite the audit fact. Trusted jobs are byte-identical on every
+path except the two new recorded facts (their scope value is unchanged);
+only fork/unknown rows and observations move.
+
+Tests, 7 new, all passing: model slug validation (1), v18
+upgrade/negative migration (2), ops row matrix/telemetry/mask-bypass (3),
+runner end-to-end derive→narrow→persist→fetch across push and fork jobs
+(1); plus extensions to existing tests (wire back-compat assertions,
+corpus `fork-pr` label, `job_summaries` class read-back, tool-prep field
+count) and the regenerated telemetry golden fixture. Docs: new "Admission
+record" section in `reference/trust-scope.mdx`.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; same strict clippy on `velnor-model` +
+`velnor-control` pass; `velnor-model` 129/129 pass; `velnor-control`
+237 + 8 + 18 + 7 pass; runner `ops::`/`trust_class`/`admission_`/`blocking_`
+92/92 pass; `telemetry_integration` 5/5 pass (incl. golden); full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1709 passed with the same 3 pre-existing environmental
+failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — untouched code path); `velnorctl`
+`trust_scope_single_source` 2/2 pass.
+F-V1 status: complete.
