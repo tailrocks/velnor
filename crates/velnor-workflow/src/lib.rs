@@ -9975,6 +9975,23 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-amd64.deb\""));
         assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-arm64.deb\""));
         assert!(!publish.contains("artifacts/velnor-runner-preview-*-${VERSION}"));
+        // GitHub rewrites asset names: `~` never survives, it becomes `.`. The
+        // verification must compare normalized names, never the on-disk dpkg
+        // spelling, or every successful publish fails its own audit.
+        let verify = must_some(
+            publish
+                .split_once("Verify the published rolling preview")
+                .map(|(_, verify)| verify),
+            "preview publish verifies the release",
+        );
+        assert!(
+            verify.contains("tr '~' '.'"),
+            "asset verification must normalize `~` to GitHub's asset spelling"
+        );
+        assert!(
+            !verify.contains("+ $version + \"-amd64.deb\""),
+            "asset verification must not compare raw dpkg version spellings"
+        );
     }
 
     #[test]

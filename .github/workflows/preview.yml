@@ -738,9 +738,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # GitHub rewrites release asset names: every `~` becomes `.` (dpkg
+          # version separators never survive as-is), so the expected names are
+          # normalized the same way before comparison instead of demanding the
+          # on-disk spelling back.
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/preview" > published.json
+          asset_version="$(printf '%s' "$VERSION" | tr '~' '.')"
           jq -e \
-            --arg name "$NAME" --arg commit "$COMMIT" --arg version "$VERSION" '
+            --arg name "$NAME" --arg commit "$COMMIT" --arg asset_version "$asset_version" '
               (.draft | not) and .prerelease == true and
               .tag_name == "preview" and .name == $name and
               .target_commitish == $commit and
@@ -748,10 +753,10 @@ jobs:
               ([
                 "SHA256SUMS",
                 "release-manifest.json",
-                ("velnor-runner-preview-" + $version + "-amd64.deb"),
-                ("velnor-runner-preview-" + $version + "-amd64.deb.sha256"),
-                ("velnor-runner-preview-" + $version + "-arm64.deb"),
-                ("velnor-runner-preview-" + $version + "-arm64.deb.sha256")
+                ("velnor-runner-preview-" + $asset_version + "-amd64.deb"),
+                ("velnor-runner-preview-" + $asset_version + "-amd64.deb.sha256"),
+                ("velnor-runner-preview-" + $asset_version + "-arm64.deb"),
+                ("velnor-runner-preview-" + $asset_version + "-arm64.deb.sha256")
               ] | sort)
             ' published.json >/dev/null
           jq -e --arg version "$VERSION" \
