@@ -29,6 +29,16 @@ reviewed body under `.github/ci/workflow-templates/`, then renders the workflow
 from that generator-owned template. The ownership sidecar keeps the historical path
 `.github/ci/.github-actions-generator-state` for safe adoption of older trees.
 
+Repositories may pin their generation inputs in an optional
+`.github-gen/velnor-workflow.toml` (`schema = 1`): the repository slug, runner
+and branch overrides, scan excludes, policy switches, and `[[declare]]` render
+primitives. Generation is a function of the scanned repository shape, this
+config, and the generator revision (`GENERATOR_REVISION`); all three are
+recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
+no longer match the current run, even if every generated file is unchanged.
+A sidecar written by an older schema is never parsed: rerun generate on a
+byte-matching tree to move it to schema 2.
+
 Generated jobs install the runtime through the versioned composite action
 (mise-action model: declare a revision, get the binary on PATH, cached)
 instead of an inline `cargo install`, so toolchain setup stays centralized:

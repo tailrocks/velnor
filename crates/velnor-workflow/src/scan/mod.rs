@@ -83,6 +83,26 @@ impl RepositoryShape {
         self.limitations.sort();
         self.limitations.dedup();
     }
+
+    /// Every verification unit id the scan produced, in canonical order.
+    pub(crate) fn unit_ids(&self) -> impl Iterator<Item = &str> {
+        self.units.iter().map(|unit| unit.id.as_str())
+    }
+
+    /// Canonical serialization of the shape.
+    ///
+    /// The shape stores every sequence in canonical sorted order and no float,
+    /// so the derived serialization is stable across runs and machines; the
+    /// state file digests exactly this string as the `scan` generation input.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails, which cannot happen for the
+    /// shape's own types but is never unwrapped.
+    pub(crate) fn canonical_json(&self) -> Result<String, GeneratorError> {
+        serde_json::to_string(self).map_err(|error| {
+            GeneratorError::usage(format!("canonicalize repository shape: {error}"))
+        })
+    }
 }
 
 /// Typed output of the scan pass, before any repository-specific policy is
