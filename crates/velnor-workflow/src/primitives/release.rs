@@ -20,8 +20,7 @@ use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
     velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
     ProjectConfig, ReleaseSpec, RunnerMode, GENERATED_HEADER,
-    VELNOR_PREVIEW_WORKFLOW_TEMPLATE, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
-    VELNOR_RELEASE_WORKFLOW_TEMPLATE,
+    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -61,16 +60,11 @@ pub(crate) fn release_content(config: &ProjectConfig) -> Option<String> {
         .map(|release| render_release(config, release))
 }
 
-/// The `preview.yml` content for a config. A repository whose release kind
-/// carries a fully reviewed native publisher renders its declared static
-/// preview surface; every other contract renders the generic rolling preview.
+/// The `preview.yml` content for a config. Every contract renders the generic
+/// rolling preview; a repository with a reviewed native preview declares its
+/// bytes as a static workflow instead.
 pub(crate) fn preview_content(config: &ProjectConfig) -> String {
-    match config.release.as_ref() {
-        Some(release) if release.kind == "velnor-native" => {
-            crate::render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE)
-        }
-        _ => render_preview(config, config.release.as_ref()),
-    }
+    render_preview(config, config.release.as_ref())
 }
 
 /// The headerless `maintenance.yml` body for a config.
@@ -492,9 +486,6 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    if release.kind == "velnor-native" {
-        return crate::render_static_template(VELNOR_RELEASE_WORKFLOW_TEMPLATE);
-    }
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
@@ -1141,6 +1132,7 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
             static_files: Vec::new(),
@@ -1165,7 +1157,7 @@ mod tests {
         generation: Option<&str>,
     ) -> Result<super::super::Surface, GeneratorError> {
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {
@@ -1204,11 +1196,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5b28774542a543b5c2fce41fc7c701067f81a5ea8d72278504163838c386db69",
+                "bb7af344828e3249f134152387340eac4721ee820c5095b06789000546676404",
             ),
             (
                 "preview.yml",
-                "4d8c76b54887b7efc2dfdcc266018868a1c4f5538c4324ce73414e6cbe2a046b",
+                "2fa8e25f56d4f0540f9778651baf95005dbf205149f7c9ced5ef40a2563dcbba",
             ),
             (
                 "maintenance.yml",

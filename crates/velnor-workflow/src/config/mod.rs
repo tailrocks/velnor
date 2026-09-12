@@ -240,8 +240,7 @@ pub(crate) struct StaticFileSection {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScanSection {
-    /// Repository paths the scan must ignore. The list is consumed when
-    /// declared primitives land; it is carried and digested until then.
+    /// Repository paths the scan must ignore.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclude: Vec<String>,
 }
@@ -516,6 +515,17 @@ impl RepoGenerationConfig {
         &self.static_files
     }
 
+    /// The repository paths excluded from the scan.
+    pub(crate) fn scan_exclude(&self) -> Result<&[String], GeneratorError> {
+        validate_excludes(&self.scan.exclude)?;
+        Ok(&self.scan.exclude)
+    }
+
+    /// Whether the generated CI aggregate should be required.
+    pub(crate) fn ci_required(&self) -> Option<bool> {
+        self.policy.ci_required
+    }
+
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
         match self.schema {
             Some(CONFIG_SCHEMA) => Ok(()),
@@ -549,6 +559,7 @@ impl RepoGenerationConfig {
             )
         })?;
         validate_repository_slug(repository)?;
+        validate_workflow(&self.workflow)?;
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -681,6 +692,36 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
                 "[scan] exclude is not a valid glob: {pattern}"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
+    if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
+        return Err(GeneratorError::usage(
+            "[workflow] github_runner must not be empty",
+        ));
+    }
+    if let Some(labels) = &workflow.velnor_labels {
+        if labels.is_empty() {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not be empty",
+            ));
+        }
+        if labels.iter().any(String::is_empty) {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not contain empty labels",
+            ));
+        }
+    }
+    if workflow
+        .velnor_runner_group
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(GeneratorError::usage(
+            "[workflow] velnor_runner_group must not be empty",
+        ));
     }
     Ok(())
 }
@@ -1001,7 +1042,7 @@ mod tests {
 
     fn shape_for(root: &Path) -> crate::scan::RepositoryShape {
         must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan config test repository",
         )
     }

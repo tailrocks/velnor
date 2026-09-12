@@ -886,6 +886,7 @@ pub(crate) fn catalog_config_with_default_branch(
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
         actionlint_config_variables_null: false,
+        ci_required: true,
         package_update_channels: None,
         velnor_runner_group: None,
         static_files: Vec::new(),

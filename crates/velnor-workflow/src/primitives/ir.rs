@@ -248,6 +248,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
     pub(crate) velnor_labels: Vec<String>,
+    pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
@@ -340,6 +341,7 @@ impl WorkflowIr {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
+            ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
             runners: config.runners,
             tools,
@@ -441,7 +443,7 @@ impl WorkflowIr {
         // Auxiliary schedules must not create or satisfy the branch-protection
         // check. Only the PR and main workflows own the stable `ci-required`
         // check that repository rulesets gate on.
-        if kind != WorkflowKind::Nightly {
+        if kind != WorkflowKind::Nightly && self.ci_required {
             self.render_required(
                 &mut output,
                 runners,
@@ -529,7 +531,7 @@ impl WorkflowIr {
         if kind == WorkflowKind::Nightly {
             self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
             self.render_nightly_alert(&mut output);
-        } else {
+        } else if self.ci_required {
             self.render_nodes_required(
                 nodes,
                 &mut output,

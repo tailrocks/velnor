@@ -77,7 +77,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "5bea6c12f45441d3c1ae409902446d1f64cbb4
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "6e59b98d5d1a6d42017465b045554a18d97d7e68";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "9c1a0782ec6138207986ee42016c0af1282ee02c";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 // The GitHub cache payload changed from Cargo's target tree to mbx objects.
 // Keep the transition explicit: the generated custom keys bypass the action's
@@ -92,12 +92,6 @@ const MR_BOXINGTON_CARGO_SUBCOMMANDS: &[&str] = &[
     "audit", "bench", "build", "check", "clippy", "deb", "deny", "doc", "fix", "fmt", "nextest",
     "package", "publish", "run", "test", "update", "zigbuild",
 ];
-const VELNOR_RELEASE_WORKFLOW_TEMPLATE: &str = include_str!("../templates/velnor-release.yml");
-// Rolling preview lane: emitted as `.github/workflows/preview.yml` when a
-// release contract selects `ReleaseKind::VelnorNative`, whose preview builds
-// release-grade debs and is a code-owned static template instead of the
-// generated `preview_content` render every other contract keeps.
-const VELNOR_PREVIEW_WORKFLOW_TEMPLATE: &str = include_str!("../templates/velnor-preview.yml");
 const VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE: &str =
     include_str!("../templates/release-package-signer.yml");
 
@@ -606,6 +600,8 @@ pub struct ProjectConfig {
     /// disabling its configuration-variables check for surfaces that declare
     /// none.
     pub(crate) actionlint_config_variables_null: bool,
+    /// Require the generated CI aggregate check to conclude the workflow.
+    pub(crate) ci_required: bool,
     /// Per-owner-block update channel grants from the repo-owned generation
     /// config, or `None` while the repository has not adopted a config.
     pub(crate) package_update_channels: Option<BTreeMap<String, Vec<String>>>,
@@ -802,8 +798,13 @@ fn scan_target(
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
-    let shape = scan::scan_shape(root, runners, default_branch)?;
     let generation = config::discover(root)?;
+    let exclude = generation
+        .as_ref()
+        .map(config::RepoGenerationConfig::scan_exclude)
+        .transpose()?
+        .unwrap_or(&[]);
+    let shape = scan::scan_shape(root, runners, default_branch, exclude)?;
     let mut config = ProjectConfig::from(shape.clone());
     enable_mr_boxington_commands(&mut config);
     if let Some(generation) = &generation {
@@ -1270,6 +1271,15 @@ fn load_workflow_templates(
 ///
 /// # Errors
 /// Returns errors for a declared source file that is missing or unreadable.
+fn validate_config_text(value: &str, field: &str) -> Result<(), GeneratorError> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(GeneratorError::usage(format!(
+            "{field} must be non-empty and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
 fn apply_generation_config(
     config: &mut ProjectConfig,
     generation: &config::RepoGenerationConfig,
@@ -1279,9 +1289,18 @@ fn apply_generation_config(
         repository.clone_into(&mut config.repository);
     }
     if let Some(runner) = generation.github_runner() {
+        validate_config_text(runner, "[workflow] github_runner")?;
         runner.clone_into(&mut config.github_runner);
     }
     if let Some(labels) = generation.velnor_labels() {
+        if labels.is_empty() {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not be empty",
+            ));
+        }
+        for label in labels {
+            validate_config_text(label, "[workflow] velnor_labels")?;
+        }
         config.velnor_labels = labels.to_vec();
     }
     if let Some(group) = generation.velnor_runner_group() {
@@ -1300,7 +1319,11 @@ fn apply_generation_config(
         config.version_bump_units = units.to_vec();
     }
     if let Some(branch) = generation.default_branch() {
+        validate_default_branch(branch)?;
         branch.clone_into(&mut config.default_branch);
+    }
+    if let Some(ci_required) = generation.ci_required() {
+        config.ci_required = ci_required;
     }
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
@@ -3678,6 +3701,16 @@ fn delete_reviewed_file(
     Ok(())
 }
 
+/// Test helper: replace a path with new content through the same staged
+/// rename the reviewed writer uses, so the file identity changes while the
+/// bytes stay identical.
+#[cfg(test)]
+fn atomic_write(path: &Path, content: &str) -> Result<(), GeneratorError> {
+    let staged = stage_generated_file(path, content)?;
+    fs::rename(&staged, path)
+        .map_err(|error| GeneratorError::io("install generated file", path, &error))
+}
+
 fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, GeneratorError> {
     let parent = path
         .parent()
@@ -4266,8 +4299,8 @@ impl Drop for Checkout {
 mod tests {
     use super::*;
     use crate::estate::{
-        catalog_config_with_default_branch, catalog_units, render_apt_package_update_template,
-        RepositoryProfile, ESTATE_PROFILES,
+        catalog_config_with_default_branch, catalog_unit, catalog_units,
+        estate_profile, render_apt_package_update_template, RepositoryProfile, ESTATE_PROFILES,
     };
     use crate::scan::rust::{parse_cargo_manifest, parse_include_str_literals, CargoDependency};
 
@@ -5582,7 +5615,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
     #[test]
     fn generated_actionlint_config_covers_declared_runner_labels() {
         let config = scanned_fixture(RunnerMode::Both);
-        let files = generated_files(&config);
+        let files = must(generated_files(&config), "generate");
         let actionlint = must_some(
             files.get(&PathBuf::from(".github/actionlint.yaml")),
             "generated actionlint configuration",
@@ -5731,6 +5764,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
             static_files: Vec::new(),
@@ -6483,7 +6517,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    #[test]
     fn detected_cargo_source_caches_render_alongside_mr_boxington() {
         let root = temporary_repository("rust-cache");
         must(
@@ -6579,7 +6612,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn mr_boxington_units_restore_their_declared_cargo_sources_on_both_lanes() {
-        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
         let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
         let rust = must_some(
             config.units.iter().find(|unit| unit.id == "rust"),
@@ -6610,7 +6643,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn raw_output_caches_alongside_mr_boxington_need_a_justification() {
-        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
         let rust = must_some(
             config.units.iter_mut().find(|unit| unit.id == "rust"),
@@ -6657,7 +6690,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn rust_units_fetch_sources_first_and_verify_offline_except_policy() {
-        let profile = must_some(estate_profile("tailrocks/velnor"), "Velnor estate profile");
+        let profile = must_some(estate_profile("tailrocks/tablerock"), "estate profile");
         let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
         let mut policy = catalog_unit(
             "rust-dependency-policy",
@@ -6934,7 +6967,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             scan_target(&source, RunnerMode::Github, "main"),
             "scan the declared surface for ownership migration",
         );
-        let initial = generated_files(&scanned.config);
+        let initial = must(generated_files(&scanned.config), "generate");
         must(
             write_generated(&root, &initial, false, false, false),
             "record generated ownership",
@@ -7127,7 +7160,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
 
         let plan = must(
-            plan_generated_write(&root, &current),
+            plan_generated_write(&root, &current, &GenerationInputs::parts(0, 0)),
             "plan current generated layout",
         );
         assert!(plan
@@ -7157,7 +7190,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             format!("{GENERATED_HEADER}name: wanted\n"),
         )]);
         let reviewed = must(
-            plan_generated_write(&root, &wanted),
+            plan_generated_write(&root, &wanted, &GenerationInputs::parts(0, 0)),
             "capture reviewed preimages",
         );
         let concurrent = BTreeMap::from([(
@@ -7169,13 +7202,13 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "write concurrent generated layout",
         );
         let current = must(
-            plan_generated_write(&root, &wanted),
+            plan_generated_write(&root, &wanted, &GenerationInputs::parts(0, 0)),
             "capture concurrent preimages",
         );
         assert_ne!(reviewed, current);
 
         let error = must_some(
-            apply_generated_write_plan(&root, &wanted, false, false, true, &reviewed).err(),
+            apply_generated_write_plan(&root, &wanted, &GenerationInputs::parts(0, 0), false, false, true, &reviewed).err(),
             "refuse unreviewed concurrent bytes",
         );
         assert!(error.to_string().contains("changed after preflight"));
@@ -7201,7 +7234,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "write generated layout",
         );
         let reviewed = must(
-            plan_generated_write(&root, &files),
+            plan_generated_write(&root, &files, &GenerationInputs::parts(0, 0)),
             "capture reviewed identity",
         );
         let content = must(fs::read_to_string(root.join(&relative)), "read exact bytes");
@@ -7211,7 +7244,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
 
         let error = must_some(
-            apply_generated_write_plan(&root, &files, true, false, false, &reviewed).err(),
+            apply_generated_write_plan(&root, &files, &GenerationInputs::parts(0, 0), true, false, false, &reviewed).err(),
             "refuse replaced identity",
         );
         assert!(error.to_string().contains("changed after preflight"));
@@ -7384,7 +7417,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 fs::read_to_string(root.join(OWNERSHIP_STATE)),
                 "read refreshed ownership state",
             ),
-            ownership_state_content(&current, &test_inputs())
+            ownership_state_content(&current, &GenerationInputs::parts(0, 0))
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -7525,7 +7558,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "create guide symlink",
         );
         must(
-            write_ownership_state(&root, &previous, &test_inputs()),
+            fs::write(root.join(OWNERSHIP_STATE), ownership_state_content(&previous, &GenerationInputs::parts(0, 0))),
             "restore legacy guide ownership state",
         );
         let error = must_some(
@@ -7597,6 +7630,15 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
     #[test]
     fn estate_remote_repository_scans_and_adopts_its_own_workflows() {
+        // The consumer comes from the legacy table itself, so the generator
+        // source never names a specific estate repository.
+        let consumer = must_some(
+            ESTATE_PROFILES
+                .iter()
+                .find(|profile| profile.profile == RepositoryProfile::AptRepository)
+                .map(|profile| profile.repository),
+            "apt consumer on the legacy table",
+        );
         let root = temporary_repository("estate-remote-self-scan");
         must(
             fs::create_dir_all(root.join(".git")),
@@ -7605,12 +7647,12 @@ const INCLUDED: &str = include_str!("fixture.txt");
         must(
             fs::write(
                 root.join(".git/config"),
-                "[remote \"origin\"]\n    url = git@github.com:tailrocks/example-self-scan.git\n",
+                &format!("[remote \"origin\"]\n    url = git@github.com:{consumer}.git\n"),
             ),
             "write repository remote metadata",
         );
         let self_hosted = format!(
-            "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: tailrocks/example-self-scan/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
+            "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: {consumer}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
         );
         let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
         must(
@@ -7635,7 +7677,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             scan_repository(&root, RunnerMode::Github),
             "scan remote-identified repository",
         );
-        assert_eq!(config.repository, "tailrocks/example-self-scan");
+        assert_eq!(config.repository, consumer);
         must(
             adopt_existing_workflow_templates(&root, config),
             "adopt self-referencing workflow",
@@ -8302,10 +8344,81 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     fn configured_repository_config(unit: &str) -> String {
         format!(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
-             [policy]\nci_required = true\n\n\
+             "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+             [policy]\nci_required = true\ndco_required = false\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"{unit}\"]\nfile = \"rust-crate.yml\"\n"
         )
+    }
+
+    #[test]
+    fn generation_config_supported_overrides_reach_rendered_output() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ngithub_runner = \"ubuntu-test\"\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\ndefault_branch = \"trunk\"\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
+        let root = configured_repository("generation-overrides", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.config.github_runner, "ubuntu-test");
+        assert_eq!(
+            scanned.config.velnor_labels,
+            vec!["self-hosted", "fixture-runner"]
+        );
+        assert_eq!(scanned.config.default_branch, "trunk");
+        assert!(!scanned.config.ci_required);
+        assert!(scanned.config.actionlint_config_variables_null);
+
+        let files = must(
+            generated_files(&scanned.config),
+            "render configured repository",
+        );
+        let pull_request =
+            WorkflowIr::from_config(&scanned.config).render(WorkflowKind::PullRequest);
+        let main = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
+            "generated main workflow",
+        );
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated actionlint config",
+        );
+        assert!(pull_request.contains("runs-on: ubuntu-test"));
+        assert!(pull_request.contains("runs-on: [self-hosted, fixture-runner]"));
+        assert!(!pull_request.contains("name: ci-required"));
+        assert!(main.contains("branches: [trunk]"));
+        assert!(!main.contains("name: ci-required"));
+        assert!(actionlint.contains("config-variables: null"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_scan_exclude_removes_files_from_scan_shape() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[scan]\nexclude = [\"excluded/**\"]\n";
+        let root = configured_repository("scan-exclude", Some(config));
+        let excluded = root.join("excluded");
+        must(fs::create_dir_all(&excluded), "create excluded package");
+        must(
+            fs::write(
+                excluded.join("Cargo.toml"),
+                "[package]\nname = \"excluded\"\nversion = \"0.1.0\"\n",
+            ),
+            "write excluded manifest",
+        );
+
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan repository with exclusions",
+        );
+        assert!(scanned
+            .shape
+            .files()
+            .iter()
+            .all(|file| !file.starts_with("excluded/")));
+        assert!(scanned
+            .config
+            .units
+            .iter()
+            .all(|unit| unit.root != "excluded"));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn generate_repository(root: &Path, force: bool) -> WriteOutcome {
@@ -8424,7 +8537,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         generate_repository(&root, false);
         let recorded = recorded_state(&root).inputs.config;
 
-        let after = before.replace("ci_required = true", "ci_required = false");
+        let after = before.replace("dco_required = false", "dco_required = true");
         assert_ne!(after, before, "the flip must change the config");
         must(
             fs::write(root.join(".github-gen").join("velnor-workflow.toml"), after),

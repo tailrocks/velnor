@@ -429,17 +429,57 @@ fn include_str_paths(
                     root.join(source).display()
                 ))
             })?;
-            if !file_set.contains(&target) && !static_github_input_exists(root, &target)? {
+            let target = if file_set.contains(&target) || static_github_input_exists(root, &target)?
+            {
+                target
+            } else if let Some(resolved) = resolve_tracked_include_path(root, &target, file_set)? {
+                resolved
+            } else {
                 return Err(GeneratorError::usage(format!(
                     "include_str! target does not exist: {} -> {}",
                     root.join(source).display(),
                     target
                 )));
-            }
+            };
             targets.insert(target);
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+/// Resolve an include path through a symlink to the tracked path that owns its
+/// bytes. The final canonical path must stay under the repository root; an
+/// existing but untracked or external target is not valid scan input.
+fn resolve_tracked_include_path(
+    root: &Path,
+    target: &str,
+    file_set: &BTreeSet<String>,
+) -> Result<Option<String>, GeneratorError> {
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| GeneratorError::io("canonicalize repository root", root, &error))?;
+    let path = root.join(target);
+    let canonical_target = match fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "resolve include_str target",
+                &path,
+                &error,
+            ));
+        }
+    };
+    let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
+        return Ok(None);
+    };
+    let relative = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if file_set.contains(&relative) {
+        Ok(Some(relative))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, String> {
@@ -843,4 +883,116 @@ pub(crate) fn detect(
     shape.detected.extend(rust.detected);
     shape.limitations.extend(rust.limitations);
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::include_str_paths;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-workflow-rust-scan-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        must(fs::create_dir_all(&root), "create scratch directory");
+        root
+    }
+
+    #[test]
+    fn include_str_through_symlinked_directory_watches_resolved_tracked_file() {
+        let root = scratch("symlinked-include");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("assets")),
+            "create asset directory",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const MANIFEST: &str = include_str!(\"linked/manifest.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            fs::write(root.join("assets/manifest.yml"), "manifest\n"),
+            "write include target",
+        );
+        must(
+            symlink("../assets", root.join("src/linked")),
+            "create tracked symlink directory",
+        );
+
+        let files = vec!["assets/manifest.yml".to_owned(), "src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let targets = must(
+            include_str_paths(&root, &files, &file_set, "."),
+            "resolve symlinked include target",
+        );
+
+        assert_eq!(targets, vec!["assets/manifest.yml"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "the test must distinguish an accepted external target from the expected error"
+    )]
+    #[test]
+    fn include_str_through_external_symlink_is_rejected() {
+        let root = scratch("external-symlink");
+        let outside = scratch("external-symlink-target");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::write(outside.join("manifest.yml"), "external\n"),
+            "write external target",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const MANIFEST: &str = include_str!(\"linked/manifest.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            symlink(&outside, root.join("src/linked")),
+            "create external symlink directory",
+        );
+
+        let files = vec!["src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let error = match include_str_paths(&root, &files, &file_set, ".") {
+            Ok(targets) => panic!("external include target was accepted: {targets:?}"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("include_str! target does not exist"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
 }
