@@ -179,6 +179,9 @@ fn probe_admission(
         slot_name: Some("slot-0".to_owned()),
         runner_name: Some("probe-runner".to_owned()),
         trust_scope: Some(trust_scope.to_owned()),
+        // Probes exercise the store/telemetry paths, not trust derivation;
+        // the class is fixed to the trusted baseline.
+        trust_class: crate::trust_class::TrustClass::Trusted,
         resource_policy: Some("standard".to_owned()),
         masks,
     }
@@ -213,6 +216,7 @@ pub fn run_ops_telemetry_probe() -> (String, Vec<u8>) {
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("probe-runner".to_owned()),
             trust_scope: Some(SECRET.to_owned()),
+            trust_class: crate::trust_class::TrustClass::Trusted,
             resource_policy: Some("standard".to_owned()),
             masks: vec![SECRET.to_owned()],
         };

@@ -6082,6 +6082,15 @@ async fn handle_job_request(
     }
     run_service_job.journal_state = RunServiceJobJournalState::Accepted;
 
+    // The job's trust class, derived once from the job's own event, before
+    // the admission row persists. The pool flag is only the ceiling: fork
+    // and unknown jobs run under the untrusted floor on every pool. The
+    // admission row and every observation below record this admitted scope,
+    // never the raw pool flag — the secrets gate, the storage leases, the
+    // container spec, and the executor all enforce it.
+    let job_trust = crate::trust_class::TrustClass::derive(&job);
+    let effective_trust_scope = job_trust.admitted_scope(&args.trust_scope).to_owned();
+
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing
@@ -6116,7 +6125,8 @@ async fn handle_job_request(
                     .and_then(|value| value.value.clone())
             }),
             runner_name: Some(runner_name.to_owned()),
-            trust_scope: Some(args.trust_scope.clone()),
+            trust_scope: Some(effective_trust_scope.clone()),
+            trust_class: job_trust,
             resource_policy: Some(resource_policy_label(&args.job_cpus, &args.job_memory)),
             slot_name: Some(canonical_slot_name(config_dir)),
             masks: job_secret_mask_values(&job),
@@ -6172,13 +6182,8 @@ async fn handle_job_request(
     };
 
     apply_workflow_script_step_names(&mut job, &early_context, &broker_cancellation.stored).await;
-    // The job's trust class, derived once from the job's own event. The pool
-    // flag is only the ceiling: fork and unknown jobs run under the untrusted
-    // floor on every pool. Everything below — the secrets gate, the storage
-    // leases, the container spec, the executor — enforces this admitted scope,
-    // never the raw pool flag.
-    let job_trust = crate::trust_class::TrustClass::derive(&job);
-    let effective_trust_scope = job_trust.admitted_scope(&args.trust_scope).to_owned();
+    // `job_trust` and `effective_trust_scope` were derived above, before the
+    // admission row persisted; everything below enforces that admitted scope.
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -14686,6 +14691,89 @@ mod tests {
     }
 
     #[test]
+    fn admission_conformance_row_and_telemetry_record_derived_trust() {
+        use crate::trust_class::TrustClass;
+
+        // F-V1: trust derives before the admission row persists, and the row
+        // plus its telemetry record the job's class and effective scope —
+        // never the raw pool flag. Each case builds the admission exactly as
+        // `handle_job_request` does: derive, narrow, then persist.
+        for (event, head, class, scope) in [
+            ("push", None, TrustClass::Trusted, "trusted"),
+            (
+                "pull_request",
+                Some("mallory/base"),
+                TrustClass::ForkPR,
+                "untrusted",
+            ),
+        ] {
+            let job = admission_job(event, head, false);
+            assert_eq!(TrustClass::derive(&job), class);
+            let admitted = class.admitted_scope("trusted").to_owned();
+            assert_eq!(admitted, scope);
+
+            let base = unique_temp_dir("admission-trust-row");
+            std::fs::create_dir_all(&base).unwrap();
+            let db_path = base.join("state.db");
+            let sink = std::sync::Arc::new(
+                crate::ops::OpsSink::open(db_path.clone(), "test-instance".to_owned()).unwrap(),
+            );
+            let admission = crate::ops::JobAdmission {
+                instance_slug: "test-instance".to_owned(),
+                job_uid: format!("job-{event}"),
+                repository_full_name: "octo/base".to_owned(),
+                workflow: "CI".to_owned(),
+                job_name: "Admission".to_owned(),
+                run_id: Some(7),
+                attempt: Some(1),
+                head_ref: None,
+                head_sha: None,
+                trigger_event: Some(event.to_owned()),
+                queued_at_rfc3339: None,
+                slot_name: Some("slot-0".to_owned()),
+                runner_name: Some("fixture-runner-0".to_owned()),
+                trust_scope: Some(admitted),
+                trust_class: class,
+                resource_policy: Some("standard".to_owned()),
+                masks: job_secret_mask_values(&job),
+            };
+            let queued_fields = BTreeMap::from([
+                ("queued_for_ms".to_owned(), serde_json::json!(0_u64)),
+                ("queue_time_present".to_owned(), serde_json::json!(false)),
+            ]);
+            assert!(sink
+                .emit_telemetry_for_admission(
+                    &admission,
+                    velnor_model::TelemetryEvent::RunQueued,
+                    queued_fields,
+                )
+                .is_some());
+            assert!(sink.record_admission(&admission));
+
+            let stored = sink
+                .store_for_tests()
+                .fetch_summary_by_job_uid("test-instance", &format!("job-{event}"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.trust_class(), Some(class.as_str()), "{event}");
+            assert_eq!(stored.trust_scope(), Some(scope), "{event}");
+
+            let telemetry_path =
+                velnor_control::telemetry::path_for_instance(&db_path, "test-instance");
+            let telemetry = std::fs::read_to_string(telemetry_path).unwrap();
+            let records: Vec<serde_json::Value> = telemetry
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(records.len(), 2, "{event}");
+            for record in &records {
+                assert_eq!(record["trust_domain"], scope, "{event}");
+                assert_eq!(record["fields"]["trust_class"], class.as_str(), "{event}");
+            }
+        }
+    }
+
+    #[test]
     fn admission_regression_missing_signal_downgrades_on_trusted_pool() {
         use crate::trust_class::TrustClass;
 
@@ -17279,6 +17367,7 @@ jobs:
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
+            trust_class: crate::trust_class::TrustClass::Trusted,
             resource_policy: Some("standard".to_owned()),
             masks: vec!["worker-test-secret".to_owned()],
         }

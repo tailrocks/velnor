@@ -82,3 +82,13 @@ second.
 
 A missing or invalid repository identity fails closed to a job-ephemeral store
 rather than sharing one.
+
+## Admission record
+
+Trust derives before the admission row persists, so every admitted job is
+auditable: the row carries the job's trust class (`trusted`, `fork-pr`,
+`unknown`) and the effective admitted scope it runs with, and the job's
+telemetry observations carry the same two values as `trust_class` and
+`trust_domain`. Rows admitted before this record existed keep a null class,
+and only rows admitted after it are guaranteed to carry the effective scope
+rather than the pool ceiling.

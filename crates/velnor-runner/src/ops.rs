@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::trust_class::TrustClass;
 #[cfg(test)]
 use rusqlite::Connection;
 use velnor_control::store::{
@@ -126,7 +127,13 @@ pub struct JobAdmission {
     pub queued_at_rfc3339: Option<String>,
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
+    /// Effective admitted scope the job runs with: the pool ceiling narrowed
+    /// by [`TrustClass`], never the raw pool flag.
     pub trust_scope: Option<String>,
+    /// The job's trust class, derived before this row is constructed. The
+    /// typed, non-optional field is the ordering proof: an admission row
+    /// cannot exist without a derivation.
+    pub trust_class: TrustClass,
     pub resource_policy: Option<String>,
     /// Secret/mask values collected from the raw job message; applied to
     /// every textual projection so no secret value can enter the store even
@@ -169,6 +176,9 @@ impl JobAdmission {
             slot_name: self.slot_name.as_deref().map(|v| self.project(v)),
             runner_name: self.runner_name.as_deref().map(|v| self.project(v)),
             trust_scope: self.trust_scope.as_deref().map(|v| self.project(v)),
+            // Code-generated closed label, never workflow input: it bypasses
+            // mask projection so no secret value can rewrite the audit fact.
+            trust_class: Some(self.trust_class.as_str().to_owned()),
             resource_policy: self
                 .resource_policy
                 .as_deref()
@@ -461,7 +471,7 @@ impl OpsSink {
         &self,
         admission: &JobAdmission,
         event: TelemetryEvent,
-        fields: BTreeMap<String, serde_json::Value>,
+        mut fields: BTreeMap<String, serde_json::Value>,
     ) -> Option<TelemetryEmission> {
         let run_id = admission
             .run_id
@@ -469,6 +479,13 @@ impl OpsSink {
             .unwrap_or_else(|| admission.project(&admission.job_uid));
         let repo = admission.project(&admission.repository_full_name);
         let trust_domain = admission.project(admission.trust_scope.as_deref().unwrap_or("unknown"));
+        // Admission-bound context, like `trust_domain`: every lifecycle
+        // observation carries the derived class. The admission is
+        // authoritative over any caller-supplied field of the same name.
+        fields.insert(
+            "trust_class".to_owned(),
+            serde_json::Value::String(admission.trust_class.as_str().to_owned()),
+        );
         let input = TelemetryEnvelopeInput {
             run_id: &run_id,
             action_key_digest: None,
@@ -487,6 +504,11 @@ impl OpsSink {
             Ok(envelope) => Some(self.telemetry.emit(envelope)),
             Err(_) => None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_for_tests(&self) -> &Store {
+        &self.store
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1243,6 +1265,7 @@ mod tests {
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
+            trust_class: TrustClass::Trusted,
             resource_policy: Some("standard".to_owned()),
             masks: secret.iter().map(|value| (*value).to_owned()).collect(),
         }
@@ -1268,6 +1291,86 @@ mod tests {
         let record: serde_json::Value = serde_json::from_str(telemetry.trim()).unwrap();
         assert_eq!(record["event"], "run_admitted");
         assert_eq!(record["run_id"], "101");
+    }
+
+    #[test]
+    fn admission_row_carries_trust_class_and_effective_scope() {
+        let (_dir, sink) = temp_sink("trust-row");
+        for (run_id, class, scope) in [
+            (201_u64, TrustClass::Trusted, "trusted"),
+            (202_u64, TrustClass::ForkPR, "untrusted"),
+            (203_u64, TrustClass::Unknown, "untrusted"),
+        ] {
+            let mut adm = admission(run_id, None);
+            adm.trust_class = class;
+            adm.trust_scope = Some(scope.to_owned());
+            assert!(sink.record_admission(&adm));
+            let uid = adm.job_uid().unwrap();
+            let stored = sink
+                .store
+                .fetch_summary_by_job_uid("test-instance", &uid)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.trust_class(), Some(class.as_str()));
+            assert_eq!(stored.trust_scope(), Some(scope));
+        }
+        let rows = sink.store.job_summaries("test-instance").unwrap();
+        assert_eq!(rows.len(), 3);
+        let fork = rows
+            .iter()
+            .find(|row| row.job_uid == "job-202")
+            .expect("fork row");
+        assert_eq!(fork.trust_class.as_deref(), Some("fork-pr"));
+        assert_eq!(fork.trust_scope.as_deref(), Some("untrusted"));
+    }
+
+    #[test]
+    fn admission_telemetry_carries_trust_class_and_effective_domain() {
+        let (dir, sink) = temp_sink("trust-telemetry");
+        let mut adm = admission(204, None);
+        adm.trust_class = TrustClass::ForkPR;
+        adm.trust_scope = Some("untrusted".to_owned());
+        let fields = BTreeMap::from([
+            ("queued_for_ms".to_owned(), serde_json::json!(7_u64)),
+            ("queue_time_present".to_owned(), serde_json::json!(true)),
+        ]);
+        assert!(sink
+            .emit_telemetry_for_admission(&adm, TelemetryEvent::RunQueued, fields)
+            .is_some());
+        assert!(sink.record_admission(&adm));
+
+        let telemetry = std::fs::read_to_string(dir.join("state.test-instance.telemetry.jsonl"))
+            .expect("telemetry records");
+        let records: Vec<serde_json::Value> = telemetry
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid record"))
+            .collect();
+        assert_eq!(records.len(), 2);
+        for record in &records {
+            assert_eq!(record["trust_domain"], "untrusted");
+            assert_eq!(record["fields"]["trust_class"], "fork-pr");
+        }
+        assert_eq!(records[0]["event"], "run_queued");
+        assert_eq!(records[1]["event"], "run_admitted");
+    }
+
+    #[test]
+    fn trust_class_label_survives_mask_projection() {
+        let (_dir, sink) = temp_sink("trust-mask");
+        // A secret equal to a class label must not rewrite the audit fact:
+        // the label bypasses mask projection by construction.
+        let mut adm = admission(205, Some("fork-pr"));
+        adm.trust_class = TrustClass::ForkPR;
+        adm.trust_scope = Some("untrusted".to_owned());
+        adm.job_name = "hold".to_owned();
+        assert!(sink.record_admission(&adm));
+        let uid = adm.job_uid().unwrap();
+        let stored = sink
+            .store
+            .fetch_summary_by_job_uid("test-instance", &uid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.trust_class(), Some("fork-pr"));
     }
 
     #[test]
