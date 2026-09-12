@@ -67,7 +67,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -193,7 +192,7 @@ impl CacheService {
     }
 
     fn prefix_scan(&self, key: &str, version: &str, namespace: Option<&str>) -> Option<CacheHit> {
-        let mut hits: BTreeMap<String, CacheHit> = BTreeMap::new();
+        let mut best: Option<((u64, usize, String), CacheHit)> = None;
         let entries = std::fs::read_dir(self.tenant_root(namespace).join("entries")).ok()?;
         for file in entries.flatten() {
             let path = file.path();
@@ -220,17 +219,22 @@ impl CacheService {
                 .unwrap_or_default()
                 .to_owned();
             // Newest wins; ties broken by longest key (GitHub favors the most
-            // specific restore key on equal timestamps in practice).
-            let rank = format!("{created:020}/{:04}", entry_key.len());
-            hits.insert(
-                rank,
-                CacheHit {
-                    hash,
-                    key: entry_key.to_owned(),
-                },
-            );
+            // specific restore key on equal timestamps in practice), then by
+            // hash for determinism. Track the max directly: ranking through a
+            // map keyed by a (created_ms, key_len) string let equal-rank
+            // entries overwrite each other, so an arbitrary loser could win
+            // depending on directory iteration order.
+            let rank = (created, entry_key.len(), hash.clone());
+            let hit = CacheHit {
+                hash,
+                key: entry_key.to_owned(),
+            };
+            match &best {
+                Some((best_rank, _)) if *best_rank >= rank => {}
+                _ => best = Some((rank, hit)),
+            }
         }
-        hits.into_values().next_back()
+        best.map(|(_, hit)| hit)
     }
 
     fn enforce_budget(&self, namespace: Option<&str>) -> Result<()> {
@@ -1738,6 +1742,31 @@ mod tests {
         .expect("commit blob");
     }
 
+    fn commit_blob_at(
+        service: &CacheService,
+        key: &str,
+        version: &str,
+        contents: &[u8],
+        created_ms: u64,
+    ) {
+        write_blob(service, key, version, contents);
+        let hash = entry_hash(key, version);
+        let entries = service.tenant_root(None).join("entries");
+        std::fs::create_dir_all(&entries).expect("create entries");
+        std::fs::write(
+            entries.join(format!("{hash}.json")),
+            json!({
+                "key": key,
+                "version": version,
+                "blob": hash,
+                "size": contents.len(),
+                "created_ms": created_ms,
+            })
+            .to_string(),
+        )
+        .expect("write entry");
+    }
+
     #[test]
     fn entry_hash_is_deterministic_and_version_sensitive() {
         assert_eq!(entry_hash("a", "v"), entry_hash("a", "v"));
@@ -1799,6 +1828,42 @@ mod tests {
 
         // Version mismatch misses.
         assert!(svc.lookup(&["linux-rust"], "v9", None).is_none());
+    }
+
+    #[test]
+    fn prefix_scan_equal_rank_breaks_ties_by_hash() {
+        // Entries sharing created_ms and key length used to collide on one
+        // rank-string map key, so the loser could overwrite the winner
+        // depending on directory iteration order. The tie-break is now the
+        // greater entry hash, independent of iteration order. Each pair shares
+        // one restore prefix, so every pair independently exercises the tie.
+        let dir = tempfile_dir();
+        let svc = test_service(dir.path());
+        let created_ms = 1_757_836_800_000;
+        let mut pairs = Vec::new();
+        for index in 0..16 {
+            let first = format!("pair{index:02}-aa");
+            let second = format!("pair{index:02}-bb");
+            commit_blob_at(&svc, &first, "v1", b"a-body", created_ms);
+            commit_blob_at(&svc, &second, "v1", b"b-body", created_ms);
+            assert_eq!(first.len(), second.len());
+            assert_ne!(entry_hash(&first, "v1"), entry_hash(&second, "v1"));
+            pairs.push((first, second));
+        }
+
+        for (first, second) in &pairs {
+            let winner = if entry_hash(first, "v1") > entry_hash(second, "v1") {
+                first
+            } else {
+                second
+            };
+            let restore = format!("{}-", &winner[..6]);
+            let primary = format!("{restore}zz");
+            let hit = svc.lookup(&[primary.as_str(), restore.as_str()], "v1", None);
+            let hit = hit.unwrap_or_else(|| panic!("restore {restore} missed"));
+            assert_eq!(hit.hash, entry_hash(winner, "v1"), "restore {restore}");
+            assert_eq!(hit.key, *winner, "restore {restore}");
+        }
     }
 
     fn test_ctx(service: CacheService) -> Ctx {
@@ -3342,6 +3407,342 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(30),
             "4k session resolutions took {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_cross_job_restore_hit_within_one_repo() {
+        // Two jobs, two tokens, one repository: job A saves on the base
+        // branch, job B restores from its feature branch through the base
+        // scope — the GitHub "current branch, then base branch" rule,
+        // end-to-end over the v1 save path and both lookup generations.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let job_b = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "job-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "job-b-token", &job_b).unwrap();
+        let chain_a = service.resolve_namespaces("job-a-token");
+        let chain_b = service.resolve_namespaces("job-b-token");
+        assert_eq!(chain_a.len(), 1);
+        assert_eq!(chain_b.len(), 2);
+        assert_eq!(chain_b[1], chain_a[0]);
+        for namespace in chain_a.iter().chain(chain_b.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+        let contents = b"shared-blob";
+
+        // Job A saves through the v1 reserve/upload path into its chain head.
+        let reserved = reserve(
+            post_json(json!({
+                "key": "shared-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            &chain_a[0],
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, &chain_a[0], true)
+            .await
+            .unwrap();
+
+        // Job B restores the entry exactly, over both wire generations, even
+        // though its own ref namespace is empty.
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("shared-key"));
+        let hit_v2 = lookup_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &mut ctx,
+            &chain_b_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hit_v2["ok"], json!(true));
+        assert_eq!(hit_v2["matchedKey"], json!("shared-key"));
+
+        // A restore-key prefix also reaches across the job boundary.
+        let prefix_hit = lookup_v1(
+            &get("keys=shared-key-zzz,shared-&version=v1"),
+            &ctx,
+            &chain_b_refs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(prefix_hit["cacheKey"], json!("shared-key"));
+
+        // The bytes download through B's chain, and the hit genuinely came
+        // from A's scope: B's own ref namespace holds no entry.
+        let (mut body, _) = download_chain(&ctx.service, &id, &chain_b_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, contents);
+        assert!(
+            !ctx.service.entry_path(&id, Some(&chain_b[0])).exists(),
+            "job B must restore from the base scope, not its own ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_cross_repo_restore_misses() {
+        // Same key, same version, same ref shape — different repositories.
+        // Job B must miss on both lookup generations, and its own save of
+        // the same key must succeed without seeing job A's entry.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a = CacheIdentity::new("acme/repo-a", "refs/heads/main", None, TrustClass::Trusted)
+            .unwrap();
+        let job_b = CacheIdentity::new("acme/repo-b", "refs/heads/main", None, TrustClass::Trusted)
+            .unwrap();
+        register_job_cache_session(dir.path(), "repo-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "repo-b-token", &job_b).unwrap();
+        let chain_a = service.resolve_namespaces("repo-a-token");
+        let chain_b = service.resolve_namespaces("repo-b-token");
+        assert_ne!(chain_a, chain_b);
+        for namespace in chain_a.iter().chain(chain_b.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+        let contents = b"repo-a-blob";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "shared-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            &chain_a[0],
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, &chain_a[0], true)
+            .await
+            .unwrap();
+
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+                .unwrap()
+                .is_none(),
+            "cross-repo v1 lookup must miss"
+        );
+        let miss = lookup_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &mut ctx,
+            &chain_b_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+        assert!(
+            download_chain(&ctx.service, &id, &chain_b_refs)
+                .await
+                .is_err(),
+            "cross-repo download must fail"
+        );
+
+        // Job B can save the same key into its own namespace: no conflict
+        // with the invisible repo-A entry.
+        let own = reserve_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &ctx,
+            &chain_b[0],
+        )
+        .await
+        .unwrap();
+        assert_eq!(own["ok"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_fork_pr_read_hit_but_write_isolated() {
+        // The full fork-PR exchange between two jobs: the trusted base job
+        // saves, the fork job restores it (read-hit through the base scope)
+        // and saves its own entry, and the trusted job can never see the
+        // fork entry back — over the v1 save path and both lookups.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let base_job =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let fork_job = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "base-token", &base_job).unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &fork_job).unwrap();
+        let base_chain = service.resolve_namespaces("base-token");
+        let fork_chain = service.resolve_namespaces("fork-token");
+        assert_eq!(base_chain.len(), 1);
+        assert_eq!(fork_chain.len(), 3);
+        assert_eq!(fork_chain[2], base_chain[0]);
+        for namespace in base_chain.iter().chain(fork_chain.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+
+        // The trusted job saves the base entry.
+        let base_contents = b"base-blob";
+        let reserved = reserve(
+            post_json(json!({
+                "key": "base-key",
+                "version": "v1",
+                "cacheSize": base_contents.len(),
+            })),
+            &ctx,
+            &base_chain[0],
+        )
+        .await
+        .unwrap();
+        let base_id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(
+            put_body(base_contents),
+            &ctx,
+            &base_id,
+            &base_chain[0],
+            true,
+        )
+        .await
+        .unwrap();
+
+        // The fork job restores it through its chain and downloads the bytes.
+        let fork_refs: Vec<&str> = fork_chain.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=base-key&version=v1"), &ctx, &fork_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("base-key"));
+        let (mut body, _) = download_chain(&ctx.service, &base_id, &fork_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, base_contents);
+
+        // The fork job saves its own entry into its chain head.
+        let fork_contents = b"fork-blob";
+        let reserved = reserve(
+            post_json(json!({
+                "key": "fork-key",
+                "version": "v1",
+                "cacheSize": fork_contents.len(),
+            })),
+            &ctx,
+            &fork_chain[0],
+        )
+        .await
+        .unwrap();
+        let fork_id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(
+            put_body(fork_contents),
+            &ctx,
+            &fork_id,
+            &fork_chain[0],
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(ctx
+            .service
+            .entry_path(&fork_id, Some(&fork_chain[0]))
+            .exists());
+
+        // The trusted chain misses the fork entry on both generations and
+        // cannot download it: the write stayed isolated.
+        let base_refs: Vec<&str> = base_chain.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=fork-key&version=v1"), &ctx, &base_refs)
+                .unwrap()
+                .is_none(),
+            "trusted job restored a fork-namespace entry over v1"
+        );
+        let miss = lookup_v2(
+            post_v2(json!({ "key": "fork-key", "version": "v1" })),
+            &mut ctx,
+            &base_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+        assert!(
+            download_chain(&ctx.service, &fork_id, &base_refs)
+                .await
+                .is_err(),
+            "trusted job downloaded a fork-namespace blob"
+        );
+    }
+
+    #[test]
+    fn cache_trust_regression_benchmark_cross_job_restore_throughput() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        // The cross-job restore path — session resolution plus a two-scope
+        // v1 lookup — runs on every cache restore. Bound it in the repo's
+        // timing-gated-test style (no criterion/divan harness exists here).
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let job_b = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "job-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "job-b-token", &job_b).unwrap();
+        let chain_b = service.resolve_namespaces("job-b-token");
+        for namespace in &chain_b {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        commit_in(&service, &chain_b[1], "shared-key", b"shared-blob");
+        let ctx = test_ctx(service);
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+                .unwrap()
+                .is_some()
+        );
+
+        let started = Instant::now();
+        for _ in 0..2_000 {
+            let chain = ctx.service.resolve_namespaces(black_box("job-b-token"));
+            let refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+            let hit = lookup_v1(
+                &get("keys=shared-key&version=v1"),
+                black_box(&ctx),
+                black_box(&refs),
+            )
+            .unwrap();
+            assert!(hit.is_some());
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "2k cross-job restores took {elapsed:?}",
         );
     }
 

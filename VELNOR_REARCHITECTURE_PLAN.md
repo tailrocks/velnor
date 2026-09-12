@@ -191,6 +191,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | gha-cache-repo-namespace landed: repo/ref-scoped hosted cache with isolated fallback (`aeb1f257`); BC-22 cache-namespacing half resolved, `pub mod gha_cache` narrowed to `pub(crate)`. |
 | 2026-09-12 | gha-cache-fork-isolation landed: trust-headed cache chains — ForkPR/Unknown jobs write an isolated `fork-` namespace and read through base scopes, trusted jobs never resolve fork namespaces; closes the repo-namespace save-gating follow-up. |
 | 2026-09-12 | gha-cache-fork-isolation fmt correction: the landed commit failed the read-only `cargo fmt -p velnor-runner -- --check` gate (one hunk in `fork_isolation_conformance_fork_v1_reads_through_to_base`); reformatted, no behavior change. |
+| 2026-09-12 | cache-trust-regression landed (4 of 5 brief items): two-token end-to-end cache regressions plus a byte-identical port of the accepted gha-cache-prefix-max fix; the trusted-pool admission item is blocked on the trust-admission-fork merge and escalated (see §13). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -1348,7 +1349,27 @@ Recorded deviations and follow-ups (deliberately out of this package, not oversi
   the repo-namespace package); this package covers the hosted `gha_cache` service only.
 - The `gha-cache-prefix-max` tie-break fix is accepted on `perf/docker-rust-mbx` but lives
   on the other side of the branch split; it is not ported here and this package does not
-  touch `prefix_scan`.
+  touch `prefix_scan`. (Resolved by cache-trust-regression below, which ports it
+  byte-identically.)
+
+## 13. Completed work packages (continued, cache-trust-regression)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| cache-trust-regression | End-to-end cross-job cache and fork-trust regression tests (4 of the 5 brief items; the fifth is escalated, not skipped) | Three two-token end-to-end regressions over the v1 save path and both lookup generations: `cache_trust_regression_cross_job_restore_hit_within_one_repo` (job A saves on `main`, job B restores from `feature` through the base scope, exact + restore-prefix + byte download, with proof the hit came from A's scope), `cache_trust_regression_cross_repo_restore_misses` (v1/v2/download all miss across repositories; B's same-key save succeeds conflict-free), `cache_trust_regression_fork_pr_read_hit_but_write_isolated` (trusted save → fork restore + fork save → trusted v1/v2/download all miss the fork entry). Plus `cache_trust_regression_benchmark_cross_job_restore_throughput` (2k session-resolve + two-scope restores against the 30 s bound, in the repo's timing-gated-test style). The `gha-cache-prefix-max` fix is ported byte-identically from `perf/docker-rust-mbx` (`a58bcb48`: direct-max `prefix_scan` over `(created_ms, key_len, hash)`, `BTreeMap` import deleted) with its accepted `prefix_scan_equal_rank_breaks_ties_by_hash` test and `commit_blob_at` helper, verified by diffing the ported bodies against the perf source. Gates: `cargo fmt --all --check` clean, clippy workspace `--all-targets --features velnor-runner/test-support -D warnings` clean, focused gha_cache 56/56, trust_class 43/43, runtime_env 12/12. |
+
+Not landed, escalated rather than re-designed: the fifth brief item — "fork-PR job
+on a trusted pool lands on untrusted stores/socket" — tests the trust-admission-fork
+enforcement (`ee95c5d4` + `a30e6196`, ~1000 lines across `runner.rs`,
+`container.rs`, `executor.rs`, `cache.rs`, `storage.rs`, `github_adapter.rs`),
+which exists only on `perf/docker-rust-mbx`. This branch has the pool-level gate
+(`trust_scope`) and the pure narrowing function (`TrustClass::admitted_scope`,
+already unit-tested) but no per-job enforcement in the admission path, and
+`runner.rs` is under concurrent edit with uncommitted work — porting the
+enforcement here would collide with it. Landing a regression test for behavior
+that cannot pass is refused; the item needs the branch merge (or an explicit
+re-targeting of this package onto `perf/docker-rust-mbx`) before the test can
+be written against the real seam.
 
 ### Correction to BC-16 — the admission gate was self-poisoning, not merely contended
 
