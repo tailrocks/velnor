@@ -1277,6 +1277,11 @@ pub(crate) fn enforce_policy_with_revision(
     let policy_entrypoint = workflows.join("ci-policy.yml");
     let mut found_policy_entrypoint = false;
     let mut failures = PolicyFindings::default();
+    // GitHub rejects a workflow whose YAML carries duplicate keys, so the
+    // auditor must fail closed on exactly the inputs GitHub refuses instead of
+    // silently auditing the last-key-wins rewrite of them.
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     for entry in entries {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
@@ -1294,9 +1299,10 @@ pub(crate) fn enforce_policy_with_revision(
         }
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
-        let document: Value = serde_yaml::from_str(&content).map_err(|error| {
-            GeneratorError::usage(format!("parse workflow {}: {error}", path.display()))
-        })?;
+        let document: Value =
+            serde_yaml::from_str_with_config(&content, &parser).map_err(|error| {
+                GeneratorError::usage(format!("parse workflow {}: {error}", path.display()))
+            })?;
         let Some(workflow) = document.as_mapping() else {
             failures.record(&path, "workflow document must be a YAML mapping");
             continue;
@@ -1385,12 +1391,14 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revisi
 /// drift — a changed pin, an extra step, a rewritten install command — fails
 /// the comparison, so a tree can only carry the audited transport.
 fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool {
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     crate::POLICY_JOB_NAMES.iter().any(|name| {
         let document = format!(
             "jobs:\n{}",
             crate::inline_policy_job(name, trusted_revision)
         );
-        let Ok(parsed) = serde_yaml::from_str::<Value>(&document) else {
+        let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&document, &parser) else {
             return false;
         };
         parsed
@@ -2647,6 +2655,37 @@ jobs:
 ";
         let root = policy_fixture("comments", workflow, "github")?;
         assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    /// GitHub rejects workflows whose YAML carries duplicate keys, so the
+    /// auditor must reject them too instead of auditing a last-key-wins
+    /// rewrite of the document GitHub refuses to run.
+    #[test]
+    fn policy_rejects_duplicate_yaml_keys_github_would_reject() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Duplicate keys
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+";
+        let root = policy_fixture("duplicate-keys", workflow, "github")?;
+        let failures = enforce_policy_with_revision(&root, POLICY_REVISION)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            failures.contains("duplicate key: verify"),
+            "rejection must come from the strict parser, not a later finding: {failures}"
+        );
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

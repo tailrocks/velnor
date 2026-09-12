@@ -62,13 +62,23 @@ const OWNERSHIP_STATE_SCHEMA: &str = "2";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
 const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
 const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
+const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/velnor";
 // The pinned revision of the policy-enforcing runtime binary. It is the single
 // literal inside the inline policy job: the `cargo install --rev` pin, the Mr.
 // Boxington cache-key suffix, and the `VELNOR_WORKFLOW_POLICY_REVISION` value
 // the installed audit binary requires all render from it, so the runtime that
-// audits a tree is always exactly the runtime the tree declares. Keep this pin
-// on the last stable mainline revision during a PR; advance it only after the
-// implementation is merged and reachable from the default branch.
+// audits a tree is always exactly the runtime the tree declares. Pin to a
+// revision whose `velnor-workflow` binary enforces the inline policy shape;
+// advance it atomically with validator changes and immediately after the
+// transport change merges — `cargo install --rev` reaches any public SHA, so
+// the pin must move in the direct follow-up commit, not wait for a later PR.
+//
+// MERGE-ORDER REQUIREMENT, MANDATORY BEFORE ANY MAIN PUSH: this revision still
+// carries the reusable-workflow validator, which rejects the inline shape this
+// generator now emits (the 07d0831 binary fails the generated job with
+// "pull_request_target is forbidden"). Until the follow-up commit advances this
+// pin, every policy lane fails loudly; the transport change must not sit on the
+// default branch across that window.
 const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
@@ -3390,7 +3400,7 @@ fn known_legacy_template(relative: &Path) -> Option<&'static str> {
 /// data, so it must never land on self-hosted capacity.
 pub(crate) fn inline_policy_job(name: &str, revision: &str) -> String {
     format!(
-            "  policy:\n    name: {name}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n          # Static policy validation only; fork head checkout is intentional.\n          allow-unsafe-pr-checkout: true\n      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cargo install \\\n            --locked \\\n            --git https://github.com/tailrocks/velnor \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n",
+            "  policy:\n    name: {name}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n          # Static policy validation only; fork head checkout is intentional.\n          allow-unsafe-pr-checkout: true\n      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n",
         ActionPin::Checkout.reference(),
         ActionPin::MrBoxington.reference(),
     )
@@ -6136,7 +6146,6 @@ mod tests {
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
         assert!(workflow.contains("name: velnor-workflow-runtime"));
-        assert_ne!(VELNOR_POLICY_WORKFLOW_REV, VELNOR_WORKFLOW_SOURCE_REV);
         assert!(!workflow.contains("cargo install --locked --git"));
         let policy = crate::inline_policy_job("Advisory policy", VELNOR_POLICY_WORKFLOW_REV);
         assert!(policy.contains(ActionPin::MrBoxington.reference()));

@@ -142,8 +142,8 @@ units = ["rust-velnor-workflow"]
 [declare.args]
 command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
 
-# Release-side surface: the reviewed publisher, rolling preview, signer, and
-# policy provider are declared verbatim; the generator refreshes their pins.
+# Release-side surface: the reviewed publisher, rolling preview, and signer are
+# declared verbatim; the generator refreshes their pins.
 [[declare]]
 primitive = "static-workflow"
 file = "release.yml"
