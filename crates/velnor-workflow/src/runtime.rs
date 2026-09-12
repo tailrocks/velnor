@@ -25,8 +25,6 @@ use sha2::{Digest, Sha256};
 use super::GeneratorError;
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
-const IMMUTABLE_POLICY_WORKFLOW: &str =
-    "tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml";
 const TRUSTED_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -1278,7 +1276,12 @@ pub(crate) fn enforce_policy_with_revision(
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
     let mut found_policy_entrypoint = false;
-    let mut failures = 0;
+    let mut failures = PolicyFindings::default();
+    // GitHub rejects a workflow whose YAML carries duplicate keys, so the
+    // auditor must fail closed on exactly the inputs GitHub refuses instead of
+    // silently auditing the last-key-wins rewrite of them.
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     for entry in entries {
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read workflow entry: {error}")))?
@@ -1296,35 +1299,38 @@ pub(crate) fn enforce_policy_with_revision(
         }
         let content = fs::read_to_string(&path)
             .map_err(|error| GeneratorError::io("read workflow", &path, &error))?;
-        let document: Value = serde_yaml::from_str(&content).map_err(|error| {
-            GeneratorError::usage(format!("parse workflow {}: {error}", path.display()))
-        })?;
+        let document: Value =
+            serde_yaml::from_str_with_config(&content, &parser).map_err(|error| {
+                GeneratorError::usage(format!("parse workflow {}: {error}", path.display()))
+            })?;
         let Some(workflow) = document.as_mapping() else {
-            policy_failure(
-                &path,
-                "workflow document must be a YAML mapping",
-                &mut failures,
-            );
+            failures.record(&path, "workflow document must be a YAML mapping");
             continue;
         };
         inspect_workflow(workflow, &path, trusted_revision, &mut failures);
     }
     if !found_policy_entrypoint {
-        policy_failure(
+        failures.record(
             &policy_entrypoint,
             "required base-owned ci-policy.yml entrypoint is missing",
-            &mut failures,
         );
     }
-    if failures > 0 {
+    if !failures.lines.is_empty() {
         return Err(GeneratorError::usage(format!(
-            "workflow policy rejected {failures} finding(s)"
+            "workflow policy rejected {} finding(s):\n{}",
+            failures.lines.len(),
+            failures.lines.join("\n")
         )));
     }
     Ok(())
 }
 
-fn inspect_workflow(workflow: &Mapping, path: &Path, trusted_revision: &str, failures: &mut usize) {
+fn inspect_workflow(
+    workflow: &Mapping,
+    path: &Path,
+    trusted_revision: &str,
+    failures: &mut PolicyFindings,
+) {
     let approved_policy_entrypoint =
         is_approved_policy_entrypoint(path, workflow, trusted_revision);
     for (key, value) in workflow {
@@ -1334,7 +1340,7 @@ fn inspect_workflow(workflow: &Mapping, path: &Path, trusted_revision: &str, fai
                 if contains_exact_yaml_value(value, "pull_request_target")
                     && !approved_policy_entrypoint
                 {
-                    policy_failure(path, "pull_request_target is forbidden", failures);
+                    failures.record(path, "pull_request_target is forbidden");
                 }
             }
             "jobs" => inspect_jobs(value, path, trusted_revision, failures),
@@ -1376,50 +1382,62 @@ fn is_approved_policy_entrypoint(path: &Path, workflow: &Mapping, trusted_revisi
     let Some(policy) = mapping_value(jobs, "policy").and_then(Value::as_mapping) else {
         return false;
     };
-    if jobs.len() != 1
-        || mapping_value(policy, "name").and_then(Value::as_str) != Some("Policy")
-        || mapping_value(policy, "uses")
-            .and_then(Value::as_str)
-            .is_none_or(|value| !is_approved_policy_reusable(value, trusted_revision))
-        || !has_policy_revision_input(policy, trusted_revision)
-    {
-        return false;
-    }
-    let Some(permissions) = mapping_value(policy, "permissions").and_then(Value::as_mapping) else {
-        return false;
-    };
-    permissions.len() == 1
-        && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
-        && policy
-            .keys()
-            .all(|key| matches!(key.as_str(), "name" | "uses" | "with" | "permissions"))
+    jobs.len() == 1 && is_approved_inline_policy_job(policy, trusted_revision)
 }
 
-fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &mut usize) {
+/// Whether a job is exactly the inline policy job the generator renders for
+/// `revision`: same key set, same runner, same permissions, and the same four
+/// steps, compared as parsed YAML against the generator's own rendering. Any
+/// drift — a changed pin, an extra step, a rewritten install command — fails
+/// the comparison, so a tree can only carry the audited transport.
+fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool {
+    let parser = serde_yaml::ParserConfig::default()
+        .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
+    crate::POLICY_JOB_NAMES.iter().any(|name| {
+        let document = format!(
+            "jobs:\n{}",
+            crate::inline_policy_job(name, trusted_revision)
+        );
+        let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&document, &parser) else {
+            return false;
+        };
+        parsed
+            .get("jobs")
+            .and_then(Value::as_mapping)
+            .and_then(|jobs| jobs.get("policy"))
+            .is_some_and(|canonical| canonical == &Value::Mapping(job.to_owned()))
+    })
+}
+
+/// Whether a job claims the inline policy transport. The first step's name is
+/// generator-owned, so anything wearing it must be the exact approved job;
+/// anything else is judged by the generic rules.
+fn claims_inline_policy_transport(job: &Mapping) -> bool {
+    mapping_value(job, "steps")
+        .and_then(Value::as_sequence)
+        .and_then(|steps| steps.first())
+        .and_then(Value::as_mapping)
+        .and_then(|step| mapping_value(step, "name").and_then(Value::as_str))
+        == Some("Checkout caller workflow data")
+}
+
+fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &mut PolicyFindings) {
     let Some(jobs) = value.as_mapping() else {
-        policy_failure(path, "jobs must be a YAML mapping", failures);
+        failures.record(path, "jobs must be a YAML mapping");
         return;
     };
     for (job_id, job) in jobs {
         let Some(job) = job.as_mapping() else {
             let name = job_id.as_str();
-            policy_failure(
-                path,
-                &format!("job {name} must be a YAML mapping"),
-                failures,
-            );
+            failures.record(path, &format!("job {name} must be a YAML mapping"));
             continue;
         };
-        if mapping_value(job, "uses")
-            .and_then(Value::as_str)
-            .is_some_and(|value| is_approved_policy_reusable(value, trusted_revision))
-            && !has_policy_revision_input(job, trusted_revision)
+        if claims_inline_policy_transport(job)
+            && !is_approved_inline_policy_job(job, trusted_revision)
         {
-            policy_failure(
-                path,
-                "approved policy workflow call must pass the trusted policy-revision input",
-                failures,
-            );
+            failures.record(path, &format!(
+                    "inline policy job must match the approved generated shape for revision {trusted_revision}"
+                ));
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
@@ -1438,7 +1456,7 @@ fn inspect_yaml_value(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
-    failures: &mut usize,
+    failures: &mut PolicyFindings,
 ) {
     match value {
         Value::Mapping(mapping) => {
@@ -1476,15 +1494,15 @@ fn inspect_mapping(
     matrix: Option<&Mapping>,
     trusted_gate: bool,
     trusted_revision: &str,
-    failures: &mut usize,
+    failures: &mut PolicyFindings,
 ) {
     for (key, value) in mapping {
         let key = key.as_str();
         match key {
             "pull_request_target" => {
-                policy_failure(path, "pull_request_target is forbidden", failures);
+                failures.record(path, "pull_request_target is forbidden");
             }
-            "uses" => inspect_uses(value, path, trusted_revision, failures),
+            "uses" => inspect_uses(value, path, failures),
             "runs-on" => inspect_runner(value, path, matrix, trusted_gate, failures),
             _ => inspect_yaml_value(
                 value,
@@ -1498,44 +1516,34 @@ fn inspect_mapping(
     }
 }
 
-fn inspect_uses(value: &Value, path: &Path, trusted_revision: &str, failures: &mut usize) {
+fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
     let Some(action) = value.as_str() else {
-        policy_failure(path, "uses must be a scalar reference", failures);
+        failures.record(path, "uses must be a scalar reference");
         return;
     };
-    if is_approved_local_reusable(action) || is_approved_policy_reusable(action, trusted_revision) {
+    if is_approved_local_reusable(action) {
         return;
     }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
     if reference_path.contains("/.github/workflows/") {
-        policy_failure(
-            path,
-            &format!("reusable workflow must be an approved local generated workflow: {action}"),
-            failures,
-        );
+        if action.starts_with("./") && action.contains('@') {
+            failures.record(
+                path,
+                &format!(
+                    "same-repository reusable workflow call at a pinned revision wedges push/schedule scheduling; inline the approved steps instead: {action}"
+                ),
+            );
+        } else {
+            failures.record(
+                path,
+                &format!(
+                    "reusable workflow must be an approved local generated workflow: {action}"
+                ),
+            );
+        }
     } else if !is_full_sha_reference(action) {
-        policy_failure(
-            path,
-            &format!("action is not a full SHA pin: {action}"),
-            failures,
-        );
+        failures.record(path, &format!("action is not a full SHA pin: {action}"));
     }
-}
-
-fn is_approved_policy_reusable(value: &str, trusted_revision: &str) -> bool {
-    value.split_once('@').is_some_and(|(path, reference)| {
-        path == IMMUTABLE_POLICY_WORKFLOW && reference == trusted_revision && is_full_sha(reference)
-    })
-}
-
-fn has_policy_revision_input(policy: &Mapping, trusted_revision: &str) -> bool {
-    let Some(with) = mapping_value(policy, "with").and_then(Value::as_mapping) else {
-        return false;
-    };
-    with.len() == 1
-        && mapping_value(with, "policy-revision")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == trusted_revision && is_full_sha(value))
 }
 
 fn is_approved_local_reusable(value: &str) -> bool {
@@ -1585,29 +1593,26 @@ fn inspect_runner(
     path: &Path,
     matrix: Option<&Mapping>,
     trusted_gate: bool,
-    failures: &mut usize,
+    failures: &mut PolicyFindings,
 ) {
     let mut resolving = BTreeSet::new();
     let analysis = analyze_runner(value, matrix, &mut resolving);
     if analysis.invalid {
-        policy_failure(
+        failures.record(
             path,
             "runs-on must contain only static labels or a static runner-group mapping",
-            failures,
         );
     }
     if analysis.dynamic {
-        policy_failure(
+        failures.record(
             path,
             "runs-on contains an unresolved or dynamic runner label",
-            failures,
         );
     }
     if analysis.self_hosted && !trusted_gate {
-        policy_failure(
+        failures.record(
             path,
             "self-hosted jobs require a default-branch trusted-event gate",
-            failures,
         );
     }
 }
@@ -1792,9 +1797,19 @@ fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
     !value.is_empty() && !value.contains("||") && !value.contains("github.ref")
 }
 
-fn policy_failure(path: &Path, message: &str, failures: &mut usize) {
-    eprintln!("{}: {message}", path.display());
-    *failures += 1;
+/// Every policy finding recorded while auditing one repository tree: the
+/// failed audit reports them in its error, so the job log carries the cause
+/// without depending on stderr interleaving.
+#[derive(Default)]
+struct PolicyFindings {
+    lines: Vec<String>,
+}
+
+impl PolicyFindings {
+    fn record(&mut self, path: &Path, message: &str) {
+        eprintln!("{}: {message}", path.display());
+        self.lines.push(format!("{}: {message}", path.display()));
+    }
 }
 
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -2042,7 +2057,10 @@ mod tests {
         std::fs::write(root.join(".github/workflows/policy.yml"), workflow)?;
         std::fs::write(
             root.join(".github/workflows/ci-policy.yml"),
-            format!("name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n  policy:\n    name: Policy\n    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@{POLICY_REVISION}\n    with:\n      policy-revision: {POLICY_REVISION}\n    permissions:\n      contents: read\n"),
+            format!(
+                "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n{}",
+                crate::inline_policy_job("Policy", POLICY_REVISION)
+            ),
         )?;
         std::fs::write(
             root.join(".github/ci/project.toml"),
@@ -2640,6 +2658,37 @@ jobs:
         Ok(())
     }
 
+    /// GitHub rejects workflows whose YAML carries duplicate keys, so the
+    /// auditor must reject them too instead of auditing a last-key-wins
+    /// rewrite of the document GitHub refuses to run.
+    #[test]
+    fn policy_rejects_duplicate_yaml_keys_github_would_reject() -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Duplicate keys
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: true
+";
+        let root = policy_fixture("duplicate-keys", workflow, "github")?;
+        let failures = enforce_policy_with_revision(&root, POLICY_REVISION)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            failures.contains("duplicate key: verify"),
+            "rejection must come from the strict parser, not a later finding: {failures}"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[test]
     fn policy_rejects_structural_forbidden_trigger_and_external_reusable_workflow(
     ) -> Result<(), Box<dyn Error>> {
@@ -2657,9 +2706,41 @@ jobs:
     }
 
     #[test]
-    fn policy_allows_only_full_sha_for_immutable_policy_workflow() -> Result<(), Box<dyn Error>> {
+    fn policy_accepts_the_generated_inline_transport_in_every_variant() -> Result<(), Box<dyn Error>>
+    {
+        // The base-owned entrypoint carries the `Policy` variant.
+        let workflow = format!(
+            "name: Advisory caller\non: push\njobs:\n{}",
+            crate::inline_policy_job("Advisory policy", POLICY_REVISION)
+        );
+        let root = policy_fixture("inline-advisory", &workflow, "github")?;
+        assert!(run_policy(root)?);
+
+        // A drifted inline job — the runtime pin rewritten to another revision —
+        // must fail closed against the trusted revision.
+        let workflow = format!(
+            "name: Advisory caller\non: push\njobs:\n{}",
+            crate::inline_policy_job(
+                "Advisory policy",
+                "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33"
+            )
+        );
+        let root = policy_fixture("inline-wrong-pin", &workflow, "github")?;
+        assert!(!run_policy(root)?);
+
+        // So must any other drift inside the approved steps.
+        let drifted = crate::inline_policy_job("Policy", POLICY_REVISION)
+            .replace("set -euo pipefail", "set -eo pipefail");
+        let workflow = format!("name: Drifted\non: push\njobs:\n{drifted}");
+        let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_rejects_the_retired_reusable_policy_transport() -> Result<(), Box<dyn Error>> {
         let workflow = r"
-name: Policy caller
+name: Reusable policy caller
 on: pull_request
 jobs:
   policy:
@@ -2667,29 +2748,70 @@ jobs:
     with:
       policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
 ";
-        let root = policy_fixture("approved-policy", workflow, "github")?;
-        assert!(run_policy(root)?);
-
-        let workflow = r"
-name: Policy caller
-on: pull_request
-jobs:
-  policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@main
-";
-        let root = policy_fixture("floating-policy", workflow, "github")?;
-        assert!(!run_policy(root)?);
-
-        let workflow = r"
-name: Policy caller
-on: pull_request
-jobs:
-  policy:
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
-";
-        let root = policy_fixture("wrong-policy-pin", workflow, "github")?;
+        let root = policy_fixture("retained-reusable-policy", workflow, "github")?;
         assert!(!run_policy(root)?);
         Ok(())
+    }
+
+    #[test]
+    fn policy_names_the_scheduling_hazard_for_same_repository_pinned_reusables(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Pinned same-repository caller
+on: push
+jobs:
+  call:
+    uses: ./.github/workflows/ci-rust.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
+";
+        let root = policy_fixture("same-repo-pinned", workflow, "github")?;
+        let failures = policy_failures(&root);
+        std::fs::remove_dir_all(root)?;
+        assert!(
+            failures.contains(
+                "same-repository reusable workflow call at a pinned revision wedges push/schedule scheduling"
+            ),
+            "{failures}"
+        );
+        Ok(())
+    }
+
+    /// The rendered inline policy job never calls a reusable workflow through
+    /// the pinned `tailrocks/velnor` provider path — the transport that wedges
+    /// push/schedule scheduling — and always installs exactly the revision it
+    /// audits with.
+    #[test]
+    fn inline_policy_job_carries_no_reusable_call_and_one_runtime_pin() {
+        for name in crate::POLICY_JOB_NAMES {
+            let job = crate::inline_policy_job(name, POLICY_REVISION);
+            assert!(
+                !job.contains("uses: tailrocks/velnor/.github/workflows/"),
+                "{name} must not call a reusable workflow through the pinned provider path"
+            );
+            let rev_uses = job.matches(&format!("--rev {POLICY_REVISION}")).count();
+            assert_eq!(
+                rev_uses, 1,
+                "{name} must pin the install to the policy revision once"
+            );
+            let revision_env = format!("{TRUSTED_POLICY_REVISION_ENV}: {POLICY_REVISION}");
+            assert!(
+                job.contains(&revision_env),
+                "{name} must audit with the same revision it installs"
+            );
+            assert_eq!(
+                job.matches(POLICY_REVISION).count(),
+                3,
+                "{name} must use the policy revision for the cache key, the install pin, and the audit env"
+            );
+        }
+    }
+
+    /// Every parsed failure the audit reports for the fixture tree, so tests
+    /// can assert the message names its cause.
+    fn policy_failures(root: &std::path::Path) -> String {
+        enforce_policy_with_revision(root, POLICY_REVISION)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -2706,46 +2828,22 @@ jobs:
 
     #[test]
     fn policy_allows_only_the_exact_base_owned_policy_entrypoint() -> Result<(), Box<dyn Error>> {
-        let workflow = r"
-name: Velnor workflow policy
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-permissions:
-  contents: read
-jobs:
-  policy:
-    name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@a1cbfcbe5ab179032e37125f0383cdcae8183c8c
-    with:
-      policy-revision: a1cbfcbe5ab179032e37125f0383cdcae8183c8c
-    permissions:
-      contents: read
-";
-        let root = policy_fixture("approved-policy-entrypoint", workflow, "github")?;
+        let workflow = format!(
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\npermissions:\n  contents: read\njobs:\n{}",
+            crate::inline_policy_job("Policy", POLICY_REVISION)
+        );
+        let root = policy_fixture("approved-policy-entrypoint", &workflow, "github")?;
         std::fs::rename(
             root.join(".github/workflows/policy.yml"),
             root.join(".github/workflows/ci-policy.yml"),
         )?;
         assert!(run_policy(root)?);
 
-        let workflow = r"
-name: Velnor workflow policy
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened]
-jobs:
-  policy:
-    name: Policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33
-    permissions:
-      contents: read
-  bypass:
-    runs-on: ubuntu-24.04
-    steps:
-      - run: true
-";
-        let root = policy_fixture("bypassed-policy-entrypoint", workflow, "github")?;
+        let workflow = format!(
+            "name: Velnor workflow policy\non:\n  pull_request_target:\n    types: [opened, synchronize, reopened]\njobs:\n{}  bypass:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            crate::inline_policy_job("Policy", POLICY_REVISION)
+        );
+        let root = policy_fixture("bypassed-policy-entrypoint", &workflow, "github")?;
         std::fs::rename(
             root.join(".github/workflows/policy.yml"),
             root.join(".github/workflows/ci-policy.yml"),
