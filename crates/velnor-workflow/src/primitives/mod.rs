@@ -25,9 +25,15 @@ use std::path::PathBuf;
 
 use crate::config::RepoGenerationConfig;
 use crate::scan::RepositoryShape;
-use crate::{nested_unit_workflow_file, GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
+use crate::{
+    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RunnerMode,
+    Unit, UnitKind,
+};
 
-pub(crate) use ir::{WorkflowIr, WorkflowKind};
+pub(crate) use ir::{
+    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note,
+    WorkflowIr, WorkflowKind,
+};
 
 /// Default `timeout-minutes` for a unit verification job.
 pub(crate) const DEFAULT_UNIT_TIMEOUT_MINUTES: u32 = 45;
@@ -54,6 +60,8 @@ pub(crate) const RELEASE: &str = "release";
 pub(crate) const PREVIEW: &str = "preview";
 /// The `maintenance.yml` cache-hygiene workflow.
 pub(crate) const MAINTENANCE: &str = "maintenance";
+/// The release artifact provenance signer.
+pub(crate) const RELEASE_SIGNER: &str = "release-signer";
 /// A reviewed workflow body declared verbatim by the repository.
 pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 
@@ -130,13 +138,77 @@ pub(crate) enum CacheBackend {
 
 impl CacheBackend {
     /// Whether the actions cache restore and save steps are emitted for `unit`.
+    ///
+    /// The detected policy classifies by purpose: Cargo-source and tool caches
+    /// ride the actions cache even when the unit compiles under Mr. Boxington
+    /// — the object transport moves compiler state, not Cargo's registry
+    /// archives, extracted sources, or Git dependencies. Raw output caches are
+    /// the one suppression: the object transport already carries workspace
+    /// state, so a declared output cache needs its justification on record.
     pub(crate) fn enables_actions_cache(self, ir: &WorkflowIr, unit: &Unit) -> bool {
         match self {
-            Self::Detected => !ir.uses_mr_boxington(unit),
+            Self::Detected => match unit.cache.as_ref().map(|cache| cache.purpose) {
+                None => false,
+                Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
+                Some(CachePurpose::Outputs) => {
+                    !ir.uses_mr_boxington(unit)
+                        || unit
+                            .cache
+                            .as_ref()
+                            .is_some_and(CacheSpec::justified_output_alongside_mr_boxington)
+                }
+            },
             Self::Actions => true,
             Self::ObjectCache => false,
         }
     }
+}
+
+/// Reject a raw output cache that would ride alongside the Mr. Boxington
+/// object transport without a recorded justification: the two transports move
+/// the same workspace state, so keeping both needs a reason on record.
+///
+/// # Errors
+/// Returns a usage error for an unjustified or multi-line justification.
+pub(crate) fn validate_cache_transports(ir: &WorkflowIr) -> Result<(), GeneratorError> {
+    for unit in &ir.units {
+        validate_cache_transports_for_unit(ir, unit)?;
+    }
+    Ok(())
+}
+
+/// Validate one unit's cache transport combination.
+///
+/// # Errors
+/// Returns a usage error for an unjustified or multi-line justification.
+pub(crate) fn validate_cache_transports_for_unit(
+    ir: &WorkflowIr,
+    unit: &Unit,
+) -> Result<(), GeneratorError> {
+    let Some(cache) = &unit.cache else {
+        return Ok(());
+    };
+    if cache.purpose != CachePurpose::Outputs || !ir.uses_mr_boxington(unit) {
+        return Ok(());
+    }
+    if !cache.justified_output_alongside_mr_boxington() {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares a raw output cache alongside the Mr. Boxington object transport; drop the output cache or set `mbx_output_cache_justification` to record why both transports are kept",
+            unit.id
+        )));
+    }
+    if cache
+        .mbx_output_cache_justification
+        .as_deref()
+        .unwrap_or_default()
+        .contains(['\n', '\r'])
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` uses a multi-line `mbx_output_cache_justification`; keep it to one line",
+            unit.id
+        )));
+    }
+    Ok(())
 }
 
 /// Everything a declared unit pipeline may tune for one unit's surface.
@@ -383,6 +455,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::Release),
         Box::new(release::Preview),
         Box::new(release::Maintenance),
+        Box::new(release::ReleaseSigner),
         Box::new(release::StaticWorkflow),
     ]
 }
@@ -1050,6 +1123,7 @@ mod tests {
             RELEASE,
             PREVIEW,
             MAINTENANCE,
+            RELEASE_SIGNER,
             STATIC_WORKFLOW,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");

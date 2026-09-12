@@ -12,13 +12,16 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    Args, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE,
-    STATIC_WORKFLOW,
+    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note, Args,
+    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE,
+    RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
     velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
     ProjectConfig, ReleaseSpec, RunnerMode, GENERATED_HEADER,
+    VELNOR_PREVIEW_WORKFLOW_TEMPLATE, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    VELNOR_RELEASE_WORKFLOW_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -28,6 +31,7 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
     ("release.yml", RELEASE),
     ("preview.yml", PREVIEW),
     ("maintenance.yml", MAINTENANCE),
+    ("ci-release-package-signer.yml", RELEASE_SIGNER),
 ];
 
 /// The canonical file a declared release-side family renders, when the family
@@ -61,12 +65,22 @@ pub(crate) fn release_content(config: &ProjectConfig) -> Option<String> {
 /// carries a fully reviewed native publisher renders its declared static
 /// preview surface; every other contract renders the generic rolling preview.
 pub(crate) fn preview_content(config: &ProjectConfig) -> String {
-    render_preview(config, config.release.as_ref())
+    match config.release.as_ref() {
+        Some(release) if release.kind == "velnor-native" => {
+            crate::render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE)
+        }
+        _ => render_preview(config, config.release.as_ref()),
+    }
 }
 
 /// The headerless `maintenance.yml` body for a config.
 pub(crate) fn maintenance_content(config: &ProjectConfig) -> String {
     render_maintenance(config)
+}
+
+/// The `ci-release-package-signer.yml` content.
+pub(crate) fn release_signer_content() -> String {
+    crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
 }
 
 /// A reviewed workflow body, declared verbatim, rendered through the static
@@ -190,6 +204,26 @@ impl Primitive for Maintenance {
 }
 
 /// The declared release artifact provenance signer.
+pub(crate) struct ReleaseSigner;
+
+impl Primitive for ReleaseSigner {
+    fn id(&self) -> &'static str {
+        RELEASE_SIGNER
+    }
+
+    fn schema(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+        render_file(
+            ctx,
+            "ci-release-package-signer.yml",
+            release_signer_content(),
+        )
+    }
+}
+
 /// The release contract a row renders: the declared arguments when the row
 /// declares any, otherwise the config's contract.
 fn declared_or_configured_spec(
@@ -458,6 +492,9 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    if release.kind == "velnor-native" {
+        return crate::render_static_template(VELNOR_RELEASE_WORKFLOW_TEMPLATE);
+    }
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
@@ -525,9 +562,10 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             );
             WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, lane, unit, false);
-            if !workflow.uses_mr_boxington(unit)
+            if CacheBackend::Detected.enables_actions_cache(&workflow, unit)
                 && let Some(cache) = &unit.cache
             {
+                render_retained_output_cache_note(&mut output, &workflow, unit, cache);
                 let (paths, key) = rendered_cache_values(cache);
                 let _ = writeln!(
                     output,
@@ -537,9 +575,11 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
+            render_cargo_source_preparation(&mut output, unit);
+            let cargo_offline = cargo_offline_env(unit);
             let _ = writeln!(
                 output,
-                "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+                "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id)
             );
@@ -1042,6 +1082,7 @@ mod tests {
             label: id.to_owned(),
             kind: crate::UnitKind::Rust,
             root: ".".to_owned(),
+            pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
@@ -1163,15 +1204,19 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "11a768e585bd0c58b75276a56dc3d9e26c1dbbff5b78f3e375771c7b506e5f6a",
+                "5b28774542a543b5c2fce41fc7c701067f81a5ea8d72278504163838c386db69",
             ),
             (
                 "preview.yml",
-                "c705f38576ea731d1b3536f0fb6ad3066251fc7d45a58d395834b40b9446a297",
+                "4d8c76b54887b7efc2dfdcc266018868a1c4f5538c4324ce73414e6cbe2a046b",
             ),
             (
                 "maintenance.yml",
                 "ba5fef94b52fb31521ff44b170c8edfb723fe47187a1cf79c91f76d010f84d00",
+            ),
+            (
+                "ci-release-package-signer.yml",
+                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
             ),
         ];
         let root = scanned_root("default");
@@ -1192,7 +1237,11 @@ mod tests {
         assert!(release.contains("name: Release"), "{release}");
         assert!(release.contains("Publish GitHub release"), "{release}");
         assert!(release.contains("Verify archive checksums"), "{release}");
-        for (file, marker) in [("preview.yml", "Preview"), ("maintenance.yml", "cache")] {
+        for (file, marker) in [
+            ("preview.yml", "Preview"),
+            ("maintenance.yml", "cache"),
+            ("ci-release-package-signer.yml", "attest"),
+        ] {
             let rendered = rendered(&surface, file);
             assert!(
                 rendered.contains(marker),
@@ -1214,7 +1263,7 @@ mod tests {
         let root = scanned_root("omitted");
         let config = config(&["release.yml", "preview.yml"], None);
         let surface = generate(&root, &config, None);
-        let legacy = crate::generated_files(&config);
+        let legacy = must(crate::generated_files(&config), "generate legacy files");
         let preview = PathBuf::from(".github/workflows/preview.yml");
         assert_eq!(
             surface.files.get(&preview),

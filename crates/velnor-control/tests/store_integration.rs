@@ -65,6 +65,7 @@ fn job(slug: &str, uid: &str) -> JobRow {
         slot_name: Some("slot-0".to_owned()),
         runner_name: Some("fixture-runner-0".to_owned()),
         trust_scope: Some("trusted".to_owned()),
+        trust_class: Some("trusted".to_owned()),
         resource_policy: Some("standard".to_owned()),
         phase: "queued".to_owned(),
         conclusion: None,
@@ -162,6 +163,7 @@ fn round_trip_summary_and_atomic_transition() {
     assert_eq!(summary.repository, "tailrocks/velnor-actions-fixture");
     assert_eq!(summary.run_id, Some(9));
     assert_eq!(summary.trust_scope.as_deref(), Some("trusted"));
+    assert_eq!(summary.trust_class.as_deref(), Some("trusted"));
     assert_eq!(store.transition_count("it", "hold-job").unwrap(), 1);
     assert_eq!(store.event_count("it", "hold-job").unwrap(), 1);
 

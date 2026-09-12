@@ -450,7 +450,11 @@ pub struct NormalizedJob {
     pub acquired_at: Option<Timestamp>,
     pub slot_name: Option<String>,
     pub runner_name: Option<String>,
+    /// Effective admitted scope the job runs with: the pool ceiling narrowed
+    /// by the job's trust class, never the raw pool flag.
     pub trust_scope: Option<String>,
+    /// The job's derived trust class label (`trusted`, `fork-pr`, `unknown`).
+    pub trust_class: Option<String>,
     pub resource_policy: Option<String>,
     pub phase: JobPhase,
     pub conclusion: Option<JobConclusion>,
@@ -483,6 +487,7 @@ pub struct JobSummary {
     slot_name: Option<Slug>,
     runner_name: Option<Slug>,
     trust_scope: Option<Slug>,
+    trust_class: Option<Slug>,
     resource_policy: Option<Slug>,
     phase: JobPhase,
     conclusion: Option<JobConclusion>,
@@ -508,6 +513,8 @@ struct JobSummaryWire {
     slot_name: Option<String>,
     runner_name: Option<String>,
     trust_scope: Option<String>,
+    #[serde(default)]
+    trust_class: Option<String>,
     resource_policy: Option<String>,
     phase: JobPhase,
     conclusion: Option<JobConclusion>,
@@ -534,6 +541,7 @@ impl TryFrom<JobSummaryWire> for JobSummary {
             slot_name: wire.slot_name,
             runner_name: wire.runner_name,
             trust_scope: wire.trust_scope,
+            trust_class: wire.trust_class,
             resource_policy: wire.resource_policy,
             phase: wire.phase,
             conclusion: wire.conclusion,
@@ -579,6 +587,7 @@ impl JobSummary {
             slot_name: optional_slug("slot_name", input.slot_name)?,
             runner_name: optional_slug("runner_name", input.runner_name)?,
             trust_scope: optional_slug("trust_scope", input.trust_scope)?,
+            trust_class: optional_slug("trust_class", input.trust_class)?,
             resource_policy: optional_slug("resource_policy", input.resource_policy)?,
             phase: input.phase,
             conclusion: input.conclusion,
@@ -662,6 +671,11 @@ impl JobSummary {
     }
 
     #[must_use]
+    pub fn trust_class(&self) -> Option<&str> {
+        self.trust_class.as_ref().map(Slug::as_str)
+    }
+
+    #[must_use]
     pub fn resource_policy(&self) -> Option<&str> {
         self.resource_policy.as_ref().map(Slug::as_str)
     }
@@ -734,6 +748,7 @@ mod tests {
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("fixture-runner-0".to_owned()),
             trust_scope: Some("trusted".to_owned()),
+            trust_class: Some("trusted".to_owned()),
             resource_policy: Some("standard".to_owned()),
             phase: JobPhase::Running,
             conclusion: None,
@@ -980,6 +995,18 @@ mod tests {
         }"#;
         let parsed: JobSummary = serde_json::from_str(good).unwrap();
         assert_eq!(parsed.conclusion(), Some(JobConclusion::Success));
+        // Pre-F-V1 wire without `trustClass` still parses; the class is
+        // simply unknown for rows admitted before derivation moved ahead of
+        // persistence.
+        assert_eq!(parsed.trust_class(), None);
+
+        let with_class = good.replace(
+            "\"trustScope\": \"trusted\",",
+            "\"trustScope\": \"untrusted\",\"trustClass\": \"fork-pr\",",
+        );
+        let parsed: JobSummary = serde_json::from_str(&with_class).unwrap();
+        assert_eq!(parsed.trust_scope(), Some("untrusted"));
+        assert_eq!(parsed.trust_class(), Some("fork-pr"));
 
         let smuggled = good.replace(".github/workflows/ci.yml", "ghp_smuggledtokenvalue");
         let outcome = serde_json::from_str::<JobSummary>(&smuggled);
@@ -994,6 +1021,27 @@ mod tests {
             "\"jobName\": \"build\",\"extra\": 1,",
         );
         assert!(serde_json::from_str::<JobSummary>(&extra).is_err());
+    }
+
+    #[test]
+    fn trust_class_validates_as_slug_naming_field() {
+        for label in ["trusted", "fork-pr", "unknown"] {
+            let mut input = normalized();
+            input.trust_class = Some(label.to_owned());
+            let summary = JobSummary::from_normalized(input).unwrap();
+            assert_eq!(summary.trust_class(), Some(label));
+        }
+        let mut input = normalized();
+        input.trust_class = Some("not a slug".to_owned());
+        let error = JobSummary::from_normalized(input).unwrap_err();
+        assert!(error.to_string().contains("trust_class"), "{error}");
+
+        let mut input = normalized();
+        input.trust_class = None;
+        assert_eq!(
+            JobSummary::from_normalized(input).unwrap().trust_class(),
+            None
+        );
     }
 
     #[test]

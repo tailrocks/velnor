@@ -1,35 +1,35 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	f006552624b1f4f9
-scan	93f7cb63e89572d5
-generator	2
+config	489081d94ffe14c9
+scan	b2a9a9e28635f510
+generator	4
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
-.github/ci/project.toml	080974bb41a48856
+.github/ci/project.toml	c11969cee4abc75a
+.github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-bun-velnor.yml	a1ab6d0b277a6cb2
 .github/workflows/ci-docker-docker.yml	77e1bd806e1e7ed7
 .github/workflows/ci-docs-docs.yml	bcadf7d393332098
-.github/workflows/ci-main.yml	26db198e57a2c740
+.github/workflows/ci-main.yml	a70f37c144a0f10c
 .github/workflows/ci-opentofu-opentofu.yml	88c4f83c0f888952
-.github/workflows/ci-policy.yml	2e2a1829dd3bfc62
+.github/workflows/ci-policy.yml	0dd63c8b9225efbe
 .github/workflows/ci-pr.yml	a1768422c336f4ee
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-rust-policy.yml	b9492b914ddf224e
-.github/workflows/ci-rust-production-topology.yml	29cac040a8f338cb
-.github/workflows/ci-rust-unit-collector.yml	57d9d1b8b8f7732f
-.github/workflows/ci-rust-velnor-bench.yml	4a860b99f37b8552
-.github/workflows/ci-rust-velnor-client.yml	26e84203bdc79d32
-.github/workflows/ci-rust-velnor-control.yml	7b3c8a955d53da36
-.github/workflows/ci-rust-velnor-model.yml	0a76a2fa6ffbe01e
-.github/workflows/ci-rust-velnor-render.yml	8835db34c27757a2
-.github/workflows/ci-rust-velnor-runner.yml	878954ea93ac26ee
-.github/workflows/ci-rust-velnor-tools.yml	6437eafccde90e8a
-.github/workflows/ci-rust-velnor-workflow.yml	500b80c03ff32f76
-.github/workflows/ci-rust-velnorctl.yml	189cb5390da907d6
+.github/workflows/ci-rust-policy.yml	3ba32b149e0b09d7
+.github/workflows/ci-rust-production-topology.yml	c6f011fb86ac24f7
+.github/workflows/ci-rust-unit-collector.yml	0aa26194b18615f6
+.github/workflows/ci-rust-velnor-bench.yml	1b54207c2b8eea99
+.github/workflows/ci-rust-velnor-client.yml	e8dbc57f22a70c80
+.github/workflows/ci-rust-velnor-control.yml	e49a9a4c85491ef4
+.github/workflows/ci-rust-velnor-model.yml	4766b4cf26897438
+.github/workflows/ci-rust-velnor-render.yml	4fdbf930d7430759
+.github/workflows/ci-rust-velnor-runner.yml	cfc2466855284327
+.github/workflows/ci-rust-velnor-tools.yml	8b60977f7ef591ca
+.github/workflows/ci-rust-velnor-workflow.yml	ef44110cea8d0402
+.github/workflows/ci-rust-velnorctl.yml	ebd0225401a34ae7
 .github/workflows/maintenance.yml	6f95b9c9d9c1040d
-.github/workflows/nightly.yml	9d9d5910f6a6fd58
-.github/workflows/preview.yml	537b73815e5a58bb
-.github/workflows/release.yml	eb617e651a2b6420
-.github/workflows/velnor-workflow-policy.yml	db48152c6ac6e084
+.github/workflows/nightly.yml	8de9c7e44e97f0d6
+.github/workflows/preview.yml	fb9ce5ebf288cd3b
+.github/workflows/release.yml	64515faa2b71edcb

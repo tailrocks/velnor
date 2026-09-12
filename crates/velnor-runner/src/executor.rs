@@ -13957,7 +13957,10 @@ mod tests {
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -14000,8 +14003,10 @@ mod tests {
             .find(|record| record["event"] == "tool_prep")
             .expect("tool_prep event");
         let fields = record["fields"].as_object().expect("tool_prep fields");
-        assert_eq!(fields.len(), 2);
+        // `trust_class` rides along on every admission-bound observation.
+        assert_eq!(fields.len(), 3);
         assert_eq!(fields["tool"], "mise");
+        assert_eq!(fields["trust_class"], "trusted");
         assert!(fields["ms"]
             .as_u64()
             .is_some_and(|value| value <= MAX_TOOL_PREP_TELEMETRY_MS));
@@ -14032,7 +14037,10 @@ mod tests {
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -15909,7 +15917,10 @@ esac
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -15992,7 +16003,10 @@ esac
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };
@@ -20539,7 +20553,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     #[test]
     fn cached_target_action_metadata_expressions_use_supported_subset() {
         let action_roots = [
-            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-runner-action-scratch"),
             Path::new("/tmp/velnor-targets/jackin/.github/actions"),
         ];
         if action_roots.iter().all(|root| !root.exists()) {
@@ -24397,7 +24411,10 @@ fi"#
             queued_at_rfc3339: None,
             slot_name: Some("slot-0".to_owned()),
             runner_name: Some("runner-0".to_owned()),
-            trust_scope: Some("trusted".to_owned()),
+            trust: crate::trust_class::AdmittedTrust::narrow(
+                crate::trust_class::TrustClass::Trusted,
+                "trusted",
+            ),
             resource_policy: Some("standard".to_owned()),
             masks: vec!["secret-marker".to_owned()],
         };

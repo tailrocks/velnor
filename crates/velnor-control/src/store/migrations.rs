@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 17;
+pub const LATEST_SCHEMA_VERSION: u32 = 18;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -503,6 +503,14 @@ CREATE TABLE IF NOT EXISTS slot_transition_requests (
 );
 ";
 
+/// Record the job's derived trust class alongside its effective admitted
+/// scope. `jobs.trust_scope` already holds the effective scope a job runs
+/// with; the class explains *why* (`trusted`, `fork-pr`, `unknown`).
+/// Historical rows predate derivation-ahead-of-persistence and keep NULL.
+const SCHEMA_V18: &str = "
+ALTER TABLE jobs ADD COLUMN trust_class TEXT;
+";
+
 const SCHEMA_V6_REPLAY: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_operations (
     instance_slug TEXT NOT NULL,
@@ -619,6 +627,11 @@ pub static MIGRATIONS: &[Migration] = &[
         name: "durable-slot-transition-requests",
         sql: SCHEMA_V17,
     },
+    Migration {
+        version: 18,
+        name: "job-trust-class-on-admission-row",
+        sql: SCHEMA_V18,
+    },
 ];
 
 const META_TABLES_SQL: &str = "
@@ -669,13 +682,13 @@ pub(crate) fn current_version(conn: &Connection) -> StoreResult<u32> {
             "stored schema version {version} is newer than supported schema version {LATEST_SCHEMA_VERSION}; upgrade Velnor before opening this database"
         )));
     }
-    if version >= LATEST_SCHEMA_VERSION && !v17_schema_complete(conn)? {
+    if version >= LATEST_SCHEMA_VERSION && !v18_schema_complete(conn)? {
         return Err(StoreError::new(
             ExitClass::Operation,
             "store.schema.incomplete",
         )
         .with_remediation(
-            "schema version 17 is recorded but its durable slot-transition request ledger or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
+            "schema version 18 is recorded but its job trust-class column, durable slot-transition request ledger, or predecessor schema is incomplete; restore the database from a consistent backup or rerun the migration transaction",
         ));
     }
     Ok(version)
@@ -869,6 +882,8 @@ pub(crate) fn apply_pending(
             slot_correlation_exists,
             slot_detail_exists,
         ];
+        let trust_class_column_exists =
+            migration.version == 18 && has_column(&transaction, "jobs", "trust_class")?;
         if migration.version == 16
             && slot_lifecycle_columns.iter().any(|exists| *exists)
             && !slot_lifecycle_columns.iter().all(|exists| *exists)
@@ -899,7 +914,8 @@ pub(crate) fn apply_pending(
             || ((migration.version != 2 || !has_run_attempt_duplicates(&transaction)?)
                 && !slot_column_exists
                 && !retention_generation_exists
-                && !slot_lifecycle_columns.iter().all(|exists| *exists))
+                && !slot_lifecycle_columns.iter().all(|exists| *exists)
+                && !trust_class_column_exists)
         {
             let sql = if lifecycle_columns_exist {
                 SCHEMA_V6_REPLAY
@@ -968,6 +984,15 @@ pub(crate) fn apply_pending(
             )
             .with_remediation(
                 "v17 durable slot-transition request identity and allocation columns did not converge transactionally; the schema version remains unchanged",
+            ));
+        }
+        if migration.version == 18 && !v18_schema_complete(&transaction)? {
+            return Err(StoreError::new(
+                ExitClass::Operation,
+                "store.schema.incomplete",
+            )
+            .with_remediation(
+                "v18 job trust-class column did not converge transactionally; the schema version remains unchanged",
             ));
         }
         if let Some(hook) = hook {
@@ -1226,13 +1251,29 @@ fn v15_schema_complete(conn: &Connection) -> StoreResult<bool> {
         && trigger_sql_contains(conn, "storage_reservations_immutable", "RAISE(ABORT")?)
 }
 
+fn v18_schema_complete(conn: &Connection) -> StoreResult<bool> {
+    if !v17_schema_complete(conn)?
+        || !column_definition_matches(conn, "jobs", "trust_class", "TEXT", false, None)?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn v16_schema_complete(conn: &Connection) -> StoreResult<bool> {
     if !v15_schema_complete(conn)?
-        || !slot_column_definition_matches(conn, "generation", "INTEGER", true, Some("0"))?
-        || !slot_column_definition_matches(conn, "transition_sequence", "INTEGER", true, Some("0"))?
-        || !slot_column_definition_matches(conn, "last_transition_token", "TEXT", false, None)?
-        || !slot_column_definition_matches(conn, "last_correlation_id", "TEXT", false, None)?
-        || !slot_column_definition_matches(conn, "last_transition_detail", "TEXT", false, None)?
+        || !column_definition_matches(conn, "slots", "generation", "INTEGER", true, Some("0"))?
+        || !column_definition_matches(
+            conn,
+            "slots",
+            "transition_sequence",
+            "INTEGER",
+            true,
+            Some("0"),
+        )?
+        || !column_definition_matches(conn, "slots", "last_transition_token", "TEXT", false, None)?
+        || !column_definition_matches(conn, "slots", "last_correlation_id", "TEXT", false, None)?
+        || !column_definition_matches(conn, "slots", "last_transition_detail", "TEXT", false, None)?
         || !table_sql_contains(conn, "slots", "CHECK (generation >= 0)")?
         || !table_sql_contains(conn, "slots", "CHECK (transition_sequence >= 0)")?
         || !v16_slot_rows_complete(conn)?
@@ -1306,20 +1347,22 @@ fn v17_schema_complete(conn: &Connection) -> StoreResult<bool> {
     )
 }
 
-fn slot_column_definition_matches(
+fn column_definition_matches(
     conn: &Connection,
+    table: &str,
     column: &str,
     expected_type: &str,
     expected_not_null: bool,
     expected_default: Option<&str>,
 ) -> StoreResult<bool> {
+    let sql = format!(
+        "SELECT type, \"notnull\", dflt_value, pk
+         FROM pragma_table_info('{table}') WHERE name = ?1"
+    );
     let definition: Option<(String, bool, Option<String>, i64)> = conn
-        .query_row(
-            "SELECT type, \"notnull\", dflt_value, pk
-             FROM pragma_table_info('slots') WHERE name = ?1",
-            [column],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
+        .query_row(&sql, [column], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
         .optional()?;
     Ok(
         definition.is_some_and(|(declared_type, not_null, default, primary_key)| {
@@ -1942,5 +1985,67 @@ mod tests {
             reopened.event_bounds("instance-a").unwrap(),
             (Some(1), Some(3))
         );
+    }
+
+    #[test]
+    fn upgrades_v17_to_v18_adding_nullable_trust_class() {
+        let temp = TempDb::new("v17-v18-trust-class");
+        let mut conn = Connection::open(&temp.path).expect("open legacy database");
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        ensure_meta_tables(&conn).unwrap();
+
+        for migration in MIGRATIONS.iter().take(17) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "UPDATE schema_version SET version = ?1, updated_at = ?2 WHERE singleton = 0",
+                rusqlite::params![migration.version, "1970-01-01T00:00:00Z"],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO jobs
+                 (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                  trigger_event, queued_at, acquired_at, trust_scope, phase, updated_at)
+             VALUES
+                 ('instance-a', 'legacy-job', 'o/r', 'w', 'j', 7, 1,
+                  'push', '1970-01-01T00:00:00Z', '1970-01-01T00:00:01Z', 'trusted',
+                  'queued', '1970-01-01T00:00:01Z');",
+        )
+        .unwrap();
+
+        acquire_lock(&conn, "v17-v18-test", Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            apply_pending(&mut conn, "v17-v18-test", None).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        release_lock(&conn, "v17-v18-test").unwrap();
+
+        assert!(v18_schema_complete(&conn).unwrap());
+        assert_eq!(current_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
+        let class: Option<String> = conn
+            .query_row(
+                "SELECT trust_class FROM jobs WHERE job_uid = 'legacy-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(class, None);
+        drop(conn);
+
+        let reopened = Store::open(&temp.path).expect("reopen migrated database");
+        assert_eq!(reopened.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn recorded_v18_without_trust_class_column_fails_closed() {
+        let temp = TempDb::new("incomplete-v18-column");
+        let store = Store::open(&temp.path).expect("initial migration");
+        let connection = store.lock_conn().expect("store lock");
+        connection
+            .execute("ALTER TABLE jobs DROP COLUMN trust_class", [])
+            .unwrap();
+
+        let error = current_version(&connection).unwrap_err();
+        assert_eq!(error.envelope.reason, "store.schema.incomplete");
     }
 }

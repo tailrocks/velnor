@@ -169,6 +169,7 @@ pub(crate) fn unit(
         velnor_full_commands: None,
         depends_on: Vec::new(),
         cache,
+        pinned_lockfile: false,
         tool_version: None,
     }
 }

@@ -393,6 +393,7 @@ pub(crate) fn catalog_unit(
         label: label.to_owned(),
         kind,
         root: ".".to_owned(),
+        pinned_lockfile: false,
         watch: watch.iter().map(|value| (*value).to_owned()).collect(),
         pr_commands: pr_commands
             .iter()
@@ -429,17 +430,15 @@ pub(crate) fn cargo_cache() -> CacheSpec {
             "rust-toolchain.toml".to_owned(),
             "rust-toolchain".to_owned(),
         ],
-        paths: vec![
-            "~/.cargo/registry".to_owned(),
-            "~/.cargo/git".to_owned(),
-            "~/.cache/sccache".to_owned(),
-        ],
+        paths: vec!["~/.cargo/registry".to_owned(), "~/.cargo/git".to_owned()],
+        purpose: crate::CachePurpose::CargoSources,
+        mbx_output_cache_justification: None,
     }
 }
 
 pub(crate) fn catalog_rust_unit(label: &str, full_command: &str) -> Unit {
     let full_commands = [full_command, crate::PER_CRATE_TEST_COMMAND];
-    catalog_unit(
+    let mut unit = catalog_unit(
         "rust",
         label,
         UnitKind::Rust,
@@ -458,7 +457,9 @@ pub(crate) fn catalog_rust_unit(label: &str, full_command: &str) -> Unit {
         ],
         &full_commands,
         Some(cargo_cache()),
-    )
+    );
+    unit.pinned_lockfile = true;
+    unit
 }
 
 pub(crate) fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
@@ -599,6 +600,8 @@ pub(crate) fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
             Some(CacheSpec {
                 key_files: vec!["package.json".to_owned(), "bun.lock".to_owned()],
                 paths: vec!["~/.bun/install/cache".to_owned()],
+                    purpose: crate::CachePurpose::Generic,
+                    mbx_output_cache_justification: None,
             }),
         )],
         RepositoryProfile::CompositeAction => vec![catalog_unit(
@@ -634,6 +637,8 @@ pub(crate) fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
             Some(CacheSpec {
                 key_files: vec!["**/.terraform.lock.hcl".to_owned()],
                 paths: vec!["~/.terraform.d/plugin-cache".to_owned()],
+                    purpose: crate::CachePurpose::Generic,
+                    mbx_output_cache_justification: None,
             }),
         )],
         RepositoryProfile::OpenTofuRust => vec![
@@ -654,6 +659,8 @@ pub(crate) fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
                 Some(CacheSpec {
                     key_files: vec!["**/.terraform.lock.hcl".to_owned()],
                     paths: vec!["~/.terraform.d/plugin-cache".to_owned()],
+                    purpose: crate::CachePurpose::Generic,
+                    mbx_output_cache_justification: None,
                 }),
             ),
         ],
@@ -678,6 +685,8 @@ pub(crate) fn catalog_units(profile: &EstateProfile) -> Vec<Unit> {
                         "~/.gradle/caches".to_owned(),
                         "~/.gradle/wrapper".to_owned(),
                     ],
+                    purpose: crate::CachePurpose::Generic,
+                    mbx_output_cache_justification: None,
                 }),
             ),
         ],
@@ -1296,7 +1305,7 @@ pub(crate) fn run_estate(cli: &crate::Cli) -> Result<(), GeneratorError> {
         if cli.adopt {
             config = crate::adopt_existing_workflow_templates(&destination, config)?;
         }
-        let files = crate::generated_files(&config);
+        let files = crate::generated_files(&config)?;
         // Catalog generation is a function of code-owned profiles, not of a
         // scanned shape or a repo-owned config, so its recorded inputs are the
         // canonical "no config, no scan" form.

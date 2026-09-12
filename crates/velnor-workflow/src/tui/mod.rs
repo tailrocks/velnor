@@ -523,7 +523,13 @@ impl App {
         let Some(config) = self.selected_config() else {
             return;
         };
-        let files = generated_files(&config);
+        let files = match generated_files(&config) {
+            Ok(files) => files,
+            Err(error) => {
+                self.fail(FailedOperation::Review, error.to_string());
+                return;
+            }
+        };
         let Some(inputs) = self.inputs.clone() else {
             self.fail(
                 FailedOperation::Review,
@@ -563,7 +569,13 @@ impl App {
             );
             return;
         };
-        let files = generated_files(&config);
+        let files = match generated_files(&config) {
+            Ok(files) => files,
+            Err(error) => {
+                self.fail(FailedOperation::Generate, error.to_string());
+                return;
+            }
+        };
         let files_for_worker = files.clone();
         let dry_run = self.cli.dry_run;
         let check = self.cli.check;
@@ -952,6 +964,7 @@ mod tests {
                 .iter()
                 .map(|dependency| (*dependency).to_owned())
                 .collect(),
+            pinned_lockfile: false,
             cache: None,
             tool_version: None,
         }

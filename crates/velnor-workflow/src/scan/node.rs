@@ -9,7 +9,8 @@ use serde_json::Value;
 use super::file_walk::{files_named, join_repo_path, path_prefix, roots_for_manifests};
 use super::{unit, RepositoryShape, ScanContext};
 use crate::{
-    identifier_suffix, parent_path, shell_change_dir, CacheSpec, GeneratorError, UnitKind,
+    identifier_suffix, parent_path, shell_change_dir, CachePurpose, CacheSpec, GeneratorError,
+    UnitKind,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -359,6 +360,8 @@ pub(crate) fn detect(
             } else {
                 "~/.npm".to_owned()
             }],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
         });
         let mut package_unit = unit(kind, &package_root, package_watch, commands, package_cache);
         let base_id = format!("{}-{}", kind.id_prefix(), identifier_suffix(&facts.name));

@@ -710,6 +710,7 @@ mod tests {
             velnor_pr_commands: None,
             velnor_full_commands: None,
             depends_on: Vec::new(),
+            pinned_lockfile: true,
             cache: None,
             tool_version: Some("1.97.1".to_owned()),
         };

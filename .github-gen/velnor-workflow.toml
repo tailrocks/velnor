@@ -96,6 +96,10 @@ units = ["rust-velnorctl"]
 primitive = "rust-crate-pipeline"
 units = ["rust-production-topology"]
 
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-workflow-contract"]
+
 # Lanes and cache: the default matrix (GitHub-hosted plus the trust-gated
 # self-hosted lane) and the detected cache contract, stated explicitly so the
 # repository owns the decision.
@@ -147,7 +151,7 @@ docker_closure = [
     "crates/velnor-workflow/README.md",
 ]
 "rust-velnor-runner" = [
-  "crates/velnor-workflow/templates/velnor-release.yml",
+  ".github-gen/velnor-workflow.toml",
   "microvm/**",
   "tools/unit-collector/**",
   "fleet/**",
@@ -166,8 +170,8 @@ units = ["rust-velnor-workflow"]
 [declare.args]
 command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."
 
-# Release-side surface: the reviewed publisher, rolling preview, signer, and
-# policy provider are declared verbatim; the generator refreshes their pins.
+# Release-side surface: the reviewed publisher, rolling preview, and signer are
+# declared verbatim; the generator refreshes their pins.
 [[declare]]
 primitive = "static-workflow"
 file = "release.yml"
@@ -1174,6 +1178,8 @@ jobs:
           sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
 
       - name: Stage acyclic identity files packaged into the deb
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           # These depend only on the source (not on the deb digest), so shipping
@@ -1182,6 +1188,42 @@ jobs:
           mkdir -p crates/velnor-runner/release
           cp release-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp release-metadata/manifest.json crates/velnor-runner/release/manifest.json
+          # The deb also ships its own informational velnor.package-record/v1
+          # (#673): a stable deb never activates from it (the out-of-band
+          # release record below is the only stable activation path), but the
+          # record names exactly this source, version, and packaged runner
+          # binary, and the emitting release-build binary refuses any record
+          # that disagrees with its own embedded identity.
+          chmod +x release-metadata/velnor-release-tool
+          binary="target/${TARGET}/release/velnor-runner"
+          test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
+          binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum release-metadata/manifest.json | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' release-metadata/manifest.json)"
+          source_sha="$(jq -er '.source_sha' release-metadata/build-identity.json)"
+          jq -n \
+            --arg schema "velnor.package-record/v1" \
+            --arg repo "tailrocks/velnor" \
+            --arg kind "stable" \
+            --arg commit "$source_sha" \
+            --arg crate "$VERSION" \
+            --arg debian "$VERSION" \
+            --argjson mv "$manifest_version" \
+            --arg mhash "$manifest_sha256" \
+            --arg arch "${{ matrix.arch }}" \
+            --arg target "$TARGET" \
+            --arg binary "$binary_sha256" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, kind: $kind, commit: $commit,
+                       crate_version: $crate, debian_version: $debian,
+                       manifest_version: $mv, manifest_sha256: $mhash },
+              architecture: { arch: $arch, target: $target, binary_sha256: $binary }
+            }' > package-record.candidate.json
+          release-metadata/velnor-release-tool release emit \
+            --record package-record.candidate.json \
+            --binary "$binary" \
+            --out crates/velnor-runner/release/package-record.json
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -1291,7 +1333,16 @@ jobs:
           grep -q "usr/share/velnor/microvm/rootfs.ext4" "$manifest" || { echo "::error::deb missing guest rootfs" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/manifest.json" "$manifest" || { echo "::error::deb missing microvm manifest" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
+          grep -q "usr/share/velnor/package-record.json" "$manifest" || { echo "::error::deb missing its package record" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          # The deb must ship exactly the package record emitted for this arch,
+          # compared as a stream: the deb guard never extracts or traps.
+          dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json \
+            | cmp - crates/velnor-runner/release/package-record.json \
+            || { echo "::error::packaged package-record.json differs from the emitted record" >&2; exit 1; }
+          record_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | sha256sum | awk '{print $1}')"
+          [ "$record_sha256" = "$(awk 'NF {print $1; exit}' crates/velnor-runner/release/package-record.json.sha256)" ] \
+            || { echo "::error::packaged package-record.json digest != emitted sidecar" >&2; exit 1; }
           build_binary="target/${{ matrix.target }}/release/velnor-runner"
           read_sha() {
             local path="$1" size token
@@ -1322,6 +1373,8 @@ jobs:
           packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
           [ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }
           [ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }
+          [ "$packaged_binary_sha" = "$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | jq -r '.architecture.binary_sha256')" ] \
+            || { echo "::error::deb runner binary does not match the package record" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
           cp "$src" "$dst"
           sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
@@ -1740,11 +1793,18 @@ name: Preview release
 # prerelease that always names the current main tip, so a consumer can install
 # "what main builds right now" without waiting for a tag.
 #
-# Deliberately NOT the stable coherence chain. A preview run emits no OCI image,
-# no release-record.json, and no release-record digest chain; its artifacts are
-# admitted by identity (version + source commit) plus GitHub artifact
-# attestation produced by the shared ci-release-package-signer callable with
-# source-ref refs/heads/main. Consumer-side verification enforces the rest.
+# Deliberately NOT the stable coherence chain. A preview run emits no OCI image
+# and no release-record.json (that record names deb digests and an OCI index a
+# preview never builds); instead every preview deb carries its own
+# velnor.package-record/v1 at /usr/share/velnor/package-record.json — emitted and
+# verified by the host-native preview binary, source-derived (commit, versions,
+# manifest hash, this arch's runner binary digest) and therefore acyclic inside
+# the deb. It is what `velnorctl release activate` consumes on a preview host,
+# so the units' `release verify-installed` gate can pass at all (#673). Beyond
+# that record, artifacts are admitted by identity (version + source commit) plus
+# GitHub artifact attestation produced by the shared ci-release-package-signer
+# callable with source-ref refs/heads/main. Consumer-side verification enforces
+# the rest.
 #
 # Version contract: `<crate_version>~preview.<run_number>+<7-hex-short-sha>`
 # (for example 0.1.274~preview.42+abc1234). `~` is required: dpkg sorts `~`
@@ -2058,6 +2118,11 @@ jobs:
           jq -e 'type == "object"' manifest.json >/dev/null
           jq -e --arg sha "$SOURCE_COMMIT" '.source_sha == $sha' build-identity.json >/dev/null \
             || { echo "::error::build identity source_sha != preview source commit $SOURCE_COMMIT" >&2; exit 1; }
+          # This same host-native binary is the only executable thing in this
+          # lane bound to the preview identity, so it also emits every deb's
+          # package record (#673): the cross-compiling deb jobs copy it instead
+          # of executing their target binary.
+          cp "$runner" velnor-release-tool
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -2065,6 +2130,7 @@ jobs:
           path: |
             build-identity.json
             manifest.json
+            velnor-release-tool
           if-no-files-found: error
 
   build:
@@ -2201,6 +2267,55 @@ jobs:
           cp preview-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp preview-metadata/manifest.json crates/velnor-runner/release/manifest.json
 
+      - name: Stage the deb's own package record
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          CRATE_VERSION: ${{ needs.identity.outputs.crate_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Issue #673: a preview install has no out-of-band release record to
+          # activate from, so the deb carries its own velnor.package-record/v1.
+          # The candidate record is authored here from source-derived inputs
+          # (no deb digest, no OCI digest — acyclic by construction), then
+          # emitted by the host-native preview binary the metadata job built
+          # from this exact commit: that binary refuses any record whose kind,
+          # commit, crate version, or runner binary digest disagrees with its
+          # own embedded identity, and writes only the canonical bytes.
+          chmod +x preview-metadata/velnor-release-tool
+          binary="target/${TARGET}/release/velnor-runner"
+          test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
+          binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum preview-metadata/manifest.json | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' preview-metadata/manifest.json)"
+          jq -n \
+            --arg schema "velnor.package-record/v1" \
+            --arg repo "tailrocks/velnor" \
+            --arg kind "preview" \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg crate "$CRATE_VERSION" \
+            --arg debian "$VERSION" \
+            --argjson mv "$manifest_version" \
+            --arg mhash "$manifest_sha256" \
+            --arg arch "${{ matrix.arch }}" \
+            --arg target "$TARGET" \
+            --arg binary "$binary_sha256" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, kind: $kind, commit: $commit,
+                       crate_version: $crate, debian_version: $debian,
+                       manifest_version: $mv, manifest_sha256: $mhash },
+              architecture: { arch: $arch, target: $target, binary_sha256: $binary }
+            }' > package-record.candidate.json
+          preview-metadata/velnor-release-tool release emit \
+            --record package-record.candidate.json \
+            --binary "$binary" \
+            --out crates/velnor-runner/release/package-record.json
+          jq -e --arg version "$VERSION" --arg commit "$SOURCE_COMMIT" \
+            '.build.kind == "preview" and .build.debian_version == $version and .build.commit == $commit' \
+            crates/velnor-runner/release/package-record.json >/dev/null \
+            || { echo "::error::emitted package record does not name this preview identity" >&2; exit 1; }
+
       - name: Download guest payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -2313,7 +2428,21 @@ jobs:
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           grep -q "usr/share/velnor/build-identity.json" "$manifest" || { echo "::error::deb missing build identity" >&2; exit 1; }
           grep -q "usr/share/velnor/manifest.json" "$manifest" || { echo "::error::deb missing compiled manifest" >&2; exit 1; }
+          grep -q "usr/share/velnor/package-record.json" "$manifest" || { echo "::error::deb missing its package record" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          # The deb must ship exactly the package record that was emitted for
+          # this arch, compared as a stream (the deb guard never extracts or
+          # traps), and its binary digest must name the packaged runner: this
+          # record is what a preview host activates from (#673).
+          dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json \
+            | cmp - crates/velnor-runner/release/package-record.json \
+            || { echo "::error::packaged package-record.json differs from the emitted record" >&2; exit 1; }
+          record_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | sha256sum | awk '{print $1}')"
+          [ "$record_sha256" = "$(awk 'NF {print $1; exit}' crates/velnor-runner/release/package-record.json.sha256)" ] \
+            || { echo "::error::packaged package-record.json digest != emitted sidecar" >&2; exit 1; }
+          packaged_binary_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
+          [ "$packaged_binary_sha256" = "$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | jq -r '.architecture.binary_sha256')" ] \
+            || { echo "::error::deb runner binary does not match the package record" >&2; exit 1; }
           # dpkg sorts `~` before the release, so this deb can never satisfy an
           # upgrade to the future <crate_version> stable release.
           dpkg --compare-versions "$VERSION" lt "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/velnor-runner/Cargo.toml | head -n1)" \
@@ -2370,6 +2499,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: preview-metadata
+          path: preview-metadata
+
       - name: Assemble the consumer release manifest and independent checksums
         run: |
           set -euo pipefail
@@ -2399,6 +2533,13 @@ jobs:
           # SHA256SUMS binds artifact basenames. Verify from the downloaded
           # artifact corpus before anything is published.
           (cd artifacts && sha256sum --check --strict ../SHA256SUMS)
+          # The packaged package record is the only identity a preview host can
+          # activate from (#673), so each deb is re-verified from its own bytes:
+          # the record must be coherent and name exactly this commit, version,
+          # arch, and packaged runner binary.
+          chmod +x preview-metadata/velnor-release-tool
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf -- "$tmpdir"' EXIT
           for arch in amd64 arm64; do
             deb="artifacts/velnor-runner-preview-${VERSION}-${arch}.deb"
             [ -f "$deb" ] || { echo "::error::missing preview deb for $arch" >&2; exit 1; }
@@ -2406,6 +2547,19 @@ jobs:
               || { echo "::error::published deb version != preview identity ($arch)" >&2; exit 1; }
             [ "$(dpkg-deb -f "$deb" Architecture)" = "$arch" ] \
               || { echo "::error::published deb arch mismatch ($arch)" >&2; exit 1; }
+            record="$tmpdir/package-record-$arch.json"
+            dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/share/velnor/package-record.json > "$record"
+            record_digest="$(sha256sum "$record" | awk '{print $1}')"
+            preview-metadata/velnor-release-tool release verify-record \
+              --record "$record" --sha256 "$record_digest" >/dev/null \
+              || { echo "::error::packaged package record is incoherent ($arch)" >&2; exit 1; }
+            packaged_binary="$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
+            jq -e --arg commit "$COMMIT" --arg version "$VERSION" --arg arch "$arch" --arg binary "$packaged_binary" \
+              '.build.kind == "preview" and .build.commit == $commit and
+               .build.debian_version == $version and
+               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \
+              "$record" >/dev/null \
+              || { echo "::error::packaged package record does not name this preview identity ($arch)" >&2; exit 1; }
           done
 
       - name: Replace the rolling preview release atomically
@@ -2566,85 +2720,6 @@ jobs:
           subject-path: signer-input/${{ inputs.subject-path }}
 '''
 
-[[declare]]
-primitive = "static-workflow"
-file = "velnor-workflow-policy.yml"
-
-[declare.args]
-template = '''
-name: Velnor workflow policy
-
-on:
-  workflow_call:
-    inputs:
-      policy-revision:
-        description: Full SHA of this reusable policy workflow
-        required: true
-        type: string
-
-permissions:
-  contents: read
-
-jobs:
-  policy:
-    name: Enforce workflow policy
-    runs-on: __VELNOR_GITHUB_RUNNER__
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout caller workflow data
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          path: policy-checkout
-          sparse-checkout: |
-            .github/workflows
-          sparse-checkout-cone-mode: true
-          fetch-depth: 1
-          persist-credentials: false
-          # Static policy validation only; fork head checkout is intentional.
-          allow-unsafe-pr-checkout: true
-
-      - name: Set up Mr. Boxington
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
-        with:
-          backend: github
-          version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-__VELNOR_WORKFLOW_SOURCE_REV__
-          restore-keys: |
-            velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install pinned Velnor workflow runtime
-        env:
-          CARGO_HOME: ${{ runner.temp }}/velnor-workflow-cargo-home
-          CARGO_TARGET_DIR: ${{ runner.temp }}/velnor-workflow-cargo-target
-          VELNOR_WORKFLOW_INSTALL_DIR: ${{ runner.temp }}/velnor-workflow-install
-          VELNOR_WORKFLOW_ROOT: ${{ runner.temp }}/velnor-workflow
-        run: |
-          set -euo pipefail
-          install -d -m 700 \
-            "$CARGO_HOME" \
-            "$CARGO_TARGET_DIR" \
-            "$VELNOR_WORKFLOW_INSTALL_DIR"
-          cd "$VELNOR_WORKFLOW_INSTALL_DIR"
-          cargo install \
-            --locked \
-            --git https://github.com/tailrocks/velnor \
-            --rev __VELNOR_WORKFLOW_SOURCE_REV__ \
-            --root "$VELNOR_WORKFLOW_ROOT" \
-            velnor-workflow \
-            --bin velnor-workflow
-          echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
-
-      - name: Enforce workflow policy
-        env:
-          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-          VELNOR_WORKFLOW_POLICY_REVISION: ${{ inputs.policy-revision }}
-        run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
-'''
-
 # The cache-hygiene workflow is the generic maintenance family, stated
 # explicitly so the repository owns the decision.
 
@@ -2686,3 +2761,7 @@ paths = ["~/.cargo/registry", "~/.cargo/git"]
 [[static_files]]
 file = ".github/actions/setup-velnor-workflow/action.yml"
 source = ".github-gen/sources/actions/setup-velnor-workflow/action.yml"
+
+[[static_files]]
+file = ".github/workflows/AGENTS.md"
+source = ".github-gen/sources/workflows-AGENTS.md"

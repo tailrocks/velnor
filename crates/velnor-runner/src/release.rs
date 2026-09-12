@@ -26,6 +26,22 @@
 //! (see `build.rs`); [`emit_record`] refuses to produce a publishable record from
 //! a development binary. The pure verify/parse logic is exercised entirely by
 //! fixtures so the normal (feature-off) test path proves the whole model.
+//!
+//! ## Preview packages
+//!
+//! The rolling preview lane builds from an untagged main commit, so no
+//! [`ReleaseRecord`] can exist for it: a stable record needs a `v*` tag and the
+//! OCI image the preview lane never builds. Without a record, no installed
+//! preview package could ever pass `release verify-installed`, and the package
+//! units would refuse to start it (issue #673). A preview deb therefore ships
+//! its own [`PackageRecord`] — `kind=preview`, bound to the exact source commit,
+//! crate/debian version, compiled-manifest hash, and the runner binary digest of
+//! the architecture the deb was built for. It records no deb digest and no OCI
+//! digest, so packaging it inside the deb is acyclic. Emission still refuses a
+//! development binary, and a preview record can only be emitted by a binary
+//! whose embedded build kind is `preview`, i.e. one bound to that exact commit.
+//! `verify-installed` applies the same installed-bytes coherence checks to both
+//! record kinds.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -49,6 +65,17 @@ pub const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
 pub const PUBLICATION_RECORD_SCHEMA: &str = "velnor.publication-record/v1";
 pub const APT_PUBLICATION_METADATA_SCHEMA: &str = "velnor.apt-publication-metadata/v1";
 pub const DEPLOYED_IDENTITY_SCHEMA: &str = "velnor.deployed-identity/v1";
+/// A deb's own source-derived identity record, shipped inside the deb at
+/// `/usr/share/velnor/package-record.json`.
+pub const PACKAGE_RECORD_SCHEMA: &str = "velnor.package-record/v1";
+
+/// Package lanes that ship a [`PackageRecord`]. A `stable` package record is
+/// informational only: stable activation demands the out-of-band release-record
+/// chain (tagged commit, OCI image, APT publication). Only a `preview` package
+/// record activates, because the preview lane builds no OCI image and has no
+/// release record to activate.
+pub const PACKAGE_KIND_STABLE: &str = "stable";
+pub const PACKAGE_KIND_PREVIEW: &str = "preview";
 
 /// Canonical source repository the release chain is anchored to.
 pub const SOURCE_REPOSITORY: &str = "tailrocks/velnor";
@@ -327,6 +354,124 @@ pub struct PackagesIndex {
     pub sha256: Sha256Hex,
 }
 
+/// The identity a deb carries about itself. It names only source-derived bytes:
+/// the source commit, both versions, the compiled-manifest hash, and the runner
+/// binary digest for the one architecture this deb was built for. It records no
+/// deb digest (circular) and no OCI digest (a package is not an image), so
+/// shipping it inside the deb is acyclic — the same property that lets the deb
+/// ship `build-identity.json` and `manifest.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageRecord {
+    pub schema: String,
+    pub build: PackageBuildIdentity,
+    pub architecture: PackageArchitectureIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageBuildIdentity {
+    pub repository: String,
+    /// [`PACKAGE_KIND_STABLE`] or [`PACKAGE_KIND_PREVIEW`]. Emission refuses a
+    /// record whose kind is not the emitting binary's own embedded build kind.
+    pub kind: String,
+    pub commit: SourceSha,
+    pub crate_version: String,
+    pub debian_version: String,
+    pub manifest_version: u32,
+    pub manifest_sha256: Sha256Hex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageArchitectureIdentity {
+    pub arch: Arch,
+    pub target: String,
+    pub binary_sha256: Sha256Hex,
+}
+
+impl PackageRecord {
+    /// Same canonical-bytes contract as a [`ReleaseRecord`]: two-space pretty
+    /// JSON plus a trailing newline, so the digest is reproducible.
+    pub fn to_canonical_json(&self) -> String {
+        let mut json =
+            serde_json::to_string_pretty(self).expect("package record always serializes");
+        json.push('\n');
+        json
+    }
+
+    /// SHA-256 over the canonical bytes, stored outside the record.
+    pub fn digest(&self) -> Sha256Hex {
+        Sha256Hex::of_bytes(self.to_canonical_json().as_bytes())
+    }
+
+    pub fn is_preview(&self) -> bool {
+        self.build.kind == PACKAGE_KIND_PREVIEW
+    }
+
+    /// Structural + cross-field coherence of one package record. The kind and
+    /// the Debian version validate each other, so a stable record can never be
+    /// re-labelled as a preview record (or vice versa) without also breaking the
+    /// version contract.
+    pub fn verify(&self) -> std::result::Result<(), CoherenceError> {
+        if self.schema != PACKAGE_RECORD_SCHEMA {
+            return Err(CoherenceError::Schema {
+                want: PACKAGE_RECORD_SCHEMA,
+            });
+        }
+        if self.build.repository != SOURCE_REPOSITORY {
+            return Err(CoherenceError::Repository);
+        }
+        if self.build.crate_version.is_empty() {
+            return Err(CoherenceError::EmptyField("crate_version"));
+        }
+        if self.build.kind != PACKAGE_KIND_STABLE && self.build.kind != PACKAGE_KIND_PREVIEW {
+            return Err(CoherenceError::Kind);
+        }
+        let version_coherent = match self.build.kind.as_str() {
+            PACKAGE_KIND_STABLE => self.build.debian_version == self.build.crate_version,
+            _ => {
+                is_preview_debian_version(&self.build.debian_version, &self.build.crate_version)
+                    && self.build.debian_version != self.build.crate_version
+            }
+        };
+        if !version_coherent {
+            return Err(CoherenceError::PackageVersion);
+        }
+        if self.build.manifest_version != crate::manifest::MANIFEST_VERSION {
+            return Err(CoherenceError::ManifestVersion);
+        }
+        if self.architecture.target != self.architecture.arch.target() {
+            return Err(CoherenceError::ArchTarget);
+        }
+        if self.architecture.binary_sha256.is_zero() {
+            return Err(CoherenceError::EmptyField("architecture.binary_sha256"));
+        }
+        Ok(())
+    }
+}
+
+/// `<crate>~preview.<run>+<7-hex>`: dpkg sorts `~` before the plain release, so
+/// a preview of X is strictly older than X and can never win an upgrade race
+/// against its own stable release.
+fn is_preview_debian_version(debian: &str, crate_version: &str) -> bool {
+    let Some(rest) = debian.strip_prefix(crate_version) else {
+        return false;
+    };
+    let Some(rest) = rest.strip_prefix("~preview.") else {
+        return false;
+    };
+    let Some((run, short_commit)) = rest.split_once('+') else {
+        return false;
+    };
+    !run.is_empty()
+        && run.bytes().all(|byte| byte.is_ascii_digit())
+        && short_commit.len() == 7
+        && short_commit
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Preverified metadata for bytes served by the APT repository. The size is
 /// kept beside the digest so the trusted byte-verification boundary can reject
 /// truncation or concatenation before constructing this claim.
@@ -439,7 +584,11 @@ pub struct DeployedIdentity {
     pub binary_sha256: Sha256Hex,
     pub manifest_version: u32,
     pub manifest_sha256: Sha256Hex,
-    pub oci_image_digest: OciDigest,
+    /// The OCI index the deployed tuple runs on. `None` only for a package
+    /// record: a preview package ships no image, so a deployed identity that
+    /// names one for it is incoherent and fails verification.
+    #[serde(default)]
+    pub oci_image_digest: Option<OciDigest>,
     /// Points AT the active release record (never the record's own digest).
     pub record_sha256: Sha256Hex,
 }
@@ -464,6 +613,12 @@ pub enum CoherenceError {
     TagVersion,
     #[error("debian version does not equal the crate version")]
     DebianVersion,
+    #[error("record build kind is neither 'stable' nor 'preview'")]
+    Kind,
+    #[error("package version does not satisfy its kind's version contract")]
+    PackageVersion,
+    #[error("bytes carry neither the release-record nor the package-record schema")]
+    RecordSchema,
     #[error("compiled-manifest version is not the expected schema version")]
     ManifestVersion,
     #[error("record repository is not the anchored source repository")]
@@ -645,6 +800,23 @@ pub fn verify_record_bytes(
     Ok(record)
 }
 
+/// Same contract as [`verify_record_bytes`] for a deb's own [`PackageRecord`].
+pub fn verify_package_record_bytes(
+    bytes: &[u8],
+    expected: &Sha256Hex,
+) -> std::result::Result<PackageRecord, CoherenceError> {
+    if &Sha256Hex::of_bytes(bytes) != expected {
+        return Err(CoherenceError::RecordChecksum);
+    }
+    let record: PackageRecord =
+        serde_json::from_slice(bytes).map_err(|_| CoherenceError::Malformed)?;
+    if record.to_canonical_json().as_bytes() != bytes {
+        return Err(CoherenceError::NonCanonical);
+    }
+    record.verify()?;
+    Ok(record)
+}
+
 fn is_full_fingerprint(value: &str) -> bool {
     value.len() == 40
         && value
@@ -652,12 +824,151 @@ fn is_full_fingerprint(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
 }
 
+/// One record a host can hold active in its release store and verify against the
+/// installed bytes. Both variants share one on-disk tuple (`record.json` +
+/// `deployed.json`), one store layout, and one verification contract: every
+/// installed byte must be named by the active record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveRecord {
+    /// The stable chain's release record: tagged commit, OCI image, APT
+    /// publication, per-arch deb digests.
+    Release(ReleaseRecord),
+    /// A deb's own package record. The preview lane's activatable record; a
+    /// `stable` package record is refused at activation (the stable chain
+    /// activates from the out-of-band release record instead).
+    Package(PackageRecord),
+}
+
+impl ActiveRecord {
+    /// Parse record bytes, dispatching on their schema tag. An unknown schema is
+    /// refused before any field is trusted.
+    pub fn parse(bytes: &[u8]) -> std::result::Result<Self, CoherenceError> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| CoherenceError::Malformed)?;
+        match schema_tag_of_value(&value)? {
+            RELEASE_RECORD_SCHEMA => Ok(Self::Release(
+                serde_json::from_value(value).map_err(|_| CoherenceError::Malformed)?,
+            )),
+            PACKAGE_RECORD_SCHEMA => Ok(Self::Package(
+                serde_json::from_value(value).map_err(|_| CoherenceError::Malformed)?,
+            )),
+            _ => Err(CoherenceError::RecordSchema),
+        }
+    }
+
+    pub fn verify(&self) -> std::result::Result<(), CoherenceError> {
+        match self {
+            Self::Release(record) => record.verify(),
+            Self::Package(record) => record.verify(),
+        }
+    }
+
+    /// Canonical bytes: two-space pretty JSON, trailing newline, deterministic.
+    pub fn to_canonical_json(&self) -> String {
+        match self {
+            Self::Release(record) => record.to_canonical_json(),
+            Self::Package(record) => record.to_canonical_json(),
+        }
+    }
+
+    /// SHA-256 over the canonical bytes, stored outside the record.
+    pub fn digest(&self) -> Sha256Hex {
+        match self {
+            Self::Release(record) => record.digest(),
+            Self::Package(record) => record.digest(),
+        }
+    }
+
+    /// The release-store directory key this record is immutable under: the
+    /// stable release tag, or the package's Debian version.
+    pub fn store_key(&self) -> &str {
+        match self {
+            Self::Release(record) => &record.build.tag,
+            Self::Package(record) => &record.build.debian_version,
+        }
+    }
+
+    /// Human-facing identity for diagnostics and command output: the stable tag,
+    /// or `<kind> <debian version>` for a package record.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Release(record) => record.build.tag.clone(),
+            Self::Package(record) => {
+                format!("{} {}", record.build.kind, record.build.debian_version)
+            }
+        }
+    }
+
+    pub fn source_commit(&self) -> &SourceSha {
+        match self {
+            Self::Release(record) => &record.build.commit,
+            Self::Package(record) => &record.build.commit,
+        }
+    }
+
+    pub fn crate_version(&self) -> &str {
+        match self {
+            Self::Release(record) => &record.build.crate_version,
+            Self::Package(record) => &record.build.crate_version,
+        }
+    }
+
+    pub fn package_version(&self) -> &str {
+        match self {
+            Self::Release(record) => &record.build.debian_version,
+            Self::Package(record) => &record.build.debian_version,
+        }
+    }
+
+    pub fn manifest_version(&self) -> u32 {
+        match self {
+            Self::Release(record) => record.build.manifest_version,
+            Self::Package(record) => record.build.manifest_version,
+        }
+    }
+
+    pub fn manifest_sha256(&self) -> &Sha256Hex {
+        match self {
+            Self::Release(record) => &record.build.manifest_sha256,
+            Self::Package(record) => &record.build.manifest_sha256,
+        }
+    }
+
+    /// The OCI index this record's tuple runs on. `None` for a package record: a
+    /// package ships no image, so its deployed identity must name none.
+    pub fn oci_index_digest(&self) -> Option<&OciDigest> {
+        match self {
+            Self::Release(record) => Some(&record.oci_index_digest),
+            Self::Package(_) => None,
+        }
+    }
+
+    /// The installed runner binary digest this record claims for `arch`.
+    pub fn binary_sha256(&self, arch: Arch) -> Option<&Sha256Hex> {
+        match self {
+            Self::Release(record) => record.architecture(arch).map(|item| &item.binary_sha256),
+            Self::Package(record) => {
+                (record.architecture.arch == arch).then_some(&record.architecture.binary_sha256)
+            }
+        }
+    }
+}
+
+fn schema_tag_of_value(value: &serde_json::Value) -> std::result::Result<&str, CoherenceError> {
+    value
+        .get("schema")
+        .and_then(|schema| schema.as_str())
+        .ok_or(CoherenceError::Malformed)
+}
+
 /// Cross-check the on-host deployed identity against the active record and the
 /// installed binary's own digest. Fails on any single-field drift so a mixed
-/// old/new tuple can never start.
+/// old/new tuple can never start. The same checks apply to both record kinds;
+/// a package record simply contributes no OCI index for the deployed identity
+/// to agree with.
 pub fn verify_installed(
     deployed: &DeployedIdentity,
-    record: &ReleaseRecord,
+    record: &ActiveRecord,
     host: Arch,
     installed_binary_sha256: &Sha256Hex,
 ) -> std::result::Result<(), CoherenceError> {
@@ -670,29 +981,28 @@ pub fn verify_installed(
     if deployed.record_sha256 != record.digest() {
         return Err(CoherenceError::InstalledRecordPointer);
     }
-    if deployed.source_commit != record.build.commit {
+    if deployed.source_commit != *record.source_commit() {
         return Err(CoherenceError::InstalledSource);
     }
-    if deployed.crate_version != record.build.crate_version {
+    if deployed.crate_version != record.crate_version() {
         return Err(CoherenceError::InstalledCrateVersion);
     }
-    if deployed.package_version != record.build.debian_version {
+    if deployed.package_version != record.package_version() {
         return Err(CoherenceError::InstalledPackageVersion);
     }
-    if deployed.manifest_version != record.build.manifest_version {
+    if deployed.manifest_version != record.manifest_version() {
         return Err(CoherenceError::InstalledManifestVersion);
     }
-    if deployed.manifest_sha256 != record.build.manifest_sha256 {
+    if deployed.manifest_sha256 != *record.manifest_sha256() {
         return Err(CoherenceError::InstalledManifestHash);
     }
-    if deployed.oci_image_digest != record.oci_index_digest {
+    if deployed.oci_image_digest.as_ref() != record.oci_index_digest() {
         return Err(CoherenceError::InstalledOci);
     }
-    let arch = record
-        .architecture(host)
+    let arch_binary = record
+        .binary_sha256(host)
         .ok_or(CoherenceError::InstalledArchMissing)?;
-    if &deployed.binary_sha256 != installed_binary_sha256
-        || deployed.binary_sha256 != arch.binary_sha256
+    if &deployed.binary_sha256 != installed_binary_sha256 || deployed.binary_sha256 != *arch_binary
     {
         return Err(CoherenceError::InstalledBinary);
     }
@@ -1050,6 +1360,63 @@ pub fn emit_record(identity: &EmbeddedIdentity, record: &ReleaseRecord) -> Resul
     Ok(())
 }
 
+/// Inputs for emitting a deb's own package record.
+pub struct PackageRecordEmission<'a> {
+    pub identity: &'a EmbeddedIdentity,
+    pub record: &'a PackageRecord,
+    /// The exact runner binary this deb ships. Its digest must equal the
+    /// record's architecture entry, so a record can never be staged against
+    /// bytes it does not describe.
+    pub binary: &'a Path,
+}
+
+/// Emit a deb's own package record. The record's `kind` must be the emitting
+/// binary's own embedded build kind: a preview record only ever comes from a
+/// binary bound to the exact preview commit (`VELNOR_PREVIEW_SOURCE_SHA`), a
+/// stable package record only from a tagged `release-build` binary. A
+/// development binary emits nothing, so no package record can be produced from
+/// bytes whose provenance the binary cannot name.
+pub fn emit_package_record(emission: PackageRecordEmission<'_>) -> Result<()> {
+    let PackageRecordEmission {
+        identity,
+        record,
+        binary,
+    } = emission;
+    // A package record may come from either shippable build kind (a preview
+    // build is deliberately not a release build), but never from a development
+    // build, whose bytes name no source at all. This is strictly weaker than
+    // [`EmbeddedIdentity::is_development`] only in allowing kind=preview.
+    if identity.source_sha == "development"
+        || (identity.kind != "release" && identity.kind != PACKAGE_KIND_PREVIEW)
+    {
+        bail!(
+            "refusing to emit a package record from a development build \
+             (source={}, kind={}); build with --features release-build",
+            identity.source_sha,
+            identity.kind
+        );
+    }
+    if record.build.kind != identity.kind {
+        bail!(
+            "package record kind {} does not match this binary's embedded build kind {}",
+            record.build.kind,
+            identity.kind
+        );
+    }
+    if record.build.commit.as_str() != identity.source_sha {
+        bail!("package record source commit does not match this binary's embedded source SHA");
+    }
+    if record.build.crate_version != identity.crate_version {
+        bail!("package record crate version does not match this binary's embedded crate version");
+    }
+    record.verify().map_err(anyhow::Error::from)?;
+    let staged = sha256_file(binary)?;
+    if staged != record.architecture.binary_sha256 {
+        bail!("package record binary digest disagrees with the bytes it is staged against");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Atomic on-disk activation
 // ---------------------------------------------------------------------------
@@ -1110,20 +1477,21 @@ impl ReleaseStore {
         Self { root: root.into() }
     }
 
-    pub fn record_path(&self, tag: &str) -> PathBuf {
-        self.root.join("records").join(tag).join("record.json")
+    pub fn record_path(&self, key: &str) -> PathBuf {
+        self.root.join("records").join(key).join("record.json")
     }
-    pub fn deployed_path(&self, tag: &str) -> PathBuf {
-        self.root.join("records").join(tag).join("deployed.json")
+    pub fn deployed_path(&self, key: &str) -> PathBuf {
+        self.root.join("records").join(key).join("deployed.json")
     }
-    pub fn read_record(&self, tag: &str) -> Result<ReleaseRecord> {
-        let path = self.record_path(tag);
+    pub fn read_record(&self, key: &str) -> Result<ActiveRecord> {
+        let path = self.record_path(key);
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let record: ReleaseRecord =
-            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        let record = ActiveRecord::parse(&bytes)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("parse {}", path.display()))?;
         record.verify().map_err(anyhow::Error::from)?;
-        if record.build.tag != tag {
-            bail!("stored release record tag disagrees with its directory");
+        if record.store_key() != key {
+            bail!("stored release record key disagrees with its directory");
         }
         Ok(record)
     }
@@ -1137,28 +1505,24 @@ impl ReleaseStore {
     /// Persist an immutable record + sidecar checksum. Refuses to overwrite an
     /// existing record whose bytes differ (no clobber); an exact re-write is a
     /// no-op success.
-    pub fn store_record(&self, record: &ReleaseRecord) -> Result<Sha256Hex> {
+    pub fn store_record(&self, record: &ActiveRecord) -> Result<Sha256Hex> {
+        let key = record.store_key();
+        validate_store_key(key)?;
         let bytes = record.to_canonical_json();
         let digest = Sha256Hex::of_bytes(bytes.as_bytes());
-        let path = self.record_path(&record.build.tag);
+        let path = self.record_path(key);
         fs::create_dir_all(path.parent().unwrap())?;
         if path.exists() {
             let existing = fs::read(&path)?;
             if existing != bytes.as_bytes() {
-                bail!(
-                    "record for {} already exists with different bytes — refusing to clobber",
-                    record.build.tag
-                );
+                bail!("record for {key} already exists with different bytes — refusing to clobber");
             }
         } else {
             write_atomic(&path, bytes.as_bytes())?;
         }
-        let checksum = format!("{digest}  {}.json\n", record.build.tag);
+        let checksum = format!("{digest}  {key}.json\n");
         write_atomic(
-            &self
-                .root
-                .join("records")
-                .join(format!("{}.json.sha256", record.build.tag)),
+            &self.root.join("records").join(format!("{key}.json.sha256")),
             checksum.as_bytes(),
         )?;
         Ok(digest)
@@ -1171,10 +1535,10 @@ impl ReleaseStore {
         read_optional_link_tag(&self.previous_path())
     }
 
-    /// Atomically make `tag` active, demoting the current active tag to
-    /// `previous`. The record for `tag` must already be stored.
-    pub fn activate(&self, record: &ReleaseRecord, deployed: &DeployedIdentity) -> Result<()> {
-        let tag = &record.build.tag;
+    /// Atomically make `key` active, demoting the current active key to
+    /// `previous`. The record for `key` must already be stored.
+    pub fn activate(&self, record: &ActiveRecord, deployed: &DeployedIdentity) -> Result<()> {
+        let key = record.store_key();
         verify_installed(
             deployed,
             record,
@@ -1184,20 +1548,20 @@ impl ReleaseStore {
         .map_err(anyhow::Error::from)?;
         self.store_record(record)?;
         let deployed_bytes = serde_json::to_vec_pretty(deployed)?;
-        let deployed_path = self.deployed_path(tag);
+        let deployed_path = self.deployed_path(key);
         if deployed_path.exists() {
             if fs::read(&deployed_path)? != deployed_bytes {
-                bail!("deployed identity for {tag} already exists with different bytes");
+                bail!("deployed identity for {key} already exists with different bytes");
             }
         } else {
             write_atomic(&deployed_path, &deployed_bytes)?;
         }
         if let Some(current) = self.active_tag()?
-            && current != *tag
+            && current != key
         {
             write_atomic_symlink(&self.previous_path(), &current)?;
         }
-        write_atomic_symlink(&self.active_path(), tag)?;
+        write_atomic_symlink(&self.active_path(), key)?;
         Ok(())
     }
 
@@ -1269,6 +1633,15 @@ fn read_record_file(path: &Path) -> Result<(Vec<u8>, ReleaseRecord)> {
     Ok((bytes, record))
 }
 
+/// Read either record kind. Refuses bytes that carry neither known schema, so a
+/// command never has to guess what a record file holds.
+fn read_active_record_file(path: &Path) -> Result<ActiveRecord> {
+    let bytes = fs::read(path).with_context(|| format!("read record {}", path.display()))?;
+    ActiveRecord::parse(&bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("parse record {}", path.display()))
+}
+
 fn parse_checksum(text: &str) -> Result<Sha256Hex> {
     let first = text
         .split_whitespace()
@@ -1307,24 +1680,60 @@ fn read_artifact_checksum(path: &Path, kind: &str) -> Result<Sha256Hex> {
 }
 
 fn validate_artifact_version_component(version: &str) -> Result<()> {
-    if version.is_empty()
-        || version == "."
-        || version == ".."
-        || version
-            .bytes()
-            .any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control())
-    {
+    if is_safe_path_component(version) {
+        Ok(())
+    } else {
         bail!("release version is not a safe artifact path component");
     }
-    Ok(())
+}
+
+/// A record's store key becomes a directory name under `records/`, so it must
+/// never be empty, a relative traversal, or carry a separator.
+fn validate_store_key(key: &str) -> Result<()> {
+    if is_safe_path_component(key) {
+        Ok(())
+    } else {
+        bail!("release store key is not a safe path component");
+    }
+}
+
+fn is_safe_path_component(value: &str) -> bool {
+    !(value.is_empty()
+        || value == "."
+        || value == ".."
+        || value
+            .bytes()
+            .any(|byte| byte == b'/' || byte == b'\\' || byte.is_ascii_control()))
 }
 
 fn emit_command(args: ReleaseEmitArgs) -> Result<()> {
-    let (_, record) = read_record_file(&args.record)?;
+    let record = read_active_record_file(&args.record)?;
     let identity = embedded();
-    emit_record(&identity, &record)?;
-    let store = ReleaseStore::new(&args.out_dir);
-    let digest = store.store_record(&record)?;
+    match &record {
+        ActiveRecord::Release(release) => emit_record(&identity, release)?,
+        ActiveRecord::Package(package) => {
+            let binary = args.binary.as_deref().context(
+                "emitting a package record requires --binary: the record must be staged \
+                 against the exact runner bytes it names",
+            )?;
+            emit_package_record(PackageRecordEmission {
+                identity: &identity,
+                record: package,
+                binary,
+            })?;
+        }
+    }
+    let canonical = record.to_canonical_json();
+    let digest = Sha256Hex::of_bytes(canonical.as_bytes());
+    if let Some(out) = &args.out {
+        write_atomic(out, canonical.as_bytes())?;
+        write_atomic(
+            &out.with_extension("json.sha256"),
+            format!("{digest}\n").as_bytes(),
+        )?;
+    } else {
+        ReleaseStore::new(&args.out_dir).store_record(&record)?;
+    }
     println!("{digest}");
     Ok(())
 }
@@ -1430,6 +1839,18 @@ fn read_distinct_apt_metadata_sources(
     Ok((expected_bytes, served_bytes))
 }
 
+/// Peek at a record file's schema tag so a command can pick the right verifier
+/// before spending any effort on the bytes. Refuses an unknown tag.
+fn record_schema_tag(bytes: &[u8]) -> Result<&'static str> {
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).with_context(|| "record is not a JSON object".to_string())?;
+    match schema_tag_of_value(&value).map_err(anyhow::Error::from)? {
+        RELEASE_RECORD_SCHEMA => Ok(RELEASE_RECORD_SCHEMA),
+        PACKAGE_RECORD_SCHEMA => Ok(PACKAGE_RECORD_SCHEMA),
+        other => bail!("unsupported record schema '{other}'"),
+    }
+}
+
 fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
     let bytes =
         fs::read(&args.record).with_context(|| format!("read {}", args.record.display()))?;
@@ -1438,7 +1859,19 @@ fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
         (None, Some(hex)) => Sha256Hex::parse(hex)?,
         (None, None) => bail!("provide --checksum <file> or --sha256 <hex>"),
     };
-    let record = verify_record_bytes(&bytes, &expected).map_err(anyhow::Error::from)?;
+    match record_schema_tag(&bytes)? {
+        RELEASE_RECORD_SCHEMA => verify_release_record_command(&args, &bytes, expected),
+        PACKAGE_RECORD_SCHEMA => verify_package_record_command(&args, &bytes, expected),
+        other => bail!("unsupported record schema '{other}'"),
+    }
+}
+
+fn verify_release_record_command(
+    args: &ReleaseVerifyRecordArgs,
+    bytes: &[u8],
+    expected: Sha256Hex,
+) -> Result<()> {
+    let record = verify_record_bytes(bytes, &expected).map_err(anyhow::Error::from)?;
     let publication = if let Some(path) = &args.publication {
         Some(
             serde_json::from_slice::<PublicationRecord>(
@@ -1495,8 +1928,28 @@ fn verify_record_command(args: ReleaseVerifyRecordArgs) -> Result<()> {
     Ok(())
 }
 
+fn verify_package_record_command(
+    args: &ReleaseVerifyRecordArgs,
+    bytes: &[u8],
+    expected: Sha256Hex,
+) -> Result<()> {
+    if args.publication.is_some()
+        || args.expected_apt_metadata.is_some()
+        || args.served_apt_metadata.is_some()
+    {
+        bail!("APT publication claims verify the stable release chain; a package record has no publication to check");
+    }
+    let record = verify_package_record_bytes(bytes, &expected).map_err(anyhow::Error::from)?;
+    println!(
+        "package record for {} is coherent (digest {})",
+        record.build.debian_version,
+        record.digest()
+    );
+    Ok(())
+}
+
 fn verify_installed_command(args: ReleaseVerifyInstalledArgs) -> Result<()> {
-    let (_, record) = read_record_file(&args.record)?;
+    let record = read_active_record_file(&args.record)?;
     let deployed_bytes = fs::read(&args.deployed)
         .with_context(|| format!("read deployed identity {}", args.deployed.display()))?;
     let deployed: DeployedIdentity = serde_json::from_slice(&deployed_bytes)
@@ -1575,40 +2028,68 @@ fn verify_and_tag_release_image(record: &ReleaseRecord) -> Result<()> {
 }
 
 fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
-    let (_, record) = read_record_file(&args.record)?;
+    let record = read_active_record_file(&args.record)?;
     record.verify().map_err(anyhow::Error::from)?;
     let host = Arch::host().context("unsupported host architecture")?;
-    let architecture = record
-        .architecture(host)
-        .context("release record lacks host architecture")?;
+
+    // A stable activation additionally proves the OCI image is exactly the one
+    // the release record names. A preview package ships no image, so its
+    // activation proves only the package bytes — binary, manifest, versions,
+    // and commit — which is all a preview deb claims to be.
+    let expected_binary = match &record {
+        ActiveRecord::Release(release) => release
+            .architecture(host)
+            .context("release record lacks host architecture")?
+            .binary_sha256
+            .clone(),
+        ActiveRecord::Package(package) => {
+            if !package.is_preview() {
+                bail!(
+                    "package record {} is kind={}; a stable package activates from its \
+                     out-of-band release record, never from the deb",
+                    package.build.debian_version,
+                    package.build.kind
+                );
+            }
+            if package.architecture.arch != host {
+                bail!(
+                    "package record names {} bytes but this host is {}",
+                    package.architecture.arch.as_str(),
+                    host.as_str()
+                );
+            }
+            package.architecture.binary_sha256.clone()
+        }
+    };
     let installed_binary = Path::new(INSTALLED_BINARY_PATH);
     let binary_sha256 = sha256_file(installed_binary)?;
-    if binary_sha256 != architecture.binary_sha256 {
+    if binary_sha256 != expected_binary {
         bail!("installed binary digest disagrees with release record");
     }
     let manifest_sha256 = Sha256Hex::of_bytes(crate::manifest::to_json_document()?.as_bytes());
-    if manifest_sha256 != record.build.manifest_sha256 {
+    if manifest_sha256 != *record.manifest_sha256() {
         bail!("compiled manifest digest disagrees with release record");
     }
-
-    verify_and_tag_release_image(&record)?;
+    if let ActiveRecord::Release(release) = &record {
+        verify_and_tag_release_image(release)?;
+    }
 
     let deployed = DeployedIdentity {
         schema: DEPLOYED_IDENTITY_SCHEMA.to_string(),
-        package_version: record.build.debian_version.clone(),
-        crate_version: record.build.crate_version.clone(),
-        source_commit: record.build.commit.clone(),
+        package_version: record.package_version().to_string(),
+        crate_version: record.crate_version().to_string(),
+        source_commit: record.source_commit().clone(),
         binary_sha256,
-        manifest_version: record.build.manifest_version,
+        manifest_version: record.manifest_version(),
         manifest_sha256,
-        oci_image_digest: record.oci_index_digest.clone(),
+        oci_image_digest: record.oci_index_digest().cloned(),
         record_sha256: record.digest(),
     };
     verify_installed(&deployed, &record, host, &deployed.binary_sha256)
         .map_err(anyhow::Error::from)?;
     let store = ReleaseStore::new(&args.dir);
     store.activate(&record, &deployed)?;
-    println!("activated {}", record.build.tag);
+    println!("activated {}", record.label());
     Ok(())
 }
 
@@ -1621,7 +2102,10 @@ fn rollback_command(args: ReleaseRollbackArgs) -> Result<()> {
     // A rollback changes both halves of the runtime tuple while the fleet is
     // drained: first make the exact prior image locally runnable, then switch
     // the filesystem pointer. Any verification failure leaves active unchanged.
-    verify_and_tag_release_image(&record)?;
+    // A preview package tuple has no image to restore.
+    if let ActiveRecord::Release(release) = &record {
+        verify_and_tag_release_image(release)?;
+    }
     let restored = store.rollback()?;
     println!("rolled back to {restored}");
     Ok(())

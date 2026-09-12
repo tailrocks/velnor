@@ -11,53 +11,66 @@
 //!   `ACTIONS_CACHE_SERVICE_V2=True`): `CreateCacheEntryUpload`,
 //!   `FinalizeCacheEntryUpload`, `GetCacheEntryDownloadURL`
 //!
-//! Storage is content-addressed beneath the durable cache root:
-//! `tenants/<repo-namespace>/blobs/<sha256>` plus tiny JSON entry records
-//! keyed by `sha256(key \0 version)`. Key matching follows GitHub semantics:
-//! exact `(key, version)` first, then restore-keys prefix order, newest wins.
-//! The namespace is `sha256("velnor-actions-cache-repo\0" ‖ repository_id ‖
-//! ref_scope ‖ trust)` where the repository id (`github.repository_id`), the
-//! ref scope (`github.ref`), and the trust floor come from the server-attested
-//! job message the runner binds to the job's runtime token at admission —
-//! never from workflow-supplied data and never from the token itself. Jobs in
-//! the same repository and ref therefore share one namespace, so a save is
-//! visible to later jobs on that exact ref, while different repositories,
-//! refs, or trust classes never alias. Insertion enforces an
-//! LRU byte budget by deleting oldest-hit entries.
+//! Storage is content-addressed beneath the durable cache root, namespaced by
+//! repository and ref: `tenants/repo-<sha256(repository \0 ref)>/{blobs,entries,reservations}`
+//! plus tiny JSON entry records keyed by `sha256(key \0 version)`. The runner
+//! registers each job's token-to-repository binding before the job runs
+//! (`register_job_cache_session`, backed by `sessions/<token-sha256>.json`);
+//! lookups then search the job's ref namespace first and its base (PR target)
+//! namespace second, so runs share caches exactly the way GitHub's "current
+//! branch, then base branch" scope rules describe. Writes always land in the
+//! job's own ref namespace, so a pull-request run can restore base-branch
+//! entries but can never overwrite them — the read-across/write-isolated
+//! direction the cache-poisoning rules require. Key matching within each scope
+//! follows GitHub semantics: exact `(key, version)` first, then restore-keys
+//! prefix order, newest wins.
 //!
-//! Intentional deviation from GitHub's branch scoping: lookups use strict
-//! ref equality with no base-branch or default-branch fallback, so a branch
-//! or `refs/pull/N/merge` job starts cold where GitHub would restore the
-//! base branch's entries. A fallback would let untrusted readers consult
-//! trusted namespaces, which BC-21 forbids (a fork job can neither read
-//! trusted entries nor poison them); restoring GitHub parity needs new
-//! server-attested base/default-ref signals plus a read-only fallback chain
-//! that never crosses the trust floor, so strict equality stands until then.
+//! Fork isolation rides on the same chain. The session also carries the job's
+//! [`TrustClass`](crate::trust_class::TrustClass): a job classified `ForkPR`
+//! or `Unknown` resolves to a fork-headed chain — its isolated `fork-`
+//! namespace first, then the base repository's ref and base namespaces for
+//! read-through — while a `Trusted` job resolves to the base namespaces only.
+//! Every write path (v1 reserve/upload, v2 upload/finalize) lands in the
+//! chain head, so an untrusted job's writes can only ever reach its fork
+//! namespace however its ref is shaped (a fork-controlled run on a base
+//! branch ref cannot overwrite the base scope), and a trusted job's chain
+//! never names a fork namespace, so it can never restore one. The `fork-`
+//! and `repo-` namespaces are disjoint by hash domain as well as by prefix.
+//!
+//! Requests whose token has no registered session (registration failed, or a
+//! caller outside the job path) fall back to an isolated per-token namespace
+//! — the pre-scoping behavior — and emit one forensic line per token hash so a
+//! fleet stuck without sessions is visible instead of silently cold. The token
+//! itself is never persisted, logged, or compared; only hashes leave the
+//! request path. Insertion enforces an LRU byte budget per namespace by
+//! deleting oldest-hit entries.
+//!
+//! Known deviation, recorded for the follow-up: GitHub also retries the lookup
+//! on the repository's default branch, which the job message does not carry,
+//! so the fallback chain ends at the base ref. PR runs (whose base is usually
+//! the default branch) are covered; direct pushes to a side branch cannot yet
+//! restore default-branch entries.
 //!
 //! The service is OFF unless the operator exports `VELNOR_ACTIONS_CACHE_URL`
 //! into the runner environment (strict capability contract: no behavior
 //! change without explicit enablement). Requests must carry the job-scoped
 //! `ACTIONS_RUNTIME_TOKEN`; the operator's enablement variable is never used
-//! as a job credential. The token only authenticates the request against the
-//! runner's live-job registry — an unknown token gets 401 — and selects the
-//! job's repo namespace; it never enters the namespace hash. A job whose
-//! identity signals are incomplete fails closed to a per-token namespace
-//! (worse sharing, never another job's entries).
+//! as a job credential.
 
+use crate::trust_class::TrustClass;
 use anyhow::{Context, Result};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Channel, Full, Limited};
-use hyper::body::{Body, Bytes};
+use hyper::body::{Body, Bytes, Incoming};
 use hyper::header::CONTENT_LENGTH;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const DEFAULT_BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
@@ -65,10 +78,17 @@ const MAX_BODY: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_JSON_BODY: usize = 64 * 1024;
 const TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 const DOWNLOAD_BUFFERED_CHUNKS: usize = 1;
+/// Sanity caps for identity fields. Generous on purpose: rejection degrades a
+/// job to its isolated namespace, so the bounds only exclude garbage.
+const MAX_REPOSITORY_LEN: usize = 256;
+const MAX_REF_LEN: usize = 512;
+/// Session and fallback-marker retention. Job tokens live hours; a week keeps
+/// the registry bounded while surviving weekends and daemon restarts.
+const SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
 type ResponseBody = UnsyncBoxBody<Bytes, io::Error>;
 
-pub fn entry_hash(key: &str, version: &str) -> String {
+pub(crate) fn entry_hash(key: &str, version: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     hasher.update(b"\0");
@@ -93,16 +113,18 @@ struct CacheHit {
 }
 
 #[derive(Debug, Clone)]
-pub struct CacheService {
-    /// Durable storage root; tenant directories live beneath it.
-    pub root: PathBuf,
-    /// LRU byte budget per repo-namespace tenant, shared by every job that
-    /// resolves to the namespace.
-    pub budget_bytes: u64,
+pub(crate) struct CacheService {
+    /// Durable storage root; tenant, session, and marker files live beneath it.
+    pub(crate) root: PathBuf,
+    /// LRU byte budget per cache namespace (one ref scope or one isolated token).
+    pub(crate) budget_bytes: u64,
+    /// Directory for the isolated-fallback forensic line (`daemon.log`). `None`
+    /// keeps the line on stderr; the daemon sets it to its log directory.
+    pub(crate) forensic_log_dir: Option<PathBuf>,
 }
 
 impl CacheService {
-    pub fn open(root: PathBuf) -> Result<Self> {
+    pub(crate) fn open(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(root.join("tenants")).context("create gha-cache tenants dir")?;
         let budget = std::env::var("VELNOR_GHA_CACHE_BUDGET_BYTES")
             .ok()
@@ -111,6 +133,7 @@ impl CacheService {
         Ok(Self {
             root,
             budget_bytes: budget,
+            forensic_log_dir: None,
         })
     }
 
@@ -159,7 +182,7 @@ impl CacheService {
                 });
             }
             if index == 0 {
-                continue; // only the primary key participates in prefix scans
+                continue; // the primary key is exact-only; only restore keys prefix-scan
             }
             if let Some(hit) = self.prefix_scan(key, version, namespace) {
                 return Some(hit);
@@ -413,177 +436,317 @@ fn clear_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Re
     Ok(())
 }
 
-/// Server-attested cache identity for one job: the namespace inputs the
-/// runner captures from the job message at admission and binds to the job's
-/// runtime token for the job's lifetime.
+fn cache_namespace(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-runner-cache-tenant\0");
+    hasher.update(token.as_bytes());
+    hex(&hasher.finalize())
+}
+
+/// Repository identity a job's cache requests are scoped to: the `owner/name`
+/// the workflow runs in, the full ref it runs on, and — for pull requests —
+/// the full base ref it may restore from — plus the job's trust class, which
+/// decides whether the job writes the base namespaces or an isolated fork
+/// one. Validation failures never fail the job; the caller treats them as "no
+/// usable identity" and the job's requests fall back to an isolated per-token
+/// namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CacheIdentity {
-    /// Shared repo namespace: `github.repository_id`, `github.ref`, and the
-    /// trust floor (`TrustClass::is_trusted`). Jobs that agree on all three
-    /// share one namespace, so a save is visible to later jobs in the same
-    /// repository and branch; any disagreement selects a disjoint namespace.
-    Shared {
-        repository_id: u64,
-        ref_scope: String,
-        trusted: bool,
-    },
-    /// Fail-closed: at least one identity signal was missing or unparseable,
-    /// so the job keeps a per-token namespace — today's isolation, never
-    /// another job's entries.
-    Isolated,
+pub(crate) struct CacheIdentity {
+    repository: String,
+    git_ref: String,
+    base_ref: Option<String>,
+    trust: TrustClass,
 }
 
 impl CacheIdentity {
-    /// Derive the identity from server-attested job-message signals. Pure:
-    /// no I/O, so the fail-closed branch is exactly `Isolated`. The
-    /// admission call site owns the isolated-fallback forensics line, where
-    /// the job id and the raw signals are available; the registry stays
-    /// silent so a signal outage is diagnosed once, with context.
-    #[must_use]
-    pub(crate) fn derive(
-        repository_id: Option<&str>,
-        ref_scope: Option<&str>,
-        scope_present: bool,
-        trusted: bool,
-    ) -> Self {
-        let repository_id = repository_id
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|id| *id != 0);
-        let ref_scope = ref_scope
-            .map(str::trim)
-            .filter(|scope| !scope.is_empty())
-            .map(str::to_owned);
-        match (repository_id, ref_scope, scope_present) {
-            (Some(repository_id), Some(ref_scope), true) => Self::Shared {
-                repository_id,
-                ref_scope,
-                trusted,
-            },
-            _ => Self::Isolated,
+    pub(crate) fn new(
+        repository: &str,
+        git_ref: &str,
+        base_ref: Option<&str>,
+        trust: TrustClass,
+    ) -> Result<Self> {
+        let repository = repository.trim().to_ascii_lowercase();
+        let (owner, name) = repository
+            .split_once('/')
+            .context("cache identity repository is not owner/name")?;
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            anyhow::bail!("cache identity repository is not owner/name");
         }
-    }
-}
-
-/// Repo-identity namespace: `sha256(domain ‖ repository_id ‖ ref-scope ‖
-/// trust)`. The bearer token is never an input — it only authenticates the
-/// request against the live-job registry that selects this namespace.
-fn repo_cache_namespace(repository_id: u64, ref_scope: &str, trusted: bool) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-repo\0");
-    hasher.update(repository_id.to_be_bytes());
-    hasher.update(b"\0");
-    hasher.update(ref_scope.as_bytes());
-    hasher.update(b"\0");
-    hasher.update([u8::from(trusted)]);
-    hex(&hasher.finalize())
-}
-
-/// Fail-closed per-token namespace for jobs whose identity signals are
-/// incomplete. Its domain differs from the repo namespace so an isolated job
-/// can never alias a shared namespace.
-fn isolated_cache_namespace(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-tenant\0");
-    hasher.update(token.as_bytes());
-    hex(&hasher.finalize())
-}
-
-/// Live-job registry: token key → the stack of sessions bound to that token.
-/// The bearer token itself is never stored, only its keyed hash. One token
-/// belongs to one job, so the stack holds one entry; it is a stack rather
-/// than a single slot so a duplicate registration cannot unbind a live job
-/// when the duplicate session drops.
-fn registry() -> &'static Mutex<HashMap<String, Vec<CacheIdentity>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, Vec<CacheIdentity>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn token_key(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-token-key\0");
-    hasher.update(token.as_bytes());
-    hex(&hasher.finalize())
-}
-
-fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, Vec<CacheIdentity>>> {
-    registry()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// RAII binding of one job's runtime token to its cache identity. The runner
-/// holds one for the whole job lifetime; dropping it unbinds exactly one
-/// registration, so every return path — including early fail-closed exits —
-/// releases the credential.
-#[must_use]
-pub(crate) struct CacheSession {
-    key: Option<String>,
-    identity: CacheIdentity,
-}
-
-impl Drop for CacheSession {
-    fn drop(&mut self) {
-        let Some(key) = self.key.take() else {
-            return;
-        };
-        let mut guard = lock_registry();
-        if let Some(stack) = guard.get_mut(&key)
-            && let Some(index) = stack.iter().position(|entry| *entry == self.identity)
+        if repository.len() > MAX_REPOSITORY_LEN || repository.chars().any(char::is_control) {
+            anyhow::bail!("cache identity repository is not usable");
+        }
+        let git_ref = git_ref.trim().to_owned();
+        if git_ref.is_empty()
+            || git_ref.len() > MAX_REF_LEN
+            || git_ref.chars().any(char::is_control)
         {
-            stack.swap_remove(index);
-            if stack.is_empty() {
-                guard.remove(&key);
-            }
+            anyhow::bail!("cache identity ref is not usable");
+        }
+        // `github.base_ref` is a short branch name (`main`); refs in jobs are
+        // full (`refs/heads/main`, `refs/pull/123/merge`). Normalize the base
+        // the same way so both hash stably, and drop it when it adds no scope.
+        let base_ref = base_ref
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(|base| {
+                if base.starts_with("refs/") {
+                    base.to_owned()
+                } else {
+                    format!("refs/heads/{base}")
+                }
+            })
+            .filter(|base| *base != git_ref);
+        if let Some(base) = &base_ref
+            && (base.len() > MAX_REF_LEN || base.chars().any(char::is_control))
+        {
+            anyhow::bail!("cache identity base ref is not usable");
+        }
+        Ok(Self {
+            repository,
+            git_ref,
+            base_ref,
+            trust,
+        })
+    }
+
+    /// Lookup chain in scope order. A trusted job searches its own ref first,
+    /// then its base. A fork-PR or unknown job searches its isolated fork
+    /// namespace first, then the same base namespaces for read-through — and
+    /// since every write path lands in the chain head, its writes can only
+    /// ever reach the fork namespace. The `repo-`/`fork-` prefixes keep repo
+    /// and fork scopes disjoint from each other and from the bare-hex
+    /// isolated per-token namespaces by construction.
+    fn namespaces(&self) -> Vec<String> {
+        let mut chain = Vec::new();
+        if !self.trust.is_trusted() {
+            chain.push(fork_namespace(&self.repository, &self.git_ref));
+        }
+        chain.push(repo_namespace(&self.repository, &self.git_ref));
+        if let Some(base) = &self.base_ref {
+            chain.push(repo_namespace(&self.repository, base));
+        }
+        chain
+    }
+}
+
+fn repo_namespace(repository: &str, git_ref: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-runner-cache-repo\0");
+    hasher.update(repository.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(git_ref.as_bytes());
+    format!("repo-{}", hex(&hasher.finalize()))
+}
+
+/// Isolated write scope for fork-PR and unknown jobs. Same inputs as
+/// [`repo_namespace`] but a distinct hash domain and prefix, so a fork
+/// namespace can never collide with a base namespace even for the same
+/// repository and ref — including a fork-controlled run whose ref *is* a base
+/// branch. Trusted jobs never resolve here (see [`CacheIdentity::namespaces`]).
+fn fork_namespace(repository: &str, git_ref: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"velnor-runner-cache-fork\0");
+    hasher.update(repository.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(git_ref.as_bytes());
+    format!("fork-{}", hex(&hasher.finalize()))
+}
+
+/// Parse a session `trust` label back to its class. The labels are
+/// [`TrustClass::as_str`]; anything else fails the session closed — the
+/// token falls back to its isolated per-token namespace like a corrupt
+/// session, it never inherits a trust it did not parse to.
+fn parse_trust(label: &str) -> Result<TrustClass> {
+    match label {
+        "trusted" => Ok(TrustClass::Trusted),
+        "fork-pr" => Ok(TrustClass::ForkPR),
+        "unknown" => Ok(TrustClass::Unknown),
+        _ => anyhow::bail!("cache session trust label is not usable"),
+    }
+}
+
+/// Durable token-to-identity binding written by
+/// [`register_job_cache_session`]. The token itself never touches disk; the
+/// file name is its hash, which doubles as the isolated-namespace name when no
+/// binding exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheSession {
+    identity: CacheIdentity,
+    registered_ms: u64,
+}
+
+impl CacheSession {
+    fn as_json(&self) -> Value {
+        json!({
+            "repository": self.identity.repository,
+            "ref": self.identity.git_ref,
+            "baseRef": self.identity.base_ref,
+            "trust": self.identity.trust.as_str(),
+            "registeredMs": self.registered_ms,
+        })
+    }
+
+    fn parse(value: Value) -> Result<Self> {
+        let repository = value["repository"]
+            .as_str()
+            .context("cache session has no repository")?;
+        let git_ref = value["ref"].as_str().context("cache session has no ref")?;
+        let base_ref = value["baseRef"].as_str();
+        // No default: a session written before trust existed (or with a
+        // label this build does not know) must not inherit trust. Failing
+        // the parse sends the token to its isolated per-token namespace —
+        // the same fail-closed path as a corrupt session — and the next
+        // registration rewrites the binding with trust.
+        let trust = value["trust"]
+            .as_str()
+            .context("cache session has no trust")?;
+        let registered_ms = value["registeredMs"].as_u64().unwrap_or(0);
+        Ok(Self {
+            identity: CacheIdentity::new(repository, git_ref, base_ref, parse_trust(trust)?)?,
+            registered_ms,
+        })
+    }
+}
+
+/// Bind a job's runtime token to its repository identity so the job's cache
+/// requests resolve to the shared repo namespaces instead of an isolated
+/// per-token one. The slot process calls this before any job process can issue
+/// a cache request; the file registry (not memory) carries the binding across
+/// to the daemon process hosting the HTTP service, and across restarts.
+/// Overwriting an existing binding is idempotent for the same identity.
+///
+/// Pruning rides along: every registration sweeps session and marker files
+/// older than [`SESSION_TTL`], so one tiny file per job token stays bounded
+/// without a timer. The sweep is best-effort; only the binding write itself
+/// can fail this call.
+pub(crate) fn register_job_cache_session(
+    root: &Path,
+    token: &str,
+    identity: &CacheIdentity,
+) -> Result<()> {
+    if token.is_empty() {
+        anyhow::bail!("cannot register a cache session without a token");
+    }
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).context("create gha-cache sessions dir")?;
+    let token_hash = cache_namespace(token);
+    let session = CacheSession {
+        identity: identity.clone(),
+        registered_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    };
+    let path = sessions.join(format!("{token_hash}.json"));
+    let tmp = sessions.join(format!(
+        ".{token_hash}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let cleanup = TemporaryUpload::new(tmp.clone());
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .context("create temporary cache session")?;
+        file.write_all(session.as_json().to_string().as_bytes())
+            .context("write temporary cache session")?;
+        file.sync_all().context("sync temporary cache session")?;
+    }
+    std::fs::rename(&tmp, &path).context("publish cache session")?;
+    drop(cleanup);
+    sync_directory(&sessions).context("sync cache sessions dir after publication")?;
+    prune_stale_sessions(&sessions, std::time::SystemTime::now());
+    Ok(())
+}
+
+fn read_session(root: &Path, token_hash: &str) -> Option<CacheSession> {
+    let raw = std::fs::read(root.join("sessions").join(format!("{token_hash}.json"))).ok()?;
+    let value: Value = serde_json::from_slice(&raw).ok()?;
+    CacheSession::parse(value).ok()
+}
+
+/// Delete session bindings and fallback markers older than [`SESSION_TTL_SECS`].
+/// Best-effort and conservative: only `<64-hex>.json`/`.isolated` files are
+/// candidates, and anything without a readable past age is kept. `now` is a
+/// parameter so tests age files without touching mtimes.
+fn prune_stale_sessions(sessions: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return;
+    };
+    for file in entries.flatten() {
+        let path = file.path();
+        let is_candidate = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let stem = name
+                    .strip_suffix(".json")
+                    .or_else(|| name.strip_suffix(".isolated"));
+                stem.is_some_and(|stem| {
+                    stem.len() == 64 && stem.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            });
+        if !is_candidate {
+            continue;
+        }
+        let stale = file
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age.as_secs() >= SESSION_TTL_SECS);
+        if stale {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
 
-/// Bind `token` — the same credential `runtime_env` injects as
-/// `ACTIONS_RUNTIME_TOKEN` — to `identity` until the returned session drops.
-/// A missing or empty token binds nothing: without a credential the job gets
-/// no `ACTIONS_CACHE_URL`, so no client can present it. Deliberately silent:
-/// the admission call site emits the isolated-fallback forensics line with
-/// the job id and the failed signals, where that context exists.
-pub(crate) fn register_job_cache_session(
-    token: Option<&str>,
-    identity: CacheIdentity,
-) -> CacheSession {
-    let Some(token) = token.filter(|token| !token.is_empty()) else {
-        return CacheSession {
-            key: None,
-            identity,
-        };
-    };
-    let key = token_key(token);
-    lock_registry()
-        .entry(key.clone())
-        .or_default()
-        .push(identity.clone());
-    CacheSession {
-        key: Some(key),
-        identity,
+impl CacheService {
+    /// Resolve a request token to its lookup chain: the registered ref/base
+    /// repo namespaces — fork-headed for fork-PR and unknown jobs — or, when
+    /// no session exists, the isolated per-token namespace plus one forensic
+    /// line. Never empty.
+    fn resolve_namespaces(&self, token: &str) -> Vec<String> {
+        let token_hash = cache_namespace(token);
+        if let Some(session) = read_session(&self.root, &token_hash) {
+            return session.identity.namespaces();
+        }
+        self.note_isolated_fallback(&token_hash);
+        vec![token_hash]
     }
-}
 
-/// Resolve the storage namespace for a presented bearer token, or `None`
-/// when the token belongs to no live job. Unknown tokens are rejected by the
-/// caller with 401; the token authenticates and selects, never namespaces.
-fn namespace_for_token(token: &str) -> Option<String> {
-    let key = token_key(token);
-    let identity = lock_registry().get(&key)?.last().cloned()?;
-    Some(match identity {
-        CacheIdentity::Shared {
-            repository_id,
-            ref_scope,
-            trusted,
-        } => repo_cache_namespace(repository_id, &ref_scope, trusted),
-        CacheIdentity::Isolated => isolated_cache_namespace(token),
-    })
-}
-
-pub async fn serve(listener: tokio::net::TcpListener, service: CacheService) -> Result<()> {
-    let public_base = configured_public_base()?;
-    serve_with_public_base(listener, service, public_base).await
+    /// Record that a token fell back to its isolated namespace. Exactly once
+    /// per token: the marker file is the dedupe state, durable across
+    /// restarts so a restarted daemon does not re-log live jobs. Strictly
+    /// additive — it never fails the request — and the line names only the
+    /// token hash, never the token.
+    fn note_isolated_fallback(&self, token_hash: &str) {
+        let sessions = self.root.join("sessions");
+        if std::fs::create_dir_all(&sessions).is_err() {
+            return;
+        }
+        let noted = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(sessions.join(format!("{token_hash}.isolated")))
+            .is_ok();
+        if !noted {
+            return;
+        }
+        let message = format!(
+            "gha-cache isolated fallback: no job session for token hash {token_hash}; serving per-token namespace"
+        );
+        match &self.forensic_log_dir {
+            Some(dir) => crate::slot_log::append_log_line(
+                dir,
+                crate::slot_log::DAEMON_LOG,
+                &format!("gha-cache pid={}", std::process::id()),
+                &message,
+            ),
+            None => eprintln!("Warning: {message}"),
+        }
+    }
 }
 
 async fn serve_with_public_base(
@@ -617,16 +780,15 @@ async fn serve_with_public_base(
     }
 }
 
-async fn route<B>(req: Request<B>, ctx: &mut Ctx) -> Result<Response<ResponseBody>, hyper::Error>
-where
-    B: Body<Data = Bytes> + Unpin,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    // Auth: every route requires the job-scoped runtime credential the
-    // runner bound to a live job at admission. The credential authenticates
-    // the request and selects the job's repo namespace; it is never
-    // persisted, never surfaced in errors, and never enters the namespace
-    // hash.
+async fn route(
+    req: Request<Incoming>,
+    ctx: &mut Ctx,
+) -> Result<Response<ResponseBody>, hyper::Error> {
+    // Auth: every route requires a non-empty job-scoped bearer capability.
+    // The credential is never persisted or surfaced in errors; only its hash
+    // leaves the request path, as the session-registry key (registered jobs
+    // resolve to their ref/base repo namespaces) or as the isolated-namespace
+    // name (unregistered tokens, with one forensic line).
     let token = req
         .headers()
         .get("authorization")
@@ -636,10 +798,13 @@ where
     let Some(token) = token else {
         return Ok(respond_unauthorized());
     };
-    let Some(namespace) = namespace_for_token(token) else {
-        return Ok(respond_unauthorized());
-    };
-    if let Err(error) = ctx.service.ensure_tenant(&namespace) {
+    let scope = ctx.service.resolve_namespaces(token);
+    let chain: Vec<&str> = scope.iter().map(String::as_str).collect();
+    // Writes always land in the job's own scope head (its ref namespace, its
+    // fork namespace when the job is fork-PR or unknown, or its isolated
+    // namespace); only reads walk the chain into the base scope.
+    let primary = chain[0];
+    if let Err(error) = ctx.service.ensure_tenant(primary) {
         eprintln!("Warning: gha cache tenant initialization: {error:#}");
         return Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -665,7 +830,7 @@ where
     };
 
     let result = match (method, path.as_str()) {
-        (hyper::Method::POST, p) if p.ends_with("/cache/reserve") => reserve(req, ctx, &namespace)
+        (hyper::Method::POST, p) if p.ends_with("/cache/reserve") => reserve(req, ctx, primary)
             .await
             .map(|v| respond(StatusCode::OK, v)),
         (hyper::Method::PUT, p) => {
@@ -673,12 +838,12 @@ where
                 Some(id) => (id.to_owned(), false),
                 None => (p.rsplit('/').next().unwrap_or_default().to_owned(), true),
             };
-            upload(req, ctx, &id, &namespace, v1)
+            upload(req, ctx, &id, primary, v1)
                 .await
                 .map(|_| respond(StatusCode::OK, json!({"ok": true})))
         }
         (hyper::Method::GET, p) if p.ends_with("/cache") => {
-            lookup_v1(&req, ctx, &namespace).map(|entry| match entry {
+            lookup_v1(&req, ctx, &chain).map(|entry| match entry {
                 Some(entry) => respond(StatusCode::OK, entry),
                 None => Response::builder()
                     .status(StatusCode::NO_CONTENT)
@@ -688,7 +853,7 @@ where
         }
         (hyper::Method::GET, p) => {
             if let Some(id) = p.rsplit('/').next() {
-                download(&ctx.service, id, Some(&namespace))
+                download_chain(&ctx.service, id, &chain)
                     .await
                     .map(|(body, size)| {
                         Response::builder()
@@ -706,17 +871,17 @@ where
             }
         }
         (hyper::Method::POST, p) if p.contains("CreateCacheEntryUpload") => {
-            reserve_v2(req, ctx, &namespace)
+            reserve_v2(req, ctx, primary)
                 .await
                 .map(|v| respond(StatusCode::OK, v))
         }
         (hyper::Method::POST, p) if p.contains("FinalizeCacheEntryUpload") => {
-            finalize_v2(req, ctx, &namespace)
+            finalize_v2(req, ctx, primary)
                 .await
                 .map(|v| respond(StatusCode::OK, v))
         }
         (hyper::Method::POST, p) if p.contains("GetCacheEntryDownloadURL") => {
-            lookup_v2(req, ctx, &namespace)
+            lookup_v2(req, ctx, &chain)
                 .await
                 .map(|v| respond(StatusCode::OK, v))
         }
@@ -1244,26 +1409,26 @@ fn validated_entry(
 /// `packages/cache/src/cache.ts`). A miss is HTTP 204 with no body —
 /// `getCacheEntry` returns `null` only on 204, and treats a 200 without
 /// `archiveLocation` as a hard error.
-fn lookup_v1<B>(req: &Request<B>, ctx: &Ctx, namespace: &str) -> Result<Option<Value>> {
+fn lookup_v1<B>(req: &Request<B>, ctx: &Ctx, namespaces: &[&str]) -> Result<Option<Value>> {
     let keys = keys_from_query(req);
     let version = query_param(req, "version").unwrap_or_default();
-    Ok(ctx
-        .service
-        .lookup(
-            &keys.iter().map(String::as_str).collect::<Vec<_>>(),
-            &version,
-            Some(namespace),
-        )
-        .map(|hit| {
-            json!({
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    // Scope order is the outer loop: every key step runs on the job's own ref
+    // before anything is tried on the base, exactly the order the GitHub cache
+    // scope rules describe (current branch fully, then the fallback branch).
+    for namespace in namespaces {
+        if let Some(hit) = ctx.service.lookup(&keys, &version, Some(namespace)) {
+            return Ok(Some(json!({
                 "archiveLocation": format!("{}/_results/download/{}", ctx.public_base, hit.hash),
                 "cacheKey": hit.key,
                 "cacheVersion": version,
-            })
-        }))
+            })));
+        }
+    }
+    Ok(None)
 }
 
-async fn lookup_v2<B>(req: Request<B>, ctx: &mut Ctx, namespace: &str) -> Result<Value>
+async fn lookup_v2<B>(req: Request<B>, ctx: &mut Ctx, namespaces: &[&str]) -> Result<Value>
 where
     B: Body<Data = Bytes>,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -1279,25 +1444,26 @@ where
                 .filter_map(|v| v.as_str().map(str::to_owned)),
         );
     }
-    match ctx.service.lookup(
-        &keys.iter().map(String::as_str).collect::<Vec<_>>(),
-        version,
-        Some(namespace),
-    ) {
-        // `matched_key` is field 3 of
-        // `github.actions.results.api.v1.GetCacheEntryDownloadURLResponse`
-        // (actions/toolkit `packages/cache/src/generated/results/api/v1/cache.ts`).
-        // `restoreCache` compares it against the requested primary key to
-        // decide exact hit vs restore-key hit and returns it as the cache key,
-        // so omitting it makes every hit look like a restore-key hit and the
-        // entry is re-saved on the next run.
-        Some(hit) => Ok(json!({
-            "ok": true,
-            "signedDownloadUrl": format!("{}/_results/download/{}", ctx.public_base, hit.hash),
-            "matchedKey": hit.key,
-        })),
-        None => Ok(json!({"ok": false})),
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    // Scope order is the outer loop, like v1: the whole key sequence runs on
+    // the job's own ref before the base scope is consulted.
+    for namespace in namespaces {
+        if let Some(hit) = ctx.service.lookup(&keys, version, Some(namespace)) {
+            // `matched_key` is field 3 of
+            // `github.actions.results.api.v1.GetCacheEntryDownloadURLResponse`
+            // (actions/toolkit `packages/cache/src/generated/results/api/v1/cache.ts`).
+            // `restoreCache` compares it against the requested primary key to
+            // decide exact hit vs restore-key hit and returns it as the cache key,
+            // so omitting it makes every hit look like a restore-key hit and the
+            // entry is re-saved on the next run.
+            return Ok(json!({
+                "ok": true,
+                "signedDownloadUrl": format!("{}/_results/download/{}", ctx.public_base, hit.hash),
+                "matchedKey": hit.key,
+            }));
+        }
     }
+    Ok(json!({"ok": false}))
 }
 
 /// Split a query string into decoded `(name, value)` pairs, preserving order
@@ -1389,6 +1555,25 @@ async fn download(
     Ok((body.boxed_unsync(), actual_size))
 }
 
+/// Serve a download from the first scope holding the entry, in chain order.
+/// The lookup that issued the URL searched the same order, so this serves what
+/// the lookup reported; a scope whose entry vanished (budget eviction between
+/// the two calls) simply yields to the next one.
+async fn download_chain(
+    service: &CacheService,
+    id: &str,
+    namespaces: &[&str],
+) -> Result<(ResponseBody, u64)> {
+    let mut error = anyhow::anyhow!("no cache namespace served the download");
+    for namespace in namespaces {
+        match download(service, id, Some(namespace)).await {
+            Ok(served) => return Ok(served),
+            Err(failed) => error = failed,
+        }
+    }
+    Err(error)
+}
+
 async fn stream_download(
     mut file: tokio::fs::File,
     mut sender: http_body_util::channel::Sender<Bytes, io::Error>,
@@ -1453,7 +1638,7 @@ async fn stream_download(
 /// Job-scoped `ACTIONS_RUNTIME_TOKEN` credentials authenticate requests; the
 /// operator environment never supplies a shared job credential.
 #[must_use]
-pub fn enabled_from_env() -> Option<String> {
+pub(crate) fn enabled_from_env() -> Option<String> {
     let url = std::env::var("VELNOR_ACTIONS_CACHE_URL").ok()?;
     if url.is_empty() {
         return None;
@@ -1506,10 +1691,10 @@ pub(crate) fn normalize_public_base(raw: &str) -> Result<String> {
 /// (e.g. `0.0.0.0:17933`) so job containers reach the service through their
 /// docker bridge gateway (`host.docker.internal`, mapped by the job's
 /// `--add-host`).
-pub const DEFAULT_CACHE_BIND: &str = "127.0.0.1:17933";
+pub(crate) const DEFAULT_CACHE_BIND: &str = "127.0.0.1:17933";
 
 /// Bind the configured address, spawn the accept loop, return the bound addr.
-pub async fn bind_configured(service: CacheService) -> Result<SocketAddr> {
+pub(crate) async fn bind_configured(service: CacheService) -> Result<SocketAddr> {
     let public_base = configured_public_base()?;
     let raw = std::env::var("VELNOR_ACTIONS_CACHE_BIND")
         .unwrap_or_else(|_| DEFAULT_CACHE_BIND.to_owned());
@@ -1557,6 +1742,31 @@ mod tests {
         .expect("commit blob");
     }
 
+    fn commit_blob_at(
+        service: &CacheService,
+        key: &str,
+        version: &str,
+        contents: &[u8],
+        created_ms: u64,
+    ) {
+        write_blob(service, key, version, contents);
+        let hash = entry_hash(key, version);
+        let entries = service.tenant_root(None).join("entries");
+        std::fs::create_dir_all(&entries).expect("create entries");
+        std::fs::write(
+            entries.join(format!("{hash}.json")),
+            json!({
+                "key": key,
+                "version": version,
+                "blob": hash,
+                "size": contents.len(),
+                "created_ms": created_ms,
+            })
+            .to_string(),
+        )
+        .expect("write entry");
+    }
+
     #[test]
     fn entry_hash_is_deterministic_and_version_sensitive() {
         assert_eq!(entry_hash("a", "v"), entry_hash("a", "v"));
@@ -1565,10 +1775,10 @@ mod tests {
     }
 
     #[test]
-    fn isolated_namespace_is_deterministic_token_specific_and_redacted() {
-        let first = isolated_cache_namespace("job-token-a");
-        assert_eq!(first, isolated_cache_namespace("job-token-a"));
-        assert_ne!(first, isolated_cache_namespace("job-token-b"));
+    fn cache_namespace_is_deterministic_token_specific_and_redacted() {
+        let first = cache_namespace("job-token-a");
+        assert_eq!(first, cache_namespace("job-token-a"));
+        assert_ne!(first, cache_namespace("job-token-b"));
         assert_eq!(first.len(), 64);
         assert!(!first.contains("job-token-a"));
     }
@@ -1618,31 +1828,6 @@ mod tests {
 
         // Version mismatch misses.
         assert!(svc.lookup(&["linux-rust"], "v9", None).is_none());
-    }
-
-    fn commit_blob_at(
-        service: &CacheService,
-        key: &str,
-        version: &str,
-        contents: &[u8],
-        created_ms: u64,
-    ) {
-        write_blob(service, key, version, contents);
-        let hash = entry_hash(key, version);
-        let entries = service.tenant_root(None).join("entries");
-        std::fs::create_dir_all(&entries).expect("create entries");
-        std::fs::write(
-            entries.join(format!("{hash}.json")),
-            json!({
-                "key": key,
-                "version": version,
-                "blob": hash,
-                "size": contents.len(),
-                "created_ms": created_ms,
-            })
-            .to_string(),
-        )
-        .expect("write entry");
     }
 
     #[test]
@@ -1739,7 +1924,7 @@ mod tests {
         let hit = lookup_v1(
             &get_at_host("attacker.test", "keys=linux-rust-2026&version=v1"),
             &ctx,
-            "tenant",
+            &["tenant"],
         )
         .unwrap()
         .unwrap();
@@ -1866,9 +2051,13 @@ mod tests {
             .service
             .reservation_path(id, Some("tenant"))
             .exists());
-        let hit = lookup_v1(&get("keys=v1-rust-cache&version=v1"), &reopened, "tenant")
-            .unwrap()
-            .unwrap();
+        let hit = lookup_v1(
+            &get("keys=v1-rust-cache&version=v1"),
+            &reopened,
+            &["tenant"],
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(hit["cacheKey"], json!(key));
         assert_eq!(hit["cacheVersion"], json!(version));
     }
@@ -2063,7 +2252,7 @@ mod tests {
         let hit = lookup_v1(
             &get("keys=linux-rust-2026%2Clinux-rust&version=v1"),
             &ctx,
-            "tenant",
+            &["tenant"],
         )
         .expect("lookup")
         .expect("hit");
@@ -2083,7 +2272,7 @@ mod tests {
         let hit = lookup_v1(
             &get("keys=linux-rust-2027%2Clinux&version=v1"),
             &ctx,
-            "tenant",
+            &["tenant"],
         )
         .expect("lookup")
         .expect("hit");
@@ -2091,7 +2280,7 @@ mod tests {
 
         // A miss carries no entry; the route turns that into HTTP 204, which is
         // the only status `getCacheEntry` treats as "no cache".
-        assert!(lookup_v1(&get("keys=absent&version=v1"), &ctx, "tenant")
+        assert!(lookup_v1(&get("keys=absent&version=v1"), &ctx, &["tenant"])
             .expect("lookup")
             .is_none());
     }
@@ -2122,7 +2311,7 @@ mod tests {
         let exact = lookup_v2(
             request(json!({"key": "linux-rust-2026", "version": "v1"})),
             &mut ctx,
-            "tenant",
+            &["tenant"],
         )
         .await
         .expect("lookup");
@@ -2133,7 +2322,7 @@ mod tests {
         let restored = lookup_v2(
             request(json!({"key": "linux-rust-2027", "version": "v1", "restoreKeys": ["linux"]})),
             &mut ctx,
-            "tenant",
+            &["tenant"],
         )
         .await
         .expect("lookup");
@@ -2142,7 +2331,7 @@ mod tests {
         let miss = lookup_v2(
             request(json!({"key": "absent", "version": "v1"})),
             &mut ctx,
-            "tenant",
+            &["tenant"],
         )
         .await
         .expect("lookup");
@@ -2320,344 +2509,1240 @@ mod tests {
         assert!(error.to_string().contains("length limit exceeded"));
     }
 
-    fn shared_identity(repository_id: u64, ref_scope: &str, trusted: bool) -> CacheIdentity {
-        CacheIdentity::Shared {
-            repository_id,
-            ref_scope: ref_scope.to_owned(),
-            trusted,
-        }
+    #[test]
+    fn repo_namespace_is_stable_scoped_and_redacted() {
+        let first = repo_namespace("acme/repo", "refs/heads/main");
+        assert_eq!(first, repo_namespace("acme/repo", "refs/heads/main"));
+        assert_ne!(first, repo_namespace("acme/other", "refs/heads/main"));
+        assert_ne!(first, repo_namespace("acme/repo", "refs/heads/feature"));
+        assert!(first.starts_with("repo-"));
+        assert_eq!(first.len(), "repo-".len() + 64);
+        assert!(!first.contains("acme"));
+        assert!(!first.contains("main"));
     }
 
-    fn register_shared(
-        credential: &str,
-        repository_id: u64,
-        ref_scope: &str,
-        trusted: bool,
-    ) -> CacheSession {
-        register_job_cache_session(
-            Some(credential),
-            shared_identity(repository_id, ref_scope, trusted),
+    #[test]
+    fn identity_validation_normalizes_and_rejects_garbage() {
+        let identity = CacheIdentity::new(
+            "Acme/Repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::Trusted,
         )
+        .unwrap();
+        assert_eq!(identity.repository, "acme/repo");
+        assert_eq!(identity.git_ref, "refs/pull/7/merge");
+        // A short base branch name normalizes to the full ref form.
+        assert_eq!(identity.base_ref.as_deref(), Some("refs/heads/main"));
+
+        // A base that adds no scope beyond the ref is dropped.
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/main",
+            Some("refs/heads/main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        assert_eq!(identity.base_ref, None);
+
+        let identity =
+            CacheIdentity::new("acme/repo", "refs/pull/7/merge", None, TrustClass::Unknown)
+                .unwrap();
+        assert_eq!(identity.base_ref, None);
+
+        for repository in [
+            "",
+            "noslash",
+            "/name",
+            "owner/",
+            "a/b/c",
+            "a/b\rc",
+            &format!("owner/{}", "n".repeat(300)),
+        ] {
+            assert!(
+                CacheIdentity::new(repository, "refs/heads/main", None, TrustClass::Trusted)
+                    .is_err(),
+                "accepted repository {repository:?}"
+            );
+        }
+        for git_ref in ["", "refs/heads/\rx", &"r".repeat(600)] {
+            assert!(
+                CacheIdentity::new("acme/repo", git_ref, None, TrustClass::Trusted).is_err(),
+                "accepted ref {git_ref:?}"
+            );
+        }
+        assert!(CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/main",
+            Some("ba\rse"),
+            TrustClass::Trusted
+        )
+        .is_err());
     }
 
-    fn authed_get(path: &str, credential: &str) -> Request<Full<Bytes>> {
+    #[test]
+    fn register_resolve_round_trip_serves_ref_then_base() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "job-token", &identity).unwrap();
+        // Re-registration is idempotent.
+        register_job_cache_session(dir.path(), "job-token", &identity).unwrap();
+
+        let chain = service.resolve_namespaces("job-token");
+        assert_eq!(
+            chain,
+            vec![
+                repo_namespace("acme/repo", "refs/pull/7/merge"),
+                repo_namespace("acme/repo", "refs/heads/main"),
+            ]
+        );
+        // A different job token in the same repo resolves to the same shared
+        // namespaces once registered: this is the cross-run hit.
+        let other = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "other-token", &other).unwrap();
+        assert_eq!(service.resolve_namespaces("other-token"), chain);
+    }
+
+    #[test]
+    fn unregistered_token_falls_back_isolated_with_exactly_one_forensic_line() {
+        let dir = tempfile_dir();
+        let mut service = test_service(dir.path());
+        let logs = dir.path().join("logs");
+        service.forensic_log_dir = Some(logs.clone());
+
+        let isolated = cache_namespace("unknown-token");
+        assert_eq!(
+            service.resolve_namespaces("unknown-token"),
+            vec![isolated.clone()]
+        );
+        assert!(dir
+            .path()
+            .join("sessions")
+            .join(format!("{isolated}.isolated"))
+            .exists());
+
+        // The second request reuses the marker instead of re-logging.
+        assert_eq!(
+            service.resolve_namespaces("unknown-token"),
+            vec![isolated.clone()]
+        );
+        let log = std::fs::read_to_string(logs.join(crate::slot_log::DAEMON_LOG)).unwrap();
+        assert_eq!(log.lines().count(), 1, "expected one forensic line: {log}");
+        assert!(log.contains("isolated fallback"));
+        assert!(log.contains(&isolated));
+        assert!(!log.contains("unknown-token"));
+    }
+
+    #[test]
+    fn corrupt_session_is_fail_closed_to_isolated() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let token_hash = cache_namespace("job-token");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join(format!("{token_hash}.json")), b"{not json").unwrap();
+        assert_eq!(
+            service.resolve_namespaces("job-token"),
+            vec![token_hash.clone()]
+        );
+        assert!(sessions.join(format!("{token_hash}.isolated")).exists());
+    }
+
+    #[test]
+    fn lookup_searches_the_whole_ref_scope_before_the_base() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        let chain = identity.namespaces();
+        let (ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str());
+        for namespace in [&ref_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let commit_in = |namespace: &str, key: &str, contents: &[u8]| {
+            let blob = service
+                .tenant_root(Some(namespace))
+                .join("blobs")
+                .join(entry_hash(key, "v1"));
+            std::fs::write(&blob, contents).unwrap();
+            commit_entry(
+                &service,
+                key,
+                "v1",
+                u64::try_from(contents.len()).unwrap(),
+                Some(namespace),
+            )
+            .unwrap();
+        };
+        // Same key in both scopes with different blobs: the ref scope wins.
+        commit_in(ref_ns, "shared", b"ref-blob");
+        commit_in(base_ns, "shared", b"base-blob");
+        // Restore-only entries live in the base scope.
+        commit_in(base_ns, "linux-rust-2026", b"base-only");
+        // A restore-prefix hit in the ref scope beats an exact primary-key hit
+        // in the base scope: scope order is the outer loop, per the GitHub
+        // cache scope rules (current branch fully, then the fallback branch).
+        commit_in(ref_ns, "prefix-entry", b"ref-prefix");
+        commit_in(base_ns, "exact-in-base", b"base-exact");
+
+        let ctx = test_ctx(service);
+        let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+
+        let hit = lookup_v1(&get("keys=shared&version=v1"), &ctx, &chain_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("shared"));
+
+        let hit = lookup_v1(
+            &get("keys=linux-other%2Clinux&version=v1"),
+            &ctx,
+            &chain_refs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(hit["cacheKey"], json!("linux-rust-2026"));
+
+        let hit = lookup_v1(
+            &get("keys=exact-in-base%2Cprefix&version=v1"),
+            &ctx,
+            &chain_refs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(hit["cacheKey"], json!("prefix-entry"));
+    }
+
+    #[tokio::test]
+    async fn download_serves_the_scope_the_lookup_reported() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        let chain = identity.namespaces();
+        let (ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str());
+        for namespace in [&ref_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+            let blob = service
+                .tenant_root(Some(namespace))
+                .join("blobs")
+                .join(entry_hash("shared", "v1"));
+            std::fs::write(&blob, format!("{namespace}-blob").as_bytes()).unwrap();
+            commit_entry(
+                &service,
+                "shared",
+                "v1",
+                u64::try_from(format!("{namespace}-blob").len()).unwrap(),
+                Some(namespace),
+            )
+            .unwrap();
+        }
+        let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let (mut body, _) = download_chain(&service, &entry_hash("shared", "v1"), &chain_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, format!("{ref_ns}-blob").as_bytes());
+
+        // An entry evicted from the ref scope still downloads from the base.
+        std::fs::remove_file(service.entry_path(&entry_hash("shared", "v1"), Some(ref_ns)))
+            .unwrap();
+        let (mut body, _) = download_chain(&service, &entry_hash("shared", "v1"), &chain_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, format!("{base_ns}-blob").as_bytes());
+    }
+
+    #[tokio::test]
+    async fn writes_land_in_the_ref_namespace_only() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        let chain = identity.namespaces();
+        let (ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str());
+        service.ensure_tenant(ref_ns).unwrap();
+        service.ensure_tenant(base_ns).unwrap();
+        let ctx = test_ctx(service);
+        let contents = b"pr-blob";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "pr-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            ref_ns,
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, ref_ns, true)
+            .await
+            .unwrap();
+
+        assert!(ctx.service.entry_path(&id, Some(ref_ns)).exists());
+        assert!(!ctx.service.entry_path(&id, Some(base_ns)).exists());
+        // The PR run restores its own write through the chain, and the base
+        // scope it read from is untouched by the write.
+        let hit = lookup_v1(&get("keys=pr-key&version=v1"), &ctx, &[ref_ns, base_ns])
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("pr-key"));
+    }
+
+    #[test]
+    fn prune_removes_only_stale_session_files() {
+        let dir = tempfile_dir();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let stale_hash = "a".repeat(64);
+        std::fs::write(sessions.join(format!("{stale_hash}.json")), b"{}").unwrap();
+        std::fs::write(sessions.join(format!("{stale_hash}.isolated")), b"").unwrap();
+        std::fs::write(sessions.join(".abc.tmp"), b"tmp").unwrap();
+        std::fs::write(sessions.join("notes.txt"), b"notes").unwrap();
+        std::fs::write(sessions.join("zz.json"), b"{}").unwrap();
+
+        // A `now` before every mtime keeps everything.
+        prune_stale_sessions(&sessions, std::time::SystemTime::UNIX_EPOCH);
+        assert_eq!(std::fs::read_dir(&sessions).unwrap().count(), 5);
+
+        // A `now` past the TTL removes only the session-shaped files.
+        let aged =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(SESSION_TTL_SECS + 60);
+        prune_stale_sessions(&sessions, aged);
+        let remaining: Vec<String> = std::fs::read_dir(&sessions)
+            .unwrap()
+            .flatten()
+            .map(|file| file.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.contains(&".abc.tmp".to_owned()));
+        assert!(remaining.contains(&"notes.txt".to_owned()));
+        assert!(remaining.contains(&"zz.json".to_owned()));
+    }
+
+    #[test]
+    fn register_rejects_an_empty_token() {
+        let dir = tempfile_dir();
+        let identity =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        assert!(register_job_cache_session(dir.path(), "", &identity).is_err());
+    }
+
+    fn post_v2(body: Value) -> Request<Full<Bytes>> {
         Request::builder()
-            .uri(format!("http://cache.test{path}"))
-            .header("authorization", format!("Bearer {credential}"))
-            .body(Full::new(Bytes::new()))
+            .method(hyper::Method::POST)
+            .uri("http://cache.test/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL")
+            .body(Full::new(Bytes::from(body.to_string())))
             .expect("build request")
     }
 
-    fn commit_blob_in(
-        service: &CacheService,
-        namespace: &str,
-        key: &str,
-        version: &str,
-        contents: &[u8],
-    ) {
-        let hash = entry_hash(key, version);
-        let blobs = service.tenant_root(Some(namespace)).join("blobs");
-        std::fs::create_dir_all(&blobs).expect("create blobs");
-        std::fs::write(blobs.join(&hash), contents).expect("write blob");
+    fn commit_in(service: &CacheService, namespace: &str, key: &str, contents: &[u8]) {
+        let blob = service
+            .tenant_root(Some(namespace))
+            .join("blobs")
+            .join(entry_hash(key, "v1"));
+        std::fs::write(&blob, contents).unwrap();
         commit_entry(
             service,
             key,
-            version,
-            u64::try_from(contents.len()).expect("blob length fits u64"),
+            "v1",
+            u64::try_from(contents.len()).unwrap(),
             Some(namespace),
         )
-        .expect("commit blob");
+        .unwrap();
     }
 
     #[test]
-    fn repo_namespace_is_deterministic_and_input_sensitive() {
-        let base = repo_cache_namespace(42, "refs/heads/main", true);
-        assert_eq!(base, repo_cache_namespace(42, "refs/heads/main", true));
-        assert_eq!(base.len(), 64);
-        assert!(base.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(!base.contains("refs/heads/main"));
-        assert_ne!(base, repo_cache_namespace(43, "refs/heads/main", true));
-        assert_ne!(base, repo_cache_namespace(42, "refs/heads/other", true));
-        assert_ne!(base, repo_cache_namespace(42, "refs/heads/main", false));
-        // Neighboring ids and one-character ref edits must not collide.
-        assert_ne!(base, repo_cache_namespace(41, "refs/heads/main", true));
-        assert_ne!(base, repo_cache_namespace(42, "refs/heads/maiN", true));
-    }
-
-    #[test]
-    fn repo_namespace_never_aliases_isolated_namespace() {
-        // The two domains differ, so a fail-closed job can never address a
-        // shared namespace even when the inputs look alike.
-        let shared = repo_cache_namespace(42, "refs/heads/main", true);
-        for credential in ["42", "refs/heads/main", "42refs/heads/main", ""] {
-            assert_ne!(shared, isolated_cache_namespace(credential));
-        }
-        assert_ne!(
-            repo_cache_namespace(42, "refs/heads/main", false),
-            isolated_cache_namespace("refs/heads/main")
-        );
-    }
-
-    #[test]
-    fn same_repo_and_branch_share_one_namespace_across_credentials() {
-        // Same-ref sharing (GitHub's branch scoping minus the
-        // base/default-branch fallback, which BC-21 forbids — see module
-        // docs): a save by one job is visible to a later job in the same
-        // repository and ref, even though the two jobs carry different
-        // per-job credentials.
-        let first = register_shared("share-conformance-first", 42, "refs/heads/main", true);
-        let second = register_shared("share-conformance-second", 42, "refs/heads/main", true);
-        let first_ns = namespace_for_token("share-conformance-first").expect("first resolves");
-        let second_ns = namespace_for_token("share-conformance-second").expect("second resolves");
-        assert_eq!(first_ns, second_ns);
-
-        let dir = tempfile_dir();
-        let service = test_service(dir.path());
-        commit_blob_in(&service, &first_ns, "linux-rust", "v1", b"shared");
-        let hit = service
-            .lookup(&["linux-rust"], "v1", Some(&second_ns))
-            .expect("later job sees the save");
-        assert_eq!(hit.key, "linux-rust");
-        drop(first);
-        drop(second);
-    }
-
-    #[test]
-    fn different_ref_scopes_do_not_share() {
-        let main = register_shared("ref-scope-main", 42, "refs/heads/main", true);
-        let feature = register_shared("ref-scope-feature", 42, "refs/heads/feature", true);
-        let main_ns = namespace_for_token("ref-scope-main").expect("main resolves");
-        let feature_ns = namespace_for_token("ref-scope-feature").expect("feature resolves");
-        assert_ne!(main_ns, feature_ns);
-
-        let dir = tempfile_dir();
-        let service = test_service(dir.path());
-        commit_blob_in(&service, &main_ns, "linux-rust", "v1", b"main-only");
-        assert!(service
-            .lookup(&["linux-rust"], "v1", Some(&feature_ns))
-            .is_none());
-        drop(main);
-        drop(feature);
-    }
-
-    #[test]
-    fn different_repositories_do_not_share() {
-        let repo_a = register_shared("repo-scope-a", 42, "refs/heads/main", true);
-        let repo_b = register_shared("repo-scope-b", 43, "refs/heads/main", true);
-        let ns_a = namespace_for_token("repo-scope-a").expect("a resolves");
-        let ns_b = namespace_for_token("repo-scope-b").expect("b resolves");
-        assert_ne!(ns_a, ns_b);
-
-        let dir = tempfile_dir();
-        let service = test_service(dir.path());
-        commit_blob_in(&service, &ns_a, "linux-rust", "v1", b"repo-a-only");
-        assert!(service.lookup(&["linux-rust"], "v1", Some(&ns_b)).is_none());
-        drop(repo_a);
-        drop(repo_b);
-    }
-
-    #[test]
-    fn untrusted_jobs_do_not_share_with_trusted() {
-        // The trust floor is a namespace input: a fork job on the same repo
-        // and ref can neither read trusted entries nor poison them.
-        let trusted = register_shared("trust-scope-trusted", 42, "refs/pull/7/merge", true);
-        let fork = register_shared("trust-scope-fork", 42, "refs/pull/7/merge", false);
-        let trusted_ns = namespace_for_token("trust-scope-trusted").expect("trusted resolves");
-        let fork_ns = namespace_for_token("trust-scope-fork").expect("fork resolves");
-        assert_ne!(trusted_ns, fork_ns);
-
-        let dir = tempfile_dir();
-        let service = test_service(dir.path());
-        commit_blob_in(&service, &trusted_ns, "linux-rust", "v1", b"trusted-only");
-        assert!(service
-            .lookup(&["linux-rust"], "v1", Some(&fork_ns))
-            .is_none());
-        commit_blob_in(&service, &fork_ns, "linux-rust", "v1", b"fork-only");
-        let hit = service
-            .lookup(&["linux-rust"], "v1", Some(&trusted_ns))
-            .expect("trusted entry intact");
-        assert_eq!(hit.key, "linux-rust");
-        drop(trusted);
-        drop(fork);
-    }
-
-    #[test]
-    fn identity_derive_fails_closed_to_isolated() {
+    fn fork_isolation_conformance_chains_split_by_trust() {
+        let trusted = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
         assert_eq!(
-            CacheIdentity::derive(Some("42"), Some("refs/heads/main"), true, true),
-            shared_identity(42, "refs/heads/main", true)
+            trusted.namespaces(),
+            vec![
+                repo_namespace("acme/repo", "refs/pull/7/merge"),
+                repo_namespace("acme/repo", "refs/heads/main"),
+            ]
         );
-        assert_eq!(
-            CacheIdentity::derive(Some(" 42 "), Some(" refs/heads/main "), true, false),
-            shared_identity(42, "refs/heads/main", false)
-        );
-        // Every incomplete or unparseable signal fails closed to Isolated:
-        // missing, zero, or non-numeric repository id; missing or blank ref;
-        // absent plan scope.
-        for (repository_id, ref_scope, scope_present) in [
-            (None, Some("refs/heads/main"), true),
-            (Some(""), Some("refs/heads/main"), true),
-            (Some("0"), Some("refs/heads/main"), true),
-            (Some("not-a-number"), Some("refs/heads/main"), true),
-            (Some("42"), None, true),
-            (Some("42"), Some(""), true),
-            (Some("42"), Some("   "), true),
-            (Some("42"), Some("refs/heads/main"), false),
-            (None, None, false),
-        ] {
+
+        // ForkPR and Unknown resolve fork-headed: the isolated fork namespace
+        // first, then the same base namespaces for read-through.
+        for trust in [TrustClass::ForkPR, TrustClass::Unknown] {
+            let untrusted =
+                CacheIdentity::new("acme/repo", "refs/pull/7/merge", Some("main"), trust).unwrap();
             assert_eq!(
-                CacheIdentity::derive(repository_id, ref_scope, scope_present, true),
-                CacheIdentity::Isolated,
-                "repository_id={repository_id:?} ref_scope={ref_scope:?} scope_present={scope_present}",
+                untrusted.namespaces(),
+                vec![
+                    fork_namespace("acme/repo", "refs/pull/7/merge"),
+                    repo_namespace("acme/repo", "refs/pull/7/merge"),
+                    repo_namespace("acme/repo", "refs/heads/main"),
+                ],
+                "wrong chain for {trust:?}"
             );
         }
     }
 
     #[test]
-    fn isolated_identity_resolves_to_the_per_credential_namespace() {
-        let session = register_job_cache_session(
-            Some("isolated-fallback-credential"),
-            CacheIdentity::Isolated,
-        );
-        assert_eq!(
-            namespace_for_token("isolated-fallback-credential").expect("isolated resolves"),
-            isolated_cache_namespace("isolated-fallback-credential"),
-        );
-        drop(session);
-        assert!(namespace_for_token("isolated-fallback-credential").is_none());
-    }
-
-    #[tokio::test]
-    async fn route_rejects_unknown_missing_and_empty_credentials() {
-        let dir = tempfile_dir();
-        let mut ctx = test_ctx(test_service(dir.path()));
-        let miss = "/_apis/artifactcache/cache?keys=absent&version=v1";
-        let unknown = route(authed_get(miss, "never-registered-credential"), &mut ctx)
-            .await
-            .expect("route");
-        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
-        let missing = route(get("keys=absent&version=v1"), &mut ctx)
-            .await
-            .expect("route");
-        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-        let empty = route(authed_get(miss, ""), &mut ctx).await.expect("route");
-        assert_eq!(empty.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn route_accepts_registered_job_credential() {
-        let dir = tempfile_dir();
-        let mut ctx = test_ctx(test_service(dir.path()));
-        let session = register_shared("route-accept-credential", 42, "refs/heads/main", true);
-        // A lookup miss reaches the service and reports 204 (the toolkit's
-        // only "no cache" status), proving the credential authenticated and
-        // the repo namespace was consulted.
-        let miss = route(
-            authed_get(
-                "/_apis/artifactcache/cache?keys=absent&version=v1",
-                "route-accept-credential",
-            ),
-            &mut ctx,
-        )
-        .await
-        .expect("route");
-        assert_eq!(miss.status(), StatusCode::NO_CONTENT);
-        drop(session);
-        let after_drop = route(
-            authed_get(
-                "/_apis/artifactcache/cache?keys=absent&version=v1",
-                "route-accept-credential",
-            ),
-            &mut ctx,
-        )
-        .await
-        .expect("route");
-        assert_eq!(after_drop.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[test]
-    fn session_guard_unregisters_on_drop() {
-        let session = register_shared("session-drop-credential", 42, "refs/heads/main", true);
-        assert!(namespace_for_token("session-drop-credential").is_some());
-        drop(session);
-        assert!(namespace_for_token("session-drop-credential").is_none());
-    }
-
-    #[test]
-    fn missing_credential_binds_nothing() {
-        let without_token =
-            register_job_cache_session(None, shared_identity(42, "refs/heads/main", true));
-        let empty_token =
-            register_job_cache_session(Some(""), shared_identity(42, "refs/heads/main", true));
-        drop(without_token);
-        drop(empty_token);
-    }
-
-    #[test]
-    fn duplicate_sessions_release_one_registration_each() {
-        let first = register_shared("duplicate-session-credential", 42, "refs/heads/main", true);
-        let second = register_shared("duplicate-session-credential", 42, "refs/heads/main", true);
-        assert!(namespace_for_token("duplicate-session-credential").is_some());
-        drop(first);
+    fn fork_isolation_conformance_fork_namespace_is_stable_scoped_and_redacted() {
+        let first = fork_namespace("acme/repo", "refs/heads/main");
+        assert_eq!(first, fork_namespace("acme/repo", "refs/heads/main"));
+        assert_ne!(first, fork_namespace("acme/other", "refs/heads/main"));
+        assert_ne!(first, fork_namespace("acme/repo", "refs/heads/feature"));
+        assert!(first.starts_with("fork-"));
+        assert_eq!(first.len(), "fork-".len() + 64);
+        assert!(!first.contains("acme"));
+        assert!(!first.contains("main"));
+        // Same inputs, distinct domains: a fork namespace can never name the
+        // same tenant as the base namespace, not even by prefix confusion.
+        assert_ne!(first, repo_namespace("acme/repo", "refs/heads/main"));
         assert!(
-            namespace_for_token("duplicate-session-credential").is_some(),
-            "one live session keeps the binding"
+            !repo_namespace("acme/repo", "refs/heads/main").starts_with("fork-"),
+            "repo namespaces must never carry the fork prefix"
         );
-        drop(second);
-        assert!(namespace_for_token("duplicate-session-credential").is_none());
     }
 
-    // Benchmark: namespace derivation and registry lookup sit on every cache
-    // request, so their cost is gated. No criterion/divan harness exists in
-    // this workspace; the bound below is the benchmark, in the style of the
-    // repo's existing timing-gated tests.
     #[test]
-    fn cache_namespace_benchmark_derivation_and_lookup_throughput() {
+    fn fork_isolation_conformance_trust_label_round_trips_through_the_session() {
+        for trust in [TrustClass::Trusted, TrustClass::ForkPR, TrustClass::Unknown] {
+            assert_eq!(parse_trust(trust.as_str()).unwrap(), trust);
+            let session = CacheSession {
+                identity: CacheIdentity::new("acme/repo", "refs/pull/7/merge", Some("main"), trust)
+                    .unwrap(),
+                registered_ms: 0,
+            };
+            let encoded = session.as_json();
+            assert_eq!(encoded["trust"], json!(trust.as_str()));
+            assert_eq!(CacheSession::parse(encoded).unwrap(), session);
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_conformance_fork_v1_writes_stay_in_the_fork_namespace() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &identity).unwrap();
+        // Resolve through the durable session, exactly as the request path does.
+        let chain = service.resolve_namespaces("fork-token");
+        assert_eq!(chain.len(), 3);
+        let (fork_ns, ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str(), chain[2].as_str());
+        for namespace in [&fork_ns, &ref_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let ctx = test_ctx(service);
+        let contents = b"fork-blob";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "fork-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, fork_ns, true)
+            .await
+            .unwrap();
+
+        // The write reached the fork namespace only: no entry and no blob in
+        // either base scope.
+        assert!(ctx.service.entry_path(&id, Some(fork_ns)).exists());
+        for namespace in [ref_ns, base_ns] {
+            assert!(
+                !ctx.service.entry_path(&id, Some(namespace)).exists(),
+                "fork write leaked an entry into {namespace}"
+            );
+            assert!(
+                !ctx.service
+                    .tenant_root(Some(namespace))
+                    .join("blobs")
+                    .join(&id)
+                    .exists(),
+                "fork write leaked a blob into {namespace}"
+            );
+        }
+        // The fork run restores its own write through its chain.
+        let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=fork-key&version=v1"), &ctx, &chain_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("fork-key"));
+
+        // A trusted chain over the same base scopes cannot see the fork entry.
+        assert!(
+            lookup_v1(&get("keys=fork-key&version=v1"), &ctx, &[ref_ns, base_ns])
+                .unwrap()
+                .is_none(),
+            "trusted chain restored a fork-namespace entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_conformance_fork_v1_reads_through_to_base() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &identity).unwrap();
+        let chain = service.resolve_namespaces("fork-token");
+        let (fork_ns, ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str(), chain[2].as_str());
+        for namespace in [&fork_ns, &ref_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        commit_in(&service, base_ns, "base-key", b"base-blob");
+        let ctx = test_ctx(service);
+
+        let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=base-key&version=v1"), &ctx, &chain_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("base-key"));
+
+        // The base entry downloads through the fork chain too.
+        let (mut body, _) =
+            download_chain(&ctx.service, &entry_hash("base-key", "v1"), &chain_refs)
+                .await
+                .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, b"base-blob");
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_conformance_fork_v2_reserve_through_finalize_stays_isolated() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &identity).unwrap();
+        let chain = service.resolve_namespaces("fork-token");
+        let (fork_ns, ref_ns, base_ns) = (chain[0].as_str(), chain[1].as_str(), chain[2].as_str());
+        for namespace in [&fork_ns, &ref_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+        let key = "fork-v2-key";
+        let version = "v1";
+        let contents = b"fork-v2-blob";
+
+        let reserved = reserve_v2(
+            post_v2(json!({ "key": key, "version": version })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reserved["ok"], json!(true));
+        let id = entry_hash(key, version);
+        upload(put_body(contents), &ctx, &id, fork_ns, false)
+            .await
+            .unwrap();
+        let finalized = finalize_v2(
+            post_v2(json!({
+                "key": key,
+                "version": version,
+                "size_bytes": contents.len(),
+            })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        assert_eq!(finalized["ok"], json!(true));
+
+        assert!(ctx.service.entry_path(&id, Some(fork_ns)).exists());
+        for namespace in [ref_ns, base_ns] {
+            assert!(
+                !ctx.service.entry_path(&id, Some(namespace)).exists(),
+                "fork v2 write leaked an entry into {namespace}"
+            );
+            assert!(
+                !ctx.service
+                    .tenant_root(Some(namespace))
+                    .join("blobs")
+                    .join(&id)
+                    .exists(),
+                "fork v2 write leaked a blob into {namespace}"
+            );
+        }
+        // A second reserve against the fork head now conflicts; the base
+        // scopes stay reservable because nothing was written there.
+        let again = reserve_v2(
+            post_v2(json!({ "key": key, "version": version })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        assert_eq!(again["ok"], json!(false));
+        for namespace in [ref_ns, base_ns] {
+            let base_reserve = reserve_v2(
+                post_v2(json!({ "key": key, "version": version })),
+                &ctx,
+                namespace,
+            )
+            .await
+            .unwrap();
+            assert_eq!(base_reserve["ok"], json!(true), "base scope {namespace}");
+        }
+
+        // The fork chain restores the entry over v2; the trusted chain misses.
+        let chain_refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+        let hit = lookup_v2(
+            post_v2(json!({ "key": key, "version": version })),
+            &mut ctx,
+            &chain_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hit["ok"], json!(true));
+        assert_eq!(hit["matchedKey"], json!(key));
+        let miss = lookup_v2(
+            post_v2(json!({ "key": key, "version": version })),
+            &mut ctx,
+            &[ref_ns, base_ns],
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_conformance_trusted_never_reads_fork_namespaces() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let fork_ns = fork_namespace("acme/repo", "refs/heads/main");
+        let base_ns = repo_namespace("acme/repo", "refs/heads/main");
+        for namespace in [&fork_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        // A fork entry committed directly to the fork namespace.
+        commit_in(&service, &fork_ns, "sneaky", b"sneaky-blob");
+        let mut ctx = test_ctx(service);
+
+        // The trusted chain over the same repository and ref misses on both
+        // wire generations, and the blob is unreachable through it: the
+        // download fails rather than serving fork bytes.
+        assert!(lookup_v1(&get("keys=sneaky&version=v1"), &ctx, &[&base_ns])
+            .unwrap()
+            .is_none());
+        let miss = lookup_v2(
+            post_v2(json!({ "key": "sneaky", "version": "v1" })),
+            &mut ctx,
+            &[&base_ns],
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+        assert!(
+            download_chain(&ctx.service, &entry_hash("sneaky", "v1"), &[&base_ns])
+                .await
+                .is_err()
+        );
+
+        // Sanity: the fork chain does restore it.
+        let fork_hit = lookup_v1(&get("keys=sneaky&version=v1"), &ctx, &[&fork_ns, &base_ns])
+            .unwrap()
+            .unwrap();
+        assert_eq!(fork_hit["cacheKey"], json!("sneaky"));
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_regression_fork_write_on_a_base_ref_cannot_poison_base() {
+        // The `workflow_run`-from-a-fork shape: a fork-controlled run whose
+        // ref *is* the base branch. Without trust in the chain its writes
+        // would land in the base scope trusted jobs restore from.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::ForkPR).unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &identity).unwrap();
+        let chain = service.resolve_namespaces("fork-token");
+        assert_eq!(
+            chain,
+            vec![
+                fork_namespace("acme/repo", "refs/heads/main"),
+                repo_namespace("acme/repo", "refs/heads/main"),
+            ]
+        );
+        let (fork_ns, base_ns) = (chain[0].as_str(), chain[1].as_str());
+        for namespace in [&fork_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let ctx = test_ctx(service);
+        let contents = b"poison";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "base-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, fork_ns, true)
+            .await
+            .unwrap();
+
+        assert!(ctx.service.entry_path(&id, Some(fork_ns)).exists());
+        assert!(
+            !ctx.service.entry_path(&id, Some(base_ns)).exists(),
+            "fork write poisoned the base-branch scope"
+        );
+        assert!(
+            !ctx.service
+                .tenant_root(Some(base_ns))
+                .join("blobs")
+                .join(&id)
+                .exists(),
+            "fork write poisoned the base-branch blob"
+        );
+        // The base scope still restores nothing for the key.
+        assert!(
+            lookup_v1(&get("keys=base-key&version=v1"), &ctx, &[base_ns])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_isolation_regression_unknown_writes_like_fork() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let identity =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Unknown).unwrap();
+        register_job_cache_session(dir.path(), "unknown-token", &identity).unwrap();
+        let chain = service.resolve_namespaces("unknown-token");
+        let (fork_ns, base_ns) = (chain[0].as_str(), chain[1].as_str());
+        assert!(fork_ns.starts_with("fork-"));
+        for namespace in [&fork_ns, &base_ns] {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let ctx = test_ctx(service);
+        let contents = b"unknown-blob";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "unknown-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            fork_ns,
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, fork_ns, true)
+            .await
+            .unwrap();
+
+        assert!(ctx.service.entry_path(&id, Some(fork_ns)).exists());
+        assert!(!ctx.service.entry_path(&id, Some(base_ns)).exists());
+    }
+
+    #[test]
+    fn fork_isolation_regression_session_without_trust_falls_back_isolated() {
+        // Sessions written before trust existed carry no `trust` field; they
+        // must not inherit trust — the token falls back to its isolated
+        // per-token namespace exactly like a corrupt session.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let token_hash = cache_namespace("legacy-token");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("{token_hash}.json")),
+            json!({
+                "repository": "acme/repo",
+                "ref": "refs/heads/main",
+                "baseRef": Value::Null,
+                "registeredMs": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            service.resolve_namespaces("legacy-token"),
+            vec![token_hash.clone()]
+        );
+        assert!(sessions.join(format!("{token_hash}.isolated")).exists());
+    }
+
+    #[test]
+    fn fork_isolation_regression_session_with_unusable_trust_label_falls_back_isolated() {
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        for label in ["superuser", "", "TRUSTED", "fork_pr"] {
+            let token = format!("token-{label}");
+            let token_hash = cache_namespace(&token);
+            let sessions = dir.path().join("sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(
+                sessions.join(format!("{token_hash}.json")),
+                json!({
+                    "repository": "acme/repo",
+                    "ref": "refs/heads/main",
+                    "baseRef": Value::Null,
+                    "trust": label,
+                    "registeredMs": 0,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                service.resolve_namespaces(&token),
+                vec![token_hash.clone()],
+                "unusable trust label {label:?} must fail closed"
+            );
+            assert!(sessions.join(format!("{token_hash}.isolated")).exists());
+        }
+    }
+
+    #[test]
+    fn fork_isolation_benchmark_namespace_resolution_throughput() {
         use std::hint::black_box;
         use std::time::{Duration, Instant};
 
-        let derived = CacheIdentity::derive(Some("42"), Some("refs/heads/main"), true, true);
-        assert!(matches!(derived, CacheIdentity::Shared { .. }));
-        let sessions: Vec<CacheSession> = (0..64)
-            .map(|index| {
-                register_shared(
-                    &format!("bench-credential-{index}"),
-                    42,
-                    "refs/heads/main",
-                    true,
-                )
-            })
-            .collect();
+        // `resolve_namespaces` runs on every cache request: one session-file
+        // read plus a parse. Bound the hot path in the repo's
+        // timing-gated-test style (no criterion/divan harness exists here).
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let trusted =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let fork = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "trusted-token", &trusted).unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &fork).unwrap();
+        let trusted_chain = service.resolve_namespaces("trusted-token");
+        let fork_chain = service.resolve_namespaces("fork-token");
+        assert_eq!(trusted_chain.len(), 1);
+        assert_eq!(fork_chain.len(), 3);
 
-        // 20k derivation + hash + registry-lookup rounds; pure hashing and a
-        // short mutex hold must stay far below the bound even on a loaded
-        // serial-gate runner.
         let started = Instant::now();
-        for _ in 0..20_000 {
-            let identity = CacheIdentity::derive(
-                black_box(Some("42")),
-                black_box(Some("refs/heads/main")),
-                true,
-                true,
+        for _ in 0..2_000 {
+            assert_eq!(
+                service.resolve_namespaces(black_box("trusted-token")),
+                trusted_chain
             );
-            let CacheIdentity::Shared {
-                repository_id,
-                ref_scope,
-                trusted,
-            } = identity
-            else {
-                panic!("complete signals must derive Shared");
-            };
-            let namespace =
-                repo_cache_namespace(repository_id, black_box(ref_scope.as_str()), trusted);
-            assert_eq!(namespace.len(), 64);
-            assert!(namespace_for_token(black_box("bench-credential-7")).is_some());
+            assert_eq!(
+                service.resolve_namespaces(black_box("fork-token")),
+                fork_chain
+            );
         }
         let elapsed = started.elapsed();
-        drop(sessions);
         assert!(
-            elapsed < Duration::from_secs(5),
-            "20k namespace rounds took {elapsed:?}",
+            elapsed < Duration::from_secs(30),
+            "4k session resolutions took {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_cross_job_restore_hit_within_one_repo() {
+        // Two jobs, two tokens, one repository: job A saves on the base
+        // branch, job B restores from its feature branch through the base
+        // scope — the GitHub "current branch, then base branch" rule,
+        // end-to-end over the v1 save path and both lookup generations.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let job_b = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "job-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "job-b-token", &job_b).unwrap();
+        let chain_a = service.resolve_namespaces("job-a-token");
+        let chain_b = service.resolve_namespaces("job-b-token");
+        assert_eq!(chain_a.len(), 1);
+        assert_eq!(chain_b.len(), 2);
+        assert_eq!(chain_b[1], chain_a[0]);
+        for namespace in chain_a.iter().chain(chain_b.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+        let contents = b"shared-blob";
+
+        // Job A saves through the v1 reserve/upload path into its chain head.
+        let reserved = reserve(
+            post_json(json!({
+                "key": "shared-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            &chain_a[0],
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, &chain_a[0], true)
+            .await
+            .unwrap();
+
+        // Job B restores the entry exactly, over both wire generations, even
+        // though its own ref namespace is empty.
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("shared-key"));
+        let hit_v2 = lookup_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &mut ctx,
+            &chain_b_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hit_v2["ok"], json!(true));
+        assert_eq!(hit_v2["matchedKey"], json!("shared-key"));
+
+        // A restore-key prefix also reaches across the job boundary.
+        let prefix_hit = lookup_v1(
+            &get("keys=shared-key-zzz,shared-&version=v1"),
+            &ctx,
+            &chain_b_refs,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(prefix_hit["cacheKey"], json!("shared-key"));
+
+        // The bytes download through B's chain, and the hit genuinely came
+        // from A's scope: B's own ref namespace holds no entry.
+        let (mut body, _) = download_chain(&ctx.service, &id, &chain_b_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, contents);
+        assert!(
+            !ctx.service.entry_path(&id, Some(&chain_b[0])).exists(),
+            "job B must restore from the base scope, not its own ref"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_cross_repo_restore_misses() {
+        // Same key, same version, same ref shape — different repositories.
+        // Job B must miss on both lookup generations, and its own save of
+        // the same key must succeed without seeing job A's entry.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a = CacheIdentity::new("acme/repo-a", "refs/heads/main", None, TrustClass::Trusted)
+            .unwrap();
+        let job_b = CacheIdentity::new("acme/repo-b", "refs/heads/main", None, TrustClass::Trusted)
+            .unwrap();
+        register_job_cache_session(dir.path(), "repo-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "repo-b-token", &job_b).unwrap();
+        let chain_a = service.resolve_namespaces("repo-a-token");
+        let chain_b = service.resolve_namespaces("repo-b-token");
+        assert_ne!(chain_a, chain_b);
+        for namespace in chain_a.iter().chain(chain_b.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+        let contents = b"repo-a-blob";
+
+        let reserved = reserve(
+            post_json(json!({
+                "key": "shared-key",
+                "version": "v1",
+                "cacheSize": contents.len(),
+            })),
+            &ctx,
+            &chain_a[0],
+        )
+        .await
+        .unwrap();
+        let id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(put_body(contents), &ctx, &id, &chain_a[0], true)
+            .await
+            .unwrap();
+
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+                .unwrap()
+                .is_none(),
+            "cross-repo v1 lookup must miss"
+        );
+        let miss = lookup_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &mut ctx,
+            &chain_b_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+        assert!(
+            download_chain(&ctx.service, &id, &chain_b_refs)
+                .await
+                .is_err(),
+            "cross-repo download must fail"
+        );
+
+        // Job B can save the same key into its own namespace: no conflict
+        // with the invisible repo-A entry.
+        let own = reserve_v2(
+            post_v2(json!({ "key": "shared-key", "version": "v1" })),
+            &ctx,
+            &chain_b[0],
+        )
+        .await
+        .unwrap();
+        assert_eq!(own["ok"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn cache_trust_regression_fork_pr_read_hit_but_write_isolated() {
+        // The full fork-PR exchange between two jobs: the trusted base job
+        // saves, the fork job restores it (read-hit through the base scope)
+        // and saves its own entry, and the trusted job can never see the
+        // fork entry back — over the v1 save path and both lookups.
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let base_job =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let fork_job = CacheIdentity::new(
+            "acme/repo",
+            "refs/pull/7/merge",
+            Some("main"),
+            TrustClass::ForkPR,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "base-token", &base_job).unwrap();
+        register_job_cache_session(dir.path(), "fork-token", &fork_job).unwrap();
+        let base_chain = service.resolve_namespaces("base-token");
+        let fork_chain = service.resolve_namespaces("fork-token");
+        assert_eq!(base_chain.len(), 1);
+        assert_eq!(fork_chain.len(), 3);
+        assert_eq!(fork_chain[2], base_chain[0]);
+        for namespace in base_chain.iter().chain(fork_chain.iter()) {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        let mut ctx = test_ctx(service);
+
+        // The trusted job saves the base entry.
+        let base_contents = b"base-blob";
+        let reserved = reserve(
+            post_json(json!({
+                "key": "base-key",
+                "version": "v1",
+                "cacheSize": base_contents.len(),
+            })),
+            &ctx,
+            &base_chain[0],
+        )
+        .await
+        .unwrap();
+        let base_id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(
+            put_body(base_contents),
+            &ctx,
+            &base_id,
+            &base_chain[0],
+            true,
+        )
+        .await
+        .unwrap();
+
+        // The fork job restores it through its chain and downloads the bytes.
+        let fork_refs: Vec<&str> = fork_chain.iter().map(String::as_str).collect();
+        let hit = lookup_v1(&get("keys=base-key&version=v1"), &ctx, &fork_refs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit["cacheKey"], json!("base-key"));
+        let (mut body, _) = download_chain(&ctx.service, &base_id, &fork_refs)
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        while let Some(frame) = body.frame().await {
+            received.extend_from_slice(&frame.unwrap().into_data().unwrap());
+        }
+        assert_eq!(received, base_contents);
+
+        // The fork job saves its own entry into its chain head.
+        let fork_contents = b"fork-blob";
+        let reserved = reserve(
+            post_json(json!({
+                "key": "fork-key",
+                "version": "v1",
+                "cacheSize": fork_contents.len(),
+            })),
+            &ctx,
+            &fork_chain[0],
+        )
+        .await
+        .unwrap();
+        let fork_id = reserved["cacheId"].as_str().unwrap().to_owned();
+        upload(
+            put_body(fork_contents),
+            &ctx,
+            &fork_id,
+            &fork_chain[0],
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(ctx
+            .service
+            .entry_path(&fork_id, Some(&fork_chain[0]))
+            .exists());
+
+        // The trusted chain misses the fork entry on both generations and
+        // cannot download it: the write stayed isolated.
+        let base_refs: Vec<&str> = base_chain.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=fork-key&version=v1"), &ctx, &base_refs)
+                .unwrap()
+                .is_none(),
+            "trusted job restored a fork-namespace entry over v1"
+        );
+        let miss = lookup_v2(
+            post_v2(json!({ "key": "fork-key", "version": "v1" })),
+            &mut ctx,
+            &base_refs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(miss, json!({"ok": false}));
+        assert!(
+            download_chain(&ctx.service, &fork_id, &base_refs)
+                .await
+                .is_err(),
+            "trusted job downloaded a fork-namespace blob"
+        );
+    }
+
+    #[test]
+    fn cache_trust_regression_benchmark_cross_job_restore_throughput() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        // The cross-job restore path — session resolution plus a two-scope
+        // v1 lookup — runs on every cache restore. Bound it in the repo's
+        // timing-gated-test style (no criterion/divan harness exists here).
+        let dir = tempfile_dir();
+        let service = test_service(dir.path());
+        let job_a =
+            CacheIdentity::new("acme/repo", "refs/heads/main", None, TrustClass::Trusted).unwrap();
+        let job_b = CacheIdentity::new(
+            "acme/repo",
+            "refs/heads/feature",
+            Some("main"),
+            TrustClass::Trusted,
+        )
+        .unwrap();
+        register_job_cache_session(dir.path(), "job-a-token", &job_a).unwrap();
+        register_job_cache_session(dir.path(), "job-b-token", &job_b).unwrap();
+        let chain_b = service.resolve_namespaces("job-b-token");
+        for namespace in &chain_b {
+            service.ensure_tenant(namespace).unwrap();
+        }
+        commit_in(&service, &chain_b[1], "shared-key", b"shared-blob");
+        let ctx = test_ctx(service);
+        let chain_b_refs: Vec<&str> = chain_b.iter().map(String::as_str).collect();
+        assert!(
+            lookup_v1(&get("keys=shared-key&version=v1"), &ctx, &chain_b_refs)
+                .unwrap()
+                .is_some()
+        );
+
+        let started = Instant::now();
+        for _ in 0..2_000 {
+            let chain = ctx.service.resolve_namespaces(black_box("job-b-token"));
+            let refs: Vec<&str> = chain.iter().map(String::as_str).collect();
+            let hit = lookup_v1(
+                &get("keys=shared-key&version=v1"),
+                black_box(&ctx),
+                black_box(&refs),
+            )
+            .unwrap();
+            assert!(hit.is_some());
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "2k cross-job restores took {elapsed:?}",
         );
     }
 
