@@ -12,9 +12,9 @@ generator	4
 .github/workflows/ci-bun-velnor.yml	a1ab6d0b277a6cb2
 .github/workflows/ci-docker-docker.yml	77e1bd806e1e7ed7
 .github/workflows/ci-docs-docs.yml	bcadf7d393332098
-.github/workflows/ci-main.yml	d42e9f2a4ad34431
+.github/workflows/ci-main.yml	a70f37c144a0f10c
 .github/workflows/ci-opentofu-opentofu.yml	88c4f83c0f888952
-.github/workflows/ci-policy.yml	feb05e304c94d2ad
+.github/workflows/ci-policy.yml	0dd63c8b9225efbe
 .github/workflows/ci-pr.yml	a1768422c336f4ee
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-rust-policy.yml	3ba32b149e0b09d7
@@ -30,6 +30,6 @@ generator	4
 .github/workflows/ci-rust-velnor-workflow.yml	ef44110cea8d0402
 .github/workflows/ci-rust-velnorctl.yml	ebd0225401a34ae7
 .github/workflows/maintenance.yml	6f95b9c9d9c1040d
-.github/workflows/nightly.yml	b56478df2b0b29f9
+.github/workflows/nightly.yml	8de9c7e44e97f0d6
 .github/workflows/preview.yml	537b73815e5a58bb
 .github/workflows/release.yml	eb617e651a2b6420
