@@ -7322,6 +7322,20 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!preview_guest_lane.contains("- arch: amd64"));
         assert!(!preview_guest_lane.contains("- arch: arm64"));
 
+        // Every deb lane ships the acyclic package record (#673): emitted by the
+        // host-native release-tool binary against the exact cross-built runner
+        // bytes, then re-verified out of the built deb before upload.
+        let release_static = render_static_template(VELNOR_RELEASE_WORKFLOW_TEMPLATE);
+        assert!(release_static.contains(
+            "release-metadata/velnor-release-tool release emit \\\n            --record package-record.candidate.json"
+        ));
+        assert!(release_static.contains("--arg kind \"stable\""));
+        assert!(release_static
+            .contains("grep -q \"usr/share/velnor/package-record.json\" \"$manifest\""));
+        assert!(release_static.contains(
+            "dpkg-deb --fsys-tarfile \"$src\" | tar -xOf - ./usr/share/velnor/package-record.json"
+        ));
+
         let docker = must_some(
             config
                 .units
@@ -8524,6 +8538,21 @@ const INCLUDED: &str = include_str!("fixture.txt");
         // claims to ship: consumer verification and postinst's offline check
         // both read this field.
         assert!(deb_lane.contains("'.source_sha == $sha'"));
+        // Each deb also stages its own package record (#673): authored from
+        // source-derived inputs, emitted (verified against the embedded preview
+        // identity and the exact cross-built runner bytes) by the host-native
+        // preview binary, and re-verified out of the built deb.
+        assert!(deb_lane.contains("name: Stage the deb's own package record"));
+        assert!(deb_lane.contains("--arg kind \"preview\""));
+        assert!(deb_lane.contains(
+            "preview-metadata/velnor-release-tool release emit \\\n            --record package-record.candidate.json"
+        ));
+        assert!(deb_lane.contains("grep -q \"usr/share/velnor/package-record.json\" \"$manifest\""));
+        // The publish job re-verifies each packaged record out of the deb it is
+        // about to publish, binding it to the commit/version/arch/binary.
+        assert!(workflow.contains(
+            "preview-metadata/velnor-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null"
+        ));
 
         let metadata = must_some(
             workflow

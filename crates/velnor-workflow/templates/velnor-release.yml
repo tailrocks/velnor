@@ -998,6 +998,8 @@ jobs:
           sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
 
       - name: Stage acyclic identity files packaged into the deb
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           # These depend only on the source (not on the deb digest), so shipping
@@ -1006,6 +1008,42 @@ jobs:
           mkdir -p crates/velnor-runner/release
           cp release-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp release-metadata/manifest.json crates/velnor-runner/release/manifest.json
+          # The deb also ships its own informational velnor.package-record/v1
+          # (#673): a stable deb never activates from it (the out-of-band
+          # release record below is the only stable activation path), but the
+          # record names exactly this source, version, and packaged runner
+          # binary, and the emitting release-build binary refuses any record
+          # that disagrees with its own embedded identity.
+          chmod +x release-metadata/velnor-release-tool
+          binary="target/${TARGET}/release/velnor-runner"
+          test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
+          binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum release-metadata/manifest.json | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' release-metadata/manifest.json)"
+          source_sha="$(jq -er '.source_sha' release-metadata/build-identity.json)"
+          jq -n \
+            --arg schema "velnor.package-record/v1" \
+            --arg repo "tailrocks/velnor" \
+            --arg kind "stable" \
+            --arg commit "$source_sha" \
+            --arg crate "$VERSION" \
+            --arg debian "$VERSION" \
+            --argjson mv "$manifest_version" \
+            --arg mhash "$manifest_sha256" \
+            --arg arch "${{ matrix.arch }}" \
+            --arg target "$TARGET" \
+            --arg binary "$binary_sha256" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, kind: $kind, commit: $commit,
+                       crate_version: $crate, debian_version: $debian,
+                       manifest_version: $mv, manifest_sha256: $mhash },
+              architecture: { arch: $arch, target: $target, binary_sha256: $binary }
+            }' > package-record.candidate.json
+          release-metadata/velnor-release-tool release emit \
+            --record package-record.candidate.json \
+            --binary "$binary" \
+            --out crates/velnor-runner/release/package-record.json
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -1115,7 +1153,16 @@ jobs:
           grep -q "usr/share/velnor/microvm/rootfs.ext4" "$manifest" || { echo "::error::deb missing guest rootfs" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/manifest.json" "$manifest" || { echo "::error::deb missing microvm manifest" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
+          grep -q "usr/share/velnor/package-record.json" "$manifest" || { echo "::error::deb missing its package record" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          # The deb must ship exactly the package record emitted for this arch,
+          # compared as a stream: the deb guard never extracts or traps.
+          dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json \
+            | cmp - crates/velnor-runner/release/package-record.json \
+            || { echo "::error::packaged package-record.json differs from the emitted record" >&2; exit 1; }
+          record_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | sha256sum | awk '{print $1}')"
+          [ "$record_sha256" = "$(awk 'NF {print $1; exit}' crates/velnor-runner/release/package-record.json.sha256)" ] \
+            || { echo "::error::packaged package-record.json digest != emitted sidecar" >&2; exit 1; }
           build_binary="target/${{ matrix.target }}/release/velnor-runner"
           read_sha() {
             local path="$1" size token
@@ -1146,6 +1193,8 @@ jobs:
           packaged_binary_sha="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
           [ "$packaged_binary_sha" = "$build_binary_sha" ] || { echo "::error::deb runner binary does not match target build" >&2; exit 1; }
           [ "$packaged_binary_sha" = "$recorded_binary_sha" ] || { echo "::error::deb runner binary does not match recorded binary sha256" >&2; exit 1; }
+          [ "$packaged_binary_sha" = "$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | jq -r '.architecture.binary_sha256')" ] \
+            || { echo "::error::deb runner binary does not match the package record" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
           cp "$src" "$dst"
           sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
