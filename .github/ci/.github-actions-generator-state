@@ -1,8 +1,8 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	43d02a5b3cd63f03
-scan	5f0e992471a94341
+config	09ef496cd1c974f7
+scan	6871afb78d71ae34
 generator	2
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e

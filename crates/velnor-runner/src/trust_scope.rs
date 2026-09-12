@@ -170,13 +170,33 @@ mod cell {
 /// Resolve the pool trust boundary from the value clap produced, and publish it
 /// as the process-wide answer.
 ///
-/// The first resolution in a process wins for the life of that process; a later
-/// call with a different value is refused rather than honoured, so no code path
-/// can move the trust boundary after startup. Empty and whitespace-only input
-/// resolves to [`FAIL_CLOSED`].
+/// Call this exactly once, at process startup, with the flag value. The first
+/// resolution in a process wins for the life of that process; a later call
+/// with a different value is refused rather than honoured, so no code path
+/// can move the trust boundary after startup. In particular a per-job path
+/// must never call this with a job-derived scope: past the first call the
+/// argument is ignored and the pool answer comes back, silently discarding
+/// the job's trust. Per-job paths normalize with [`normalize_scope`] instead.
+/// Empty and whitespace-only input resolves to [`FAIL_CLOSED`].
 #[must_use]
 pub fn resolve(raw: &str) -> TrustScope {
     cell::set_once(TrustScope::normalize(raw))
+}
+
+/// Normalize a trust scope value without touching the process-wide cell.
+///
+/// Same spelling as [`resolve`] — trim, empty or whitespace-only fails closed
+/// to [`FAIL_CLOSED`] — for per-job paths that already hold their scope
+/// (the pool ceiling narrowed by the job's trust class) and only need the
+/// canonical spelling. Never resolves, never publishes.
+#[must_use]
+pub(crate) fn normalize_scope(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        FAIL_CLOSED
+    } else {
+        trimmed
+    }
 }
 
 /// The boundary this process resolved, or [`FAIL_CLOSED`] if it resolved none.
@@ -260,6 +280,18 @@ mod tests {
         assert_eq!(TrustScope::normalize("").as_str(), FAIL_CLOSED);
         assert_eq!(TrustScope::normalize("   ").as_str(), FAIL_CLOSED);
         assert_eq!(TrustScope::normalize(" public ").as_str(), "public");
+    }
+
+    #[test]
+    fn normalize_scope_matches_resolve_spelling_without_publishing() {
+        let _guard = test_support::serialized();
+        assert_eq!(normalize_scope(""), FAIL_CLOSED);
+        assert_eq!(normalize_scope("   "), FAIL_CLOSED);
+        assert_eq!(normalize_scope(" public "), "public");
+        assert_eq!(normalize_scope("trusted"), "trusted");
+        // Normalizing never resolves: the cell stays empty and the process
+        // still reports fail-closed.
+        assert_eq!(current(), FAIL_CLOSED);
     }
 
     #[test]
