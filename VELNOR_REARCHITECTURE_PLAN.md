@@ -234,6 +234,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R0-fv2v5 correction fixed the clone-URL identity to exactly two path segments (`evil/octo/base` no longer corroborates `octo/base`) and re-verified the custom-pool lease report against the converged tree — the `StoreTrustClass` divergence it names was deleted by the convergence, and a lease-vs-mount conformance test now pins the admitted-verbatim contract (§105). |
 | 2026-09-12 | R1-post merged the native + JavaScript post-action lists into one LIFO stack per upstream `PostJobSteps`, keeping per-entry post conditions; the mixed-order conformance test matches upstream LIFO (§106). |
 | 2026-09-12 | R1-cond gave the step loop cancel re-evaluation (a killed step records failure and remaining conditions re-evaluate fresh instead of breaking), failed pre/post records on unevaluable conditions instead of silent skips, and a `status-conditions` dual-lane workflow pinning all four status functions plus the fail-closed unevaluable step for R2-v2v4's live run (§107). |
+| 2026-09-12 | R1-cond correction fixed the vacuous bad-if pin (an `always() &&` guard so the unevaluable RHS evaluates instead of short-circuiting to a skip), kept the execution error in the cancelled pre-step record, and absorbed unevaluable inner conditions into the composite umbrella so it renders failed (§107). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5539,18 +5540,21 @@ remained, all fixed here:
   (generator template + regen wiring; standalone so the designed
   failure cannot redden `ci.yml`'s lane verdict): a real failure,
   `failure()`/`success()`/`cancelled()` branches, an unevaluable
-  `fromJSON`-over-runtime-output step, an `always()` assert on all
-  six outcomes plus `job.status`, and `steps.json` evidence compared
-  across lanes by its own `compare-status` job. The unevaluable shape
-  is deliberately runtime-only — actionlint statically rejects
-  unknown functions, wrong arities, unknown contexts, bad format
-  placeholders, and invalid `fromJSON` literals, so a literal
-  unevaluable condition would break the fixture's own lint gate.
-  Regen verified in a scratch fixture worktree (exactly the two new
-  files plus the `project.toml` file list and generator state;
-  byte-stable otherwise; idempotent; surface audit, `test_audits.py`,
-  and actionlint green). The fixture regen commit and the live run
-  belong to R2-v2v4.
+  `always() && fromJSON`-over-runtime-output step, an `always()`
+  assert on all six outcomes plus `job.status`, and `steps.json`
+  evidence compared across lanes by its own `compare-status` job. The
+  unevaluable shape is deliberately runtime-only — actionlint
+  statically rejects unknown functions, wrong arities, unknown
+  contexts, bad format placeholders, and invalid `fromJSON` literals,
+  so a literal unevaluable condition would break the fixture's own
+  lint gate. The `always() &&` guard is load-bearing (correction
+  round, below): after the designed failure the implicit
+  `success() &&` prefix would short-circuit a bare `fromJSON(...)`
+  condition to a skip on both runners. Regen verified in a scratch
+  fixture worktree (exactly the two new files plus the `project.toml`
+  file list and generator state; byte-stable otherwise; idempotent;
+  surface audit, `test_audits.py`, and actionlint green). The fixture
+  regen commit and the live run belong to R2-v2v4.
 
 Tests, 7 new, all passing: pre-cancelled and mid-loop cancel
 re-evaluation (ordinary + `failure()` skip undispatched,
@@ -5579,3 +5583,47 @@ is killed by the ladder where upstream's re-evaluation would let it
 finish (BC-6 lifecycle, architectural follow-up); non-cancel
 execution errors still break the loop where upstream continues them
 as failures (same arm, deliberately untouched — separate package).
+
+Correction round (same date): three review issues, each re-verified
+against this tree rather than taken on pointers alone:
+
+- Vacuous bad-if pin (real bug, fixed): the fixture's bad-if step
+  used a bare `fromJSON(steps.real-failure.outputs.payload) == ''`
+  condition, but after the designed failure the implicit
+  `success() &&` prefix (GitHub docs; Velnor
+  `evaluate_condition_expression`) plus `&&` short-circuit (same in
+  upstream `And.cs` and Velnor `eval.rs`, both left-to-right with
+  early falsy exit) SKIPS the step on both runners instead of
+  evaluating `fromJSON` — so the `BAD_IF_OUTCOME=failure` assert
+  failed invisibly (the job fails by design anyway) and `steps.json`
+  agreed on `skipped`. The condition is now `always() &&
+  fromJSON(...) == ''`, which both runners evaluate to a step
+  failure. D-7 pins both halves: a bare `fromJSON` over a failed
+  state evaluates to `false` (the trap), while the live-pin shape is
+  `Err`.
+- Cancelled pre-step diagnostics (real bug, fixed): the salvaged
+  result used a generic `pre step was cancelled` stderr without the
+  execution error, unlike the main cancel arm which keeps `{error:#}`
+  (e.g. `process terminated by signal`). The pre record now carries
+  the error for log parity; a test with a cancel-firing node runner
+  pins the stderr plus the still-running cleanup and registered post.
+- Unevaluable inner conditions vs the composite umbrella (real bug,
+  fixed in both blocks): the pre-if failure block was copied from
+  the main-condition block, and neither appended nor absorbed into
+  the `CompositeFrame` — so a composite with an unevaluable inner
+  condition rendered exit 0 while the job failed. Both blocks now
+  `append_inner`/`absorb` exactly like the main Ok/Err arms. Two
+  tests pin the umbrella exit code for the main and pre paths; both
+  fail on the pre-fix code, which never touched the frame.
+
+Tests, 3 new + D-7 extended, all passing. Gates observed in this
+worktree: `cargo fmt --all -- --check` clean; `cargo
+check --workspace --all-targets` zero warnings; strict clippy clean
+workspace-wide (with `test-support`, `-D warnings`); serial runner
+lib 1733 passed, 0 failed, 1 ignored; full runner package all
+targets green; focused cancel 39 + condition 21 + post 17, all pass;
+model 129+4+6+4; control 237+8+18+7; velnorctl 24+19+2+8;
+velnor-workflow 197+2+2+8; actionlint on the reworked template
+reports only the pre-existing `ubuntu-26.04` runner-label note the
+fixture gate config allowlists — no diagnostics on the changed
+lines.
