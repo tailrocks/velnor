@@ -715,7 +715,7 @@ mod tests {
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),
-            profile: crate::RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "static metadata".to_owned(),
                 detected: vec!["Rust".to_owned()],
@@ -737,6 +737,9 @@ mod tests {
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));

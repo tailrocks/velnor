@@ -161,7 +161,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
     pub(crate) velnor_labels: Vec<String>,
-    pub(crate) velnor_runner_group: Option<&'static str>,
+    pub(crate) velnor_runner_group: Option<String>,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     pub(crate) mise_rust: bool,
@@ -253,7 +253,7 @@ impl WorkflowIr {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
-            velnor_runner_group: velnor_runner_group(config),
+            velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
             runners: config.runners,
             tools,
             mise_rust,
@@ -764,7 +764,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     pub(crate) fn runner_for(&self, lane: RunnerMode) -> String {
         match lane {
             RunnerMode::Github | RunnerMode::Both => yaml_scalar(&self.github_runner),
-            RunnerMode::Velnor => velnor_runner(&self.velnor_labels, self.velnor_runner_group),
+            RunnerMode::Velnor => {
+                velnor_runner(&self.velnor_labels, self.velnor_runner_group.as_deref())
+            }
         }
     }
 

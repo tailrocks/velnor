@@ -3,6 +3,31 @@ schema = 1
 [generator]
 repository = "tailrocks/velnor"
 
+# Runner placement: the hosted image the GitHub lane pins, and the self-hosted
+# labels the trust-gated Velnor lane selects by.
+[workflow]
+github_runner = "ubuntu-24.04"
+profile = "rust-workspace-release"
+velnor_labels = ["self-hosted", "velnor-target-mvp"]
+version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
+
+# Release contract: the reviewed publisher renders `release.yml` verbatim
+# (see the static-workflow row below); the record fields stay declared here so
+# the generated project config carries the same contract.
+
+[release]
+enabled = true
+reason = "Release contract is explicitly cataloged; review credentials, environments, and tag protection before cutover."
+kind = "velnor-native"
+package = "velnor-runner"
+packages = []
+binary = "velnor-runner"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+image = "ghcr.io/tailrocks/velnor-job-ubuntu"
+source_repository = "tailrocks/velnor"
+consumer_repository = "tailrocks/velnor-apt"
+description = "Native high-performance GitHub Actions runner"
+
 # Verification pipelines: one reusable workflow per unit, one row per unit, in
 # scan order. The aggregate workflows compose exactly these units, in this
 # order.
@@ -119,8 +144,7 @@ docker_closure = [
 "rust-velnor-workflow" = [
   "Dockerfile",
   "docker/build-mise.*",
-  "crates/velnor-workflow/templates/**",
-  "crates/velnor-workflow/README.md",
+    "crates/velnor-workflow/README.md",
 ]
 "rust-velnor-runner" = [
   "crates/velnor-workflow/templates/velnor-release.yml",
@@ -2627,3 +2651,38 @@ jobs:
 [[declare]]
 primitive = "maintenance"
 file = "maintenance.yml"
+# The workspace-wide release-topology unit: the scan sees a workspace root; the
+# repository declares the verification contract the unit carries.
+
+# The Docker image build: the repository declares its buildx contract (gha
+# cache scopes per lane) on top of the detected unit.
+
+[[units]]
+id = "docker"
+github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+
+[[units]]
+id = "rust-production-topology"
+label = "Rust production topology"
+kind = "rust"
+root = "."
+watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/**", "crates/velnor-workflow/src/runtime.rs", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "tools/**"]
+github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+
+[units.cache]
+key_files = ["Cargo.toml", "Cargo.lock"]
+paths = ["~/.cargo/registry", "~/.cargo/git"]
+
+# The composite action the generated workflows bootstrap through: the
+# repository owns the bytes under .github-gen/sources, the generator owns the
+# write into .github/actions.
+
+[[static_files]]
+file = ".github/actions/setup-velnor-workflow/action.yml"
+source = ".github-gen/sources/actions/setup-velnor-workflow/action.yml"

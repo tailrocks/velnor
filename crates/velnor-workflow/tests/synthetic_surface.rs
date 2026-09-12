@@ -245,6 +245,9 @@ const FULL_CONFIG: &str = r#"schema = 1
 [generator]
 repository = "example/synthetic"
 
+[workflow]
+velnor_labels = ["self-hosted", "example-lane"]
+
 [[declare]]
 primitive = "bun-package-pipeline"
 units = ["bun-synthetic-app"]
@@ -406,6 +409,9 @@ const RELEASE_CONFIG: &str = r#"schema = 1
 
 [generator]
 repository = "example/synthetic-release"
+
+[workflow]
+velnor_labels = ["self-hosted", "example-lane"]
 
 [[declare]]
 primitive = "release"
