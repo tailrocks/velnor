@@ -20539,7 +20539,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     #[test]
     fn cached_target_action_metadata_expressions_use_supported_subset() {
         let action_roots = [
-            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-runner-action-scratch"),
             Path::new("/tmp/velnor-targets/jackin/.github/actions"),
         ];
         if action_roots.iter().all(|root| !root.exists()) {

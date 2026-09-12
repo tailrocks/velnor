@@ -4604,8 +4604,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 --locked -- -D warnings` pass; module suite 32/32 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1679 passed with 3 pre-existing environmental failures
-(`action::tests::fetched_*`: host `/tmp/velnor-actions` exists but is
-empty, 0 files — untouched code path, fails identically without this
+(`action::tests::fetched_*`: a stale empty host scratch directory under
+`/tmp`, 0 files — untouched code path, fails identically without this
 package). WP-6 status: derivation complete; pool-refuses-out-of-class
 enforcement and the flag-as-ceiling wiring remain unclaimed.
 
@@ -4694,8 +4694,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 --locked -- -D warnings` pass; module suite 41/41 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1688 passed with the same 3 pre-existing environmental
-failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
-exists but is empty — untouched code path). WP-6 status: derivation
+failures as §97 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — untouched code path). WP-6 status: derivation
 complete incl. this correction; pool-refuses-out-of-class enforcement and
 the flag-as-ceiling wiring remain unclaimed.
 
@@ -4792,8 +4792,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 suites (`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`)
 166/166 pass; full serial `cargo test -p velnor-runner --lib --features
 test-support --locked -- --test-threads=1` 1705 passed with the same 3
-pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
-`/tmp/velnor-actions` exists but is empty — verified identical on the
+pre-existing environmental failures as §97 (`action::tests::fetched_*`: a
+stale empty host scratch directory under `/tmp` — verified identical on the
 untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
 WP-6 status: complete (derivation §97+§98, enforcement this section).
 
@@ -4849,8 +4849,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 209/209 pass; `velnor-model` telemetry 24/24 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1706 passed with the same 3 pre-existing environmental
-failures as §100 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
-exists but is empty — cause re-verified, `action.rs` untouched);
+failures as §100 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — cause re-verified, `action.rs` untouched);
 `velnorctl` `trust_scope_single_source` 2/2 pass. WP-6 status: complete.
 
 ## 102. gha-cache-repo-namespace: GHA cache namespaced by repo identity, not job token — 2026-09-12
@@ -4858,7 +4858,7 @@ exists but is empty — cause re-verified, `action.rs` untouched);
 The cache service hashed the per-job `ACTIONS_RUNTIME_TOKEN` into the
 storage namespace, so a save was visible only to the job that wrote it and
 every abandoned tenant kept up to its budget outside any sharing. The
-namespace is now `sha256("velnor-actions-cache-repo\0" ‖ repository_id ‖
+namespace is now `sha256(cache-repo domain separator ‖ repository_id ‖
 ref_scope ‖ trust)` where `repository_id` (`github.repository_id`),
 `ref_scope` (`github.ref`), and the trust floor
 (`TrustClass::is_trusted`, §97) come from the server-attested job message —
@@ -4916,8 +4916,8 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 pass; `trust_class` 42/42 pass; full serial
 `cargo test -p velnor-runner --lib --features test-support --locked --
 --test-threads=1` 1720 passed with the same 3 pre-existing environmental
-failures as §101 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
-exists but is empty — cause re-verified, `action.rs` untouched).
+failures as §101 (`action::tests::fetched_*`: a stale empty host scratch
+directory under `/tmp` — cause re-verified, `action.rs` untouched).
 Review-correction re-run (strict-ref deviation documented, registry API
 narrowed to `pub(crate)`, isolated-fallback forensics moved to the
 admission call site with job context): identical gates — fmt clean,
