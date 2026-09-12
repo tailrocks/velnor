@@ -226,7 +226,11 @@ impl RepoGenerationConfig {
     /// # Errors
     /// Returns an error naming the offending value and, for unknown unit ids,
     /// every unit id the scan did produce.
-    pub(crate) fn validate(&self, unit_ids: &[String]) -> Result<(), GeneratorError> {
+    pub(crate) fn validate(
+        &self,
+        unit_ids: &[String],
+        package_update_blocks: &[&str],
+    ) -> Result<(), GeneratorError> {
         let repository = self.generator.repository.as_deref().ok_or_else(|| {
             GeneratorError::usage(
                 "generation config is missing `[generator] repository = \"owner/repository\"`",
@@ -237,6 +241,10 @@ impl RepoGenerationConfig {
             validate_declare_row(row, unit_ids)?;
         }
         validate_excludes(&self.scan.exclude)?;
+        validate_package_update_channels(
+            self.workflow.package_update_channels.as_ref(),
+            package_update_blocks,
+        )?;
         Ok(())
     }
 
@@ -356,6 +364,61 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// The update channels the rendered `package-update.yml` matrix can grant. The
+/// consumer-side `package-updater.yml` implements a `stable` arm and a
+/// `preview` arm and nothing else, so any other channel renders a scheduled job
+/// that can never succeed. The legacy grant table in the crate root draws only
+/// from this set.
+const PACKAGE_UPDATE_CHANNELS: &[&str] = &["stable", "preview"];
+
+/// The `package_update_channels` key replaces the legacy per-block grant table
+/// wholesale, so a declared table has to stand on its own: every grant names a
+/// channel the rendered updater implements, no grant is empty, and every owner
+/// block of the rendered workflow is covered by a row or by `default`. Anything
+/// else would silently narrow or drop a publish lane.
+fn validate_package_update_channels(
+    grants: Option<&BTreeMap<String, Vec<String>>>,
+    blocks: &[&str],
+) -> Result<(), GeneratorError> {
+    let Some(grants) = grants else {
+        return Ok(());
+    };
+    for (block, channels) in grants {
+        if channels.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[workflow] package_update_channels grants block `{block}` an empty channel list; name the channels it may consult or remove the row"
+            )));
+        }
+        for channel in channels {
+            if !PACKAGE_UPDATE_CHANNELS.contains(&channel.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow] package_update_channels grants block `{block}` the channel `{channel}`, which the rendered updater does not implement; implemented channels: {}",
+                    PACKAGE_UPDATE_CHANNELS.join(", ")
+                )));
+            }
+        }
+    }
+    for block in grants.keys() {
+        if block != "default" && !blocks.contains(&block.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[workflow] package_update_channels grants `{block}`, which the rendered `package-update.yml` does not declare; owner blocks: {}, or grant `default`",
+                blocks.join(", ")
+            )));
+        }
+    }
+    if !grants.contains_key("default") {
+        for block in blocks {
+            if !grants.contains_key(*block) {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow] package_update_channels covers no row for owner block `{block}` and declares no `default`; owner blocks: {}",
+                    blocks.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_arg_value(key: &str, value: &toml::Value) -> Result<(), GeneratorError> {
     match value {
         toml::Value::String(_) | toml::Value::Integer(_) | toml::Value::Boolean(_) => Ok(()),
@@ -429,6 +492,12 @@ mod tests {
         )
     }
 
+    /// The owner blocks the rendered `package-update.yml` really declares, so
+    /// the channel-grant rules are tested against the render surface itself.
+    fn package_update_blocks() -> Vec<&'static str> {
+        crate::apt_package_update_owner_blocks(crate::APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE)
+    }
+
     fn full_config(unit: &str) -> String {
         format!(
             "schema = 1\n\
@@ -473,7 +542,10 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let unit = unit_ids.first().cloned().unwrap_or_default();
         let config = config_for(&full_config(&unit));
-        must(config.validate(&unit_ids), "validate full config");
+        must(
+            config.validate(&unit_ids, &package_update_blocks()),
+            "validate full config",
+        );
         assert_eq!(config.schema, Some(1));
         let _ = fs::remove_dir_all(root);
     }
@@ -562,7 +634,10 @@ mod tests {
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
         );
-        let error = must_some_error(config.validate(&unit_ids).err(), "unknown unit must fail");
+        let error = must_some_error(
+            config.validate(&unit_ids, &package_update_blocks()).err(),
+            "unknown unit must fail",
+        );
         assert!(error.contains("not-a-unit"), "error names the row: {error}");
         assert!(
             error.contains(&format!("available units: {available}")),
@@ -582,7 +657,7 @@ mod tests {
                  [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&unit_ids).err(),
+                config.validate(&unit_ids, &package_update_blocks()).err(),
                 "declared file must fail validation",
             );
             assert!(
@@ -595,7 +670,9 @@ mod tests {
             "[[declare]]\nprimitive = \"rust-crate\"\nfile = 'back\\slash.yml'\n",
         ));
         let error = must_some_error(
-            separator.validate(&unit_ids).err(),
+            separator
+                .validate(&unit_ids, &package_update_blocks())
+                .err(),
             "backslash file name must fail validation",
         );
         assert!(error.contains("bare `.yml` workflow file name"), "{error}");
@@ -618,7 +695,7 @@ mod tests {
                 "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&unit_ids).err(),
+                config.validate(&unit_ids, &package_update_blocks()).err(),
                 "repository slug must fail validation",
             );
             assert!(
@@ -636,7 +713,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let config = config_for("schema = 1\n");
         let error = must_some_error(
-            config.validate(&unit_ids).err(),
+            config.validate(&unit_ids, &package_update_blocks()).err(),
             "missing generator must fail",
         );
         assert!(error.contains("[generator] repository"), "{error}");
@@ -653,13 +730,19 @@ mod tests {
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
-        must(opaque.validate(&unit_ids), "opaque args validate");
+        must(
+            opaque.validate(&unit_ids, &package_update_blocks()),
+            "opaque args validate",
+        );
         let float = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nratio = 1.5\n",
         );
-        let error = must_some_error(float.validate(&unit_ids).err(), "float args must fail");
+        let error = must_some_error(
+            float.validate(&unit_ids, &package_update_blocks()).err(),
+            "float args must fail",
+        );
         assert!(error.contains("float"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
@@ -677,6 +760,57 @@ mod tests {
             error.contains("unknown field"),
             "typo'd fields must fail closed: {error}"
         );
+    }
+
+    /// A declared channel-grant table has to stand on its own: empty grants,
+    /// channels the rendered updater never implements, unknown blocks, and
+    /// uncovered owner blocks are all usage errors, never a silent default.
+    #[test]
+    fn package_update_channel_grants_fail_closed() {
+        let blocks = package_update_blocks();
+        assert!(blocks.len() > 1, "the rendered surface declares {blocks:?}");
+        // The owner blocks are read off the render surface, so the test never
+        // spells one: the names belong to the estate, not to a generic module.
+        let block = blocks[0];
+        let other = blocks[1];
+        for (grants, expected) in [
+            (format!("{block} = []"), "empty channel list"),
+            (
+                format!("{block} = [\"stable\", \"beta\"]"),
+                "does not implement",
+            ),
+            (
+                format!("default = [\"stable\"], {block}_typo = [\"stable\"]"),
+                "does not declare",
+            ),
+            (format!("{other} = [\"stable\"]"), "declares no `default`"),
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\npackage_update_channels = {{{grants}}}\n"
+            ));
+            let error = must_some_error(
+                config.validate(&[], &blocks).err(),
+                "channel grants must fail validation",
+            );
+            assert!(
+                error.contains(expected),
+                "`{grants}` must be rejected for `{expected}`: {error}"
+            );
+        }
+        // The two shapes that are legal: every block named, or `default` alone.
+        let every_block = blocks
+            .iter()
+            .map(|block| format!("{block} = [\"stable\"]"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for grants in [every_block, String::from("default = [\"stable\"]")] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                 [workflow]\npackage_update_channels = {{{grants}}}\n"
+            ));
+            must(config.validate(&[], &blocks), "channel grants validate");
+        }
     }
 
     #[test]
