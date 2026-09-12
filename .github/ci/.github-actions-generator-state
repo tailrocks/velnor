@@ -29,7 +29,7 @@ generator	1
 .github/workflows/ci-rust-velnor-tools.yml	83f3c4e18e9e23e2
 .github/workflows/ci-rust-velnor-workflow.yml	7465507d1bc22f6e
 .github/workflows/ci-rust-velnorctl.yml	a20e85b075f2b4ca
-.github/workflows/maintenance.yml	2fa7edb094936b03
+.github/workflows/maintenance.yml	6f95b9c9d9c1040d
 .github/workflows/nightly.yml	ffef9ba0c2a44075
 .github/workflows/preview.yml	c098d324021993c8
 .github/workflows/release.yml	eb617e651a2b6420

@@ -5156,12 +5156,47 @@ jobs:
           path: ${{ runner.temp }}/cache-budget
           if-no-files-found: error
           retention-days: 14
-      - name: Enforce cache budget
+      - name: Evict least-recently-used caches over budget
         env:
+          GH_TOKEN: ${{ github.token }}
           MAX_BYTES: '8589934592'
         run: |
           set -euo pipefail
           total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
+          if (( total <= MAX_BYTES )); then
+            echo "Cache account within budget: $total bytes"
+            exit 0
+          fi
+          echo "Cache account over budget: $total bytes; evicting least-recently-used entries"
+          evicted=0
+          freed=0
+          # Oldest access first: caches no running lane has touched recently are
+          # the cheapest to rebuild, so they go before anything else.
+          while IFS=$'\t' read -r id size key; do
+            if (( total <= MAX_BYTES )); then break; fi
+            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+              total=$((total - size))
+              evicted=$((evicted + 1))
+              freed=$((freed + size))
+              echo "evicted id=$id size=$size key=$key (remaining total $total)"
+            else
+              echo "::warning::failed to evict cache id $id (key $key)" >&2
+            fi
+          done < <(jq -r 'sort_by(.last_accessed_at)[] | [.id, .size_in_bytes, .key] | @tsv' \
+            "$RUNNER_TEMP/cache-budget/entries.json")
+          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson total "$total" \
+            '{evicted_caches: $evicted, freed_bytes: $freed, remaining_total_bytes: $total}' \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Enforce cache budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_BYTES: '8589934592'
+        run: |
+          set -euo pipefail
+          # Re-query live state: the enforcement decision must reflect what the
+          # account actually holds after eviction, not the pre-eviction snapshot.
+          total="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '[.actions_caches[].size_in_bytes] | add // 0')"
           if (( total > MAX_BYTES )); then
             echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
             exit 1
