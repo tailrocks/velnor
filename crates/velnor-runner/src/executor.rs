@@ -6008,8 +6008,9 @@ fn native_rust_cache(
         restore_cache_paths(&action_state, matched_key, &cache_directories, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
-    let persistent_target = rust_cache_covered_by_persistent_storage(&cache_directories);
-    let cache_hit = matched.is_some() || persistent_target;
+    let covered_by_persistent_storage =
+        rust_cache_covered_by_persistent_storage(&cache_directories);
+    let cache_hit = matched.is_some() || covered_by_persistent_storage;
     let mut outputs = BTreeMap::new();
     outputs.insert("cache-hit".to_string(), cache_hit.to_string());
     if !shared_key.is_empty() {
@@ -6019,15 +6020,15 @@ fn native_rust_cache(
         format!(
             "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
         )
-    } else if persistent_target {
+    } else if covered_by_persistent_storage {
         format!(
             "{ANSI_GREEN}Rust cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
         )
     } else {
         format!("{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n")
     };
-    let summary = if persistent_target {
-        "## Velnor cache report\n- Backend: rust-cache (native)\n- Store: host-persistent target class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    let summary = if covered_by_persistent_storage {
+        "## Velnor cache report\n- Backend: rust-cache (native)\n- Store: host-persistent cache class\n- Result: host-persistent store — restore/save skipped\n".to_string()
     } else {
         format!(
             "## Velnor cache report\n- Backend: rust-cache (native)\n- Key: `{shared_key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
@@ -17469,6 +17470,11 @@ esac
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("Store: host-persistent cache class"));
+        assert!(!results[0].state.summary.contains("target class"));
         fs::remove_dir_all(temp).unwrap();
     }
 

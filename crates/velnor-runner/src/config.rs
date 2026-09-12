@@ -442,4 +442,13 @@ mod tests {
             .collect();
         assert_eq!(assignments, ["VELNOR_GITHUB_HTTP_TRANSPORT=native"]);
     }
+
+    #[test]
+    fn packaged_env_does_not_advertise_removed_cargo_target_persist() {
+        let env = include_str!("../debian/velnor.env");
+        assert!(
+            !env.contains("VELNOR_CARGO_TARGET_PERSIST"),
+            "shipped env must not advertise the removed persistent-target knob"
+        );
+    }
 }
