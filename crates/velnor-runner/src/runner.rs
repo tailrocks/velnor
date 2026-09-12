@@ -2538,7 +2538,39 @@ fn gha_cache_root(layout: Option<crate::storage::StorageLayout>) -> Result<PathB
             "GHA cache is enabled but canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
         )
     })?;
-    Ok(layout.cache_root.join("gha-cache"))
+    Ok(crate::store_catalog::gha_cache_root(&layout))
+}
+
+/// Bind the job's runtime token to its repository identity before any job
+/// process can issue a cache request, so restores hit the shared repo
+/// namespaces. Runs for every backend (script and microVM) because it sits in
+/// `execute_script_job`, ahead of the backend split.
+///
+/// Best-effort by design: a cache session is a performance binding, not job
+/// state. When registration is skipped or fails, the job still runs and its
+/// cache requests fall back to an isolated per-token namespace — with one
+/// forensic line per token at request time, so the degradation is visible
+/// rather than silently cold.
+fn register_job_cache_session(job: &AgentJobRequestMessage) {
+    if crate::gha_cache::enabled_from_env().is_none() {
+        return;
+    }
+    let Some((token, identity)) = crate::runtime_env::job_cache_session(job) else {
+        eprintln!(
+            "Warning: gha cache session not registered: job carries no usable runtime token or repository identity"
+        );
+        return;
+    };
+    let Some(layout) = crate::storage::StorageLayout::resolve() else {
+        eprintln!(
+            "Warning: gha cache session not registered: canonical storage is unavailable; set VELNOR_STORAGE_ROOT"
+        );
+        return;
+    };
+    let root = crate::store_catalog::gha_cache_root(&layout);
+    if let Err(error) = crate::gha_cache::register_job_cache_session(&root, &token, &identity) {
+        eprintln!("Warning: gha cache session registration failed: {error:#}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2645,11 +2677,16 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // P1: host the GitHub cache contract when the operator enables it. The
     // service spawn and runtime-env injection key off the same URL; each job
     // still authenticates with its own runtime token, while disabled fleets
-    // remain byte-for-byte unchanged.
+    // remain byte-for-byte unchanged. Registered jobs resolve to shared
+    // repo namespaces (see `register_job_cache_session`); unregistered tokens
+    // get an isolated namespace plus one forensic line in the daemon log.
     if let Some(url) = crate::gha_cache::enabled_from_env() {
         let root = gha_cache_root(crate::storage::StorageLayout::resolve())?;
-        let service = crate::gha_cache::CacheService::open(root)
+        let mut service = crate::gha_cache::CacheService::open(root)
             .context("initialize GHA cache service on canonical storage")?;
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            service.forensic_log_dir = Some(config_base.join("logs"));
+        }
         let bound = crate::gha_cache::bind_configured(service)
             .await
             .context("bind GHA cache service")?;
@@ -6140,59 +6177,21 @@ async fn handle_job_request(
     }
     run_service_job.journal_state = RunServiceJobJournalState::Accepted;
 
-    // The job's admitted trust, bound once from the job's own event, before
-    // the admission row persists. The pool flag is only the ceiling: fork and
-    // unknown jobs run under the untrusted floor on every pool. The admission
-    // row and every observation below record this admitted scope, never the
-    // raw pool flag — the secrets gate, the storage leases, the container
-    // spec, and the executor all enforce it.
+    // The job's admitted trust, bound once from the job's own event,
+    // before the admission row persists. The pool flag is only the ceiling:
+    // fork and unknown jobs run under the untrusted floor on every pool. The
+    // admission row and every observation below record this admitted scope,
+    // never the raw pool flag — the secrets gate, the storage leases, the
+    // container spec, and the executor all enforce it.
     let admitted_trust = crate::trust_class::AdmittedTrust::admit(&job, &args.trust_scope);
-    let job_trust = admitted_trust.class();
     let effective_trust_scope = admitted_trust.effective_scope().to_owned();
     forensics.lifecycle(&format!(
         "job admitted job_id={} trust={} admitted_scope={} pool_scope={}",
         job.job_id,
-        job_trust.as_str(),
+        admitted_trust.class().as_str(),
         effective_trust_scope,
         args.trust_scope,
     ));
-
-    // The GHA cache service namespaces entries by server-attested repo and
-    // ref, never by the per-job credential. Bind this job's runtime
-    // credential — the same value runtime_env injects as
-    // ACTIONS_RUNTIME_TOKEN — to its cache identity for the whole job
-    // lifetime. The RAII session unbinds on every return path below,
-    // including early fail-closed exits. An incomplete identity fails closed
-    // to a per-token namespace; the forensics line names the job and the raw
-    // signals so an identity-signal outage is visible in logs (the registry
-    // itself stays silent — only this call site has the context).
-    let cache_repository_id = crate::github_adapter::job_variable(&job, "github.repository_id");
-    let cache_ref_scope = crate::github_adapter::job_variable(&job, "github.ref");
-    let cache_scope_present = job
-        .plan
-        .scope_identifier
-        .as_deref()
-        .is_some_and(|scope| !scope.trim().is_empty());
-    let cache_identity = crate::gha_cache::CacheIdentity::derive(
-        cache_repository_id,
-        cache_ref_scope,
-        cache_scope_present,
-        job_trust.is_trusted(),
-    );
-    if cache_identity == crate::gha_cache::CacheIdentity::Isolated {
-        forensics.lifecycle(&format!(
-            "gha-cache identity incomplete; job caches isolated to its own token namespace job_id={} repository_id={:?} ref={:?} scope_present={} trusted={}",
-            job.job_id,
-            cache_repository_id,
-            cache_ref_scope,
-            cache_scope_present,
-            job_trust.is_trusted(),
-        ));
-    }
-    let _cache_session = crate::gha_cache::register_job_cache_session(
-        crate::runtime_env::job_runtime_token(&job),
-        cache_identity,
-    );
 
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
@@ -6239,7 +6238,7 @@ async fn handle_job_request(
             run_queued_telemetry_fields(
                 queue_ms,
                 queue_time_present,
-                job_trust.as_str(),
+                admitted_trust.class().as_str(),
                 &admission.project(&effective_trust_scope),
             ),
         );
@@ -6438,7 +6437,9 @@ async fn handle_job_request(
                 .context("failed to clear acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
-        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope, job_trust) {
+        if let Err(error) =
+            validate_job_trust_policy(&job, &args.trust_scope, admitted_trust.class())
+        {
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
@@ -8454,6 +8455,7 @@ fn execute_script_job(
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .backend();
     let job_dir = job_work_dir(config_dir, work_dir, job);
+    register_job_cache_session(job);
     let result = execute_script_job_inner(
         &job_dir,
         docker_host_work_dir,
@@ -14713,6 +14715,7 @@ mod tests {
                 admitted.effective_scope()
             )
         );
+        assert_eq!(admitted.effective_scope(), crate::trust_scope::FAIL_CLOSED);
     }
 
     #[test]
