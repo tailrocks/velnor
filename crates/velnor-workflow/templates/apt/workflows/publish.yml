@@ -130,16 +130,22 @@ jobs:
           # itself is the only authority on what may be published: the state row
           # must describe exactly the signed `preview` release on tailrocks/velnor.
           gh api repos/tailrocks/velnor/releases/tags/preview > preview-release.json
-          jq -e --arg version "$state_version" --arg commit "$state_commit" '
+          # GitHub rewrites release asset names on upload: `~` becomes `.`. The
+          # expected asset set uses the same normalization so the check compares
+          # what the platform actually serves; the release name keeps the raw
+          # tilde version, which is also what the state row records.
+          asset_version="${state_version//'~'/.}"
+          jq -e --arg version "$state_version" --arg asset_version "$asset_version" \
+            --arg commit "$state_commit" '
             type == "object" and (.draft | not) and .prerelease == true and
             .tag_name == "preview" and .target_commitish == $commit and
             .name == ("Preview " + $version) and
             ([.assets[].name] | sort) ==
             (["release-manifest.json", "SHA256SUMS",
-              "velnor-runner-preview-" + $version + "-amd64.deb",
-              "velnor-runner-preview-" + $version + "-amd64.deb.sha256",
-              "velnor-runner-preview-" + $version + "-arm64.deb",
-              "velnor-runner-preview-" + $version + "-arm64.deb.sha256"] | sort)
+              "velnor-runner-preview-" + $asset_version + "-amd64.deb",
+              "velnor-runner-preview-" + $asset_version + "-amd64.deb.sha256",
+              "velnor-runner-preview-" + $asset_version + "-arm64.deb",
+              "velnor-runner-preview-" + $asset_version + "-arm64.deb.sha256"] | sort)
           ' preview-release.json >/dev/null
           printf 'version=%s\ncommit=%s\n' "$state_version" "$state_commit" >> "$GITHUB_OUTPUT"
 
@@ -161,9 +167,12 @@ jobs:
           # Attestation gating for the preview suite lives here (the caller),
           # not in verify-release.sh: only hosted velnor builds may feed this
           # channel, bound to the exact main commit the rolling release names.
+          # GitHub rewrote the uploaded asset names (`~` -> `.`), so attest
+          # against the sanitized names the release actually serves.
+          asset_version="${VERSION//'~'/.}"
           for artifact in \
-            "velnor-runner-preview-${VERSION}-amd64.deb" \
-            "velnor-runner-preview-${VERSION}-arm64.deb"; do
+            "velnor-runner-preview-${asset_version}-amd64.deb" \
+            "velnor-runner-preview-${asset_version}-arm64.deb"; do
             gh attestation verify "incoming-preview/$artifact" \
               --repo tailrocks/velnor \
               --signer-workflow tailrocks/velnor/.github/workflows/ci-release-package-signer.yml \
