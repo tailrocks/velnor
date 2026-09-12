@@ -6117,6 +6117,25 @@ async fn handle_job_request(
         args.trust_scope,
     ));
 
+    // The GHA cache service namespaces entries by server-attested repo and
+    // ref, never by the per-job credential. Bind this job's runtime
+    // credential — the same value runtime_env injects as
+    // ACTIONS_RUNTIME_TOKEN — to its cache identity for the whole job
+    // lifetime. The RAII session unbinds on every return path below,
+    // including early fail-closed exits.
+    let _cache_session = crate::gha_cache::register_job_cache_session(
+        crate::runtime_env::job_runtime_token(&job),
+        crate::gha_cache::CacheIdentity::derive(
+            crate::github_adapter::job_variable(&job, "github.repository_id"),
+            crate::github_adapter::job_variable(&job, "github.ref"),
+            job.plan
+                .scope_identifier
+                .as_deref()
+                .is_some_and(|scope| !scope.trim().is_empty()),
+            job_trust.is_trusted(),
+        ),
+    );
+
     // Plan 066 required write: the sanitized admission row must persist
     // before the job is accepted. When it cannot, fail this job closed
     // explicitly as infrastructure rejection instead of executing

@@ -143,6 +143,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
 | `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
+| `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 
 ## 8. Discovered bug classes
 
@@ -4851,3 +4852,55 @@ Gates observed in this worktree: `cargo fmt --all -- --check` pass;
 failures as §100 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
 exists but is empty — cause re-verified, `action.rs` untouched);
 `velnorctl` `trust_scope_single_source` 2/2 pass. WP-6 status: complete.
+
+## 102. gha-cache-repo-namespace: GHA cache namespaced by repo identity, not job token — 2026-09-12
+
+The cache service hashed the per-job `ACTIONS_RUNTIME_TOKEN` into the
+storage namespace, so a save was visible only to the job that wrote it and
+every abandoned tenant kept up to its budget outside any sharing. The
+namespace is now `sha256("velnor-actions-cache-repo\0" ‖ repository_id ‖
+ref_scope ‖ trust)` where `repository_id` (`github.repository_id`),
+`ref_scope` (`github.ref`), and the trust floor
+(`TrustClass::is_trusted`, §97) come from the server-attested job message —
+never from workflow-supplied data and never from the token. Jobs in the
+same repository and branch share one namespace, so saves are visible to
+later jobs per GitHub's branch scoping; different repositories, refs, or
+trust classes select disjoint namespaces, so a fork job can neither read
+trusted entries nor poison them (BC-21 read-write invariant).
+
+The token remains only the credential: the runner binds it to the job's
+cache identity at admission (next to the §100 trust derivation) and holds
+the RAII `CacheSession` for the whole job lifetime, so every return path —
+including early fail-closed exits — unbinds it. The registry stores only
+the keyed token hash, never the credential, as a stack so a duplicate
+registration cannot unbind a live job. Route auth rejects unknown tokens
+with 401 (previously any non-empty string was accepted); a job whose
+identity signals are incomplete fails closed to a per-token namespace —
+today's isolation, never another job's entries — with a
+`forensics.lifecycle` line. Both the binding and the `ACTIONS_CACHE_URL`
+injection read the credential through one new accessor
+(`runtime_env::job_runtime_token`), so registration and presentation
+cannot drift. Each daemon's service authenticates its own jobs only:
+credentials from another daemon 401. Previously written per-token tenants
+are no longer addressed and age out under the existing GC, which already
+manages the tenants root (`cache.rs` `GhaCache` store root).
+
+New coverage (14 tests in `gha_cache.rs`): namespace determinism and
+per-input sensitivity, shared/isolated domain non-aliasing, the
+same-repo-and-branch sharing conformance test (save under one credential,
+lookup under another), ref/repository/trust non-sharing tests,
+derive-fails-closed table, isolated fallback resolution, route-level
+401/204 auth tests through the now-generic `route`, session drop and
+duplicate-session release tests, plus the
+`cache_namespace_benchmark_derivation_and_lookup_throughput` timing-gated
+benchmark in the §97 style.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `gha_cache` 44/44 pass; `runtime_env` 8/8
+pass; `trust_class` 42/42 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1720 passed with the same 3 pre-existing environmental
+failures as §101 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — cause re-verified, `action.rs` untouched).
+gha-cache-repo-namespace status: complete.
