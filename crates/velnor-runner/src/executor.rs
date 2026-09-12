@@ -7385,7 +7385,6 @@ fn native_upload_artifact(
         &action_state,
         "include-hidden-files",
     )?);
-    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite")?);
     // The strict manifest admits only the estate-approved v4 value `0`.
     // upload-artifact defines it as no compression (ZIP Stored).
     let store_uncompressed =
@@ -7424,7 +7423,6 @@ fn native_upload_artifact(
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
         // and the latest run's content is what compare-results should see.
-        let _ = overwrite; // silence unused warning; we always overwrite
         fs::remove_dir_all(&artifact_dir).ok();
     }
     fs::create_dir_all(&artifact_dir)
@@ -7519,7 +7517,15 @@ fn native_upload_artifact(
                 crate::protocol::ArtifactUploadOptions {
                     store_uncompressed,
                     retention_days,
-                    overwrite,
+                    // Same "always overwrite" rule as the local store above.
+                    // The Results Service accepts a repeated name instead of
+                    // rejecting it, so a non-overwriting re-upload stacks a
+                    // second `(job, name)` row, and the Results Service
+                    // listing check then fails every job in the run that
+                    // lists artifacts (run 34711777480: of 16 Velnor-lane
+                    // jobs, 11 were rejected after the first of 5 legacy
+                    // cross-job `job-log` rows landed).
+                    overwrite: true,
                 },
             ) {
                 Ok(finalized) => {
@@ -25028,21 +25034,12 @@ fi"#
     }
 
     #[test]
-    fn native_upload_artifact_requires_overwrite_for_duplicate_name() {
+    fn native_upload_artifact_always_overwrites_duplicate_name() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
         fs::write(temp.join("work/first.txt"), "first\n").unwrap();
         fs::write(temp.join("work/second.txt"), "second\n").unwrap();
-        let upload = |path: &str, overwrite: Option<&str>| {
-            let mut inputs: BTreeMap<String, String> = [
-                ("name".into(), "duplicate".into()),
-                ("path".into(), path.into()),
-                ("if-no-files-found".into(), "error".into()),
-            ]
-            .into();
-            if let Some(value) = overwrite {
-                inputs.insert("overwrite".into(), value.into());
-            }
+        let upload = |path: &str| {
             vec![ExecutableStep::Native {
                 step_id: format!("upload-{}", path.replace('.', "-")),
                 display_name: String::new(),
@@ -25051,7 +25048,12 @@ fi"#
                     adapter: NativeActionAdapter::UploadArtifact,
                     cache_kind: None,
                     source_path: None,
-                    inputs,
+                    inputs: [
+                        ("name".into(), "duplicate".into()),
+                        ("path".into(), path.into()),
+                        ("if-no-files-found".into(), "error".into()),
+                    ]
+                    .into(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -25061,10 +25063,10 @@ fi"#
         };
 
         let first_results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
+            .execute_ordered_steps(&container(&temp), &upload("first.txt"), &[], &temp)
             .unwrap();
         let duplicate_results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
+            .execute_ordered_steps(&container(&temp), &upload("second.txt"), &[], &temp)
             .unwrap();
 
         assert_eq!(first_results[0].exit_code, 0);
@@ -25075,15 +25077,10 @@ fi"#
                 .unwrap(),
             "second\n"
         );
-        let overwrite_results = DockerJobEngine::inert(RecordingRunner::default())
-            .execute_ordered_steps(
-                &container(&temp),
-                &upload("second.txt", Some("true")),
-                &[],
-                &temp,
-            )
+        let replaced_results = DockerJobEngine::inert(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &upload("second.txt"), &[], &temp)
             .unwrap();
-        assert_eq!(overwrite_results[0].exit_code, 0);
+        assert_eq!(replaced_results[0].exit_code, 0);
         assert!(!temp
             .join("_velnor_artifacts/local-1/duplicate/first.txt")
             .exists());

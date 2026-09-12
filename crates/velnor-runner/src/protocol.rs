@@ -5270,6 +5270,8 @@ fn upload_artifact_with_zip_builder(
         .context("build Results Service HTTP client")?;
 
     if options.overwrite {
+        // Raw enumeration: this delete phase is the repair path for a
+        // duplicated `(job, name)` pair, so it must see every row it owns.
         let existing = artifacts_owned_by_job(
             list_results_artifacts(&client, base, token, plan_id, job_id)?,
             job_id,
@@ -5422,6 +5424,8 @@ pub(crate) fn delete_finalized_artifact_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
+    // Raw enumeration: a delete target is picked by artifact ID, so the
+    // identity contract must not gate the repair path.
     let matches = artifacts_owned_by_job(
         list_results_artifacts(&client, base, token, plan_id, job_id)?,
         job_id,
@@ -6098,6 +6102,16 @@ pub(crate) fn download_artifacts_blocking(
     )
 }
 
+/// Listing enumeration: per-row wire validation only, no identity contract.
+///
+/// The Results Service accepts repeated `(job, name)` rows instead of
+/// rejecting them, so a listing can always carry duplicates — a strict read
+/// contract would turn that service-side data condition into job failures,
+/// which is exactly how run 34711777480's legacy cross-job `job-log` rows
+/// rejected eleven downstream jobs. Reads tolerate duplicates; producers stay
+/// idempotent (`overwrite: true`); destructive paths filter with
+/// `artifacts_owned_by_job` and pick targets by artifact ID so they can also
+/// repair a duplicated pair instead of aborting on it.
 fn list_results_artifacts(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -6164,11 +6178,20 @@ fn test_results_artifact_descriptor(
     job_id: &str,
     database_id: u64,
 ) -> ValidatedResultsArtifactDescriptor {
+    named_test_results_artifact_descriptor(job_id, database_id, "release")
+}
+
+#[cfg(test)]
+fn named_test_results_artifact_descriptor(
+    job_id: &str,
+    database_id: u64,
+    name: &str,
+) -> ValidatedResultsArtifactDescriptor {
     ValidatedResultsArtifactDescriptor {
         workflow_run_backend_id: "plan".to_owned(),
         workflow_job_run_backend_id: job_id.to_owned(),
         database_id,
-        name: "release".to_owned(),
+        name: name.to_owned(),
         size: 7,
         digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
             .to_owned(),
@@ -7089,6 +7112,122 @@ mod tests {
         assert!(create.contains("\"mime_type\":\"application/zip\""));
         let finalize = String::from_utf8_lossy(&requests[2]);
         assert!(finalize.contains("\"hash\":\"sha256:"));
+    }
+
+    /// The overwrite path is what makes a repeated upload idempotent, so it
+    /// must delete exactly the stale rows this job owns for that name and
+    /// leave every other row in the run alone.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn overwrite_deletes_only_this_jobs_rows_for_the_name() {
+        use crate::test_support::results_artifact_store::Store;
+
+        let store = Store::mount().await;
+        store.seed(11, "job-1", "job-log-job-1");
+        store.seed(12, "job-1", "other-artifact");
+        store.seed(13, "job-2", "job-log-job-1");
+
+        let results_url = store.uri();
+        let finalized = tokio::task::spawn_blocking(move || {
+            upload_artifact_blocking(
+                &results_url,
+                "runtime-token",
+                "plan-1",
+                "job-1",
+                "job-log-job-1",
+                &[("job-log.txt".to_string(), b"log".to_vec())],
+                ArtifactUploadOptions {
+                    overwrite: true,
+                    ..ArtifactUploadOptions::default()
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let replaced_id = finalized.id.parse::<u64>().unwrap();
+        assert_eq!(
+            store.rows(),
+            vec![
+                (12, "job-1".to_owned(), "other-artifact".to_owned()),
+                (13, "job-2".to_owned(), "job-log-job-1".to_owned()),
+                (replaced_id, "job-1".to_owned(), "job-log-job-1".to_owned()),
+            ],
+            "only the stale row of this job for this name may be deleted"
+        );
+        assert_eq!(store.deleted_ids(), vec![11]);
+    }
+
+    /// The delete phase is the repair path for a duplicated `(job, name)`
+    /// pair: it enumerates raw rows, so an overwrite upload succeeds and ends
+    /// with exactly one row even when the listing it starts from is poisoned.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn overwrite_self_heals_a_duplicate_row_pair() {
+        use crate::test_support::results_artifact_store::Store;
+
+        let store = Store::mount().await;
+        store.seed(11, "job-1", "job-log-job-1");
+        store.seed(12, "job-1", "job-log-job-1");
+
+        let results_url = store.uri();
+        tokio::task::spawn_blocking(move || {
+            upload_artifact_blocking(
+                &results_url,
+                "runtime-token",
+                "plan-1",
+                "job-1",
+                "job-log-job-1",
+                &[("job-log.txt".to_string(), b"log".to_vec())],
+                ArtifactUploadOptions {
+                    overwrite: true,
+                    ..ArtifactUploadOptions::default()
+                },
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(store.rows().len(), 1, "the pair must collapse to one row");
+        assert_eq!(store.deleted_ids(), vec![11, 12]);
+        assert_eq!(
+            store.puts(),
+            1,
+            "exactly one replacement blob must reach the store"
+        );
+    }
+
+    /// Without `overwrite` the same upload stacks a second `(job, name)` row
+    /// — listings then resolve that name ambiguously, so callers that may
+    /// re-upload must pass `overwrite: true`.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn upload_without_overwrite_stacks_a_duplicate_row() {
+        use crate::test_support::results_artifact_store::Store;
+
+        let store = Store::mount().await;
+        store.seed(11, "job-1", "job-log-job-1");
+
+        let results_url = store.uri();
+        tokio::task::spawn_blocking(move || {
+            upload_artifact_blocking(
+                &results_url,
+                "runtime-token",
+                "plan-1",
+                "job-1",
+                "job-log-job-1",
+                &[("job-log.txt".to_string(), b"log".to_vec())],
+                ArtifactUploadOptions::default(),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(store.deleted_ids(), Vec::<u64>::new());
+        assert_eq!(store.rows().len(), 2, "duplicate row accumulated");
     }
 
     #[cfg(feature = "test-support")]
