@@ -79,7 +79,7 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // "pull_request_target is forbidden"). Until the follow-up commit advances this
 // pin, every policy lane fails loudly; the transport change must not sit on the
 // default branch across that window.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "07d083181537b3b51c98e35879ffc16bd7f9b288";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "5bea6c12f45441d3c1ae409902446d1f64cbb4b4";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
