@@ -1240,11 +1240,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "4268511f1069142ef57786b24e0e84f64b99f7cd5381e8ebc64196471411ba46",
+                "4d91c7fc728c6086c68f96593cd66e7578d02f5c28b7d831fe449224e47b7802",
             ),
             (
                 "preview.yml",
-                "bbd3a2cc82f21409b288b30b9f4e6dc1d1bb173d766b4915609d3762686595d8",
+                "c585f5f8d0b6ec4440eb808e107f2983969e867367ca13acf5d38b38ad349bc6",
             ),
             (
                 "maintenance.yml",
@@ -1256,7 +1256,7 @@ mod tests {
             ),
             (
                 "velnor-workflow-policy.yml",
-                "78a1fe789a20bc3568587ec831aea85d7fd18c04885ee632219b0180b454e72b",
+                "473bb2ab08e097bb92839264e15d28a56d1ac86d66c67d3fdcbf75a7a08a81ef",
             ),
         ];
         let root = scanned_root("default");
