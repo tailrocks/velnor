@@ -19,7 +19,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::scan::RepositoryShape;
 use crate::{content_digest_bytes, GeneratorError};
 
 /// Location of the repository-owned generation config, relative to the
@@ -152,20 +151,47 @@ struct PolicySection {
 /// config schema migration.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct DeclareRow {
-    /// Primitive name the renderer knows how to build.
-    primitive: Option<String>,
-    /// Verification unit ids this declaration applies to.
+pub(crate) struct DeclareRow {
+    /// The primitive the row names.
+    pub(crate) primitive: Option<String>,
+    /// The unit ids the row applies to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    units: Vec<String>,
-    /// Bare workflow file name the primitive renders into.
-    file: Option<String>,
+    pub(crate) units: Vec<String>,
+    /// The bare workflow file name the primitive renders into.
+    pub(crate) file: Option<String>,
     /// Opaque primitive arguments, stored and digested as given.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    args: BTreeMap<String, toml::Value>,
+    pub(crate) args: BTreeMap<String, toml::Value>,
+}
+
+impl DeclareRow {
+    /// The primitive the row names.
+    pub(crate) fn primitive(&self) -> &str {
+        self.primitive.as_deref().unwrap_or_default()
+    }
+
+    /// The unit ids the row applies to.
+    pub(crate) fn units(&self) -> &[String] {
+        &self.units
+    }
+
+    /// The workflow file the row renders into, when it names one.
+    pub(crate) fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
+    /// The primitive's own arguments, as the config gave them.
+    pub(crate) fn args(&self) -> &BTreeMap<String, toml::Value> {
+        &self.args
+    }
 }
 
 impl RepoGenerationConfig {
+    /// The declared render primitives, in the order the config declares them.
+    pub(crate) fn declare(&self) -> &[DeclareRow] {
+        &self.declare
+    }
+
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
         match self.schema {
             Some(CONFIG_SCHEMA) => Ok(()),
@@ -188,7 +214,7 @@ impl RepoGenerationConfig {
     /// # Errors
     /// Returns an error naming the offending value and, for unknown unit ids,
     /// every unit id the scan did produce.
-    pub(crate) fn validate(&self, shape: &RepositoryShape) -> Result<(), GeneratorError> {
+    pub(crate) fn validate(&self, unit_ids: &[String]) -> Result<(), GeneratorError> {
         let repository = self.generator.repository.as_deref().ok_or_else(|| {
             GeneratorError::usage(
                 "generation config is missing `[generator] repository = \"owner/repository\"`",
@@ -196,7 +222,7 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         for row in &self.declare {
-            validate_declare_row(row, shape)?;
+            validate_declare_row(row, unit_ids)?;
         }
         validate_excludes(&self.scan.exclude)?;
         Ok(())
@@ -256,20 +282,23 @@ fn validate_repository_slug(repository: &str) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn validate_declare_row(row: &DeclareRow, shape: &RepositoryShape) -> Result<(), GeneratorError> {
+fn validate_declare_row(row: &DeclareRow, unit_ids: &[String]) -> Result<(), GeneratorError> {
     let primitive = row.primitive.as_deref().unwrap_or_default();
     if primitive.is_empty() {
         return Err(GeneratorError::usage(
             "[[declare]] is missing `primitive`; name the render primitive the row declares",
         ));
     }
-    let file = row.file.as_deref().unwrap_or_default();
-    validate_workflow_file_name(file)?;
+    // A family that renders no file of its own — the contracts and the plan —
+    // declares none.
+    if let Some(file) = row.file.as_deref() {
+        validate_workflow_file_name(file)?;
+    }
     for unit in &row.units {
-        if !shape.unit_ids().any(|candidate| candidate == unit) {
+        if !unit_ids.iter().any(|candidate| candidate == unit) {
             return Err(GeneratorError::usage(format!(
                 "[[declare]] primitive `{primitive}` names unit `{unit}`, which the scan did not produce; available units: {}",
-                shape.unit_ids().collect::<Vec<_>>().join(", ")
+                unit_ids.join(", ")
             )));
         }
     }
@@ -374,7 +403,7 @@ mod tests {
         root
     }
 
-    fn shape_for(root: &Path) -> RepositoryShape {
+    fn shape_for(root: &Path) -> crate::scan::RepositoryShape {
         must(
             crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
             "scan config test repository",
@@ -429,9 +458,10 @@ mod tests {
     fn full_config_validates_against_a_scanned_shape() {
         let root = scanned_root("valid");
         let shape = shape_for(&root);
-        let unit = shape.unit_ids().next().unwrap_or_default().to_owned();
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let unit = unit_ids.first().cloned().unwrap_or_default();
         let config = config_for(&full_config(&unit));
-        must(config.validate(&shape), "validate full config");
+        must(config.validate(&unit_ids), "validate full config");
         assert_eq!(config.schema, Some(1));
         let _ = fs::remove_dir_all(root);
     }
@@ -514,12 +544,13 @@ mod tests {
     fn unknown_declared_unit_names_the_available_units() {
         let root = scanned_root("unknown-unit");
         let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let available = shape.unit_ids().collect::<Vec<_>>().join(", ");
         let config = config_for(
             "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
         );
-        let error = must_some_error(config.validate(&shape).err(), "unknown unit must fail");
+        let error = must_some_error(config.validate(&unit_ids).err(), "unknown unit must fail");
         assert!(error.contains("not-a-unit"), "error names the row: {error}");
         assert!(
             error.contains(&format!("available units: {available}")),
@@ -532,13 +563,14 @@ mod tests {
     fn declared_files_stay_bare_yml_names() {
         let root = scanned_root("declare-file");
         let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         for file in ["../escape.yml", "nested/deep.yml", "workflow.yaml", ".yml"] {
             let config = config_for(&format!(
                 "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
                  [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&shape).err(),
+                config.validate(&unit_ids).err(),
                 "declared file must fail validation",
             );
             assert!(
@@ -551,7 +583,7 @@ mod tests {
             "[[declare]]\nprimitive = \"rust-crate\"\nfile = 'back\\slash.yml'\n",
         ));
         let error = must_some_error(
-            separator.validate(&shape).err(),
+            separator.validate(&unit_ids).err(),
             "backslash file name must fail validation",
         );
         assert!(error.contains("bare `.yml` workflow file name"), "{error}");
@@ -562,6 +594,7 @@ mod tests {
     fn repository_must_be_an_owner_and_a_name() {
         let root = scanned_root("repository-slug");
         let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         for repository in [
             "tailrocks",
             "tailrocks/",
@@ -573,7 +606,7 @@ mod tests {
                 "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&shape).err(),
+                config.validate(&unit_ids).err(),
                 "repository slug must fail validation",
             );
             assert!(
@@ -588,8 +621,12 @@ mod tests {
     fn missing_generator_section_is_a_config_error() {
         let root = scanned_root("missing-generator");
         let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let config = config_for("schema = 1\n");
-        let error = must_some_error(config.validate(&shape).err(), "missing generator must fail");
+        let error = must_some_error(
+            config.validate(&unit_ids).err(),
+            "missing generator must fail",
+        );
         assert!(error.contains("[generator] repository"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
@@ -598,18 +635,19 @@ mod tests {
     fn args_stay_opaque_but_reject_unstable_values() {
         let root = scanned_root("args");
         let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let opaque = config_for(
             "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
-        must(opaque.validate(&shape), "opaque args validate");
+        must(opaque.validate(&unit_ids), "opaque args validate");
         let float = config_for(
             "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
              [declare.args]\nratio = 1.5\n",
         );
-        let error = must_some_error(float.validate(&shape).err(), "float args must fail");
+        let error = must_some_error(float.validate(&unit_ids).err(), "float args must fail");
         assert!(error.contains("float"), "{error}");
         let _ = fs::remove_dir_all(root);
     }

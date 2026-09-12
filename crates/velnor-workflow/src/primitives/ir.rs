@@ -1,0 +1,1159 @@
+//! The resolved render environment for the declared CI surface.
+//!
+//! `WorkflowIr` is the lane and toolchain context every primitive renders
+//! against: which lanes exist, which runner each lane uses, and which tools a
+//! unit needs provisioned. It carries no repository knowledge of its own; every
+//! value comes from the scanned shape and the repo-owned generation config.
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+
+use super::{CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES};
+use crate::{
+    github_expression, hosted_mold_setup, lane_supports_unit, nested_unit_workflow_file,
+    rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
+    unit_job_id, unit_needs, velnor_runner, velnor_runner_group, workflow_runtime_artifact_upload,
+    workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
+    workflow_selection_artifact_upload, yaml_scalar, CacheSpec, ProjectConfig, RunnerMode, Unit,
+    UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION, MR_BOXINGTON_VERSION,
+    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW, VELNOR_POLICY_WORKFLOW_REV,
+    VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
+};
+
+/// The resolved render environment: lanes, runners, and unit tool needs.
+///
+/// Rendering is kept separate from scanning so output policy is inspectable
+/// and unit-tested.
+#[derive(Debug)]
+pub(crate) struct WorkflowIr {
+    pub(crate) default_branch: String,
+    pub(crate) github_runner: String,
+    pub(crate) velnor_labels: Vec<String>,
+    pub(crate) velnor_runner_group: Option<&'static str>,
+    pub(crate) runners: RunnerMode,
+    pub(crate) tools: BTreeSet<ToolRequirement>,
+    pub(crate) mise_rust: bool,
+    pub(crate) mr_boxington: bool,
+    pub(crate) units: Vec<Unit>,
+    pub(crate) pins: Pins,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ToolRequirement {
+    OpenTofu,
+    Homebrew,
+    Bun,
+    Node,
+    Nextest,
+    CargoDeny,
+    CargoAudit,
+    Gradle,
+    Sccache,
+    MrBoxington,
+    Mold,
+    DockerBuildx,
+    Mise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkflowKind {
+    PullRequest,
+    Main,
+    Nightly,
+}
+
+#[allow(dead_code)]
+impl WorkflowIr {
+    pub(crate) fn from_config(config: &ProjectConfig) -> Self {
+        let mut tools = BTreeSet::new();
+        let mr_boxington = config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+        if config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::OpenTofu)
+        {
+            tools.insert(ToolRequirement::OpenTofu);
+        }
+        if config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Homebrew)
+        {
+            tools.insert(ToolRequirement::Homebrew);
+        }
+        if config.units.iter().any(|unit| unit.kind == UnitKind::Bun) {
+            tools.insert(ToolRequirement::Bun);
+        }
+        if config.units.iter().any(|unit| unit.kind == UnitKind::Node) {
+            tools.insert(ToolRequirement::Node);
+        }
+        if config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Gradle)
+        {
+            tools.insert(ToolRequirement::Gradle);
+        }
+        if config.units.iter().any(|unit| unit.kind == UnitKind::Rust) {
+            if mr_boxington {
+                tools.insert(ToolRequirement::MrBoxington);
+            } else {
+                tools.insert(ToolRequirement::Sccache);
+            }
+            tools.insert(ToolRequirement::Mold);
+        }
+        let mise_rust = config
+            .analysis
+            .detected
+            .iter()
+            .any(|item| item == "mise-rust-toolchain");
+        if mise_rust {
+            tools.insert(ToolRequirement::Mise);
+        }
+        if config
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Docker)
+        {
+            tools.insert(ToolRequirement::DockerBuildx);
+        }
+        Self {
+            default_branch: config.default_branch.clone(),
+            github_runner: config.github_runner.clone(),
+            velnor_labels: config.velnor_labels.clone(),
+            velnor_runner_group: velnor_runner_group(config),
+            runners: config.runners,
+            tools,
+            mise_rust,
+            mr_boxington,
+            units: config.units.clone(),
+            pins: Pins::resolved(),
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the legacy renderer remains a single auditable workflow pass"
+    )]
+    pub(crate) fn render(&self, kind: WorkflowKind) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = match kind {
+            WorkflowKind::PullRequest => (
+                "CI",
+                "CI / PR",
+                "on:\n  pull_request:".to_owned(),
+                "true",
+            ),
+            WorkflowKind::Main => (
+                "CI",
+                "CI / main",
+                format!(
+                    "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
+                    yaml_scalar(&self.default_branch)
+                ),
+                "true",
+            ),
+            WorkflowKind::Nightly => (
+                "Nightly",
+                "Nightly",
+                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
+                    .to_owned(),
+                "true",
+            ),
+        };
+        let _ = writeln!(
+            output,
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
+        );
+        if self.tools.contains(&ToolRequirement::Sccache)
+            || self.tools.contains(&ToolRequirement::OpenTofu)
+            || self.mise_rust
+        {
+            output.push_str("env:\n");
+            if self.tools.contains(&ToolRequirement::Sccache) {
+                output.push_str(
+                    "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
+                );
+            }
+            if self.mise_rust {
+                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
+            }
+            if self.tools.contains(&ToolRequirement::OpenTofu) {
+                output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
+            }
+            output.push('\n');
+        }
+        output.push_str("jobs:\n");
+        // Runner mode is global; only trusted-event jobs receive the extra
+        // default-branch gate needed for Velnor execution.
+        let trusted_event = kind != WorkflowKind::PullRequest;
+        let runners = self.runners;
+        // Planning and policy execute on a GitHub-hosted runner even when the
+        // selected verification lane is self-hosted. They execute checked-in
+        // shell files and must never expose untrusted PR code to that runner.
+        self.render_plan(&mut output, RunnerMode::Github, false);
+        if kind != WorkflowKind::PullRequest {
+            Self::render_policy(&mut output, RunnerMode::Github, false);
+        }
+        self.render_hierarchy_groups(&mut output, kind != WorkflowKind::PullRequest);
+        let cache_save = kind != WorkflowKind::PullRequest;
+        match runners {
+            RunnerMode::Github => self.render_verify_github(
+                &mut output,
+                None,
+                cache_save,
+                kind != WorkflowKind::PullRequest,
+            ),
+            RunnerMode::Velnor => self.render_verify_velnor(
+                &mut output,
+                cache_save,
+                kind != WorkflowKind::PullRequest,
+            ),
+            RunnerMode::Both => {
+                self.render_verify_github(
+                    &mut output,
+                    None,
+                    cache_save,
+                    kind != WorkflowKind::PullRequest,
+                );
+                self.render_verify_velnor(&mut output, false, kind != WorkflowKind::PullRequest);
+            }
+        }
+        // Auxiliary schedules must not create or satisfy the branch-protection
+        // check. Only the PR and main workflows own the stable `ci-required`
+        // check that repository rulesets gate on.
+        if kind != WorkflowKind::Nightly {
+            self.render_required(
+                &mut output,
+                runners,
+                kind == WorkflowKind::PullRequest,
+                trusted_event,
+                kind != WorkflowKind::PullRequest,
+            );
+        }
+        while output.ends_with("\n\n") {
+            output.pop();
+        }
+        output = output
+            .lines()
+            .map(|line| {
+                line.split_once(" · Runner:")
+                    .filter(|_| line.trim_start().starts_with("name:"))
+                    .map_or_else(
+                        || line.to_owned(),
+                        |(name, _)| {
+                            if name.contains("name: \"") {
+                                format!("{name}\"")
+                            } else {
+                                name.to_owned()
+                            }
+                        },
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        output
+    }
+
+    /// Render one reusable-workflow call per sidebar group. GitHub flattens
+    /// nested reusable workflows, so an intermediate stack workflow would hide
+    /// unit names and place every terminal runner job directly under the stack.
+    /// Render one aggregate workflow from the CI graph nodes the declared
+    /// primitives contributed.
+    ///
+    /// The aggregate owns only composition: the plan job, the advisory policy
+    /// job, one reusable-workflow caller per contributed unit node, and the
+    /// required check that validates every one of them. Rendering is a pure
+    /// function of the nodes, so a unit the declared surface does not cover
+    /// simply has no caller and no required-check branch.
+    pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let (workflow_name, run_name, triggers, cancel_in_progress) = match kind {
+            WorkflowKind::PullRequest => (
+                "CI",
+                "CI / PR",
+                "on:\n  pull_request:".to_owned(),
+                "true",
+            ),
+            WorkflowKind::Main => (
+                "CI",
+                "CI / main",
+                format!(
+                    "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
+                    yaml_scalar(&self.default_branch)
+                ),
+                "true",
+            ),
+            WorkflowKind::Nightly => (
+                "Nightly",
+                "Nightly",
+                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
+                    .to_owned(),
+                "true",
+            ),
+        };
+        let _ = writeln!(
+            output,
+            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
+        );
+        // The plan job is a contributed node: the aggregate composes the graph
+        // the declared primitives built and renders no job of its own.
+        let plan = nodes
+            .iter()
+            .find_map(GraphNode::plan_job)
+            .unwrap_or_default();
+        output.push_str(plan);
+        if kind != WorkflowKind::PullRequest {
+            Self::render_policy(&mut output, RunnerMode::Github, false);
+        }
+        Self::render_node_callers(nodes, &mut output, kind != WorkflowKind::PullRequest);
+        if kind == WorkflowKind::Nightly {
+            self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
+            self.render_nightly_alert(&mut output);
+        } else {
+            self.render_nodes_required(
+                nodes,
+                &mut output,
+                kind != WorkflowKind::PullRequest,
+                "ci-required",
+                false,
+            );
+        }
+        while output.ends_with("\n\n") {
+            output.pop();
+        }
+        output
+    }
+
+    pub(crate) fn render_nested_unit_callers(&self, output: &mut String, include_policy: bool) {
+        for unit in &self.units {
+            let mut needs = vec!["plan".to_owned()];
+            if include_policy {
+                needs.push("policy".to_owned());
+            }
+            let id = unit_group_job_id(unit);
+            let name = sidebar_group_name(unit);
+            let mut conditions = vec![
+                "always()".to_owned(),
+                "needs.plan.result == 'success'".to_owned(),
+            ];
+            if include_policy {
+                conditions.push("needs.policy.result == 'success'".to_owned());
+            }
+            conditions.push(format!(
+                "contains(format(',{{0}},', needs.plan.outputs.units), ',{},')",
+                unit.id
+            ));
+            let _ = writeln!(
+                output,
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
+                yaml_scalar(&name),
+                conditions.join(" && "),
+                needs.join(", "),
+                nested_unit_workflow_file(unit),
+            );
+        }
+    }
+
+    /// One reusable-workflow caller per contributed unit node, in the order the
+    /// nodes were contributed (canonical unit order).
+    pub(crate) fn render_node_callers(
+        nodes: &[GraphNode],
+        output: &mut String,
+        include_policy: bool,
+    ) {
+        for (unit_id, job_id, name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
+            let mut needs = vec!["plan".to_owned()];
+            if include_policy {
+                needs.push("policy".to_owned());
+            }
+            let id = job_id;
+            let mut conditions = vec![
+                "always()".to_owned(),
+                "needs.plan.result == 'success'".to_owned(),
+            ];
+            if include_policy {
+                conditions.push("needs.policy.result == 'success'".to_owned());
+            }
+            conditions.push(format!(
+                "contains(format(',{{0}},', needs.plan.outputs.units), ',{unit_id},')"
+            ));
+            let _ = writeln!(
+                output,
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
+                yaml_scalar(name),
+                conditions.join(" && "),
+                needs.join(", "),
+                file,
+            );
+        }
+    }
+
+    /// The aggregate required check over every contributed unit node.
+    pub(crate) fn render_nodes_required(
+        &self,
+        nodes: &[GraphNode],
+        output: &mut String,
+        include_policy: bool,
+        check_name: &str,
+        simulate_failure: bool,
+    ) {
+        let units = nodes
+            .iter()
+            .filter_map(|node| node.as_unit().map(|(_, job_id, _, _)| job_id.to_owned()))
+            .collect::<Vec<_>>();
+        let mut needs = vec!["plan".to_owned()];
+        if include_policy {
+            needs.push("policy".to_owned());
+        }
+        needs.extend(units);
+        let _ = writeln!(
+            output,
+            "  {check_name}:\n    name: {check_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
+            needs.join(", "),
+            yaml_scalar(&self.github_runner)
+        );
+        if simulate_failure {
+            let simulate = github_expression("inputs.simulate_failure");
+            let _ = writeln!(
+                output,
+                "          if [[ \"{simulate}\" == true ]]; then\n            echo \"nightly red-to-signal simulation requested\" >&2\n            exit 1\n          fi"
+            );
+        }
+        for job in needs
+            .iter()
+            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
+        {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+            );
+        }
+        let selected = github_expression("needs.plan.outputs.units");
+        let _ = writeln!(output, "          selected=\",{selected},\"");
+        for (unit_id, job_id, _, _) in nodes.iter().filter_map(GraphNode::as_unit) {
+            let job = job_id;
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+            );
+        }
+    }
+
+    pub(crate) fn render_nightly_alert(&self, output: &mut String) {
+        let _ = writeln!(
+            output,
+            "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ always() }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
+            yaml_scalar(&self.github_runner)
+        );
+        let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
+Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
+        let good_body = r#"          body="$(printf '%s\n%s\n' \
+            "nightly-required result: $NIGHTLY_RESULT" \
+            "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")""#;
+        *output = output.replace(bad_body, good_body);
+    }
+
+    /// The legacy default unit contract: every supported lane, the default
+    /// timeout, and the detected cache backend.
+    pub(crate) fn default_unit_contract(&self, cache_save: bool) -> UnitContract {
+        UnitContract {
+            lanes: self.default_lane_jobs(cache_save),
+            timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
+            cache: CacheBackend::Detected,
+            cache_save,
+        }
+    }
+
+    /// The lane jobs a nested unit workflow emits: the hosted lane saves the
+    /// cache and is untrusted, the self-hosted lane is the trusted event lane.
+    pub(crate) fn default_lane_jobs(&self, cache_save: bool) -> Vec<LaneJob> {
+        let mut lanes = Vec::new();
+        if matches!(self.runners, RunnerMode::Github | RunnerMode::Both) {
+            lanes.push(LaneJob {
+                lane: RunnerMode::Github,
+                cache_save,
+                trusted: false,
+            });
+        }
+        if matches!(self.runners, RunnerMode::Velnor | RunnerMode::Both) {
+            lanes.push(LaneJob {
+                lane: RunnerMode::Velnor,
+                cache_save: false,
+                trusted: true,
+            });
+        }
+        lanes
+    }
+
+    /// Render one unit's reusable workflow surface.
+    ///
+    /// The unit contract carries everything a declaring primitive may tune: the
+    /// lane jobs to emit, the job timeout, and the cache backend. With the
+    /// default contract the output is the surface the generator has always
+    /// emitted for a unit.
+    pub(crate) fn render_unit_surface(&self, unit: &Unit, contract: &UnitContract) -> String {
+        let mut output = String::from(GENERATED_HEADER);
+        let _ = writeln!(
+            output,
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string",
+            yaml_scalar(&sidebar_group_name(unit))
+        );
+        self.render_workflow_env(&mut output, unit);
+        output.push_str("\njobs:\n");
+        for job in &contract.lanes {
+            if lane_supports_unit(job.lane, unit) {
+                self.render_lane_job(&mut output, *job, unit, contract);
+            }
+        }
+        output
+    }
+
+    /// Legacy entry point: the nested unit workflow for one unit under the
+    /// default contract.
+    pub(crate) fn render_nested_unit(&self, unit: &Unit, kind: WorkflowKind) -> String {
+        self.render_unit_surface(
+            unit,
+            &self.default_unit_contract(kind != WorkflowKind::PullRequest),
+        )
+    }
+
+    pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
+        let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
+        if tools.contains(&ToolRequirement::Sccache)
+            || tools.contains(&ToolRequirement::OpenTofu)
+            || self.mise_rust
+        {
+            output.push_str("\nenv:\n");
+            if tools.contains(&ToolRequirement::Sccache) {
+                output.push_str(
+                    "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
+                );
+            }
+            if self.mise_rust {
+                output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
+            }
+            if tools.contains(&ToolRequirement::OpenTofu) {
+                output.push_str("  TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
+            }
+        }
+    }
+
+    /// Render one lane job of a nested unit workflow from the unit contract.
+    pub(crate) fn render_lane_job(
+        &self,
+        output: &mut String,
+        job: LaneJob,
+        unit: &Unit,
+        contract: &UnitContract,
+    ) {
+        let lane = job.lane;
+        let cache_save = job.cache_save && contract.cache_save;
+        let trusted = job.trusted;
+        let id = lane.as_str();
+        let _ = writeln!(output, "  {id}:\n    name: {}", lane.display_name());
+        if trusted {
+            let _ = writeln!(
+                output,
+                "    if: ${{{{ github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}",
+                self.default_branch
+            );
+        }
+        let _ = writeln!(
+            output,
+            "    runs-on: {}\n    timeout-minutes: {}\n    steps:",
+            self.runner_for_unit(lane, unit),
+            contract.timeout_minutes
+        );
+        let _ = writeln!(
+            output,
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+            self.pins.checkout
+        );
+        Self::render_workflow_runtime_download(output, lane);
+        output.push_str(&workflow_selection_artifact_download(Some(
+            "${{ inputs.selection-artifact }}",
+        )));
+        self.render_tool_provisioning(output, lane, unit, cache_save);
+        if contract.cache.enables_actions_cache(self, unit)
+            && let Some(cache) = &unit.cache
+        {
+            let (paths, key) = rendered_cache_values(cache);
+            let cache_key = format!(
+                "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                unit.id
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                yaml_scalar(&unit.label),
+                self.pins.cache_restore,
+                unit.id
+            );
+        }
+        let _ = writeln!(
+            output,
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+            yaml_scalar(&unit.label),
+            yaml_scalar(&unit.id),
+            yaml_scalar(&unit.id)
+        );
+        if cache_save
+            && lane == RunnerMode::Github
+            && contract.cache.enables_actions_cache(self, unit)
+            && let Some(cache) = unit.cache.as_ref()
+        {
+            let trusted_cache = format!(
+                "(github.event_name == 'push' && github.ref == 'refs/heads/{}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}')",
+                self.default_branch, self.default_branch
+            );
+            let (paths, key) = rendered_cache_values(cache);
+            let cache_key = format!(
+                "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                unit.id
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Save {} cache\n        if: ({trusted_cache}) && steps.cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
+                yaml_scalar(&unit.label),
+                self.pins.cache_save
+            );
+        }
+        output.push('\n');
+    }
+
+    pub(crate) fn runner_for(&self, lane: RunnerMode) -> String {
+        match lane {
+            RunnerMode::Github | RunnerMode::Both => yaml_scalar(&self.github_runner),
+            RunnerMode::Velnor => velnor_runner(&self.velnor_labels, self.velnor_runner_group),
+        }
+    }
+
+    pub(crate) fn render_workflow_runtime_setup(output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_setup(lane));
+    }
+
+    pub(crate) fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
+        output.push_str(&workflow_runtime_download(lane));
+    }
+
+    pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
+        let gate = self.trusted_runner_gate(runners, trusted);
+        let _ = writeln!(
+            output,
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n      full_units: ${{{{ steps.plan.outputs.full_units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            self.runner_for(runners),
+            self.pins.checkout,
+            VELNOR_WORKFLOW_SETUP_ACTION,
+            VELNOR_WORKFLOW_SOURCE_REV,
+            VELNOR_WORKFLOW_SOURCE_REV,
+        );
+        output.push_str(&workflow_runtime_artifact_upload());
+        output.push_str(&workflow_selection_artifact_upload());
+    }
+
+    pub(crate) fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
+        let _ = (runners, trusted);
+        let _ = writeln!(
+            output,
+            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
+        );
+    }
+
+    pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
+        if runners == RunnerMode::Velnor && trusted {
+            format!(
+                "    if: ${{{{ github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n",
+                self.default_branch
+            )
+        } else {
+            String::new()
+        }
+    }
+
+    pub(crate) fn render_verify_github(
+        &self,
+        output: &mut String,
+        condition: Option<&str>,
+        cache_save: bool,
+        include_policy: bool,
+    ) {
+        self.render_verify_lane(
+            output,
+            RunnerMode::Github,
+            condition,
+            cache_save,
+            include_policy,
+        );
+    }
+
+    pub(crate) fn render_verify_velnor(
+        &self,
+        output: &mut String,
+        cache_save: bool,
+        include_policy: bool,
+    ) {
+        // Self-hosted runners never receive untrusted pull-request code.
+        let condition = Some(format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            self.default_branch
+        ));
+        self.render_verify_lane(
+            output,
+            RunnerMode::Velnor,
+            condition.as_deref(),
+            cache_save,
+            include_policy,
+        );
+    }
+
+    pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
+        let kinds = self
+            .units
+            .iter()
+            .map(|unit| unit.kind)
+            .collect::<BTreeSet<_>>();
+        for kind in kinds {
+            let group_id = stack_group_job_id(kind);
+            let group_name = yaml_scalar(unit_group(kind));
+            let _ = writeln!(output, "  {group_id}:\n    name: {group_name}");
+            let needs = if include_policy {
+                "[plan, policy]"
+            } else {
+                "[plan]"
+            };
+            let _ = writeln!(
+                output,
+                "    needs: {needs}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
+                self.github_runner,
+                unit_group(kind),
+            );
+            for unit in self.units.iter().filter(|unit| unit.kind == kind) {
+                let child_id = unit_group_job_id(unit);
+                let child_label = unit
+                    .label
+                    .strip_prefix("Rust crate (")
+                    .and_then(|value| value.strip_suffix(')'))
+                    .unwrap_or(&unit.label);
+                let child_name = yaml_scalar(child_label);
+                let _ = writeln!(
+                    output,
+                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
+                    self.github_runner,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn render_verify_lane(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        condition: Option<&str>,
+        cache_save: bool,
+        include_policy: bool,
+    ) {
+        for unit in self
+            .units
+            .iter()
+            .filter(|unit| lane_supports_unit(lane, unit))
+        {
+            let id = unit_job_id(lane, &unit.id);
+            let lane_label = lane.display_name();
+            let needs = unit_needs(lane, unit, include_policy);
+            let runner = self.runner_for_unit(lane, unit);
+            let group = unit_group(unit.kind);
+            let label = unit
+                .label
+                .strip_prefix("Rust crate (")
+                .and_then(|value| value.strip_suffix(')'))
+                .unwrap_or(&unit.label);
+            let job_name = yaml_scalar(&format!("{lane_label} / {group} / {label}"));
+            let verify_name = yaml_scalar(&unit.label);
+            let _ = writeln!(output, "  {id}:\n    name: {job_name}");
+            if let Some(condition) = condition {
+                let _ = writeln!(output, "    if: ${{{{ {condition} }}}}");
+            }
+            let _ = writeln!(output, "    needs: [{}]", needs.join(", "));
+            let _ = writeln!(
+                output,
+                "    runs-on: {runner}\n    timeout-minutes: 45\n    steps:",
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+                self.pins.checkout,
+            );
+            Self::render_workflow_runtime_download(output, lane);
+            output.push_str(&workflow_selection_artifact_download(None));
+            self.render_tool_provisioning(output, lane, unit, cache_save);
+            if !self.uses_mr_boxington(unit)
+                && let Some(cache) = &unit.cache
+            {
+                let (paths, key) = rendered_cache_values(cache);
+                let cache_key = format!(
+                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                    unit.id
+                );
+                let _ = writeln!(
+                    output,
+                    "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
+                    verify_name,
+                    self.pins.cache_restore,
+                    unit.id,
+                );
+            }
+            let _ = writeln!(
+                output,
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}",
+                verify_name,
+                yaml_scalar(&unit.id),
+                yaml_scalar(&unit.id),
+            );
+            if cache_save
+                && lane == RunnerMode::Github
+                && !self.uses_mr_boxington(unit)
+                && let Some(cache) = &unit.cache
+            {
+                let (paths, key) = rendered_cache_values(cache);
+                let trusted_cache = format!(
+                    "(github.event_name == 'push' && github.ref == 'refs/heads/{}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}')",
+                    self.default_branch, self.default_branch
+                );
+                let cache_key = format!(
+                    "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
+                    unit.id
+                );
+                let _ = writeln!(
+                    output,
+                    "      - name: Save {} cache\n        if: ({trusted_cache}) && steps.cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}",
+                    verify_name,
+                    self.pins.cache_save,
+                );
+            }
+            output.push('\n');
+        }
+    }
+
+    pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
+        if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
+            return "macos-15".to_owned();
+        }
+        self.runner_for(lane)
+    }
+
+    pub(crate) fn uses_mr_boxington(&self, unit: &Unit) -> bool {
+        self.mr_boxington && unit.kind == UnitKind::Rust
+    }
+
+    pub(crate) fn tools_for_unit(
+        unit: &Unit,
+        mise_rust: bool,
+        mr_boxington: bool,
+    ) -> BTreeSet<ToolRequirement> {
+        let mut tools = BTreeSet::new();
+        match unit.kind {
+            UnitKind::OpenTofu => {
+                tools.insert(ToolRequirement::OpenTofu);
+            }
+            UnitKind::Homebrew => {
+                tools.insert(ToolRequirement::Homebrew);
+            }
+            UnitKind::Bun => {
+                tools.insert(ToolRequirement::Bun);
+            }
+            UnitKind::Node => {
+                tools.insert(ToolRequirement::Node);
+            }
+            UnitKind::Gradle => {
+                tools.insert(ToolRequirement::Gradle);
+            }
+            UnitKind::Rust => {
+                if mise_rust {
+                    tools.insert(ToolRequirement::Mise);
+                }
+                if mr_boxington {
+                    tools.insert(ToolRequirement::MrBoxington);
+                } else {
+                    tools.insert(ToolRequirement::Sccache);
+                }
+                tools.insert(ToolRequirement::Mold);
+                let commands = unit.pr_commands.iter().chain(&unit.full_commands);
+                if commands.clone().any(|command| {
+                    command.contains("cargo nextest") || command.contains("mbx nextest")
+                }) {
+                    tools.insert(ToolRequirement::Nextest);
+                }
+                if unit
+                    .pr_commands
+                    .iter()
+                    .chain(&unit.full_commands)
+                    .any(|command| command.contains("cargo deny") || command.contains("mbx deny"))
+                {
+                    tools.insert(ToolRequirement::CargoDeny);
+                }
+                if unit
+                    .pr_commands
+                    .iter()
+                    .chain(&unit.full_commands)
+                    .any(|command| command.contains("cargo audit") || command.contains("mbx audit"))
+                {
+                    tools.insert(ToolRequirement::CargoAudit);
+                }
+            }
+            UnitKind::Docker => {
+                tools.insert(ToolRequirement::DockerBuildx);
+            }
+            UnitKind::Swift | UnitKind::Docs => {}
+        }
+        tools
+    }
+
+    pub(crate) fn render_tool_provisioning(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        unit: &Unit,
+        cache_save: bool,
+    ) {
+        // The Velnor job image is the toolchain boundary for self-hosted jobs.
+        // Hosted setup actions either are not admitted by Velnor or would
+        // redundantly download tools already pinned in that image. Keep
+        // transport/setup actions lane-specific instead of rendering one
+        // action surface and hoping the runner can ignore the other lane.
+        let github_lane = lane == RunnerMode::Github;
+        let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
+        if github_lane && tools.contains(&ToolRequirement::Mise) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust aqua:nextest-rs/nextest/cargo-nextest\n          cache: true",
+                self.pins.mise
+            );
+        }
+        if tools.contains(&ToolRequirement::MrBoxington) {
+            if lane == RunnerMode::Github {
+                let (_, key_files) = unit.cache.as_ref().map_or_else(
+                    || {
+                        rendered_cache_values(&CacheSpec {
+                            key_files: vec![
+                                "Cargo.lock".to_owned(),
+                                "rust-toolchain.toml".to_owned(),
+                                "rust-toolchain".to_owned(),
+                                "mise.toml".to_owned(),
+                                "mise.lock".to_owned(),
+                            ],
+                            paths: Vec::new(),
+                        })
+                    },
+                    rendered_cache_values,
+                );
+                // Stable per-unit key: exact hits reuse the cache on every run
+                // with unchanged dependency inputs, and a new immutable entry
+                // is saved only when those inputs change. A per-commit suffix
+                // would mint one entry per unit per push, flood the 10 GiB
+                // GitHub cache, evict warm entries, and force cold
+                // `Downloading crates` / `Compiling` builds.
+                let cache_key = format!(
+                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}",
+                    unit.id,
+                );
+                // Unit-level prefix (no dependency hash): after a lockfile or
+                // toolchain bump the previous tree still warms unchanged
+                // dependencies instead of rebuilding the world cold.
+                let restore_key = format!(
+                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-",
+                    unit.id,
+                );
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
+                    self.pins.mr_boxington
+                );
+            } else {
+                // Velnor lane: the job image pins Mr. Boxington and the runner
+                // mounts its host-persistent local store, so the local backend
+                // reuses it with no download and no cache transport. The
+                // version is deliberately omitted: pinning one would force a
+                // release download on every job instead of reusing PATH mbx.
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: local",
+                    self.pins.mr_boxington
+                );
+            }
+        }
+        if github_lane && tools.contains(&ToolRequirement::Bun) {
+            if let Some(bun_version) = unit.tool_version.as_deref() {
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Bun\n        uses: {}\n        with:\n          bun-version: {bun_version}",
+                    self.pins.bun
+                );
+            } else {
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Bun\n        uses: {}",
+                    self.pins.bun
+                );
+            }
+        }
+        if github_lane && tools.contains(&ToolRequirement::Node) {
+            let cache_manager = "npm";
+            let cache_dependency_path = unit.cache.as_ref().and_then(|cache| {
+                cache
+                    .key_files
+                    .iter()
+                    .find(|path| path.ends_with("package-lock.json"))
+            });
+            let cache_options = cache_dependency_path.map_or_else(
+                || "\n          package-manager-cache: false".to_owned(),
+                |path| {
+                    format!(
+                        "\n          cache: {cache_manager}\n          cache-dependency-path: {}",
+                        yaml_scalar(path)
+                    )
+                },
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Set up Node.js\n        uses: {}\n        with:\n          node-version: lts/*{cache_options}",
+                self.pins.node
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
+            let _ = writeln!(
+                output,
+                "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",
+                self.pins.rust_tool
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::CargoDeny) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up cargo-deny\n        uses: {}\n        with:\n          tool: cargo-deny\n          fallback: none",
+                self.pins.rust_tool
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::CargoAudit) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up cargo-audit\n        uses: {}\n        with:\n          tool: cargo-audit\n          fallback: none",
+                self.pins.rust_tool
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::Gradle) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up Gradle\n        uses: {}",
+                self.pins.gradle
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::Sccache) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0",
+                self.pins.sccache
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::Mold) {
+            output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
+        }
+        if github_lane && tools.contains(&ToolRequirement::DockerBuildx) {
+            let _ = writeln!(
+                output,
+                "      - name: Expose GitHub Actions runtime\n        uses: {}",
+                self.pins.github_runtime
+            );
+            let _ = writeln!(
+                output,
+                "      - name: Set up Docker Buildx\n        uses: {}",
+                self.pins.docker_buildx
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::OpenTofu) {
+            let _ = writeln!(
+                output,
+                "      - name: Set up OpenTofu\n        uses: {}\n        with:\n          tofu_version: {}\n          tofu_wrapper: false",
+                self.pins.opentofu_setup,
+                OPEN_TOFU_VERSION,
+            );
+        }
+        if github_lane && tools.contains(&ToolRequirement::Homebrew) {
+            output.push_str(
+                "      - name: Prepare Linuxbrew path\n        shell: bash\n        run: |\n          set -euo pipefail\n          if command -v brew >/dev/null 2>&1; then\n            exit 0\n          fi\n          linuxbrew_bin=/home/linuxbrew/.linuxbrew/bin\n          linuxbrew_sbin=/home/linuxbrew/.linuxbrew/sbin\n          if [[ ! -x \"$linuxbrew_bin/brew\" ]]; then\n            printf '%s\\n' 'Homebrew unavailable: install brew or expose it on PATH' >&2\n            exit 1\n          fi\n          [[ -n \"${GITHUB_PATH:-}\" ]] || { printf '%s\\n' 'GITHUB_PATH is unavailable' >&2; exit 1; }\n          printf '%s\\n%s\\n' \"$linuxbrew_bin\" \"$linuxbrew_sbin\" >> \"$GITHUB_PATH\"\n",
+            );
+        }
+    }
+
+    pub(crate) fn render_required(
+        &self,
+        output: &mut String,
+        runners: RunnerMode,
+        _stable: bool,
+        trusted: bool,
+        include_policy: bool,
+    ) {
+        let check_name = "ci-required";
+        let lanes = match runners {
+            RunnerMode::Github => vec![RunnerMode::Github],
+            RunnerMode::Velnor => vec![RunnerMode::Velnor],
+            RunnerMode::Both => vec![RunnerMode::Github, RunnerMode::Velnor],
+        };
+        let mut needs = vec!["plan".to_owned()];
+        if include_policy {
+            needs.push("policy".to_owned());
+        }
+        let mut job_checks = Vec::new();
+        for lane in lanes {
+            for unit in self
+                .units
+                .iter()
+                .filter(|unit| lane_supports_unit(lane, unit))
+            {
+                let id = unit_job_id(lane, &unit.id);
+                needs.push(id.clone());
+                job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
+            }
+        }
+        let gate = if runners == RunnerMode::Velnor && trusted {
+            format!(
+                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+                self.default_branch
+            )
+        } else {
+            "always()".to_owned()
+        };
+        let _ = writeln!(
+            output,
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        shell: bash\n        run: |",
+            needs.join(", "),
+            yaml_scalar(&self.github_runner),
+        );
+        for job in needs
+            .iter()
+            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
+        {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let _ = writeln!(
+                output,
+                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+            );
+        }
+        let selected = github_expression("needs.plan.outputs.units");
+        let _ = writeln!(output, "          selected=\",{selected},\"");
+        for (unit, job, allow_selected_skip) in job_checks {
+            let result = github_expression(&format!("needs['{job}'].result"));
+            let selected_case = if allow_selected_skip {
+                "success|skipped"
+            } else {
+                "success"
+            };
+            let _ = writeln!(
+                output,
+                "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            );
+        }
+    }
+}
