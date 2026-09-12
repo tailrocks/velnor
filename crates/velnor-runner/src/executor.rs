@@ -4539,7 +4539,7 @@ where
     fn seed_mise_store(&mut self, container: &JobContainerSpec) -> Result<()> {
         let store = crate::container::mise_store_host(
             &container.temp_host,
-            crate::container::store_trust_namespace(container.store_trust_class),
+            container.store_trust_scope.as_str(),
         );
         let inspect = self.runner.run(
             "docker",
@@ -15400,7 +15400,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
@@ -20552,7 +20552,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     #[test]
     fn cached_target_action_metadata_expressions_use_supported_subset() {
         let action_roots = [
-            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-runner-action-scratch"),
             Path::new("/tmp/velnor-targets/jackin/.github/actions"),
         ];
         if action_roots.iter().all(|root| !root.exists()) {

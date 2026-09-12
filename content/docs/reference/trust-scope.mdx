@@ -15,10 +15,11 @@ path: no host Docker socket, no user secrets, untrusted store namespace.
 
 ## The default is `untrusted`, and it fails closed
 
-`VELNOR_TRUST_SCOPE` (or `--trust-scope`) defaults to `untrusted`. Absent,
-empty, or unrecognized values all resolve to `untrusted`. Only the exact value
+`VELNOR_TRUST_SCOPE` (or `--trust-scope`) defaults to `untrusted`. Absent or
+empty values resolve to `untrusted`. Only the exact value
 `trusted` grants capability; `release` selects the `release` store namespace
-with the same capability as `untrusted`.
+with the same capability as `untrusted`, and any other (custom) value selects
+a store namespace of its own, also with the capability of `untrusted`.
 
 ### Breaking change for existing deployments
 
@@ -56,12 +57,21 @@ name before any side effect, not silently stripped.
 ## Store partitioning
 
 Every executable or build store Velnor persists across jobs is partitioned
-first by trust class and then, where a repository identity applies, by numeric
+first by the job's admitted scope — the pool ceiling narrowed by the job's
+trust class — and then, where a repository identity applies, by numeric
 GitHub repository ID:
 
 ```text
-<storage root>/cache/velnor/v1/<untrusted|trusted|release>/<class>[/<repository id>]
+<storage root>/cache/velnor/v1/<admitted scope>/<class>[/<repository id>]
 ```
+
+On a `trusted` pool that is `trusted` for same-repo jobs and `untrusted` for
+fork and unknown jobs; on a `release` pool it is `release` and `untrusted`;
+on a custom pool (any other scope value) trusted jobs keep the pool's own
+scope while fork and unknown jobs still run under `untrusted`. The spelling
+is one value threaded through the storage leases, the container mounts, and
+garbage collection, so a custom scope can never lease one namespace and mount
+another.
 
 With the packaged storage root that is `/var/cache/velnor/v1/...`. The
 partitioned classes are the Mr Boxington store (`compiler/mbx`), the sccache

@@ -43,13 +43,11 @@ run = "cargo check --workspace --all-targets --locked"
 
 [tasks.test-release-feature-boundary]
 description = "Prove release-profile builds reject the loopback-only test feature"
-run = """
-set -eu
-if cargo check -p velnor-runner --release --locked --features test-support; then
-  echo "test-support unexpectedly compiled in a release profile" >&2
-  exit 1
-fi
-"""
+run = "bash scripts/check-release-feature-boundary.sh"
+
+[tasks.test-release-boundary-script]
+description = "Prove the boundary check accepts only the expected guard and rejects unrelated failures"
+run = "bash scripts/test-check-release-feature-boundary.sh"
 
 [tasks."release:check"]
 description = "Validate the tagged release unit and signed velnor-apt train"
@@ -219,7 +217,7 @@ cat "$digest_output"
 """
 
 [tasks.check]
-depends = ["fmt", "actionlint", "audit-ci", "deny", "pin-integrity", "lint", "test", "test-production-topology", "test-release-feature-boundary"]
+depends = ["fmt", "actionlint", "audit-ci", "deny", "pin-integrity", "lint", "test", "test-production-topology", "test-release-feature-boundary", "test-release-boundary-script"]
 
 [tasks.ci]
 depends = ["actionlint", "audit-ci", "deny", "pin-integrity"]

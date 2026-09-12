@@ -433,6 +433,88 @@ pub fn resolve_acquisition(
     Ok(())
 }
 
+/// Rebuild an acquisition row that `resolve_acquisition` cannot find, from the
+/// identity the acquire reply named.
+///
+/// The provisional row is crash *bookkeeping*, not a precondition of the job:
+/// it exists so that a crash inside the acquire window leaves evidence. When
+/// the acquire reply came back 200 the runner provably holds the job, so a row
+/// that went missing anyway — the slot journal was created or repopulated by
+/// another process between the intent and the resolve — must be rebuilt, never
+/// treated as a reason to give the job up. Writing it ends at the same state
+/// `intend_acquisition` + `resolve_acquisition` normally produce: one
+/// provisional row keyed by the acquired identity, carrying the plan that makes
+/// it probeable, occupying the slot.
+///
+/// The rebuild is deliberately two events, not one new event type: the interim
+/// state (provisional, no plan) is one that already exists in the log, so
+/// recovery and every reader keep seeing shapes they already understand.
+///
+/// Already-recorded rows are adopted, never forked or rewritten, for the same
+/// reason `intend_acquisition` reuses a retried message's generation: a row for
+/// the acquired identity that already carries a plan, or that `JobOwned` has
+/// already promoted, *is* the evidence this function exists to write. Only a
+/// provisional row still missing its plan — the state a crash between the two
+/// writes below leaves — is finished off rather than restarted.
+///
+/// Returns `true` when a row was written and `false` when the journal already
+/// held the acquired identity, so callers can tell a genuine rebuild from an
+/// adoption they never need to announce.
+///
+/// # Errors
+/// Journal write failure, or a rejection: the journal holds a state this
+/// recovery must not overwrite (a slot that is not `Ready` has a claim on it
+/// that nothing here has proven false).
+pub fn reintend_resolved_acquisition(
+    journal: &mut Journal,
+    acquired_job_id: &JobId,
+    slot_id: &SlotId,
+    message_id: &str,
+    plan_id: &str,
+    run_service_url: &str,
+    now: u64,
+) -> anyhow::Result<bool> {
+    let state = journal.materialized_state()?;
+    match state.jobs.iter().find(|job| job.job_id == *acquired_job_id) {
+        // Ownership supersedes recovery: promote nothing, fork nothing.
+        Some(job) if !job.provisional || !job.plan_id.is_empty() => return Ok(false),
+        // A crash between the intent and the resolve below leaves exactly this
+        // row: keyed by the acquired identity but planless, so no `renewjob`
+        // call can be built for it and startup recovery would abandon it. Give
+        // it the plan instead of starting the rebuild over.
+        Some(job) => {
+            resolve_acquisition(
+                journal,
+                acquired_job_id,
+                acquired_job_id,
+                plan_id,
+                job.generation,
+            )?;
+            return Ok(true);
+        }
+        None => {}
+    }
+    let generation = intend_acquisition(
+        journal,
+        acquired_job_id,
+        slot_id,
+        message_id,
+        run_service_url,
+        now,
+    )?;
+    // Provisional and acquired identities are the same job here, so this is a
+    // plan write, not a retarget of somebody else's row: the reducer's
+    // `target_taken` guard is defined to be false when the two names match.
+    resolve_acquisition(
+        journal,
+        acquired_job_id,
+        acquired_job_id,
+        plan_id,
+        generation,
+    )?;
+    Ok(true)
+}
+
 /// Promote a provisional row after GitHub returned the job.
 pub fn confirm_acquisition(
     journal: &mut Journal,
@@ -1218,6 +1300,78 @@ mod tests {
     /// sees.
     fn restart(dir: &Path) -> Journal {
         Journal::open(dir.join("journal.db")).unwrap()
+    }
+
+    /// A rebuild is two writes, so it can itself be interrupted: the crash
+    /// leaves a provisional row keyed by the acquired identity with no plan, and
+    /// a planless row is exactly the one startup recovery abandons. Retrying the
+    /// rebuild must finish that row, not fork a second one beside it.
+    #[test]
+    fn a_rebuild_picks_up_where_an_interrupted_one_stopped() {
+        let dir = tmp("rebuild-interrupted");
+        let job = JobId("guid-1".into());
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            // The intent half of the rebuild, without the resolve.
+            intend_acquisition(
+                &mut journal,
+                &job,
+                &slot,
+                "request-1",
+                RUN_SERVICE_URL,
+                INTENDED_UNIX,
+            )
+            .unwrap();
+        }
+
+        let mut journal = restart(&dir);
+        reintend_resolved_acquisition(
+            &mut journal,
+            &job,
+            &SlotId("scope-1".into()),
+            "request-1",
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1, "the interrupted row is finished");
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].run_service_url, RUN_SERVICE_URL);
+        assert!(state.jobs[0].provisional, "still not ownership");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A rebuild that arrives after ownership is a no-op: the row it would
+    /// write already says more than the rebuild could.
+    #[test]
+    fn a_rebuild_never_touches_a_row_that_is_already_owned() {
+        let dir = tmp("rebuild-after-ownership");
+        let job = JobId("guid-1".into());
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let slot = SlotId("scope-1".into());
+        let generation = prime_owned(&mut journal, &job);
+
+        reintend_resolved_acquisition(
+            &mut journal,
+            &job,
+            &slot,
+            "request-1",
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(!state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].generation, generation);
+        assert!(state.outbox.iter().all(|row| row.job_id != job));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn pending_row(

@@ -502,21 +502,27 @@ fn store_roots_with_layout(
         gc_managed: true,
         emergency_managed: true,
     });
-    for (trust_class, trust_scope) in crate::store_catalog::TRUST_SCOPES {
-        for (kind, path) in [
-            (CacheStore::Mbx, catalog.mbx(trust_scope)),
-            (CacheStore::Sccache, catalog.sccache(trust_class)),
-        ] {
-            stores.push(StoreRoot {
-                kind,
-                path,
-                scope_prefix: Vec::new(),
-                scope_depth: 1,
-                candidate_depth: 1,
-                gc_managed: false,
-                emergency_managed: true,
-            });
-        }
+    // The compiler stores are partitioned by the job's admitted scope like
+    // every other trust-partitioned class: trusted jobs on a custom pool
+    // write under the pool scope, fork and unknown jobs under the floor.
+    for (kind, path) in trust_partitioned_roots(&catalog, StoreCatalog::mbx)
+        .into_iter()
+        .map(|path| (CacheStore::Mbx, path))
+        .chain(
+            trust_partitioned_roots(&catalog, StoreCatalog::sccache)
+                .into_iter()
+                .map(|path| (CacheStore::Sccache, path)),
+        )
+    {
+        stores.push(StoreRoot {
+            kind,
+            path,
+            scope_prefix: Vec::new(),
+            scope_depth: 1,
+            candidate_depth: 1,
+            gc_managed: false,
+            emergency_managed: true,
+        });
     }
     // The hosted actions-cache service is durable storage like any other class.
     // It was previously invisible to `cache du` and to every collector, so each
@@ -544,11 +550,13 @@ fn is_legacy_store(path: &Path) -> bool {
 /// the untrusted floor fork and unknown jobs run under, deduped by path.
 ///
 /// The pool scope comes from the process resolution (the daemon's flag); the
-/// floor is unconditional. Legacy roots ignore the scope, so both resolve to
-/// the one root and enumerate once. Canonical roots namespace by scope, so a
-/// trusted pool sweeps both its own namespace and the fork-job namespace —
-/// without the second root, fork-job stores on a trusted pool would grow
-/// unbounded, invisible to every collector.
+/// floor is unconditional. Legacy roots of the plain classes ignore the
+/// scope, so both resolve to the one root and enumerate once; legacy roots of
+/// the compiler classes carry the scope below the shared root, so both
+/// namespaces enumerate. Canonical roots namespace by scope, so a trusted
+/// pool sweeps both its own namespace and the fork-job namespace — without
+/// the second root, fork-job stores on a trusted pool would grow unbounded,
+/// invisible to every collector.
 fn trust_partitioned_roots(
     catalog: &StoreCatalog,
     root: impl Fn(&StoreCatalog, &str) -> PathBuf,

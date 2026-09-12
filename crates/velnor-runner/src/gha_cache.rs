@@ -438,7 +438,7 @@ fn clear_v1_reservation(service: &CacheService, id: &str, namespace: &str) -> Re
 
 fn cache_namespace(token: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-tenant\0");
+    hasher.update(b"velnor-runner-cache-tenant\0");
     hasher.update(token.as_bytes());
     hex(&hasher.finalize())
 }
@@ -531,7 +531,7 @@ impl CacheIdentity {
 
 fn repo_namespace(repository: &str, git_ref: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-repo\0");
+    hasher.update(b"velnor-runner-cache-repo\0");
     hasher.update(repository.as_bytes());
     hasher.update(b"\0");
     hasher.update(git_ref.as_bytes());
@@ -545,7 +545,7 @@ fn repo_namespace(repository: &str, git_ref: &str) -> String {
 /// branch. Trusted jobs never resolve here (see [`CacheIdentity::namespaces`]).
 fn fork_namespace(repository: &str, git_ref: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"velnor-actions-cache-fork\0");
+    hasher.update(b"velnor-runner-cache-fork\0");
     hasher.update(repository.as_bytes());
     hasher.update(b"\0");
     hasher.update(git_ref.as_bytes());

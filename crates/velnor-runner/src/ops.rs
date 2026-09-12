@@ -193,7 +193,7 @@ impl JobAdmission {
 
     /// Mask, then project onto the slug charset. Validation still runs
     /// afterwards and fails closed naming only the field.
-    fn project(&self, raw: &str) -> String {
+    pub(crate) fn project(&self, raw: &str) -> String {
         let masked = crate::runner::mask_all(raw, &self.masks);
         sanitize_slug(&masked)
     }

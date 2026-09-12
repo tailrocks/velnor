@@ -202,7 +202,7 @@ impl From<RepositoryShape> for ProjectConfig {
             default_branch: shape.default_branch,
             runners: shape.runners,
             github_runner: "ubuntu-24.04".to_owned(),
-            velnor_labels: vec!["self-hosted".to_owned(), "velnor-target-mvp".to_owned()],
+            velnor_labels: crate::default_velnor_runner_labels(),
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
             release: None,
@@ -210,6 +210,7 @@ impl From<RepositoryShape> for ProjectConfig {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            package_update_channels: None,
         }
     }
 }
