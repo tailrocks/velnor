@@ -18,6 +18,11 @@ name: Preview release
 # The rolling `preview` release is replaced atomically: delete-then-create under
 # a serialized concurrency group, never edited in place, so a reader can never
 # observe a half-replaced asset set.
+#
+# Every job re-checks the ref: `workflow_dispatch` carries no branch filter, so
+# a dispatch from any other ref must never build, and the manifest it would
+# publish hardcodes `source_ref: refs/heads/main` — the producer is not allowed
+# to claim a ref it did not build from.
 on:
   push:
     branches: [main]
@@ -33,6 +38,7 @@ concurrency:
 jobs:
   identity:
     name: Resolve preview identity
+    if: ${{ github.ref == 'refs/heads/main' }}
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     outputs:
@@ -88,6 +94,7 @@ jobs:
   guest-payload:
     needs: identity
     name: Build ${{ matrix.arch }} guest payload for the deb
+    if: ${{ github.ref == 'refs/heads/main' }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -234,6 +241,7 @@ jobs:
   build:
     needs: [identity, guest-payload]
     name: Build ${{ matrix.arch }} preview deb
+    if: ${{ github.ref == 'refs/heads/main' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -484,6 +492,7 @@ jobs:
   attest:
     needs: [identity, build]
     name: Attest ${{ matrix.arch }} preview deb
+    if: ${{ github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:
@@ -501,6 +510,7 @@ jobs:
   publish:
     needs: [identity, build, attest]
     name: Replace the rolling preview release
+    if: ${{ github.ref == 'refs/heads/main' }}
     timeout-minutes: 20
     runs-on: ubuntu-24.04
     permissions:
@@ -559,6 +569,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Monotonicity guard: a re-run of a superseded publish job reuses its
+          # original run number, so the version it would publish can be older
+          # than the version the rolling release names right now. Deleting the
+          # live release before that check would move the lane backward, so the
+          # live version is compared first and a regression is refused: the
+          # operator must re-run the LATEST preview run instead. Re-publishing
+          # the identical version (same commit re-run) stays idempotent.
+          live_name="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/preview" --jq '.name' 2>/dev/null || true)"
+          live_version="${live_name#Preview }"
+          if [ -n "$live_version" ]; then
+            [[ "$live_name" = "Preview $live_version" && "$live_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+~preview\.[0-9]+\+[0-9a-f]{7}$ ]] \
+              || { echo "::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it" >&2; exit 1; }
+            if dpkg --compare-versions "$live_version" eq "$VERSION"; then
+              :
+            elif dpkg --compare-versions "$live_version" gt "$VERSION"; then
+              echo "::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead" >&2
+              exit 1
+            fi
+          fi
           # Serialized by the workflow concurrency group, so this delete can
           # never race another run's create and a reader never sees a torn
           # release. `preview` is a moving tag by contract: the only mutable

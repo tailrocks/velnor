@@ -5926,15 +5926,33 @@ fn replace_apt_package_updater_runner(
 fn render_apt_package_update_template(config: &ProjectConfig, template: &str) -> String {
     let mut output = String::with_capacity(template.len());
     let mut replaced = false;
+    let mut block: Option<&str> = None;
     for segment in template.split_inclusive('\n') {
         let line = segment.strip_suffix('\n').unwrap_or(segment);
-        if line.trim_start().starts_with("runs-on:")
+        let trimmed = line.trim_start();
+        let indentation = line.len() - trimmed.len();
+        // Owner blocks are the top-level jobs of this workflow; the channel
+        // matrix inside each one is rewritten from catalog data below.
+        if indentation == 2 && trimmed.ends_with(':') {
+            block = Some(trimmed.strip_suffix(':').unwrap_or(trimmed));
+        }
+        let is_channel_matrix = indentation == 8 && trimmed.starts_with("channel:");
+        if let Some(block) = block.filter(|_| is_channel_matrix) {
+            output.push_str(&line[..indentation]);
+            output.push_str(&apt_package_update_channel_matrix(
+                apt_package_update_channels(&config.repository, block),
+            ));
+            if segment.ends_with('\n') {
+                output.push('\n');
+            }
+            replaced = true;
+        } else if trimmed.starts_with("runs-on:")
             && line.contains("${{")
             && line.contains("inputs.lanes")
             && line.contains("velnor")
         {
-            let indentation = &line[..line.len() - line.trim_start().len()];
-            output.push_str(indentation);
+            let indent = &line[..indentation];
+            output.push_str(indent);
             output.push_str("runs-on: ");
             output.push_str(&yaml_scalar(&config.github_runner));
             if segment.ends_with('\n') {
@@ -5952,6 +5970,35 @@ fn render_apt_package_update_template(config: &ProjectConfig, template: &str) ->
         return template.to_owned();
     }
     output
+}
+
+/// Update channels an owner block of the rendered `package-update.yml` matrix
+/// may consult. A channel is granted only where the consumer-side
+/// `package-updater.yml` implements that channel's arm: a granted-but-
+/// unimplemented channel renders a scheduled job that can never succeed. The
+/// grant is per owner block, because one rendered file is shared by every
+/// owner: jackin's updater predates the preview lane and already carries a
+/// preview arm, and no `ChainArgos` consumer implements one, so both blocks are
+/// consumer-independent. The tailrocks block is granted per estate — only
+/// velnor-apt's own package-updater.yml verifies and publishes the preview
+/// channel today, so the other tailrocks consumers keep `channel: [stable]`.
+/// Never returns an empty grant.
+fn apt_package_update_channels(repository: &str, block: &str) -> &'static [&'static str] {
+    match block {
+        "jackin_project" => &["stable", "preview"],
+        "chainargos" => &["stable"],
+        _ if repository == "tailrocks/velnor-apt" => &["stable", "preview"],
+        _ => &["stable"],
+    }
+}
+
+fn apt_package_update_channel_matrix(channels: &[&str]) -> String {
+    let rendered = channels
+        .iter()
+        .map(|channel| yaml_scalar(channel))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("channel: [{rendered}]")
 }
 
 fn apt_velnor_trusted_gate(default_branch: &str) -> String {
@@ -11165,6 +11212,174 @@ const INCLUDED: &str = include_str!("fixture.txt");
             rendered.as_str(),
             "adopting an already generated APT barrier must be idempotent"
         );
+    }
+
+    /// The `channel:` matrix entry an owner block of a rendered
+    /// `package-update.yml` carries.
+    fn apt_package_update_block_matrix(rendered: &str, block: &str) -> Option<String> {
+        let mut inside = false;
+        for line in rendered.lines() {
+            let trimmed = line.trim_start();
+            let indentation = line.len() - trimmed.len();
+            if indentation == 2 && trimmed.ends_with(':') {
+                inside = trimmed == format!("{block}:");
+                continue;
+            }
+            if inside && indentation == 8 && trimmed.starts_with("channel:") {
+                return Some(trimmed.to_owned());
+            }
+        }
+        None
+    }
+
+    fn apt_package_update_config(repository: &str, template: &str) -> ProjectConfig {
+        let mut apt = must(
+            scan_repository(&fixture_root(), RunnerMode::Both),
+            "scan fixture for APT package update channels",
+        );
+        apt.profile = RepositoryProfile::AptRepository;
+        apt.repository = repository.to_owned();
+        apt.workflow_files = vec!["package-update.yml".to_owned()];
+        apt.workflow_templates
+            .insert("package-update.yml".to_owned(), template.to_owned());
+        apt.adopted_workflow_surface = true;
+        apt
+    }
+
+    #[test]
+    fn apt_package_update_channels_are_granted_per_owner_block() {
+        let rendered = must_some(
+            generated_files(&apt_package_update_config(
+                "tailrocks/velnor-apt",
+                APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE,
+            ))
+            .remove(&PathBuf::from(".github/workflows/package-update.yml")),
+            "generated velnor-apt package update",
+        );
+        // velnor-apt is the only tailrocks consumer whose updater implements
+        // the preview arm, so only its tailrocks block carries both channels.
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "jackin_project"),
+                "jackin_project channel matrix"
+            ),
+            "channel: [stable, preview]"
+        );
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "tailrocks"),
+                "tailrocks channel matrix"
+            ),
+            "channel: [stable, preview]"
+        );
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "chainargos"),
+                "chainargos channel matrix"
+            ),
+            "channel: [stable]"
+        );
+        assert_eq!(
+            render_apt_package_update_template(
+                &apt_package_update_config(
+                    "tailrocks/velnor-apt",
+                    APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE
+                ),
+                &rendered
+            ),
+            rendered,
+            "the granted channel matrix must be a render fixpoint"
+        );
+
+        // Every other estate keeps stable only, and a checked-in matrix that
+        // drifted onto preview (the shared template shipped before the grant
+        // was per estate) converges back instead of staying permanently red.
+        let drifted = APT_PACKAGE_UPDATE_WORKFLOW_TEMPLATE.replace(
+            "        channel: [stable]\n",
+            "        channel: [stable, preview]\n",
+        );
+        let rendered = must_some(
+            generated_files(&apt_package_update_config("tailrocks/holla-apt", &drifted))
+                .remove(&PathBuf::from(".github/workflows/package-update.yml")),
+            "generated holla-apt package update",
+        );
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "jackin_project"),
+                "jackin_project channel matrix"
+            ),
+            "channel: [stable, preview]"
+        );
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "tailrocks"),
+                "tailrocks channel matrix"
+            ),
+            "channel: [stable]"
+        );
+        assert_eq!(
+            must_some(
+                apt_package_update_block_matrix(&rendered, "chainargos"),
+                "chainargos channel matrix"
+            ),
+            "channel: [stable]"
+        );
+        assert_eq!(
+            render_apt_package_update_template(
+                &apt_package_update_config("tailrocks/holla-apt", &drifted),
+                &rendered
+            ),
+            rendered,
+            "the stable-only channel matrix must be a render fixpoint"
+        );
+    }
+
+    #[test]
+    fn velnor_preview_lane_refuses_off_main_dispatch_and_rolling_release_regression() {
+        let workflow = render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE);
+        let body = must_some(
+            workflow.split_once("\njobs:\n").map(|(_, body)| body),
+            "preview workflow declares jobs",
+        );
+        // workflow_dispatch carries no ref filter, so every job re-checks the
+        // ref itself: a dispatch from a non-main ref must never build, attest,
+        // or publish a manifest that claims source_ref refs/heads/main.
+        let mut current = String::new();
+        let mut guarded = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            let indentation = line.len() - trimmed.len();
+            if indentation == 2 && trimmed.ends_with(':') {
+                current = trimmed.trim_end_matches(':').to_owned();
+            }
+            if indentation == 4 && trimmed == "if: ${{ github.ref == 'refs/heads/main' }}" {
+                guarded.push(current.clone());
+            }
+        }
+        for job in ["identity", "guest-payload", "build", "attest", "publish"] {
+            assert!(
+                guarded.iter().any(|guarded| guarded == job),
+                "preview job {job} must refuse a non-main ref"
+            );
+        }
+
+        let publish = must_some(
+            body.split_once("\n  publish:").map(|(_, publish)| publish),
+            "preview workflow publishes",
+        );
+        let delete = must_some(
+            publish
+                .split_once("gh release delete preview")
+                .map(|(guard, _)| guard),
+            "preview publish replaces the rolling release",
+        );
+        // Re-running a superseded publish reuses its run number, so the delete
+        // is gated on the live version: equal is idempotent, newer refuses and
+        // points the operator at the latest run.
+        assert!(delete.contains("dpkg --compare-versions \"$live_version\" eq \"$VERSION\""));
+        assert!(delete.contains("dpkg --compare-versions \"$live_version\" gt \"$VERSION\""));
+        assert!(delete.contains("re-run the LATEST preview run"));
+        assert!(delete.contains("^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{7}$"));
     }
 
     #[test]
