@@ -1657,8 +1657,10 @@ pub(crate) struct DockerJobEngine<R> {
     /// Job-secret mask values supplied by the runner. Combined with runtime
     /// ::add-mask:: values before building each docker exec argv.
     secret_masks: Vec<String>,
-    /// Operator-selected trust boundary. Credential-bearing native adapters
-    /// enforce this independently of Docker-socket availability.
+    /// The trust scope in effect for this job: the pool ceiling narrowed by
+    /// the job's trust class at admission, installed via `with_trust_scope`.
+    /// Credential-bearing native adapters enforce this independently of
+    /// Docker-socket availability; cache paths resolve under it.
     trust_scope: String,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
@@ -1729,6 +1731,9 @@ where
         self
     }
 
+    /// Install the job's admitted scope (the pool ceiling narrowed by the
+    /// job's trust class at admission). Native-adapter gates and cache paths
+    /// enforce this; pass the admitted scope, never the raw pool flag.
     pub fn with_trust_scope(mut self, trust_scope: impl Into<String>) -> Self {
         self.trust_scope = trust_scope.into();
         self
@@ -2042,6 +2047,10 @@ where
             temp_host,
         )?;
         state.persistent_workspace_target = container.cargo_target_host.is_some();
+        // The engine's scope is the job's admitted scope (installed from the
+        // admission decision via `with_trust_scope`): cache paths resolved
+        // from this state land in the job's namespace, not the pool's.
+        state.trust_scope = self.trust_scope.clone();
         state.cargo_target_host = container
             .cargo_target_host
             .as_ref()
@@ -4528,7 +4537,10 @@ where
     /// over /opt/mise/installs dangles the image-baked shims (the `gh is not
     /// a valid shim` class); seeding makes the store a superset of the image.
     fn seed_mise_store(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let store = crate::container::mise_store_host(&container.temp_host);
+        let store = crate::container::mise_store_host(
+            &container.temp_host,
+            container.store_trust_scope.as_str(),
+        );
         let inspect = self.runner.run(
             "docker",
             &[
@@ -9749,17 +9761,19 @@ fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> 
         );
         return Ok(temp.join("_velnor/ephemeral/caches").join(version));
     };
+    // The job's admitted scope, installed by the engine: a fork job's cache
+    // lands in the untrusted namespace even on a trusted pool. Never the
+    // process pool — that is the ceiling, not this job's trust.
+    let scope = crate::trust_scope::normalize_scope(&state.trust_scope);
     let root = crate::storage::cache_class_path(
         &crate::container::daemon_shared_root(shared_work_root(temp)),
+        scope,
         "caches",
         "_velnor_caches",
     );
-    Ok(crate::storage::append_legacy_trust(
-        root,
-        &crate::github_adapter::cargo_target_trust_scope(),
-    )
-    .join(crate::container::sanitize_store_key(&repository))
-    .join(version))
+    Ok(crate::storage::append_legacy_trust(root, scope)
+        .join(crate::container::sanitize_store_key(&repository))
+        .join(version))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -11567,6 +11581,11 @@ fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
 
 #[derive(Debug, Default)]
 pub(crate) struct JobExecutionState {
+    /// The trust scope in effect for this job (the pool ceiling narrowed by
+    /// the job's trust class at admission). The engine installs it when the
+    /// state is built; cache and artifact paths namespace by it. Empty reads
+    /// as fail-closed: states built without a scope resolve untrusted stores.
+    trust_scope: String,
     env: BTreeMap<String, String>,
     /// Snapshot of runner-authoritative job values. Action-local env and
     /// workflow command state must never rewrite identity or credentials used
@@ -11687,6 +11706,7 @@ impl JobExecutionState {
     ) -> Result<Self, ExpressionInterpolationError> {
         let initial_env: BTreeMap<_, _> = base_env.iter().cloned().collect();
         let mut state = Self {
+            trust_scope: String::new(),
             env: initial_env.clone(),
             immutable_env: initial_env,
             workflow_env: Vec::new(),
@@ -11741,6 +11761,9 @@ impl JobExecutionState {
 
     pub(crate) fn with_step_action(&self, step_id: &str) -> Self {
         let mut state = Self {
+            // A derived state is the same job, so it carries the same trust:
+            // cache paths resolved from it land in the job's namespace.
+            trust_scope: self.trust_scope.clone(),
             env: self.env.clone(),
             immutable_env: self.immutable_env.clone(),
             workflow_env: self.workflow_env.clone(),
@@ -11771,6 +11794,9 @@ impl JobExecutionState {
 
     fn with_env(&self, env: Vec<(String, String)>) -> Self {
         let mut state = Self {
+            // A derived state is the same job, so it carries the same trust:
+            // cache paths resolved from it land in the job's namespace.
+            trust_scope: self.trust_scope.clone(),
             env: self.env.clone(),
             immutable_env: self.immutable_env.clone(),
             workflow_env: self.workflow_env.clone(),
@@ -15367,7 +15393,7 @@ esac
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         }
@@ -16456,6 +16482,44 @@ esac
         assert_eq!(
             store.parent().unwrap().file_name().unwrap(),
             "Org_Repo.Name"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_store_dir_uses_the_job_admitted_scope() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut state = JobExecutionState::new_internal(
+            &[("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into())],
+            &[],
+            None,
+            Some(temp.clone()),
+        );
+
+        // A state without an installed scope fails closed to untrusted.
+        let store = cache_store_dir(&state, "cv1-abc123").unwrap();
+        assert!(
+            store.ends_with("_velnor_caches/untrusted/Org_Repo.Name/cv1-abc123"),
+            "{}",
+            store.display()
+        );
+
+        // The engine installs the job's admitted scope; the cache follows it.
+        state.trust_scope = "trusted".into();
+        let store = cache_store_dir(&state, "cv1-abc123").unwrap();
+        assert!(
+            store.ends_with("_velnor_caches/trusted/Org_Repo.Name/cv1-abc123"),
+            "{}",
+            store.display()
+        );
+
+        // A derived state is the same job: it carries the same trust.
+        let derived = state.with_env(Vec::new());
+        assert_eq!(
+            cache_store_dir(&derived, "cv1-abc123").unwrap(),
+            cache_store_dir(&state, "cv1-abc123").unwrap()
         );
         fs::remove_dir_all(root).unwrap();
     }

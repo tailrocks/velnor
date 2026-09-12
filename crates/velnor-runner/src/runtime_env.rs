@@ -124,7 +124,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         if let Some(url) = endpoint.url.as_deref() {
             set_env(&mut env, "ACTIONS_RUNTIME_URL", url);
         }
-        if let Some(token) = endpoint_access_token(endpoint) {
+        if let Some(token) = job_runtime_token(job) {
             set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", token);
         }
         push_endpoint_data(
@@ -152,7 +152,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
                 "ACTIONS_ID_TOKEN_REQUEST_URL",
             ],
             "ACTIONS_ID_TOKEN_REQUEST_URL",
-        ) && let Some(token) = endpoint_access_token(endpoint)
+        ) && let Some(token) = job_runtime_token(job)
         {
             set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
         }
@@ -405,6 +405,14 @@ fn push_endpoint_data(
         return true;
     }
     false
+}
+
+/// The job's runtime credential: the SystemConnection access token, i.e. the
+/// exact value injected as `ACTIONS_RUNTIME_TOKEN`. The GHA cache service
+/// binds this credential to the job's cache identity at admission, so both
+/// sides must read it through this one accessor.
+pub(crate) fn job_runtime_token(job: &AgentJobRequestMessage) -> Option<&str> {
+    job.system_connection().and_then(endpoint_access_token)
 }
 
 fn endpoint_access_token(endpoint: &crate::job_message::ServiceEndpoint) -> Option<&str> {

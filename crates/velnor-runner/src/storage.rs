@@ -99,13 +99,33 @@ impl StorageLayout {
     }
 }
 
-pub fn cache_class_path(legacy_work_root: &Path, class: &str, legacy_name: &str) -> PathBuf {
+/// Resolve the root of a trust-partitioned store class.
+///
+/// `trust_scope` is the scope in effect for the caller: the job's admitted
+/// scope on the execution path, the pool scope or the untrusted floor on the
+/// GC path. There is no ambient read here — a caller that guessed would hand
+/// one job's stores to another class. In the legacy layout the root carries
+/// no trust segment (trust appends below it, per store); in the canonical
+/// layout the root is namespaced by the scope.
+pub fn cache_class_path(
+    legacy_work_root: &Path,
+    trust_scope: &str,
+    class: &str,
+    legacy_name: &str,
+) -> PathBuf {
     let layout = StorageLayout::resolve();
-    cache_class_path_with_layout(legacy_work_root, class, legacy_name, layout.as_ref())
+    cache_class_path_with_layout(
+        legacy_work_root,
+        trust_scope,
+        class,
+        legacy_name,
+        layout.as_ref(),
+    )
 }
 
 pub fn cache_class_path_with_layout(
     legacy_work_root: &Path,
+    trust_scope: &str,
     class: &str,
     legacy_name: &str,
     layout: Option<&StorageLayout>,
@@ -114,14 +134,14 @@ pub fn cache_class_path_with_layout(
     let Some(layout) = layout else {
         return legacy;
     };
-    let canonical = layout.cache_class(&crate::github_adapter::cargo_target_trust_scope(), class);
+    let canonical = layout.cache_class(crate::trust_scope::normalize_scope(trust_scope), class);
     prefer_canonical_or_existing_legacy(canonical, legacy)
 }
 
-/// Resolve a trust-scoped store path without consulting process-global trust
-/// state. Executable and build stores use this boundary because the admitted
-/// trust class belongs to the job plan, while other stores retain
-/// [`cache_class_path`] and their existing operator-selected scope.
+/// Resolve a trust-scoped store path below its class root, without consulting
+/// process-global trust state. Takes the scope in effect for the caller, like
+/// [`cache_class_path`]; unlike the root, the legacy form also carries the
+/// trust segment, so both layouts namespace the store by the scope.
 pub fn cache_class_path_for_trust(
     legacy_work_root: &Path,
     trust_scope: &str,

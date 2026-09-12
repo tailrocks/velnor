@@ -26,6 +26,12 @@ pub struct GitHubJobContainerPaths {
     pub execution_backend: velnor_model::ExecutionBackendKind,
 }
 
+/// Build the job container spec for one admitted job.
+///
+/// `trust_scope` is the job's admitted scope (the pool ceiling narrowed by
+/// the job's trust class at admission), never the raw pool flag: it decides
+/// the Docker socket mount, privileged options, port publishing, and every
+/// trust-scoped store path in the spec.
 #[allow(clippy::too_many_arguments)]
 pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
@@ -77,7 +83,7 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
-        store_trust_class: store_trust_class(trust_scope),
+        store_trust_scope: crate::trust_scope::normalize_scope(trust_scope).to_owned(),
         sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
             && explicit_sccache)
             .then(|| github_sccache_store_host(job, &paths.temp_host, trust_scope)),
@@ -124,13 +130,14 @@ fn github_rust_store_host(
         );
         return ephemeral();
     };
+    // Normalize once, without resolving: this is the job's admitted scope,
+    // and re-resolving it through the process cell would hand back the pool.
+    // The compiler stores are namespaced by that same scope — not collapsed
+    // to a fixed class — so the mounts agree with the storage leases.
+    let scope = crate::trust_scope::normalize_scope(trust_scope);
     crate::storage::cache_class_path_for_trust(
         &crate::container::daemon_store_root(temp_host),
-        match store_trust_class(trust_scope) {
-            crate::container::StoreTrustClass::Trusted => "trusted",
-            crate::container::StoreTrustClass::Release => "release",
-            crate::container::StoreTrustClass::Untrusted => "untrusted",
-        },
+        scope,
         &format!("compiler/{store}"),
         &format!("_velnor_{store}"),
     )
@@ -176,9 +183,12 @@ pub(crate) fn github_cargo_target_store_host(
         eprintln!("forensics.lifecycle: persistent target store refused: invalid job display name");
         return ephemeral();
     };
+    // Normalize once, without resolving: this is the job's admitted scope,
+    // and re-resolving it through the process cell would hand back the pool.
+    let scope = crate::trust_scope::normalize_scope(trust_scope);
     crate::storage::append_legacy_trust(
-        crate::container::cargo_target_store_host(temp_host),
-        crate::trust_scope::resolve(trust_scope).as_str(),
+        crate::container::cargo_target_store_host(temp_host, scope),
+        scope,
     )
     .join(CARGO_TARGET_GENERATION)
     .join(repository)
@@ -211,30 +221,17 @@ fn target_path_component(value: &str) -> Option<String> {
     Some(key)
 }
 
-/// The pool trust boundary this process resolved at startup.
+/// Whether the scope in effect for a job unlocks host-level capability.
 ///
-/// There is no ambient read here any more: [`crate::trust_scope`] owns the
-/// `VELNOR_TRUST_SCOPE` variable through clap, resolves it against the command
-/// line exactly once, and hands the same answer to the capability gates and to
-/// every trust-scoped store path.
-pub(crate) fn cargo_target_trust_scope() -> String {
-    crate::trust_scope::current()
-}
-
+/// The argument is the job's admitted scope (the pool ceiling narrowed by the
+/// job's trust class), never the raw pool flag: only the exact value
+/// `trusted` passes, case-insensitively. Untrusted jobs — and jobs on
+/// untrusted pools — get no host Docker socket, no privileged container
+/// options, no host port publishing, and no user secrets.
 pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
     trust_scope
         .trim()
         .eq_ignore_ascii_case(crate::trust_scope::TRUSTED)
-}
-
-pub(crate) fn store_trust_class(trust_scope: &str) -> crate::container::StoreTrustClass {
-    if trust_scope.trim().eq_ignore_ascii_case("trusted") {
-        crate::container::StoreTrustClass::Trusted
-    } else if trust_scope.trim().eq_ignore_ascii_case("release") {
-        crate::container::StoreTrustClass::Release
-    } else {
-        crate::container::StoreTrustClass::Untrusted
-    }
 }
 
 pub fn github_normalized_job_plan(
@@ -1070,7 +1067,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
-            store_trust_class: crate::container::StoreTrustClass::Trusted,
+            store_trust_scope: "trusted".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,
         };
@@ -1150,6 +1147,45 @@ mod tests {
     }
 
     #[test]
+    fn target_bucket_honors_its_scope_parameter_over_the_process_pool() {
+        // Regression: this path used to re-resolve its scope argument through
+        // the process-wide cell, whose first-wins rule hands back the pool in
+        // production and silently discards the job's admitted scope. A fork
+        // job's untrusted target bucket landed in the trusted namespace.
+        let _serial = crate::trust_scope::test_support::serialized();
+        let pool = crate::trust_scope::resolve("trusted");
+        assert_eq!(pool.as_str(), "trusted");
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobName": "test",
+            "jobDisplayName": "Rust / test (ubuntu)",
+            "requestId": 42,
+            "variables": {
+                "github.workflow": { "value": "CI", "isSecret": false },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let host = github_cargo_target_store_host(
+            &job,
+            std::path::Path::new("/velnor/work"),
+            crate::trust_scope::FAIL_CLOSED,
+        );
+
+        assert_eq!(
+            host,
+            std::path::PathBuf::from(
+                "/velnor/work/_velnor_targets/untrusted/workspace-v4-success-only/ChainArgos_java-monorepo/CI/Rust___test__ubuntu_"
+            )
+        );
+    }
+
+    #[test]
     fn target_bucket_refuses_missing_repository_identity() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
@@ -1204,7 +1240,8 @@ mod tests {
     /// the capability gates read the command line and the store paths read the
     /// variable, so a fork pull request ran without the Docker socket but wrote
     /// into the *trusted* cargo/mise stores that the next job mounts read-write
-    /// onto its `PATH`. Every consumer must now observe `public`.
+    /// onto its `PATH`. Every consumer takes the resolved scope as a parameter
+    /// now — no ambient read remains to disagree — and must observe `public`.
     #[test]
     fn every_consumer_observes_one_resolved_trust_scope() {
         let _serial = crate::trust_scope::test_support::serialized();
@@ -1282,57 +1319,66 @@ mod tests {
             .iter()
             .any(|option| option == "--privileged"));
         assert!(service.ports.is_empty());
-        // Store trust class.
-        assert_eq!(
-            spec.store_trust_class,
-            crate::container::StoreTrustClass::Untrusted
-        );
+        // The spec carries the one spelling: the admitted scope itself, not a
+        // collapsed class. A custom pool scope must survive into every mount,
+        // or the mounts disagree with the storage leases (which use the raw
+        // admitted scope) and live stores become GC-reclaimable mid-job.
+        assert_eq!(spec.store_trust_scope, "public");
 
         // Every trust-scoped store path, including the six that used to read
-        // the environment variable behind the gate's back. Stores named by the
-        // raw scope carry a `public` component; stores named by the derived
-        // trust class carry `untrusted`. Neither may ever carry `trusted`.
-        assert_eq!(cargo_target_trust_scope(), "public");
-        let scoped_by_raw_value = [
+        // the environment variable behind the gate's back. All of them carry
+        // a `public` component now — the compiler stores used to collapse to
+        // `untrusted` here while the leases pinned `public`. None may ever
+        // carry `trusted`.
+        let scoped_stores = [
             github_cargo_target_store_host(&job, temp, resolved.as_str()),
-            crate::container::cargo_executable_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::mise_executable_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::mise_binary_store_host(temp, "ChainArgos/java-monorepo"),
-            crate::container::playwright_browser_store_host(temp, "ChainArgos/java-monorepo"),
+            crate::container::cargo_executable_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::mise_executable_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::mise_binary_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
+            crate::container::playwright_browser_store_host(
+                temp,
+                resolved.as_str(),
+                "ChainArgos/java-monorepo",
+            ),
             // The persistent actions cache, exactly as `executor.rs` composes it.
             crate::storage::append_legacy_trust(
-                crate::storage::cache_class_path(temp, "caches", "_velnor_caches"),
-                &cargo_target_trust_scope(),
+                crate::storage::cache_class_path(
+                    temp,
+                    resolved.as_str(),
+                    "caches",
+                    "_velnor_caches",
+                ),
+                resolved.as_str(),
             ),
+            spec.mbx_store_host.clone().expect("mbx store"),
         ];
-        let scoped_by_trust_class = [spec.mbx_store_host.clone().expect("mbx store")];
 
         let has_component = |store: &std::path::Path, wanted: &str| {
             store
                 .components()
                 .any(|component| component.as_os_str() == wanted)
         };
-        for store in scoped_by_raw_value
-            .iter()
-            .chain(scoped_by_trust_class.iter())
-        {
+        for store in &scoped_stores {
             assert!(
                 !has_component(store, "trusted"),
                 "store path leaked the ambient VELNOR_TRUST_SCOPE value: {}",
                 store.display()
             );
-        }
-        for store in &scoped_by_raw_value {
             assert!(
                 has_component(store, "public"),
                 "store path is not scoped to the resolved trust scope: {}",
-                store.display()
-            );
-        }
-        for store in &scoped_by_trust_class {
-            assert!(
-                has_component(store, "untrusted"),
-                "store path is not scoped to the resolved trust class: {}",
                 store.display()
             );
         }
@@ -1356,19 +1402,233 @@ mod tests {
     }
 
     #[test]
-    fn store_trust_class_mapping_is_explicit_and_fail_closed() {
+    fn container_spec_preserves_the_admitted_scope_verbatim() {
+        // The spec is the mount side of the one-spelling contract: whatever
+        // admission derived — a known scope, a custom pool scope, or a case
+        // variant — must reach the mounts unchanged (trimmed, empty failing
+        // closed), or the mounts disagree with the storage leases.
+        let job = microvm_job();
+        let spec_for = |scope: &str| {
+            github_job_container_spec(
+                &job,
+                GitHubJobContainerPaths {
+                    workspace_host: "/tmp/workspace".into(),
+                    temp_host: "/tmp/temp".into(),
+                    home_host: "/tmp/home".into(),
+                    actions_host: "/tmp/actions".into(),
+                    tools_host: "/tmp/tools".into(),
+                    docker_host_work_dir: None,
+                    execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                },
+                "ubuntu:24.04",
+                Vec::new(),
+                NonZeroU32::MIN,
+                "",
+                "daemon".into(),
+                scope,
+            )
+            .unwrap()
+        };
+        assert_eq!(spec_for("trusted").store_trust_scope, "trusted");
+        assert_eq!(spec_for(" release ").store_trust_scope, "release");
+        assert_eq!(spec_for("public-forks").store_trust_scope, "public-forks");
+        assert_eq!(spec_for(" Trusted ").store_trust_scope, "Trusted");
         assert_eq!(
-            store_trust_class("trusted"),
-            crate::container::StoreTrustClass::Trusted
+            spec_for("").store_trust_scope,
+            crate::trust_scope::FAIL_CLOSED
         );
         assert_eq!(
-            store_trust_class(" release "),
-            crate::container::StoreTrustClass::Release
+            spec_for("   ").store_trust_scope,
+            crate::trust_scope::FAIL_CLOSED
         );
-        assert_eq!(
-            store_trust_class("public-forks"),
-            crate::container::StoreTrustClass::Untrusted
-        );
+    }
+
+    /// Leases pin the raw admitted scope while the mounts used to collapse it
+    /// to a fixed class: on a custom pool the legacy executable stores were
+    /// leased at `bin/<custom>/<repo>` and mounted at `bin/untrusted/<repo>`,
+    /// so the live stores were GC-reclaimable mid-job — and in both layouts a
+    /// trusted-class job shared mutable untrusted stores with fork jobs. Every
+    /// mount-side path below must equal its lease-side twin, in both layouts.
+    #[test]
+    fn custom_pool_leases_and_mounts_share_one_scope_spelling() {
+        use crate::trust_class::TrustClass;
+
+        let root =
+            std::env::temp_dir().join(format!("velnor-custom-pool-scope-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let temp = work.join("slot-1").join("job-1").join("temp");
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Custom pool scope test",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "octo/base" },
+                "github.repository_id": { "value": "42" }
+            }
+        }))
+        .unwrap();
+
+        for pool in ["public-forks", "Trusted"] {
+            // A trusted-class job keeps the pool value byte-identically; the
+            // runner normalizes it once and threads it to leases and mounts.
+            let admitted =
+                crate::trust_scope::normalize_scope(TrustClass::Trusted.admitted_scope(pool));
+            let spec = github_job_container_spec(
+                &job,
+                GitHubJobContainerPaths {
+                    workspace_host: work.join("slot-1/job-1/workspace"),
+                    temp_host: temp.clone(),
+                    home_host: work.join("slot-1/job-1/home"),
+                    actions_host: work.join("slot-1/job-1/actions"),
+                    tools_host: work.join("slot-1/job-1/tools"),
+                    docker_host_work_dir: None,
+                    execution_backend: velnor_model::ExecutionBackendKind::Docker,
+                },
+                "ubuntu:24.04",
+                Vec::new(),
+                NonZeroU32::MIN,
+                "",
+                "daemon".into(),
+                admitted,
+            )
+            .unwrap();
+            assert_eq!(spec.store_trust_scope, admitted, "pool={pool}");
+
+            // The daemon roots on both sides resolve identically: the lease
+            // side from the work dir, the mount side from the job temp dir.
+            let lease_root = crate::container::daemon_shared_root(work.clone());
+            let mount_root = crate::container::daemon_store_root(&temp);
+            assert_eq!(lease_root, mount_root, "pool={pool}");
+
+            let repository_key = crate::container::sanitize_store_key("octo/base");
+            let trust_key = crate::container::sanitize_store_key(admitted);
+            // Lease side, exactly as `runner.rs` composes it; mount side from
+            // the spec's scope, exactly as `container.rs` composes it.
+            for (lease, mount) in [
+                (
+                    crate::container::cargo_store_host(&lease_root, admitted),
+                    crate::container::cargo_store_host(
+                        &mount_root,
+                        spec.store_trust_scope.as_str(),
+                    ),
+                ),
+                (
+                    crate::container::mise_store_host(&lease_root, admitted),
+                    crate::container::mise_store_host(&mount_root, spec.store_trust_scope.as_str()),
+                ),
+            ] {
+                // In the legacy layout these roots carry no trust segment
+                // (trust namespaces below them); the one-spelling proof here
+                // is that both sides resolve the identical root.
+                assert_eq!(lease, mount, "pool={pool}");
+            }
+            for (lease, mount) in [
+                (
+                    crate::container::cargo_executable_store_host(
+                        &lease_root,
+                        admitted,
+                        &repository_key,
+                    ),
+                    crate::container::cargo_executable_store_host(
+                        &mount_root,
+                        spec.store_trust_scope.as_str(),
+                        &repository_key,
+                    ),
+                ),
+                (
+                    crate::container::mise_executable_store_host(
+                        &lease_root,
+                        admitted,
+                        &repository_key,
+                    ),
+                    crate::container::mise_executable_store_host(
+                        &mount_root,
+                        spec.store_trust_scope.as_str(),
+                        &repository_key,
+                    ),
+                ),
+                (
+                    crate::container::mise_binary_store_host(
+                        &lease_root,
+                        admitted,
+                        &repository_key,
+                    ),
+                    crate::container::mise_binary_store_host(
+                        &mount_root,
+                        spec.store_trust_scope.as_str(),
+                        &repository_key,
+                    ),
+                ),
+                (
+                    github_mbx_store_host(&job, &lease_root, admitted),
+                    spec.mbx_store_host.clone().expect("mbx store"),
+                ),
+            ] {
+                assert_eq!(lease, mount, "pool={pool}");
+                assert!(
+                    lease
+                        .components()
+                        .any(|component| component.as_os_str() == std::ffi::OsStr::new(&trust_key)),
+                    "store path is not namespaced by the admitted scope {admitted}: {}",
+                    lease.display()
+                );
+                assert!(
+                    !lease
+                        .components()
+                        .any(|component| component.as_os_str() == crate::trust_scope::FAIL_CLOSED),
+                    "trusted-class store path collapsed to the untrusted floor: {}",
+                    lease.display()
+                );
+            }
+
+            // Canonical layout: the same scope string selects the same
+            // namespace on both sides.
+            let layout = crate::storage::StorageLayout::from_prefix(&root);
+            let lease_catalog =
+                crate::store_catalog::StoreCatalog::for_work_root_with_layout(&work, Some(&layout));
+            for (lease, mount) in [
+                (
+                    crate::storage::cache_class_path_with_layout(
+                        &lease_root,
+                        admitted,
+                        "cargo",
+                        "_velnor_cargo",
+                        Some(&layout),
+                    ),
+                    crate::storage::cache_class_path_with_layout(
+                        &mount_root,
+                        spec.store_trust_scope.as_str(),
+                        "cargo",
+                        "_velnor_cargo",
+                        Some(&layout),
+                    ),
+                ),
+                (
+                    lease_catalog.mbx(admitted),
+                    lease_catalog.mbx(spec.store_trust_scope.as_str()),
+                ),
+                (
+                    lease_catalog.sccache(admitted),
+                    lease_catalog.sccache(spec.store_trust_scope.as_str()),
+                ),
+            ] {
+                assert_eq!(lease, mount, "pool={pool}");
+                assert!(
+                    lease
+                        .components()
+                        .any(|component| component.as_os_str() == std::ffi::OsStr::new(&trust_key)),
+                    "canonical store path is not namespaced by the admitted scope {admitted}: {}",
+                    lease.display()
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -1442,10 +1702,7 @@ mod tests {
         .unwrap();
 
         assert!(!spec.mount_docker_socket);
-        assert_eq!(
-            spec.store_trust_class,
-            crate::container::StoreTrustClass::Untrusted
-        );
+        assert_eq!(spec.store_trust_scope, "public-forks");
         assert!(spec.mbx_store_host.is_some());
         assert!(spec.sccache_store_host.is_none());
     }

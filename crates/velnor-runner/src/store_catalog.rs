@@ -17,8 +17,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::container::StoreTrustClass;
-
 /// Directory name of the legacy (pre-`VELNOR_STORAGE_ROOT`) artifact store.
 ///
 /// This literal exists once in the tree. `store_catalog` tests assert that,
@@ -144,36 +142,52 @@ impl StoreCatalog {
         &self.work_root
     }
 
-    pub(crate) fn cargo(&self) -> PathBuf {
+    /// Root of the cargo store class for one trust scope: the pool scope or
+    /// the untrusted floor on the GC path. The scope selects the canonical
+    /// namespace; the legacy root carries no trust segment.
+    pub(crate) fn cargo(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_with_layout(
             &self.work_root,
+            trust_scope,
             "cargo",
             "_velnor_cargo",
             self.layout.as_ref(),
         )
     }
 
-    pub(crate) fn mise(&self) -> PathBuf {
+    /// Root of the mise store class for one trust scope: the pool scope or
+    /// the untrusted floor on the GC path. The scope selects the canonical
+    /// namespace; the legacy root carries no trust segment.
+    pub(crate) fn mise(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_with_layout(
             &self.work_root,
+            trust_scope,
             "mise",
             "_velnor_mise",
             self.layout.as_ref(),
         )
     }
 
-    pub(crate) fn targets(&self) -> PathBuf {
+    /// Root of the persistent-target store class for one trust scope: the
+    /// pool scope or the untrusted floor on the GC path. The scope selects
+    /// the canonical namespace; the legacy root carries no trust segment.
+    pub(crate) fn targets(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_with_layout(
             &self.work_root,
+            trust_scope,
             "targets",
             "_velnor_targets",
             self.layout.as_ref(),
         )
     }
 
-    pub(crate) fn actions_cache(&self) -> PathBuf {
+    /// Root of the actions-cache store class for one trust scope: the pool
+    /// scope or the untrusted floor on the GC path. The scope selects the
+    /// canonical namespace; the legacy root carries no trust segment.
+    pub(crate) fn actions_cache(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_with_layout(
             &self.work_root,
+            trust_scope,
             "caches",
             LEGACY_ACTIONS_CACHE_DIR,
             self.layout.as_ref(),
@@ -206,12 +220,10 @@ impl StoreCatalog {
         )
     }
 
-    pub(crate) fn sccache(&self, trust_class: StoreTrustClass) -> PathBuf {
-        let trust_scope = match trust_class {
-            StoreTrustClass::Untrusted => "untrusted",
-            StoreTrustClass::Trusted => "trusted",
-            StoreTrustClass::Release => "release",
-        };
+    /// Root of the sccache compiler store for one trust scope: the pool
+    /// scope or the untrusted floor on the GC path, the job's admitted scope
+    /// on the execution path. Namespaced by the scope in both layouts.
+    pub(crate) fn sccache(&self, trust_scope: &str) -> PathBuf {
         crate::storage::cache_class_path_for_trust_with_layout(
             &self.work_root,
             trust_scope,
@@ -221,13 +233,6 @@ impl StoreCatalog {
         )
     }
 }
-
-/// Trust scopes the compiler stores are partitioned by.
-pub(crate) const TRUST_SCOPES: [(StoreTrustClass, &str); 3] = [
-    (StoreTrustClass::Untrusted, "untrusted"),
-    (StoreTrustClass::Trusted, "trusted"),
-    (StoreTrustClass::Release, "release"),
-];
 
 /// Root of the hosted GitHub Actions cache service storage.
 ///
@@ -252,10 +257,12 @@ mod tests {
         let from_gc = StoreCatalog::for_work_root(work.clone());
         assert_eq!(from_job.work_root(), work.as_path());
         assert_eq!(from_job.artifacts(), from_gc.artifacts());
-        assert_eq!(from_job.actions_cache(), from_gc.actions_cache());
-        assert_eq!(from_job.targets(), from_gc.targets());
-        assert_eq!(from_job.cargo(), from_gc.cargo());
-        assert_eq!(from_job.mise(), from_gc.mise());
+        for scope in ["trusted", crate::trust_scope::FAIL_CLOSED] {
+            assert_eq!(from_job.actions_cache(scope), from_gc.actions_cache(scope));
+            assert_eq!(from_job.targets(scope), from_gc.targets(scope));
+            assert_eq!(from_job.cargo(scope), from_gc.cargo(scope));
+            assert_eq!(from_job.mise(scope), from_gc.mise(scope));
+        }
     }
 
     /// A per-slot root must not produce a per-slot store: that is the exact

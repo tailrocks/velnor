@@ -13,6 +13,31 @@ document for the duration of this effort; it is deleted when the work lands.
 Both branch heads were re-resolved against `origin` at program start and matched the
 SHAs recorded in the goal, so no newer head substitution was required.
 
+### 2026-09-12 — goal branches recreated at main tips (original SHAs kept as history)
+
+The Sep-4 lines merged to main and the remotes went main-only; the goal
+branches were then recreated at the main tips. Verified live on 2026-09-12
+(`git rev-parse HEAD origin/<branch> origin/main` agree on all three refs in
+each repo):
+
+| Repository | Branch | Recreated SHA (= `origin/main`) |
+| --- | --- | --- |
+| `tailrocks/velnor` | `perf/docker-rust-mbx` | `96bf1ed60933a351178f8811b4d33c976f74e3f9` |
+| `tailrocks/velnor-actions-fixture` | `codex/verifier-completion-fixes` | `5c2cbfdf8519520a744f3bdaf8dbbbc0e4c56db3` |
+
+The original starting SHAs in the table above
+(`2858e92df0eb78df4f1a6fe2ad4cbf86f1d56355`,
+`5c8b57aa64dcbfd8fe6b2f6edae625ae344fc496`) are retained as program history.
+Lineage note: the original commits are not direct ancestors of the recreated
+tips (the Sep-4/5 work reached main through PR merges, e.g. Velnor main
+PRs #567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
+the recreated tip). All §93–§95 handoff SHAs (`f5f28ca`, `976516f`, `e8223f5`,
+fixture `9d03639`) likewise predate the recreation and are history, not heads.
+Remote state at recreation: Velnor `origin` carries `main` +
+`perf/docker-rust-mbx`; fixture `origin` carries `main` +
+`codex/verifier-completion-fixes` plus the still-open `rearch/ci-generation-config`
+and `rearch/generator-state-schema2` lines.
+
 Upstream semantic source of truth: `actions/runner`, resolved live to the latest
 stable release **v2.337.0** (published 2026-08-26), source commit
 `397b032cbf865e9c3ddfab89d533ec19325e1273`. Velnor pins the same version in
@@ -115,6 +140,10 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-bench/src/sys.rs` + `drivers/cargo.rs` (Cargo measurement environment) | codex-lead | claimed — T-022 |
 | `crates/velnor-bench/src/drivers/mod.rs` (failure cleanup) | codex-lead | claimed — T-023 |
 | `crates/velnor-bench/src/drivers/cargo.rs` + `drivers/docker.rs` (cleanup ownership and error propagation) | codex-lead | claimed — T-024 |
+| `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
+| `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
+| `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
+| `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 
 ## 8. Discovered bug classes
 
@@ -4373,3 +4402,526 @@ above, keep the verifier at
 on its clean `codex/verifier-completion-fixes` branch, and keep the dirty
 checkout-hydration worktree untouched. The complete architecture objective is
 still open.
+
+## 96. Living-plan refresh at the recreated tips — 2026-09-12
+
+Evidence basis for this section: direct inspection of both recreated tips on
+2026-09-12 (Velnor `96bf1ed6`, fixture `5c2cbfd`, see §0). The eight prior
+workflow child results assigned to this refresh (architecture+packages,
+red-team, six audits) arrived as `structured result submitted` summaries with
+no inspectable evidence attached, so per the workflow contract they were
+treated as pointers, not reused; no finding below is attributed to them. Any
+future refresh that does carry their bodies must reconcile against this
+section. Unresolved evidence: the full text of those eight results.
+
+### Current architecture (at `96bf1ed6`)
+
+- Workspace: 9 crates (`velnor-model`, `velnor-control`, `velnor-client`,
+  `velnor-render`, `velnorctl`, `velnor-runner`, `velnor-workflow`,
+  `velnor-bench`, `velnor-tools`) plus `tools/unit-collector`; edition 2024.
+- `velnor-workflow` is the sole, generic, scan-driven workflow generator: it
+  owns the `.github` surface of Velnor, `velnor-apt` and the fixture (#570,
+  #635, #637, #638); rearch phases 0 (scan extraction, #651), 1 (repo-owned
+  generation config + generator-state inputs, #654) and 2a (generic CI
+  primitives over scan + config, #659) are merged; the preview release lane
+  (#643) with its hardening (#645, #647, #650, #652, #653, #655, #658) and
+  per-consumer channels is live. Generator law: generic engine shapes, never
+  estate names; byte-stable output; regeneration fails closed on drift.
+- Runner: protocol pin stays `RUNNER_VERSION = "2.337.0"` (upstream
+  `actions/runner` v2.337.0 remains the semantic source of truth);
+  `MANIFEST_VERSION = 13`, crate `0.1.274`; toolchain `1.98.1` (BC-4 bump
+  landed) with a Renovate custom manager covering `rust-toolchain.toml` plus
+  the mise mirror sites (`renovate.json`, "rust toolchain" group) — WP-1 is
+  fully landed, channel and pin sites move as one PR.
+- Fixture baseline bound to Velnor `6e59b98d` (rearch phase 2a): manifest v13,
+  crate `0.1.274`, capability identity
+  `79a3a913b2e182b01ca2e40ea5478f7474bc5d5914957418581a2cd4c73cb785`,
+  29 admitted actions. Fixture audits moved from `.github/scripts` to
+  `scripts/` + the `verifier` Rust crate (`record`, `provenance`, `observe`,
+  `compare`); `.github` is fully generated.
+- Sep-5 canonical-branch content is in main through the PR line (T-004
+  `docker_lease.rs` present; T-017/T-018/T-021–T-025 bench/storage packages
+  present as `velnor-bench` drivers `cargo`/`docker`/`isolated_docker`).
+
+### Target architecture (unchanged in shape; sources of truth)
+
+`.rearch/reports/20-synthesis.md` (target + invariants + work graph),
+`21-redteam.md` (corrections + do-not-implement-as-written §5), finals
+`30-final-semantics.md`, `31-final-concurrency.md`, `32-final-security.md`,
+`33-final-architecture.md`, `34-final-redteam.md`, `35-benchmarks.md`. Shape:
+typestate `Slot<S>`/`Job<S>` with one supervisor per slot; `CancelToken` as a
+required field of `Running` with one termination ladder; `SendClaim`
+(non-`Clone`, consumed by `send()`); provisional acquire marker with 409 as
+the ownership oracle; `TrustClass` derived from the job's own event with the
+flag as ceiling; `StoreCatalog` as the sole path constructor with
+`HostCapacity` (from `statvfs`) as the only admission authority; typed sync
+Docker facade with per-call deadlines; `Redacted<String>` as the only sink
+type; collected evidence envelopes carrying unfabricable provenance.
+
+### Invariants
+
+I-1…I-28 in synthesis §4 stand, with the red-team corrections applied: I-11's
+statement is corrected per S1-2 (the plan must own the code that makes it
+true); I-14's mechanism stands but its statement is corrected per S2-3;
+I-13/I-28 carry the S1-3/S2-2 non-disjointness and adapter-table corrections;
+seven of the eleven ⚙ compiler-checked claims are qualified per S1-1 (the
+typestate cannot enforce cross-process invariants — fencing/ownership across
+processes need the durable generation + lease mechanism, not the signature
+alone).
+
+### Bug classes
+
+BC-1…BC-33 recorded in §§8/12–15. Closed or withdrawn since Sep-4: BC-8
+(withdrawn, checkout admission is fail-closed), BC-11 (typed evaluator),
+BC-20 (cross-repo fallback lock-in broken on both sides), BC-24 (durable
+sinks mask; encoded variants covered), BC-29 (argv injection unconstructible
+at the worst instance), BC-32/BC-33 (timing SLOs reportable), BC-9/BC-10
+(credential reaping; checkout slimmed), BC-4 (toolchain + manager), trust
+split-brain (fails closed). Still structural and open: BC-5 lifecycle
+typestate, BC-6 cancellation model, BC-1/BC-2/BC-3/BC-25 completion
+durability (T-019 landed the durable half; wire re-derivation and the
+`Acquired` escape-hatch deletion remain), BC-7 Docker facade, BC-14 Rust
+acceleration (persistent-target deletion, sccache bifurcation removal),
+BC-15/BC-21 trust derivation, BC-16 admission permits, BC-17 resource model,
+BC-22 store catalog/GC, BC-26 observability, BC-27 benchmark-of-product,
+BC-28 image/BuildKit (measured; slimming + persistent builders open).
+
+### Bottlenecks (observed, not projected)
+
+Docker CLI subprocess per-call latency on the job hot path (BC-7);
+`try_acquire_owned` admission permits failing acquired jobs under co-tenancy
+(BC-16); the shared control-plane pool and shared execution pool (WP-5);
+mirror exclusive lock held across the network (BC-10); per-job 1.2 GB tool
+copy and 3.0 GB image with cache thrown away per job (BC-28, measured);
+two append-only journals unbounded (WP-14); log-line timing re-parse already
+replaced by durable stage rows (BC-33 closed). Benchmark-invalidating order
+still applies: correctness/stability first, then startup/Docker hot path,
+then Rust workload, then parity.
+
+### Baseline plan (benchmarks)
+
+No benchmark of the product exists yet (BC-27 open). The scaffolding that
+landed: `velnor-bench` record integrity (T-021), Cargo env isolation (T-022),
+failed-workload cleanup (T-023), cleanup ownership + error propagation
+(T-024), Cargo/Docker scratch ownership (T-025), isolated-Docker driver.
+WP-17 remains: Rust benchmark invoking Velnor vs Docker vs real jobs,
+`CommandRunner` decorator for per-job process counts and per-call latency,
+the four injection seams, the fault catalogue, soak with resource-growth
+monitors, comparison against an official `actions/runner` install.
+
+### Dependencies
+
+Pinned and gated: toolchain 1.98.1 + Renovate toolchain group; `deny.toml`
+licences (WP-21 wires the licence gate into CI); tokio feature set owned by
+T-003; mbx with `MBX_SCHEDULER_*`/`MBX_LEARNED_INCREMENTAL_MAX_SIZE`/
+`MBX_TARGET_VIEWS` pinning still to land (WP-10); mold for Rust compile
+lanes; sccache local-only 20 GiB compat scenario; renovate action v46.2.6
+admitted across the fleet (#639, #641, #642); `actions/toolkit` pinned as the
+second upstream oracle (WP-0/WP-2 contract half).
+
+### Decisions and rejected alternatives
+
+- Adopt the synthesis target with the red-team amendments; red-team §5
+  (do-not-implement-as-written) is binding on implementers.
+- Reject `bollard` adoption (report 05 §7.1 over-reach): typed sync facade
+  with per-call deadlines instead (WP-8).
+- Reject the persistent Cargo target layer: delete it (V-13), do not migrate
+  it (WP-10).
+- Reject sccache as a requirement: one local-only compat scenario; the
+  default transparent-mbx path is the primary scenario (I-27; BC-20).
+- Reject deleting either `actions/cache` implementation (S1-7): one of them
+  is a wire protocol.
+- Reject the single Docker I/O thread (S1-6): it deadlocks cancellation.
+- Reject a second masker, second path constructor, second `docker` argv
+  builder anywhere (I-20/I-22): one construction site each, enforced by
+  `clippy::disallowed_methods` where feasible.
+- Merge WP-4 with WP-12's wiring (same 771-line step loop); merge the
+  redaction half of WP-16 into WP-7. Serialize WP-2→WP-3, WP-5 before WP-3,
+  WP-6 before WP-14, WP-8 before WP-9, WP-10's deletion before WP-11's
+  restructure.
+- Workflow generation stays generic and scan-driven; repo-specific grants
+  live in each consumer's generation config, never in `velnor-workflow`.
+
+### Dependency graph (work packages)
+
+P0: WP-0 (oracle; fixture repo, parallel-safe) → feeds WP-2 contract half,
+WP-10, WP-13, WP-17; WP-1 landed; WP-2 ↔ WP-3 conflict, WP-2 first; WP-3
+consumes WP-2's `SendClaim`/`CompletionIntent`; WP-4 needs WP-3's `Running`;
+WP-5 independent, before WP-3; WP-6 independent, before WP-14; WP-7
+independent, shares the masker with WP-16. P1: WP-8 needs WP-4's token;
+WP-9 needs WP-6's `TrustClass`, conflicts WP-8; WP-10 needs WP-6 + WP-0;
+WP-11 independent, conflicts WP-10; WP-12 needs WP-4's token, conflicts
+WP-4; WP-13 needs WP-0. P2: WP-14 needs WP-6; WP-15 needs WP-5; WP-16 needs
+WP-3; WP-17 needs WP-0 + WP-16. P3: WP-18 deletions, WP-19 error taxonomy,
+WP-20 decomposition, WP-21 hygiene. Genuinely parallel now: WP-0 remainder,
+WP-13, WP-9's image-slimming half, WP-17 scaffolding, WP-19's
+`DockerCliError`, WP-21, WP-12's evaluator core (leaf; wiring serializes
+with WP-4). Fixture track: V0 (baseline binding — done, manifest v13 at
+`6e59b98d`) → V1 (Rust matrix) / V2 (live dual-lane + semantic comparison)
+→ V4 (lifecycle/cancel/fault scenarios, needs WP-3/WP-4) → V5 (Rust
+verifier completion) / V6 (bench validation) → V7 (final reviews).
+
+## 97. WP-6/job-trust-class derivation landed — 2026-09-12
+
+Bounded package: the per-job `TrustClass` derivation only (no pool-refusal
+wiring; that is the WP-6 remainder). New `pub mod trust_class`
+(`crates/velnor-runner/src/trust_class.rs`, one `lib.rs` module line):
+`TrustClass::{Trusted, ForkPR, Unknown}` with the single derivation-only
+constructor `TrustClass::derive(&AgentJobRequestMessage)`, non-`Default` per
+I-13, pure (no I/O, no ambient state).
+
+Signals, in derivation order: `github.event_name` (variables, else the raw
+`github` context value so pre-hydration messages classify identically;
+ASCII `[A-Za-z0-9_]` else unparseable), plan `scopeIdentifier` present and
+non-blank as the structural-completeness signal, base `github.repository`
+full-name shape, then for `pull_request*` events (case-insensitive prefix)
+the head full name from `github.event.pull_request.head.repo.full_name`
+(object, JSON string, or V2 compact `{"d"}` form at any level) compared
+case-insensitively against the base, with contradictory
+`head.repo.id`/`base.repo.id` numerics refusing trust; finally the self
+(first) repository resource's `name` and `cloneUrl` property must agree
+with the base (read exactly as `checkout.rs` reads them) or the derivation
+fails closed. Missing or unparseable signals yield `Unknown`, and only
+`Trusted` reports `is_trusted`. A fork `pull_request_target` is `ForkPR`:
+base-repo code over fork-controlled inputs. Unknown non-`pull_request*`
+event names derive `Trusted` (GitHub reserves that prefix for PR-scoped
+events; all other events execute base-repo code). Deliberate scope cut:
+the event-level `repository.full_name` is not used as base corroboration;
+the resource block already covers base identity from an independent block.
+
+Tests in-module, 31 total, all passing: 14 `trust_class_conformance_*`
+(GitHub event semantics incl. compact-context and string-event forms),
+16 `trust_class_regression_*` (each mutates exactly one signal of a
+trusted baseline or fork-PR job and proves `Unknown`), and
+`trust_class_benchmark_derivation_throughput` (40k derivations under a 5s
+bound — the benchmark, in the repo's timing-gated-test style; no
+criterion/divan harness exists in this workspace to extend). The
+`trust_class` filter run shows 32 because it also matches one pre-existing
+`store_trust_class` mapping test.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; module suite 32/32 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1679 passed with 3 pre-existing environmental failures
+(`action::tests::fetched_*`: host `/tmp/velnor-actions` exists but is
+empty, 0 files — untouched code path, fails identically without this
+package). WP-6 status: derivation complete; pool-refuses-out-of-class
+enforcement and the flag-as-ceiling wiring remain unclaimed.
+
+### P0–P3 status
+
+- P0: WP-1 landed. WP-0 partial: baseline binding + identity comparison +
+  refresh recipe + mutation tests landed (F3/F4/F7/F9 closed); collected
+  evidence + live dual-lane comparison landed in V-1 (twelve tasks complete)
+  but live dual-lane proof and deployed-image identity are still unclaimed.
+  WP-2 partial (T-019 durable half). WP-3/WP-4/WP-5/WP-6/WP-7 not started.
+- P1: WP-12 evaluator core landed (BC-11 closed); wiring, `StepResult`, and
+  command-file parity remain. WP-8–WP-11, WP-13 not started.
+- P2/P3: not started except bench scaffolding (WP-17 partial) and the
+  toolchain/licence halves of WP-21.
+
+### Tests
+
+Runner gate: full parallel library suite (~1.5k tests; two known
+timing-sensitive flakes rerun in isolation per §92 — `git_mirror`
+checkout-reader lease, action-admission concurrency); focused container
+suites (54 tests) for Docker-scope changes; mutation tests required for
+every audit/oracle check (I-25/I-26 discipline: each check must prove it
+rejects bad input). Fixture gate: `just check` = capability-audit
+(readiness, requires live export or runner source) + workflow-check
+(actionlint, python-check, python-test, readiness) + audit-workflows +
+fmt-check + rust-check + nextest workspace + l2-closure, plus
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
+Contract-only mode never substitutes for readiness.
+
+### Status
+
+Both goal branches are clean at their recreated main-tip SHAs (see §0); no
+push pending at the time of this refresh. The §93–§95 merge worktrees
+(`.rearch/velnor-merge-main-current`, checkout-hydration) predate the
+recreation: re-audit before reuse, do not assume they apply. Next bounded
+work is WP-0 remainder (live dual-lane proof), WP-2 completion durability,
+and WP-5 admission partitioning — all unclaimed; claim in §7 before writing.
+
+### Agent ownership
+
+Ownership table (§7) claims stand: T-001 (toolchain), T-002
+(protocol error contracts), T-003 (deny/tokio) with opus-lead;
+T-004/T-017/T-018/T-021–T-025 complete with codex-lead; T-019/T-020
+claimed by codex-lead. Coordination protocol (§1) is unchanged: shared
+branches, isolated worktrees, rebase-before-push, never force-push, claims
+before writes, this file append-mostly. No new claims are made by this
+refresh (read-only).
+
+## 98. WP-6/job-trust-class correction: `workflow_run` from a fork is `ForkPR` — 2026-09-12
+
+Review finding against §97: every non-`pull_request*` event skipped payload
+analysis and derived `Trusted`, so a `workflow_run` requested by a fork PR —
+base workflow code over a fork-controlled head sha and repository, the exact
+shape the module calls `ForkPR` for `pull_request_target` — classified as
+`Trusted`. That violated the fail-closed invariant and disagreed with the
+executor's own fork-sensitive `workflow_run` checks
+(`repository_artifact_matches_trusted_producer` gates on the same
+`head_repository`/`repository` `full_name` values, `executor.rs`). The
+enabling condition was structural: one blanket-trust arm for all remaining
+event names with no fork-sensitive second path.
+
+Fix in the same file (`crates/velnor-runner/src/trust_class.rs`, still the
+WP-6/job-trust-class boundary claimed in §7): a `workflow_run` event
+(case-insensitive) now compares
+`github.event.workflow_run.head_repository.full_name` against the base with
+the same `repository_eq` comparison — mismatch derives `ForkPR`, a missing
+or malformed head (or payload) fails closed to `Unknown`. The event-payload
+projection was factored into one `with_github_event` helper shared by the
+`pull_request` and `workflow_run` paths, so object, JSON-string, and V2
+compact `{"d"}` forms behave identically on both; module and variant docs
+updated to match (`ForkPR` now covers fork `workflow_run`).
+
+Tests in-module, 40 total (was 31), all passing: 6 new
+`trust_class_conformance_workflow_run_*` (same-repo trusted, fork `ForkPR`,
+case-insensitive detection and head comparison, string-payload and
+compact-context forms) plus 3 new
+`trust_class_regression_workflow_run_*` (missing payload, unparseable string
+event, missing/malformed head all `Unknown`); the non-PR blanket-trust test
+no longer lists `workflow_run`, and the throughput benchmark now covers all
+three derivation paths (60k derivations under the same 5s bound). The
+`trust_class` filter run shows 41 because it also matches one pre-existing
+`store_trust_class` mapping test.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; module suite 41/41 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1688 passed with the same 3 pre-existing environmental
+failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — untouched code path). WP-6 status: derivation
+complete incl. this correction; pool-refuses-out-of-class enforcement and
+the flag-as-ceiling wiring remain unclaimed.
+
+## 99. gha-cache-prefix-max: `prefix_scan` rank-collision fix — 2026-09-12
+
+`prefix_scan` ranked restore-key candidates through a `BTreeMap` keyed by a
+`(created_ms, key_len)` rank string, so two entries sharing a timestamp and
+key length collided on one key and the later-iterated entry overwrote the
+earlier one: the restored entry depended on directory iteration order, and a
+stale loser could poison the cache hit. The enabling condition was
+structural — ranking through a lossy map key instead of comparing
+candidates.
+
+Fix in `crates/velnor-runner/src/gha_cache.rs` (boundary claimed in §7):
+`prefix_scan` now tracks the max directly, comparing each candidate by the
+`(created_ms, key_len, hash)` tuple. Equal-rank entries no longer overwrite
+each other; ties break deterministically by greater entry hash. Newest-wins
+and longest-key-second ordering are unchanged. The now-unused `BTreeMap`
+import is removed; no other call sites exist (`lookup` is the only caller).
+
+Tests in-module, 30 in the `gha_cache` filter (was 29), all passing: new
+`prefix_scan_equal_rank_breaks_ties_by_hash` commits 16 same-`created_ms`,
+same-length pairs under distinct restore prefixes and asserts each lookup
+restores the hash-greater entry. The test was verified to fail against the
+old `BTreeMap` logic (`restore pair04-` mismatch) and pass on the fix. No
+benchmark was named in the brief and `crates/velnor-runner` has no benches
+harness, so none was added.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `gha_cache` module suite 30/30 pass.
+gha-cache-prefix-max status: complete.
+
+## 100. trust-admission-fork: TrustClass enforced in job admission on every pool — 2026-09-12
+
+The WP-6 remainder from §97/§98: the pool flag is now only a ceiling. Each
+job admits under its own trust — `TrustClass::derive` runs once per job in
+`handle_job_request`, and `TrustClass::admitted_scope` narrows the pool
+ceiling by it (`trust_class.rs`, `runner.rs`). A `Trusted` job keeps the
+pool value byte-identically (including `release` and custom scopes); a
+`ForkPR` or `Unknown` job fails to the untrusted floor on every pool.
+
+Enforcement, all from the admitted scope: `validate_job_trust_policy` takes
+the pool flag plus the job class and admits user secrets only when both are
+trusted (the refusal names the class and the pool); the storage-lease block
+derives its trust key, roots, and GC scopes from it; `execute_script_job*`
+thread it (renamed parameter) into the container spec (no host socket, no
+privileged options, no published ports, `StoreTrustClass::Untrusted`), the
+git mirror store, and the executor, whose native-adapter gates
+(QEMU/login/BuildKit) and new `JobExecutionState.trust_scope` field (cache
+paths; empty fails closed, derived states carry it) enforce it.
+
+Two structural removals came with the threading. First, every trust-scoped
+store root takes the scope explicitly now (`storage.rs` `cache_class_path`,
+`container.rs` cargo/mise/target roots and executable stores,
+`store_catalog.rs`), and the ambient pool read
+`github_adapter::cargo_target_trust_scope` is deleted — no per-job path can
+observe the pool behind the gate's back any more. Second, GC sweeps each
+trust-partitioned class under the pool namespace plus the untrusted floor
+(`cache.rs` `trust_partitioned_roots`, deduped by path so the legacy layout
+enumerates once); without the second root, fork-job stores on a trusted
+pool would grow unbounded, invisible to every collector.
+
+Found and fixed on the same path: `github_cargo_target_store_host`
+re-resolved its scope argument through the first-wins process cell, which
+hands back the pool in production and silently discarded the job's scope —
+the parameter was dead past startup. Per-job paths normalize with the new
+`trust_scope::normalize_scope` (same spelling, no cell write) instead, and
+`trust_scope::resolve` is documented startup-only so the trap cannot recur.
+
+Trusted jobs are byte-identical to before on every path (the admitted scope
+equals the pool value); only fork/unknown jobs move namespaces, and their
+first run rebuilds caches once. Lease/GC scope keys are unchanged: a lease
+derives from the same effective root the job mounts, and cross-namespace key
+matches only ever over-protect, never under-protect.
+
+Tests, 16 new, all passing: `trust_class` ceiling/floor mapping (2),
+`trust_scope` normalization without publishing (1), `runner` secrets-matrix
+updates plus 10 admission tests (pool×class matrix, three
+`admission_conformance_*` including end-to-end through the container spec,
+one single-signal `admission_regression_*`, and
+`admission_benchmark_trust_decision_throughput` — 20k derive+narrow+validate
+decisions in 0.04s against the 5s bound, the benchmark in the repo's
+timing-gated-test style), `github_adapter` scope-parameter-over-cell
+regression (1), `executor` state-scope cache namespacing (1), `cache`
+pool+fork namespace reclaim (1). Docs updated where the behavior changed
+(`reference/trust-scope.mdx`, `guides/execution.mdx`,
+`reference/interface.mdx`); the `security-and-data.mdx` pinned line numbers
+were left to the established drift tolerance.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `trust_class` filter 43/43 pass; store
+suites (`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`)
+166/166 pass; full serial `cargo test -p velnor-runner --lib --features
+test-support --locked -- --test-threads=1` 1705 passed with the same 3
+pre-existing environmental failures as §97 (`action::tests::fetched_*`: host
+`/tmp/velnor-actions` exists but is empty — verified identical on the
+untouched base via stash); `velnorctl` `trust_scope_single_source` 2/2 pass.
+WP-6 status: complete (derivation §97+§98, enforcement this section).
+
+## 101. trust-admission-fork correction: one scope spelling through leases, mounts, and GC, plus admission forensics — 2026-09-12
+
+Review of §100 found two holes on the same path, both fixed here.
+
+First, the mounts collapsed what the leases kept raw. The storage leases
+used the admitted scope verbatim, but `JobContainerSpec` carried a
+`StoreTrustClass` that folded every custom pool scope (and the `Trusted`
+case variant) to `untrusted`. On a custom pool the legacy executable stores
+were therefore leased at `bin/<custom>/<repo>` and mounted at
+`bin/untrusted/<repo>` — live stores GC-reclaimable mid-job — and in both
+layouts a trusted-class job shared mutable untrusted cargo/mise stores with
+fork jobs, contradicting the namespaced-by-admitted-scope docs. The
+collapsed enum is deleted (`StoreTrustClass`,
+`store_trust_namespace`, `github_adapter::store_trust_class`,
+`store_catalog::TRUST_SCOPES`); the spec now carries
+`store_trust_scope: String`, normalized once at admission, and every
+mount-side path (cargo/mise roots, executable and binary stores,
+Playwright, compiler stores, mise seeding in both `runner.rs` and
+`executor.rs`) derives from it. GC sweeps the compiler stores under the
+pool namespace plus the untrusted floor through the same
+`trust_partitioned_roots` as every other class, so custom-pool compiler
+stores are reclaimed instead of leaking. New regression coverage:
+`container_spec_preserves_the_admitted_scope_verbatim` and
+`custom_pool_leases_and_mounts_share_one_scope_spelling` (lease-vs-mount
+equality for `public-forks` and `Trusted` in both layouts, and no
+untrusted-floor collapse for trusted-class jobs); the
+`every_consumer_observes_one_resolved_trust_scope` split-brain test now
+asserts the compiler stores carry the resolved custom scope too.
+
+Second, admission forensics recorded only the pool ceiling
+(`JobAdmission.trust_scope`), never the derived decision, so RunQueued
+records could not distinguish a fork job downgraded to the untrusted path
+from a trusted job. `TrustClass::derive` now runs before the admission row
+persists (step-name hydration touches only display names, so the earlier
+derivation is stable), the slot forensics log records
+`trust=<class> admitted_scope=<scope> pool_scope=<pool>` per job, and the
+RunQueued telemetry carries `job_trust` plus the projected
+`admitted_scope` (optional `String` fields in the model contract and
+`schemas/velnor.telemetry.v1.json`; `JobAdmission::project` is `pub(crate)`
+for the sanitization). Docs updated where the behavior changed
+(`reference/trust-scope.mdx`: partitioning by admitted scope, custom
+scopes select a namespace of their own, and the stale "unrecognized values
+resolve to untrusted" claim corrected to absent/empty).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `cargo clippy -p velnor-model
+--all-targets --locked -- -D warnings` pass; store suites
+(`container`/`github_adapter`/`cache`/`storage`/`trust_scope`/`store_catalog`/`trust_class`)
+209/209 pass; `velnor-model` telemetry 24/24 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1706 passed with the same 3 pre-existing environmental
+failures as §100 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — cause re-verified, `action.rs` untouched);
+`velnorctl` `trust_scope_single_source` 2/2 pass. WP-6 status: complete.
+
+## 102. gha-cache-repo-namespace: GHA cache namespaced by repo identity, not job token — 2026-09-12
+
+The cache service hashed the per-job `ACTIONS_RUNTIME_TOKEN` into the
+storage namespace, so a save was visible only to the job that wrote it and
+every abandoned tenant kept up to its budget outside any sharing. The
+namespace is now `sha256("velnor-actions-cache-repo\0" ‖ repository_id ‖
+ref_scope ‖ trust)` where `repository_id` (`github.repository_id`),
+`ref_scope` (`github.ref`), and the trust floor
+(`TrustClass::is_trusted`, §97) come from the server-attested job message —
+never from workflow-supplied data and never from the token. Jobs in the
+same repository and ref share one namespace, so a save is visible to later
+jobs on that exact ref; different repositories, refs, or trust classes
+select disjoint namespaces, so a fork job can neither read trusted entries
+nor poison them (BC-21 read-write invariant). Intentional deviation from
+GitHub's branch scoping, recorded here and in the `gha_cache.rs` module
+docs: lookups use strict ref equality with no base-branch or
+default-branch fallback, so a branch or `refs/pull/N/merge` job starts
+cold where GitHub would restore the base branch's entries. A fallback
+would let untrusted readers consult trusted namespaces, which BC-21
+forbids; restoring GitHub parity needs new server-attested
+base/default-ref signals plus a read-only fallback chain that never
+crosses the trust floor.
+
+The token remains only the credential: the runner binds it to the job's
+cache identity at admission (next to the §100 trust derivation) and holds
+the RAII `CacheSession` for the whole job lifetime, so every return path —
+including early fail-closed exits — unbinds it. The registry stores only
+the keyed token hash, never the credential, as a stack so a duplicate
+registration cannot unbind a live job. The registry API
+(`CacheIdentity`, `CacheSession`, `register_job_cache_session`) is
+`pub(crate)`: the only caller is the admission hook in `runner.rs`, so no
+in-process caller can bind an arbitrary token to a victim Shared
+identity. Route auth rejects unknown tokens
+with 401 (previously any non-empty string was accepted); a job whose
+identity signals are incomplete fails closed to a per-token namespace —
+today's isolation, never another job's entries — with a
+`forensics.lifecycle` line emitted at the admission call site, naming the
+job id and the raw signals (`repository_id`, `ref`, `scope_present`,
+`trusted`) so an identity-signal outage is diagnosable; the registry
+itself stays silent. Both the binding and the `ACTIONS_CACHE_URL`
+injection read the credential through one new accessor
+(`runtime_env::job_runtime_token`), so registration and presentation
+cannot drift. Each daemon's service authenticates its own jobs only:
+credentials from another daemon 401. Previously written per-token tenants
+are no longer addressed and age out under the existing GC, which already
+manages the tenants root (`cache.rs` `GhaCache` store root).
+
+New coverage (14 tests in `gha_cache.rs`): namespace determinism and
+per-input sensitivity, shared/isolated domain non-aliasing, the
+same-repo-and-branch sharing conformance test (save under one credential,
+lookup under another), ref/repository/trust non-sharing tests,
+derive-fails-closed table, isolated fallback resolution, route-level
+401/204 auth tests through the now-generic `route`, session drop and
+duplicate-session release tests, plus the
+`cache_namespace_benchmark_derivation_and_lookup_throughput` timing-gated
+benchmark in the §97 style.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `gha_cache` 44/44 pass; `runtime_env` 8/8
+pass; `trust_class` 42/42 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1720 passed with the same 3 pre-existing environmental
+failures as §101 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — cause re-verified, `action.rs` untouched).
+Review-correction re-run (strict-ref deviation documented, registry API
+narrowed to `pub(crate)`, isolated-fallback forensics moved to the
+admission call site with job context): identical gates — fmt clean,
+clippy clean, `gha_cache` 44/44, `runtime_env` 8/8, `trust_class` 42/42,
+full serial 1720 passed with the same 3 pre-existing environmental
+failures (cause re-verified, `action.rs` untouched).
+gha-cache-repo-namespace status: complete.
