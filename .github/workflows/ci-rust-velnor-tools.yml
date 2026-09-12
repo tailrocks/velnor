@@ -99,6 +99,20 @@ jobs:
         with:
           path: ~/.cache/velnor/mold/2.42.0
           key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Restore "Rust crate (velnor-tools)" cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-tools/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ci-${{ runner.os }}-rust-velnor-tools-
+      - name: Prepare Cargo sources
+        run: |
+          set -euo pipefail
+          cd -- 'crates/velnor-tools' && cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -107,6 +121,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
         run: |
           set -o pipefail
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
@@ -224,6 +239,14 @@ jobs:
             echo "| compiling_lines | $compiling_count |"
           } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           exit 0
+      - name: Save "Rust crate (velnor-tools)" cache
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-tools/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
 
   velnor:
     name: Velnor
@@ -244,6 +267,20 @@ jobs:
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
+      - name: Restore "Rust crate (velnor-tools)" cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ci-${{ runner.os }}-rust-velnor-tools-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-tools/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ci-${{ runner.os }}-rust-velnor-tools-
+      - name: Prepare Cargo sources
+        run: |
+          set -euo pipefail
+          cd -- 'crates/velnor-tools' && cargo fetch --locked
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
@@ -252,6 +289,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
         run: |
           set -o pipefail
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"

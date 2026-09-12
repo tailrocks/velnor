@@ -12,8 +12,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    Args, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, POLICY_PROVIDER, PREVIEW,
-    RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note, Args,
+    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, POLICY_PROVIDER,
+    PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
@@ -601,9 +602,10 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
             );
             WorkflowIr::render_workflow_runtime_setup(&mut output, lane);
             workflow.render_tool_provisioning(&mut output, lane, unit, false);
-            if !workflow.uses_mr_boxington(unit)
+            if CacheBackend::Detected.enables_actions_cache(&workflow, unit)
                 && let Some(cache) = &unit.cache
             {
+                render_retained_output_cache_note(&mut output, &workflow, unit, cache);
                 let (paths, key) = rendered_cache_values(cache);
                 let _ = writeln!(
                     output,
@@ -613,9 +615,11 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
+            render_cargo_source_preparation(&mut output, unit);
+            let cargo_offline = cargo_offline_env(unit);
             let _ = writeln!(
                 output,
-                "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+                "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
                 yaml_scalar(&unit.id),
                 yaml_scalar(&unit.id)
             );
@@ -1118,6 +1122,7 @@ mod tests {
             label: id.to_owned(),
             kind: crate::UnitKind::Rust,
             root: ".".to_owned(),
+            pinned_lockfile: true,
             watch: vec!["Cargo.toml".to_owned()],
             pr_commands: vec!["cargo check".to_owned()],
             full_commands: vec!["cargo check".to_owned()],
@@ -1234,7 +1239,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "88532575f09f21c4dd6e045a55d528d053366806f622830f019ee4d228bab13e",
+                "4268511f1069142ef57786b24e0e84f64b99f7cd5381e8ebc64196471411ba46",
             ),
             (
                 "preview.yml",
@@ -1298,7 +1303,7 @@ mod tests {
         let root = scanned_root("omitted");
         let config = config(&["release.yml", "preview.yml"], None);
         let surface = generate(&root, &config, None);
-        let legacy = crate::generated_files(&config);
+        let legacy = must(crate::generated_files(&config), "generate legacy files");
         let preview = PathBuf::from(".github/workflows/preview.yml");
         assert_eq!(
             surface.files.get(&preview),

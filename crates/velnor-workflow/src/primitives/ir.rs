@@ -14,9 +14,9 @@ use crate::{
     rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
     unit_job_id, unit_needs, velnor_runner, velnor_runner_group, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
-    workflow_selection_artifact_upload, yaml_scalar, CacheSpec, ProjectConfig, RunnerMode, Unit,
-    UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW, VELNOR_POLICY_WORKFLOW_REV,
+    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
+    RunnerMode, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW, VELNOR_POLICY_WORKFLOW_REV,
     VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
 };
 
@@ -149,6 +149,93 @@ pub(crate) fn render_phase_report_step(output: &mut String, workflow_name: &str,
         output.push_str("          ");
         output.push_str(line);
         output.push('\n');
+    }
+}
+
+/// The Cargo subcommands whose inputs are resolved by the command itself:
+/// advisory databases, publish registries, and similar tool-owned data are
+/// fetched at run time regardless of any `Cargo.lock` pin.
+fn command_resolves_its_own_inputs(command: &str) -> bool {
+    // Environment assignments (`FOO=bar cargo audit`) do not change the tool;
+    // `skip_while` stops at the first non-assignment token and keeps it. The
+    // tool is then located wherever it sits, so a quoted env value that split
+    // into extra tokens cannot push it out of head position.
+    let mut tokens = command
+        .split_whitespace()
+        .skip_while(|token| token.contains('=') && !token.starts_with('-'));
+    while let Some(tool) = tokens.next() {
+        if !matches!(tool, "cargo" | "mbx") {
+            continue;
+        }
+        // Tool modifiers such as `+nightly` do not change the subcommand.
+        if let Some(subcommand) = tokens.by_ref().find(|token| !token.starts_with('+')) {
+            return matches!(subcommand, "deny" | "audit" | "publish");
+        }
+    }
+    false
+}
+
+/// Whether the unit's Cargo verification runs with the network restricted to
+/// the source-preparation step. Restriction requires a root `Cargo.lock` so
+/// `cargo fetch --locked` is well-defined, and exempts units whose commands
+/// resolve their own inputs (deny, audit, publish).
+fn cargo_network_is_restricted(unit: &Unit) -> bool {
+    if !unit.pinned_lockfile {
+        return false;
+    }
+    let mut commands = unit
+        .pr_commands
+        .iter()
+        .chain(&unit.full_commands)
+        .chain(unit.github_pr_commands.iter().flatten())
+        .chain(unit.github_full_commands.iter().flatten())
+        .chain(unit.velnor_pr_commands.iter().flatten())
+        .chain(unit.velnor_full_commands.iter().flatten());
+    !commands.any(|command| command_resolves_its_own_inputs(command))
+}
+
+/// The `CARGO_NET_OFFLINE` env entry for the run-checks step, or nothing for
+/// units that must resolve their own inputs.
+pub(crate) fn cargo_offline_env(unit: &Unit) -> String {
+    if cargo_network_is_restricted(unit) {
+        "\n          CARGO_NET_OFFLINE: \"true\"".to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Fetch every declared Cargo source up front, after the cache restore and
+/// before verification. Verification then runs without package-origin
+/// downloads: registry archives and Git dependencies arrive here, once, where
+/// the fetch is visible and measurable on its own.
+pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) {
+    if !cargo_network_is_restricted(unit) {
+        return;
+    }
+    let change_dir = crate::shell_change_dir(&unit.root);
+    let _ = writeln!(
+        output,
+        "      - name: Prepare Cargo sources\n        run: |\n          set -euo pipefail\n          {change_dir}cargo fetch --locked"
+    );
+}
+
+/// Record why a raw output cache rides alongside the Mr. Boxington object
+/// transport. Without a justification the generator refuses the combination.
+pub(crate) fn render_retained_output_cache_note(
+    output: &mut String,
+    ir: &WorkflowIr,
+    unit: &Unit,
+    cache: &crate::CacheSpec,
+) {
+    if ir.uses_mr_boxington(unit) && cache.justified_output_alongside_mr_boxington() {
+        let justification = cache
+            .mbx_output_cache_justification
+            .as_deref()
+            .unwrap_or_default();
+        let _ = writeln!(
+            output,
+            "      # output cache retained alongside mbx: {justification}"
+        );
     }
 }
 
@@ -712,6 +799,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if contract.cache.enables_actions_cache(self, unit)
             && let Some(cache) = &unit.cache
         {
+            render_retained_output_cache_note(output, self, unit, cache);
             let (paths, key) = rendered_cache_values(cache);
             let cache_key = format!(
                 "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
@@ -725,11 +813,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 unit.id
             );
         }
+        render_cargo_source_preparation(output, unit);
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
+            cargo_offline_env(unit),
             yaml_scalar(&unit.id)
         );
         render_phase_report_step(
@@ -926,9 +1016,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             Self::render_workflow_runtime_download(output, lane);
             output.push_str(&workflow_selection_artifact_download(None));
             self.render_tool_provisioning(output, lane, unit, cache_save);
-            if !self.uses_mr_boxington(unit)
+            if CacheBackend::Detected.enables_actions_cache(self, unit)
                 && let Some(cache) = &unit.cache
             {
+                render_retained_output_cache_note(output, self, unit, cache);
                 let (paths, key) = rendered_cache_values(cache);
                 let cache_key = format!(
                     "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
@@ -942,11 +1033,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     unit.id,
                 );
             }
+            render_cargo_source_preparation(output, unit);
             let _ = writeln!(
                 output,
-                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+                "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
                 verify_name,
                 yaml_scalar(&unit.id),
+                cargo_offline_env(unit),
                 yaml_scalar(&unit.id),
             );
             render_phase_report_step(
@@ -956,7 +1049,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
             if cache_save
                 && lane == RunnerMode::Github
-                && !self.uses_mr_boxington(unit)
+                && CacheBackend::Detected.enables_actions_cache(self, unit)
                 && let Some(cache) = &unit.cache
             {
                 let (paths, key) = rendered_cache_values(cache);
@@ -1087,6 +1180,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                                 "mise.lock".to_owned(),
                             ],
                             paths: Vec::new(),
+                            purpose: CachePurpose::Generic,
+                            mbx_output_cache_justification: None,
                         })
                     },
                     rendered_cache_values,

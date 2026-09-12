@@ -8,7 +8,8 @@ use super::file_walk::{
 };
 use super::{unit, RepositoryShape, ScanContext};
 use crate::{
-    identifier_suffix, parent_path, shell_change_dir, shell_quote, CacheSpec, Unit, UnitKind,
+    identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
+    UnitKind,
 };
 
 fn swift_package_unit(package_root: &str) -> Unit {
@@ -36,6 +37,8 @@ fn swift_package_unit(package_root: &str) -> Unit {
                 join_repo_path(package_root, ".swiftpm/Package.resolved"),
             ],
             paths: vec!["~/.swiftpm".to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
         }),
     );
     result.id = format!("swift-package-{}", identifier_suffix(package_root));
@@ -147,9 +150,12 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             velnor_pr_commands: None,
             velnor_full_commands: None,
             depends_on: Vec::new(),
+            pinned_lockfile: false,
             cache: Some(CacheSpec {
                 key_files: cache_key_files,
                 paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
+                purpose: CachePurpose::Generic,
+                mbx_output_cache_justification: None,
             }),
             tool_version: None,
         };
