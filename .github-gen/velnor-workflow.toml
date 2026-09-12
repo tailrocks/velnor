@@ -1,0 +1,143 @@
+schema = 1
+
+[generator]
+repository = "tailrocks/velnor"
+
+# Verification pipelines: one reusable workflow per unit, one row per unit, in
+# scan order. The aggregate workflows compose exactly these units, in this
+# order.
+
+[[declare]]
+primitive = "bun-package-pipeline"
+units = ["bun-velnor"]
+
+[[declare]]
+primitive = "docker-image-pipeline"
+units = ["docker"]
+
+[[declare]]
+primitive = "docs-lint-pipeline"
+units = ["docs"]
+
+[[declare]]
+primitive = "opentofu-pipeline"
+units = ["opentofu"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-policy"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-unit-collector"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-bench"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-client"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-control"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-model"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-render"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-runner"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-tools"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnor-workflow"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-velnorctl"]
+
+[[declare]]
+primitive = "rust-crate-pipeline"
+units = ["rust-production-topology"]
+
+# Lanes and cache: the default matrix (GitHub-hosted plus the trust-gated
+# self-hosted lane) and the detected cache contract, stated explicitly so the
+# repository owns the decision.
+
+[[declare]]
+primitive = "lane-matrix"
+
+[[declare]]
+primitive = "cache-contract"
+
+# Affected selection: the plan job every aggregate starts from.
+
+[[declare]]
+primitive = "affected-plan"
+
+# Aggregate workflows, one row per generated entry point.
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "ci-pr.yml"
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "ci-main.yml"
+
+[[declare]]
+primitive = "unit-aggregation"
+file = "nightly.yml"
+
+# Watch graph: derived from unit kinds and the Docker dependency closure, plus
+# the paths this repository adds on top.
+
+[[declare]]
+primitive = "watch-graph"
+
+[declare.args]
+runtime_inputs = ["crates/velnor-workflow/src/runtime.rs"]
+docker_closure = [
+  "rust-velnor-runner",
+  "rust-velnorctl",
+  "rust-velnor-tools",
+  "rust-velnor-workflow",
+]
+
+[declare.args.watch]
+"rust-velnor-workflow" = [
+  "Dockerfile",
+  "docker/build-mise.*",
+  "crates/velnor-workflow/templates/**",
+  "crates/velnor-workflow/README.md",
+]
+"rust-velnor-runner" = [
+  "crates/velnor-workflow/templates/velnor-release.yml",
+  "microvm/**",
+  "tools/unit-collector/**",
+  "fleet/**",
+]
+"rust-velnorctl" = ["microvm/**"]
+"rust-velnor-tools" = ["fleet/**"]
+"rust-velnor-model" = ["schemas/**"]
+
+# Regeneration gate: the workflow crate owns the generated surface, so its
+# verification starts by checking that the checked-in output is current.
+
+[[declare]]
+primitive = "regen-gate"
+units = ["rust-velnor-workflow"]
+
+[declare.args]
+command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../.."

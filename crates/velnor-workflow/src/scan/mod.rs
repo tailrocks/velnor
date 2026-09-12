@@ -85,6 +85,11 @@ impl RepositoryShape {
     }
 
     /// Every verification unit id the scan produced, in canonical order.
+    /// Every repository path the walk observed, relative to the root.
+    pub(crate) fn files(&self) -> &[String] {
+        &self.files
+    }
+
     pub(crate) fn unit_ids(&self) -> impl Iterator<Item = &str> {
         self.units.iter().map(|unit| unit.id.as_str())
     }
