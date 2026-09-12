@@ -5268,7 +5268,14 @@ fn upload_artifact_with_zip_builder(
 
     if options.overwrite {
         let existing = artifacts_owned_by_job(
-            list_results_artifacts(&client, base, token, plan_id, job_id)?,
+            list_results_artifacts(
+                &client,
+                base,
+                token,
+                plan_id,
+                job_id,
+                ResultsListingScope::Destructive,
+            )?,
             job_id,
         )
         .into_iter()
@@ -5420,7 +5427,14 @@ pub(crate) fn delete_finalized_artifact_blocking(
         .build()
         .context("build Results Service HTTP client")?;
     let matches = artifacts_owned_by_job(
-        list_results_artifacts(&client, base, token, plan_id, job_id)?,
+        list_results_artifacts(
+            &client,
+            base,
+            token,
+            plan_id,
+            job_id,
+            ResultsListingScope::Destructive,
+        )?,
         job_id,
     )
     .into_iter()
@@ -6095,12 +6109,51 @@ pub(crate) fn download_artifacts_blocking(
     )
 }
 
+/// How a listing treats rows that name a different workflow backend than the
+/// one this job queried with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResultsListingScope {
+    /// Read side: `download-artifact` fan-in and by-name lookups. actions/runner
+    /// and actions/toolkit consume ListArtifacts rows as-is and filter by name
+    /// client-side (`actions/toolkit`
+    /// `packages/artifact/src/internal/find/list-artifacts.ts` maps the whole
+    /// response without inspecting `workflow_run_backend_id`), so a row that
+    /// names another workflow backend is skipped — never a job failure. The
+    /// fleet hit the opposite behavior: a legacy cross-run `job-log` row in the
+    /// listing failed every Velnor-lane docker job before its first step.
+    Read,
+    /// Destructive side: overwrite deletes and artifact cleanup. Those paths
+    /// act on artifacts this job owns, so a row outside this plan is an
+    /// unexpected server response and must abort instead of being ignored.
+    Destructive,
+}
+
+/// Names of the skipped foreign rows for the read-side warning. Artifact names
+/// only — never backend IDs, sizes, or digests.
+fn foreign_listing_row_names(rows: &[ResultsArtifactDescriptorWire]) -> String {
+    const MAX_NAMES: usize = 5;
+    let mut names = rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    let mut summary = names
+        .iter()
+        .take(MAX_NAMES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > MAX_NAMES {
+        summary.push_str(&format!(", ... +{}", names.len() - MAX_NAMES));
+    }
+    summary
+}
+
 fn list_results_artifacts(
     client: &reqwest::blocking::Client,
     base: &str,
     token: &str,
     plan_id: &str,
     job_id: &str,
+    scope: ResultsListingScope,
 ) -> Result<Vec<ValidatedResultsArtifactDescriptor>> {
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let list_body = serde_json::to_string(&serde_json::json!({
@@ -6122,7 +6175,28 @@ fn list_results_artifacts(
             RESULTS_ARTIFACT_MAX_LISTED_ARTIFACTS
         );
     }
-    let validated = artifacts
+    // Partition on the plan ID before validating: a foreign row's malformed
+    // name, digest, or database_id must not abort a read that never touches it.
+    let (owned_plan, foreign_plan): (Vec<_>, Vec<_>) = artifacts
+        .into_iter()
+        .partition(|artifact| artifact.workflow_run_backend_id == plan_id);
+    if !foreign_plan.is_empty() {
+        match scope {
+            ResultsListingScope::Read => eprintln!(
+                "Warning: skipped {} Results Service artifact(s) belonging to other workflow backends: {}",
+                foreign_plan.len(),
+                foreign_listing_row_names(&foreign_plan)
+            ),
+            ResultsListingScope::Destructive => {
+                // Surface the first offending row through the same validator the
+                // destructive path has always used.
+                if let Some(artifact) = foreign_plan.into_iter().next() {
+                    artifact.validate(plan_id)?;
+                }
+            }
+        }
+    }
+    let validated = owned_plan
         .into_iter()
         .map(|artifact| artifact.validate(plan_id))
         .collect::<Result<Vec<_>>>()?;
@@ -6223,10 +6297,17 @@ pub(crate) fn results_artifact_id_by_name_blocking(
         .user_agent(RUNNER_USER_AGENT)
         .build()
         .context("build Results Service HTTP client")?;
-    let matching = list_results_artifacts(&client, base, token, plan_id, job_id)?
-        .into_iter()
-        .filter(|artifact| artifact.name == name)
-        .collect::<Vec<_>>();
+    let matching = list_results_artifacts(
+        &client,
+        base,
+        token,
+        plan_id,
+        job_id,
+        ResultsListingScope::Read,
+    )?
+    .into_iter()
+    .filter(|artifact| artifact.name == name)
+    .collect::<Vec<_>>();
     if matching.len() != 1 {
         bail!(
             "expected exactly one Results Service artifact named '{name}', found {}",
@@ -6267,7 +6348,14 @@ fn download_artifacts_blocking_in_temp_dir(
         .build()
         .context("build Results Service HTTP client")?;
 
-    let artifacts = list_results_artifacts(&client, base, token, plan_id, job_id)?;
+    let artifacts = list_results_artifacts(
+        &client,
+        base,
+        token,
+        plan_id,
+        job_id,
+        ResultsListingScope::Read,
+    )?;
     // Filter before enforcing global name uniqueness. Legacy runs can contain
     // duplicate names from unrelated producer jobs; those must not poison a
     // narrow download. Selected duplicates remain ambiguous and fail closed.
@@ -7354,6 +7442,334 @@ mod tests {
             assert!(error.to_string().contains(&format!("status={status}")));
             server.join().unwrap();
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn results_service_listing_scope_decides_foreign_backend_row_handling() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // A Results Service response that carries rows from another workflow
+        // backend: the legacy pre-per-job `job-log` fallback name and a foreign
+        // row that even collides with the requested artifact name. This is what
+        // GitHub-hosted results-receiver returned while every Velnor-lane
+        // docker job died on it before its first step.
+        const FOREIGN_BACKEND: &str = "f82aa716-7e04-45e9-a55c-91f3154e5ead";
+        let digest = format!("sha256:{}", "1".repeat(64));
+        let listing = serde_json::json!({
+            "artifacts": [
+                {
+                    "name": "job-log",
+                    "workflow_run_backend_id": FOREIGN_BACKEND,
+                    "workflow_job_run_backend_id": "legacy-job",
+                    "database_id": 101,
+                    "size": 3,
+                    "digest": digest
+                },
+                {
+                    "name": "release-linux",
+                    "workflow_run_backend_id": FOREIGN_BACKEND,
+                    "workflow_job_run_backend_id": "legacy-job",
+                    "database_id": 102,
+                    "size": 3,
+                    "digest": digest
+                },
+                {
+                    "name": "release-linux",
+                    "workflow_run_backend_id": "plan",
+                    "workflow_job_run_backend_id": "producer",
+                    "database_id": 103,
+                    "size": 3,
+                    "digest": digest
+                }
+            ]
+        })
+        .to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).to_string());
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{listing}",
+                    listing.len()
+                )
+                .unwrap();
+            }
+            requests
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .unwrap();
+
+        // Read side: foreign rows are skipped, including the one whose name
+        // matches the requested artifact. Ownership, not the name filter,
+        // decides what a download may touch.
+        let read_listing = list_results_artifacts(
+            &client,
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            ResultsListingScope::Read,
+        )
+        .unwrap();
+        assert_eq!(read_listing.len(), 1);
+        assert_eq!(read_listing[0].database_id, 103);
+        assert_eq!(read_listing[0].workflow_run_backend_id, "plan");
+        assert_eq!(read_listing[0].workflow_job_run_backend_id, "producer");
+
+        // Destructive side: unchanged, fail closed on the foreign row.
+        let error = list_results_artifacts(
+            &client,
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            ResultsListingScope::Destructive,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Results Service artifact 'job-log' belongs to workflow backend f82aa716-7e04-45e9-a55c-91f3154e5ead, not plan"),
+            "{error:#}"
+        );
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.contains("ArtifactService/ListArtifacts")));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn results_service_download_proceeds_when_listing_has_foreign_backend_rows() {
+        // Live failure (fleet build 0.1.274~preview.32, velnor lane): a legacy
+        // cross-run `job-log` row in the ListArtifacts response failed every
+        // docker job at "Download Velnor CI selection" before any step ran.
+        // actions/runner and actions/toolkit filter listing rows client-side
+        // and never fail a job because a row names another workflow backend.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let digest = format!(
+            "sha256:{}",
+            sha2::Sha256::digest(&zip_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip?credential=secret");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).to_string());
+                let (content_type, body): (&str, Vec<u8>) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::json!({
+                            "artifacts": [
+                                {
+                                    "name": "job-log",
+                                    "workflow_run_backend_id": "f82aa716-7e04-45e9-a55c-91f3154e5ead",
+                                    "workflow_job_run_backend_id": "legacy-job",
+                                    "database_id": 101,
+                                    "size": zip_bytes.len(),
+                                    "digest": digest
+                                },
+                                {
+                                    "name": "release-linux",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "producer",
+                                    "database_id": 103,
+                                    "size": zip_bytes.len(),
+                                    "digest": digest
+                                }
+                            ]
+                        })
+                        .to_string()
+                        .into_bytes(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::json!({"signed_url": signed_url})
+                            .to_string()
+                            .into_bytes(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            requests
+        });
+
+        let downloads = download_artifacts_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            "release-linux",
+            "",
+        )
+        .unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        let mut downloaded = Vec::new();
+        downloads[0].files[0]
+            .file()
+            .unwrap()
+            .read_to_end(&mut downloaded)
+            .unwrap();
+        assert_eq!(downloaded, b"artifact-v4\n");
+
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        // Only the owned row is signed and fetched.
+        assert!(requests[1].contains("\"workflow_run_backend_id\":\"plan\""));
+        assert!(requests[1].contains("\"workflow_job_run_backend_id\":\"producer\""));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn artifact_overwrite_refuses_foreign_workflow_backend_rows() {
+        // Destructive paths stay strict: an overwrite delete must abort when
+        // the listing names artifacts from another workflow backend instead of
+        // silently ignoring them, and it must not reach CreateArtifact.
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let probe_addr = listener.local_addr().unwrap();
+        let base = format!("http://{probe_addr}");
+        let listing = serde_json::json!({
+            "artifacts": [{
+                "name": "release",
+                "workflow_run_backend_id": "f82aa716-7e04-45e9-a55c-91f3154e5ead",
+                "workflow_job_run_backend_id": "legacy-job",
+                "database_id": 101,
+                "size": 3,
+                "digest": format!("sha256:{}", "1".repeat(64))
+            }]
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{listing}",
+                listing.len()
+            )
+            .unwrap();
+            // Any further client request (CreateArtifact, DeleteArtifact) is a
+            // regression: answer it as a server error and record it.
+            let mut extra = Vec::new();
+            loop {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let count = stream.read(&mut request).unwrap_or(0);
+                if request[..count].starts_with(b"PROBE") {
+                    break;
+                }
+                extra.push(request[..count].to_vec());
+                let body = "unexpected destructive request";
+                write!(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            (String::from_utf8_lossy(&request).to_string(), extra)
+        });
+
+        let error = upload_artifact_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "job",
+            "release",
+            &[("dist/output.txt".to_string(), b"artifact".to_vec())],
+            ArtifactUploadOptions {
+                overwrite: true,
+                ..ArtifactUploadOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("belongs to workflow backend f82aa716-7e04-45e9-a55c-91f3154e5ead"),
+            "{error:#}"
+        );
+
+        let mut probe = TcpStream::connect(probe_addr).unwrap();
+        probe.write_all(b"PROBE").unwrap();
+        probe.shutdown(Shutdown::Both).unwrap();
+        let (list_request, extra) = server.join().unwrap();
+        assert!(list_request.contains("ArtifactService/ListArtifacts"));
+        assert!(
+            extra.is_empty(),
+            "overwrite must not act on a foreign-workflow listing"
+        );
     }
 
     #[cfg(feature = "test-support")]
