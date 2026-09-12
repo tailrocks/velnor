@@ -145,6 +145,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
 | `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 | `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; corrections `d37ad166`, `admit` binding) |
+| `crates/velnor-runner/src/{trust_class.rs (workflow_run numeric ids, clone-URL host + SSH), runner.rs (case-insensitive secret prefix), github_adapter.rs (shared trust predicate contract)}` (red-team F-V2..F-V5 trust fixes, fail-closed) | codex-lead | complete — R0-fv2v5 (`fe5ea25f`) |
 | *(convergence 2026-09-12: both rows kept as landed history. The two `gha-cache-repo-namespace` mechanisms collided — main's in-memory live-job registry (§102) vs the accepted wave package's durable file-session registry with fork read-through chains (§13, `aeb1f257`/`abe0a07b`); the converged tree keeps the file-session design and drops the registry. See the convergence record at the end of this file.)* | | |
 
 ## 8. Discovered bug classes
@@ -228,6 +229,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §103). |
 | 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§103). |
 | 2026-09-12 | Line convergence: one `perf/docker-rust-mbx` head now contains the perf trust line, the fix cache half, and `origin/main` — merges `02c2e9db` + `0f2b02f5`, full SHA record in §104. |
+| 2026-09-12 | R0-fv2v5 closed red-team F-V2 (`workflow_run` numeric ids), F-V3 (clone-URL host + SSH), F-V4 (case-insensitive secret prefix) in `fe5ea25f`; F-V5 verified closed by the §104 convergence with the shared trust predicate pinned by test (§105). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5314,3 +5316,89 @@ tree admits trusted-pool jobs through `AdmittedTrust` and the
 `admission_conformance_*` tests assert the narrowed pair production
 persists. Main's §102 registry record stands as landed history for #663;
 the operational mechanism is §13's file-session design.
+
+## 105. R0-fv2v5: red-team F-V2..F-V5 trust fixes — 2026-09-12
+
+Follow-up to the finalize anchor's red-team list. The report's pointers
+were taken on the pre-convergence cache-half branch and re-inspected only
+for F-V1, so each of F-V2..F-V5 was re-verified against the converged
+`origin/perf/docker-rust-mbx` head before fixing (`fe5ea25f`):
+
+- F-V2 (low): the `workflow_run` derivation path lacked the pull-request
+  path's numeric-id contradiction check. Both paths now read through one
+  `HeadBaseRepos` struct (`trust_class.rs`): a run compares
+  `workflow_run.head_repository.id` against `workflow_run.repository.id`
+  the same way a pull request compares `head.repo.id` against
+  `base.repo.id`, and equal names with disagreeing ids fail closed to
+  `Unknown`. The shared struct removes the enabling condition — the check
+  cannot exist on one path and be forgotten on the other — and either
+  check can only ever move `Trusted` to `Unknown`, never the reverse,
+  because the fork verdict returns before the ids are consulted.
+- F-V3 (low/robustness): `clone_url_repository` ignored the URL host and
+  failed every SSH-style URL to `Unknown`. It now parses the two shapes
+  git accepts (`scheme://[user@]host[:port]/path` and scp-like
+  `[user@]host:path`) and requires the host to equal the job's own
+  GitHub server host from `github.server_url` — the variable first,
+  then the `github` context value, defaulting to `github.com` exactly
+  like the checkout planner — because checkout clones the URL verbatim
+  and a base-matching path on any other host corroborates nothing. A
+  present-but-garbled server URL, a hostless URL (bare path, `file:`),
+  and a URL/host split across servers all fail the corroboration closed.
+  GHES jobs keep working: their URL corroborates against their own
+  `server_url` host. The `cloneUrl`-key spelling is deliberately
+  unchanged: it matches `checkout.rs` `self_clone_url` signal for
+  signal, and diverging would break that tie.
+- F-V4 (note, pre-existing): `is_user_secret_variable` (`runner.rs`)
+  matched the `secrets.`/`secret.` prefix case-sensitively, so a
+  `Secrets.*` user secret bypassed the trust gate and flowed to an
+  untrusted job. The prefix now matches case-insensitively,
+  dot-anchored (`secretsX.*` is still not a secret context) and
+  panic-free on non-ASCII names. The two related prefix sites were
+  audited and left alone: `secret_context_names` (secrets-context
+  synthesis, fail-closed direction — a case variant does not
+  synthesize, it is not leaked) and checkout's token-expression
+  resolver (expression semantics, not gating); masking itself is
+  name-independent over all `isSecret` values.
+- F-V5 (note): the reported site — an inline `StoreTrustClass`
+  namespace match at `github_adapter.rs:135-138` bypassing the shared
+  `container::store_trust_namespace` helper — no longer exists in any
+  form. The §104 convergence deleted the enum, the helper, and the
+  match together, and the converged store paths call only shared
+  helpers (`normalize_scope`, `cache_class_path_for_trust`,
+  `cargo_target_store_host`, `append_legacy_trust`). Verified by
+  re-inspection on the converged tree: zero `StoreTrustClass`
+  references remain anywhere in `crates/`, the store functions carry
+  no inline trust match, and the only trust-string predicate is the
+  shared `github_trust_scope_allows_host_docker`, which every
+  capability gate calls (executor ×3, adapter ×5,
+  `validate_job_trust_policy`). Closed by convergence; the test
+  artifact pins the shared predicate's contract instead
+  (case-insensitive `trusted`, near-misses refused).
+
+Tests, 12 new, all passing: `trust_class` conformance for agreeing and
+one-sided run ids, ids-never-override-a-fork, every clone-URL shape,
+and GHES-against-`server_url` (5); `trust_class` regression for
+contradictory run ids, foreign-host URLs, server/URL splits, garbled
+server URLs, and hostless URLs (5); runner gate refusal of
+case-variant user secrets plus dotted-context anchoring (2). Both
+timing-gated trust benchmarks grew to the new paths in the repo's
+established style: derivation is 100k walks over five message shapes
+(bound 10 s, observed 0.20 s) and admission is 30k decisions including
+an id-carrying fork run with a case-variant secret (bound 10 s,
+observed 0.07 s).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean on runner (with `test-support`), model, and control; full
+serial runner lib 1762 passed, 0 failed, 1 ignored (the §104 1750
+plus the 12 new tests); targeted trust/admission 115/115;
+`telemetry_integration` 5/5; model 129+4+6+4; control 237+8+18+7;
+velnorctl `trust_scope_single_source` 2/2.
+F-V2..F-V5 status: complete.
+
+Landing note: `perf/docker-rust-mbx` was deleted from origin by a
+leader branch-sync while this package was in flight (its trust content
+survives on `main` via #667, byte-identical for every file this
+package touches); the two commits were replayed onto the `main` tip
+and pushed as `r0-fv2v5` for PR-based integration — `main` itself was
+not pushed directly, and the deleted branch was not resurrected.
