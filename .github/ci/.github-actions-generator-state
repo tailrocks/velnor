@@ -1,7 +1,7 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	4d6a159f7ab22b82
+config	489081d94ffe14c9
 scan	b2a9a9e28635f510
 generator	4
 [outputs]
@@ -31,5 +31,5 @@ generator	4
 .github/workflows/ci-rust-velnorctl.yml	fb5cee04c1db275e
 .github/workflows/maintenance.yml	6f95b9c9d9c1040d
 .github/workflows/nightly.yml	bb57b6f6cad6650b
-.github/workflows/preview.yml	537b73815e5a58bb
-.github/workflows/release.yml	eb617e651a2b6420
+.github/workflows/preview.yml	fb9ce5ebf288cd3b
+.github/workflows/release.yml	64515faa2b71edcb

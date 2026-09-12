@@ -248,6 +248,19 @@ fn debian_package_declares_flock_provider() {
 }
 
 #[test]
+fn debian_package_ships_its_own_package_record() {
+    // Issue #673: a preview install has no out-of-band release record to
+    // activate from, so the deb must carry its own activatable identity.
+    let assets = include_str!("../../Cargo.toml");
+    assert!(
+        assets.contains(
+            "[\"release/package-record.json\", \"usr/share/velnor/package-record.json\", \"644\"]"
+        ),
+        "cargo-deb assets must ship the deb's package record"
+    );
+}
+
+#[test]
 fn debian_package_ships_boot_persistent_transaction_lock_path() {
     // /run is tmpfs: without a tmpfiles.d entry the preinst/postinst lock gates
     // fail closed after every reboot until an operator recreates the path.
@@ -392,7 +405,7 @@ fn deployed_for(record: &ReleaseRecord, host: Arch) -> DeployedIdentity {
         binary_sha256: arch.binary_sha256.clone(),
         manifest_version: record.build.manifest_version,
         manifest_sha256: record.build.manifest_sha256.clone(),
-        oci_image_digest: record.oci_index_digest.clone(),
+        oci_image_digest: Some(record.oci_index_digest.clone()),
         record_sha256: record.digest(),
     }
 }
@@ -640,7 +653,12 @@ fn verify_installed_happy_path() {
     let host = Arch::Amd64;
     let deployed = deployed_for(&record, host);
     assert_eq!(
-        verify_installed(&deployed, &record, host, &deployed.binary_sha256),
+        verify_installed(
+            &deployed,
+            &ActiveRecord::Release(record.clone()),
+            host,
+            &deployed.binary_sha256
+        ),
         Ok(())
     );
 }
@@ -649,11 +667,12 @@ fn verify_installed_happy_path() {
 fn verify_installed_catches_each_field() {
     let record = valid_record();
     let host = Arch::Amd64;
+    let active = ActiveRecord::Release(record.clone());
 
     let mut wrong_pointer = deployed_for(&record, host);
     wrong_pointer.record_sha256 = digest_of("x");
     assert_eq!(
-        verify_installed(&wrong_pointer, &record, host, &wrong_pointer.binary_sha256),
+        verify_installed(&wrong_pointer, &active, host, &wrong_pointer.binary_sha256),
         Err(CoherenceError::InstalledRecordPointer)
     );
 
@@ -661,28 +680,28 @@ fn verify_installed_catches_each_field() {
     wrong_source.source_commit = source_sha("other");
     wrong_source.record_sha256 = record.digest();
     assert_eq!(
-        verify_installed(&wrong_source, &record, host, &wrong_source.binary_sha256),
+        verify_installed(&wrong_source, &active, host, &wrong_source.binary_sha256),
         Err(CoherenceError::InstalledSource)
     );
 
     let mut wrong_pkg = deployed_for(&record, host);
     wrong_pkg.package_version = "0.1.58".into();
     assert_eq!(
-        verify_installed(&wrong_pkg, &record, host, &wrong_pkg.binary_sha256),
+        verify_installed(&wrong_pkg, &active, host, &wrong_pkg.binary_sha256),
         Err(CoherenceError::InstalledPackageVersion)
     );
 
     let mut wrong_oci = deployed_for(&record, host);
-    wrong_oci.oci_image_digest = oci_of("other-index");
+    wrong_oci.oci_image_digest = Some(oci_of("other-index"));
     assert_eq!(
-        verify_installed(&wrong_oci, &record, host, &wrong_oci.binary_sha256),
+        verify_installed(&wrong_oci, &active, host, &wrong_oci.binary_sha256),
         Err(CoherenceError::InstalledOci)
     );
 
     // Installed binary on disk disagrees with the recorded digest.
     let deployed = deployed_for(&record, host);
     assert_eq!(
-        verify_installed(&deployed, &record, host, &digest_of("tampered-binary")),
+        verify_installed(&deployed, &active, host, &digest_of("tampered-binary")),
         Err(CoherenceError::InstalledBinary)
     );
 }
@@ -702,11 +721,16 @@ fn verify_installed_rejects_missing_host_arch() {
         binary_sha256: digest_of("bin-arm64"),
         manifest_version: record.build.manifest_version,
         manifest_sha256: record.build.manifest_sha256.clone(),
-        oci_image_digest: record.oci_index_digest.clone(),
+        oci_image_digest: Some(record.oci_index_digest.clone()),
         record_sha256: record.digest(),
     };
     assert_eq!(
-        verify_installed(&deployed, &record, host, &deployed.binary_sha256),
+        verify_installed(
+            &deployed,
+            &ActiveRecord::Release(record.clone()),
+            host,
+            &deployed.binary_sha256
+        ),
         Err(CoherenceError::ArchitectureSet)
     );
 }
@@ -1643,8 +1667,12 @@ fn store_activate_and_rollback_restore_exact_tuple() {
     let deployed120 = deployed_for(&v120, host);
     let deployed121 = deployed_for(&v121, host);
 
-    store.activate(&v120, &deployed120).unwrap();
-    store.activate(&v121, &deployed121).unwrap();
+    store
+        .activate(&ActiveRecord::Release(v120.clone()), &deployed120)
+        .unwrap();
+    store
+        .activate(&ActiveRecord::Release(v121.clone()), &deployed121)
+        .unwrap();
 
     assert_eq!(store.active_tag().unwrap().as_deref(), Some("v0.1.121"));
     assert_eq!(store.previous_tag().unwrap().as_deref(), Some("v0.1.120"));
@@ -1664,7 +1692,9 @@ fn store_record_refuses_to_clobber_divergent_bytes() {
     let dir = TempDir::new("clobber");
     let store = ReleaseStore::new(dir.path());
     let record = valid_record();
-    store.store_record(&record).unwrap();
+    store
+        .store_record(&ActiveRecord::Release(record.clone()))
+        .unwrap();
 
     // Same tag, different content -> must not overwrite.
     let mut tampered = record.clone();
@@ -1673,11 +1703,15 @@ fn store_record_refuses_to_clobber_divergent_bytes() {
         "ghcr.io/tailrocks/velnor-job-ubuntu@{}",
         tampered.oci_index_digest
     );
-    let err = store.store_record(&tampered).unwrap_err();
+    let err = store
+        .store_record(&ActiveRecord::Release(tampered))
+        .unwrap_err();
     assert!(err.to_string().contains("refusing to clobber"));
 
     // Exact re-store of identical bytes is an idempotent success.
-    store.store_record(&record).unwrap();
+    store
+        .store_record(&ActiveRecord::Release(record.clone()))
+        .unwrap();
 }
 
 #[test]
@@ -1687,7 +1721,9 @@ fn activate_requires_a_stored_record() {
     let record = valid_record();
     let mut deployed = deployed_for(&record, Arch::host().unwrap());
     deployed.record_sha256 = digest_of("wrong-record");
-    assert!(store.activate(&record, &deployed).is_err());
+    assert!(store
+        .activate(&ActiveRecord::Release(record.clone()), &deployed)
+        .is_err());
 }
 
 #[test]
@@ -1708,4 +1744,655 @@ fn sha256_file_matches_in_memory_digest() {
         sha256_file(&path).unwrap(),
         Sha256Hex::of_bytes(b"velnor-runner-bytes")
     );
+}
+
+// --- package records (issue #673) ------------------------------------------
+
+/// The version the preview workflow builds and publishes: the crate version is
+/// prefixed by `~` so dpkg ranks the preview strictly below its own release.
+fn preview_debian_version(crate_version: &str) -> String {
+    format!("{crate_version}~preview.25+8d49319")
+}
+
+fn package_record_for(kind: &str, arch: Arch) -> PackageRecord {
+    let debian_version = match kind {
+        PACKAGE_KIND_PREVIEW => preview_debian_version("0.1.121"),
+        _ => "0.1.121".to_string(),
+    };
+    PackageRecord {
+        schema: PACKAGE_RECORD_SCHEMA.to_string(),
+        build: PackageBuildIdentity {
+            repository: SOURCE_REPOSITORY.to_string(),
+            kind: kind.to_string(),
+            commit: source_sha("commit-seed"),
+            crate_version: "0.1.121".to_string(),
+            debian_version,
+            manifest_version: crate::manifest::MANIFEST_VERSION,
+            manifest_sha256: digest_of("manifest"),
+        },
+        architecture: PackageArchitectureIdentity {
+            arch,
+            target: arch.target().to_string(),
+            binary_sha256: digest_of(&format!("bin-{}", arch.as_str())),
+        },
+    }
+}
+
+fn deployed_for_package(record: &PackageRecord) -> DeployedIdentity {
+    DeployedIdentity {
+        schema: DEPLOYED_IDENTITY_SCHEMA.to_string(),
+        package_version: record.build.debian_version.clone(),
+        crate_version: record.build.crate_version.clone(),
+        source_commit: record.build.commit.clone(),
+        binary_sha256: record.architecture.binary_sha256.clone(),
+        manifest_version: record.build.manifest_version,
+        manifest_sha256: record.build.manifest_sha256.clone(),
+        // A package ships no image, so its deployed identity names none.
+        oci_image_digest: None,
+        record_sha256: record.digest(),
+    }
+}
+
+#[test]
+fn preview_and_stable_package_records_verify() {
+    assert_eq!(
+        package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64).verify(),
+        Ok(())
+    );
+    assert_eq!(
+        package_record_for(PACKAGE_KIND_STABLE, Arch::Arm64).verify(),
+        Ok(())
+    );
+}
+
+/// Kind and Debian version validate each other, so a record can never be
+/// re-labelled across channels without breaking the version contract.
+#[test]
+fn package_record_kind_must_satisfy_its_version_contract() {
+    let cases: Vec<(String, String, CoherenceError)> = vec![
+        // A preview record whose Debian version equals its crate version would
+        // win an upgrade race against the stable release: never.
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121".into(),
+            CoherenceError::PackageVersion,
+        ),
+        // A preview record without the `~preview.<run>+<short>` shape.
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.999".into(),
+            CoherenceError::PackageVersion,
+        ),
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121~preview.".into(),
+            CoherenceError::PackageVersion,
+        ),
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121~preview.25".into(),
+            CoherenceError::PackageVersion,
+        ),
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121~preview.25+8d4931".into(),
+            CoherenceError::PackageVersion,
+        ),
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121~preview.25+8D49319".into(),
+            CoherenceError::PackageVersion,
+        ),
+        (
+            PACKAGE_KIND_PREVIEW.into(),
+            "0.1.121~preview.x+8d49319".into(),
+            CoherenceError::PackageVersion,
+        ),
+        // A stable record must keep the exact release version, never a preview
+        // suffix: the stable chain's coherence is unchanged.
+        (
+            PACKAGE_KIND_STABLE.into(),
+            "0.1.121~preview.25+8d49319".into(),
+            CoherenceError::PackageVersion,
+        ),
+        // No third kind exists.
+        (
+            "development".into(),
+            preview_debian_version("0.1.121"),
+            CoherenceError::Kind,
+        ),
+    ];
+    for (kind, debian_version, expected) in cases {
+        let mut record = package_record_for(&kind, Arch::Amd64);
+        record.build.debian_version = debian_version;
+        assert_eq!(record.verify(), Err(expected), "kind {kind}");
+    }
+}
+
+#[test]
+fn package_record_is_deterministic_and_acyclic() {
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    assert_eq!(record.to_canonical_json(), record.to_canonical_json());
+    let bytes = record.to_canonical_json();
+    // Same acyclicity rule as the release record: no self digest inside.
+    assert!(!bytes.contains(record.digest().as_str()));
+    // The record names its binary digest exactly once (the architecture entry).
+    assert_eq!(
+        bytes
+            .matches(record.architecture.binary_sha256.as_str())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn package_record_and_release_record_describe_one_source() {
+    // Both record kinds are derived from the same source identity, so a host can
+    // hold either tuple for the same commit and manifest.
+    let release = valid_record();
+    let package = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    assert_eq!(release.build.commit, package.build.commit);
+    assert_eq!(release.build.manifest_sha256, package.build.manifest_sha256);
+    assert_eq!(release.build.crate_version, package.build.crate_version);
+}
+
+#[test]
+fn package_record_rejects_unknown_fields_and_wrong_schema() {
+    let mut value =
+        serde_json::to_value(package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64)).unwrap();
+    value["apt_token"] = serde_json::json!("ghp_secretsecretsecret");
+    assert!(serde_json::from_value::<PackageRecord>(value).is_err());
+
+    let mut wrong_schema = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    wrong_schema.schema = "velnor.package-record/v2".into();
+    assert_eq!(
+        wrong_schema.verify(),
+        Err(CoherenceError::Schema {
+            want: PACKAGE_RECORD_SCHEMA,
+        })
+    );
+
+    let mut wrong_repo = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    wrong_repo.build.repository = "evil/fork".into();
+    assert_eq!(wrong_repo.verify(), Err(CoherenceError::Repository));
+
+    let mut wrong_target = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Arm64);
+    wrong_target.architecture.target = "wrong-triple".into();
+    assert_eq!(wrong_target.verify(), Err(CoherenceError::ArchTarget));
+}
+
+#[test]
+fn verify_package_record_bytes_enforces_the_same_contract() {
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    let bytes = record.to_canonical_json();
+    let checksum = Sha256Hex::of_bytes(bytes.as_bytes());
+    assert_eq!(
+        verify_package_record_bytes(bytes.as_bytes(), &checksum).map(|parsed| parsed.digest()),
+        Ok(record.digest())
+    );
+
+    let wrong = digest_of("wrong");
+    assert_eq!(
+        verify_package_record_bytes(bytes.as_bytes(), &wrong),
+        Err(CoherenceError::RecordChecksum)
+    );
+
+    let mut padded = bytes.clone().into_bytes();
+    padded.extend_from_slice(b"   \n");
+    assert_eq!(
+        verify_package_record_bytes(&padded, &Sha256Hex::of_bytes(&padded)),
+        Err(CoherenceError::NonCanonical)
+    );
+
+    assert_eq!(
+        verify_package_record_bytes(b"{not json", &Sha256Hex::of_bytes(b"{not json")),
+        Err(CoherenceError::Malformed)
+    );
+}
+
+#[test]
+fn active_record_parses_either_schema_and_refuses_others() {
+    let package = ActiveRecord::parse(
+        package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64)
+            .to_canonical_json()
+            .as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        package,
+        ActiveRecord::Package(package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64))
+    );
+    assert_eq!(package.store_key(), "0.1.121~preview.25+8d49319");
+    assert_eq!(package.label(), "preview 0.1.121~preview.25+8d49319");
+    assert!(package.oci_index_digest().is_none());
+
+    let release = ActiveRecord::parse(valid_record().to_canonical_json().as_bytes()).unwrap();
+    assert_eq!(release.store_key(), "v0.1.121");
+    assert_eq!(release.label(), "v0.1.121");
+    assert!(release.oci_index_digest().is_some());
+
+    let unknown = br#"{"schema":"velnor.release-record/v9"}"#;
+    assert_eq!(
+        ActiveRecord::parse(unknown),
+        Err(CoherenceError::RecordSchema)
+    );
+    assert_eq!(
+        ActiveRecord::parse(b"{not json"),
+        Err(CoherenceError::Malformed)
+    );
+}
+
+#[test]
+fn emit_package_record_refuses_development_identity() {
+    let identity = embedded();
+    assert!(identity.is_development());
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::host().unwrap());
+    let dir = TempDir::new("emit-pkg-binary");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"runner-bytes").unwrap();
+    let err = emit_package_record(PackageRecordEmission {
+        identity: &identity,
+        record: &record,
+        binary: &binary,
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("development"));
+}
+
+#[test]
+fn emit_package_record_accepts_a_matching_preview_identity() {
+    let mut record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    // Name exactly the bytes the packaging lane stages.
+    record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+    let identity = EmbeddedIdentity {
+        source_sha: record.build.commit.as_str().to_string(),
+        tag: "preview".into(),
+        kind: PACKAGE_KIND_PREVIEW.into(),
+        crate_version: record.build.crate_version.clone(),
+    };
+    let dir = TempDir::new("emit-pkg-ok");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    emit_package_record(PackageRecordEmission {
+        identity: &identity,
+        record: &record,
+        binary: &binary,
+    })
+    .unwrap();
+
+    // The staged record is byte-identical to the canonical form and re-verifies
+    // against the digest the packaging lane publishes beside it.
+    let bytes = record.to_canonical_json();
+    verify_package_record_bytes(bytes.as_bytes(), &Sha256Hex::of_bytes(bytes.as_bytes())).unwrap();
+}
+
+/// A record is only ever staged against the bytes it names, from a binary whose
+/// own embedded identity agrees with it.
+#[test]
+fn emit_package_record_rejects_every_binding_drift() {
+    let mut record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"exact-runner-bytes");
+    let dir = TempDir::new("emit-pkg-drift");
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"exact-runner-bytes").unwrap();
+    let emission = |identity: &EmbeddedIdentity, record: &PackageRecord| {
+        emit_package_record(PackageRecordEmission {
+            identity,
+            record,
+            binary: &binary,
+        })
+    };
+
+    let matching = EmbeddedIdentity {
+        source_sha: record.build.commit.as_str().to_string(),
+        tag: "preview".into(),
+        kind: PACKAGE_KIND_PREVIEW.into(),
+        crate_version: record.build.crate_version.clone(),
+    };
+    // Sanity: the matching identity emits cleanly, so each rejection below is
+    // caused by the single field it drifts.
+    emission(&matching, &record).unwrap();
+
+    let mut other_commit = matching.clone();
+    other_commit.source_sha = source_sha("other-commit").as_str().to_string();
+    assert!(emission(&other_commit, &record)
+        .unwrap_err()
+        .to_string()
+        .contains("source commit"));
+
+    let mut other_version = matching.clone();
+    other_version.crate_version = "0.1.999".into();
+    assert!(emission(&other_version, &record)
+        .unwrap_err()
+        .to_string()
+        .contains("crate version"));
+
+    // Kind mismatch: a preview record cannot come from a release-build binary.
+    let mut stable_identity = matching.clone();
+    stable_identity.kind = PACKAGE_KIND_STABLE.into();
+    assert!(emission(&stable_identity, &record)
+        .unwrap_err()
+        .to_string()
+        .contains("kind"));
+
+    // Binary drift: the record must never ship against bytes it does not name.
+    let tampered = dir.path().join("tampered");
+    std::fs::write(&tampered, b"tampered-runner-bytes").unwrap();
+    assert!(emit_package_record(PackageRecordEmission {
+        identity: &matching,
+        record: &record,
+        binary: &tampered,
+    })
+    .unwrap_err()
+    .to_string()
+    .contains("binary digest disagrees"));
+}
+
+#[test]
+fn verify_installed_accepts_a_preview_package_tuple() {
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    let deployed = deployed_for_package(&record);
+    assert_eq!(
+        verify_installed(
+            &deployed,
+            &ActiveRecord::Package(record.clone()),
+            Arch::Amd64,
+            &deployed.binary_sha256
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn verify_installed_catches_drift_in_a_preview_package_tuple() {
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    let active = ActiveRecord::Package(record.clone());
+
+    // A package tuple must name no image: the preview lane builds none.
+    let mut with_image = deployed_for_package(&record);
+    with_image.oci_image_digest = Some(oci_of("some-index"));
+    assert_eq!(
+        verify_installed(&with_image, &active, Arch::Amd64, &with_image.binary_sha256),
+        Err(CoherenceError::InstalledOci)
+    );
+
+    let mut wrong_binary = deployed_for_package(&record);
+    wrong_binary.binary_sha256 = digest_of("tampered-binary");
+    assert_eq!(
+        verify_installed(
+            &wrong_binary,
+            &active,
+            Arch::Amd64,
+            &wrong_binary.binary_sha256
+        ),
+        Err(CoherenceError::InstalledBinary)
+    );
+
+    // Installed bytes disagreeing with the record fail even with a coherent
+    // deployed identity.
+    let deployed = deployed_for_package(&record);
+    assert_eq!(
+        verify_installed(
+            &deployed,
+            &active,
+            Arch::Amd64,
+            &digest_of("tampered-binary")
+        ),
+        Err(CoherenceError::InstalledBinary)
+    );
+
+    let mut wrong_source = deployed_for_package(&record);
+    wrong_source.source_commit = source_sha("other");
+    assert_eq!(
+        verify_installed(
+            &wrong_source,
+            &active,
+            Arch::Amd64,
+            &wrong_source.binary_sha256
+        ),
+        Err(CoherenceError::InstalledSource)
+    );
+
+    let mut wrong_pointer = deployed_for_package(&record);
+    wrong_pointer.record_sha256 = digest_of("x");
+    assert_eq!(
+        verify_installed(
+            &wrong_pointer,
+            &active,
+            Arch::Amd64,
+            &wrong_pointer.binary_sha256
+        ),
+        Err(CoherenceError::InstalledRecordPointer)
+    );
+
+    // The record carries exactly one architecture.
+    assert_eq!(
+        verify_installed(&deployed, &active, Arch::Arm64, &deployed.binary_sha256),
+        Err(CoherenceError::InstalledArchMissing)
+    );
+}
+
+#[test]
+fn verify_installed_command_reads_a_preview_package_tuple() {
+    let dir = TempDir::new("verify-installed-preview");
+    let mut record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::host().unwrap());
+    record.architecture.binary_sha256 = Sha256Hex::of_bytes(b"installed-bytes");
+    let deployed = deployed_for_package(&record);
+    let record_path = dir.path().join("record.json");
+    let deployed_path = dir.path().join("deployed.json");
+    let binary_path = dir.path().join("velnor-runner");
+    std::fs::write(&record_path, record.to_canonical_json()).unwrap();
+    std::fs::write(&deployed_path, serde_json::to_vec(&deployed).unwrap()).unwrap();
+    std::fs::write(&binary_path, b"installed-bytes").unwrap();
+
+    verify_installed_command(ReleaseVerifyInstalledArgs {
+        record: record_path,
+        deployed: deployed_path,
+        binary: binary_path,
+        arch: None,
+    })
+    .unwrap();
+
+    // And an installed binary that disagrees fails closed.
+    let tampered = dir.path().join("tampered");
+    std::fs::write(&tampered, b"tampered-bytes").unwrap();
+    assert!(verify_installed_command(ReleaseVerifyInstalledArgs {
+        record: dir.path().join("record.json"),
+        deployed: dir.path().join("deployed.json"),
+        binary: tampered,
+        arch: None,
+    })
+    .is_err());
+}
+
+#[test]
+fn store_activates_and_rolls_back_preview_package_tuples() {
+    let dir = TempDir::new("store-preview");
+    let store = ReleaseStore::new(dir.path());
+    let host = Arch::host().unwrap();
+
+    let mut older = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    older.build.crate_version = "0.1.120".into();
+    older.build.debian_version = preview_debian_version("0.1.120");
+    assert_eq!(older.verify(), Ok(()));
+
+    let newer = package_record_for(PACKAGE_KIND_PREVIEW, host);
+    let old_record = ActiveRecord::Package(older.clone());
+    let new_record = ActiveRecord::Package(newer.clone());
+
+    store
+        .activate(&old_record, &deployed_for_package(&older))
+        .unwrap();
+    store
+        .activate(&new_record, &deployed_for_package(&newer))
+        .unwrap();
+
+    assert_eq!(
+        store.active_tag().unwrap().as_deref(),
+        Some(newer.build.debian_version.as_str())
+    );
+    assert_eq!(
+        store.previous_tag().unwrap().as_deref(),
+        Some(older.build.debian_version.as_str())
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("active/record.json")).unwrap(),
+        new_record.to_canonical_json().as_bytes()
+    );
+    // A stored package record re-reads as a package record under its Debian
+    // version key.
+    assert_eq!(
+        store
+            .read_record(newer.build.debian_version.as_str())
+            .unwrap(),
+        new_record
+    );
+
+    let restored = store.rollback().unwrap();
+    assert_eq!(restored, older.build.debian_version);
+    assert_eq!(
+        store.read_record(restored.as_str()).unwrap(),
+        ActiveRecord::Package(older)
+    );
+}
+
+/// Activation of a stable package record is refused before any byte is hashed:
+/// the stable chain activates from its out-of-band release record, never from
+/// the deb carrying an informational package record.
+#[test]
+fn activate_command_refuses_a_stable_package_record() {
+    let dir = TempDir::new("activate-stable-package");
+    let record_path = dir.path().join("record.json");
+    std::fs::write(
+        &record_path,
+        package_record_for(PACKAGE_KIND_STABLE, Arch::host().unwrap()).to_canonical_json(),
+    )
+    .unwrap();
+
+    let error = activate_command(ReleaseActivateArgs {
+        dir: dir.path().join("store"),
+        record: record_path,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("a stable package activates from its out-of-band release record"));
+}
+
+#[test]
+fn activate_command_refuses_a_package_for_another_host_architecture() {
+    let dir = TempDir::new("activate-package-arch");
+    let other = match Arch::host().unwrap() {
+        Arch::Amd64 => Arch::Arm64,
+        Arch::Arm64 => Arch::Amd64,
+    };
+    let record_path = dir.path().join("record.json");
+    std::fs::write(
+        &record_path,
+        package_record_for(PACKAGE_KIND_PREVIEW, other).to_canonical_json(),
+    )
+    .unwrap();
+
+    let error = activate_command(ReleaseActivateArgs {
+        dir: dir.path().join("store"),
+        record: record_path,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("but this host is"));
+}
+
+#[test]
+fn emit_command_requires_a_binary_for_a_package_record() {
+    let dir = TempDir::new("emit-command-package");
+    let record_path = dir.path().join("package-record.json");
+    std::fs::write(
+        &record_path,
+        package_record_for(PACKAGE_KIND_PREVIEW, Arch::host().unwrap()).to_canonical_json(),
+    )
+    .unwrap();
+
+    // No --binary: refused before anything is staged.
+    let error = emit_command(ReleaseEmitArgs {
+        record: record_path.clone(),
+        out_dir: dir.path().join("store"),
+        out: None,
+        binary: None,
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("requires --binary"));
+
+    // With --binary the development identity of the test binary still refuses:
+    // no provenance-less bytes can produce a package record.
+    let binary = dir.path().join("velnor-runner");
+    std::fs::write(&binary, b"runner-bytes").unwrap();
+    let error = emit_command(ReleaseEmitArgs {
+        record: record_path,
+        out_dir: dir.path().join("store"),
+        out: None,
+        binary: Some(binary),
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("development"));
+}
+
+#[test]
+fn verify_record_command_verifies_and_guards_a_package_record() {
+    let dir = TempDir::new("verify-record-package");
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    let record_path = dir.path().join("package-record.json");
+    let checksum_path = dir.path().join("package-record.json.sha256");
+    let bytes = record.to_canonical_json();
+    let digest = Sha256Hex::of_bytes(bytes.as_bytes());
+    std::fs::write(&record_path, &bytes).unwrap();
+    std::fs::write(&checksum_path, format!("{digest}  package-record.json\n")).unwrap();
+
+    verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path.clone(),
+        checksum: Some(checksum_path),
+        sha256: None,
+        publication: None,
+        expected_apt_metadata: None,
+        served_apt_metadata: None,
+    })
+    .unwrap();
+
+    // A package record has no publication: the stable chain's APT claims do not
+    // apply to it.
+    let publication_path = dir.path().join("publication.json");
+    std::fs::write(
+        &publication_path,
+        serde_json::to_vec(&publication_for(&valid_record())).unwrap(),
+    )
+    .unwrap();
+    let error = verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: Some(dir.path().join("package-record.json.sha256")),
+        sha256: None,
+        publication: Some(publication_path),
+        expected_apt_metadata: None,
+        served_apt_metadata: None,
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("a package record has no publication to check"));
+}
+
+#[test]
+fn verify_record_command_accepts_sha256_for_a_package_record() {
+    let dir = TempDir::new("verify-record-package-hex");
+    let record = package_record_for(PACKAGE_KIND_PREVIEW, Arch::Amd64);
+    let record_path = dir.path().join("package-record.json");
+    let bytes = record.to_canonical_json();
+    std::fs::write(&record_path, &bytes).unwrap();
+
+    verify_record_command(ReleaseVerifyRecordArgs {
+        record: record_path,
+        checksum: None,
+        sha256: Some(Sha256Hex::of_bytes(bytes.as_bytes()).as_str().to_string()),
+        publication: None,
+        expected_apt_metadata: None,
+        served_apt_metadata: None,
+    })
+    .unwrap();
 }
