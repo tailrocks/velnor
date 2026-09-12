@@ -83,7 +83,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "5bea6c12f45441d3c1ae409902446d1f64cbb4
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "6e59b98d5d1a6d42017465b045554a18d97d7e68";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "9c1a0782ec6138207986ee42016c0af1282ee02c";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 // The GitHub cache payload changed from Cargo's target tree to mbx objects.
 // Keep the transition explicit: the generated custom keys bypass the action's
@@ -741,6 +741,8 @@ pub struct ProjectConfig {
     /// disabling its configuration-variables check for surfaces that declare
     /// none.
     actionlint_config_variables_null: bool,
+    /// Require the generated CI aggregate check to conclude the workflow.
+    ci_required: bool,
     /// Per-owner-block update channel grants from the repo-owned generation
     /// config, or `None` while the repository has not adopted a config.
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
@@ -918,16 +920,23 @@ fn scan_target(
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<ScannedTarget, GeneratorError> {
-    let shape = scan::scan_shape(root, runners, default_branch)?;
     let generation = config::discover(root)?;
+    let exclude = generation
+        .as_ref()
+        .map(config::RepoGenerationConfig::scan_exclude)
+        .transpose()?
+        .unwrap_or(&[]);
+    let shape = scan::scan_shape(root, runners, default_branch, exclude)?;
     let declared = primitives::declared_contracts(generation.as_ref());
-    let config = apply_local_velnor_profile(root, ProjectConfig::from(shape.clone()), declared)?;
+    let config =
+        apply_local_velnor_profile(root, ProjectConfig::from(shape.clone()), declared, exclude)?;
     let config = load_workflow_templates(root, config)?;
     let mut config = apply_local_estate_runner_profile(root, config);
     // The repo-owned config is validated against the resolved units before it
     // can influence anything: a declared unit the scan did not find is a hard
     // error, never a silent no-op.
     if let Some(generation) = &generation {
+        apply_generation_overrides(&mut config, generation)?;
         config.package_update_channels = generation.package_update_channels();
         let unit_ids = config
             .units
@@ -946,6 +955,47 @@ fn scan_target(
         generation,
         inputs,
     })
+}
+
+fn apply_generation_overrides(
+    config: &mut ProjectConfig,
+    generation: &config::RepoGenerationConfig,
+) -> Result<(), GeneratorError> {
+    if let Some(github_runner) = generation.github_runner() {
+        validate_config_text(github_runner, "[workflow] github_runner")?;
+        github_runner.clone_into(&mut config.github_runner);
+    }
+    if let Some(velnor_labels) = generation.velnor_labels() {
+        if velnor_labels.is_empty() {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not be empty",
+            ));
+        }
+        for label in velnor_labels {
+            validate_config_text(label, "[workflow] velnor_labels")?;
+        }
+        config.velnor_labels = velnor_labels.to_vec();
+    }
+    if let Some(default_branch) = generation.default_branch() {
+        validate_default_branch(default_branch)?;
+        default_branch.clone_into(&mut config.default_branch);
+    }
+    if let Some(ci_required) = generation.ci_required() {
+        config.ci_required = ci_required;
+    }
+    if let Some(actionlint_config_variables_null) = generation.actionlint_config_variables_null() {
+        config.actionlint_config_variables_null = actionlint_config_variables_null;
+    }
+    Ok(())
+}
+
+fn validate_config_text(value: &str, field: &str) -> Result<(), GeneratorError> {
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(GeneratorError::usage(format!(
+            "{field} must be non-empty and contain no control characters"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1387,6 +1437,7 @@ fn apply_local_velnor_profile(
     root: &Path,
     mut config: ProjectConfig,
     declared: primitives::DeclaredContracts,
+    exclude: &[String],
 ) -> Result<ProjectConfig, GeneratorError> {
     if local_github_repository(root).as_deref() != Some("tailrocks/velnor") {
         enable_mr_boxington_commands(&mut config);
@@ -1465,7 +1516,7 @@ fn apply_local_velnor_profile(
     // A repo-owned config that declares these contracts owns them: the legacy
     // paths stay for the surfaces that have not declared them yet.
     if !declared.watch_graph {
-        apply_velnor_watch_graph(root, &mut config)?;
+        apply_velnor_watch_graph(root, &mut config, exclude)?;
     }
     configure_velnor_docker_pr_target(&mut config);
     if !declared.regen_gate {
@@ -1587,8 +1638,12 @@ fn add_velnor_regeneration_gate(config: &mut ProjectConfig) {
     }
 }
 
-fn apply_velnor_watch_graph(root: &Path, config: &mut ProjectConfig) -> Result<(), GeneratorError> {
-    let files = repository_files(root)?;
+fn apply_velnor_watch_graph(
+    root: &Path,
+    config: &mut ProjectConfig,
+    exclude: &[String],
+) -> Result<(), GeneratorError> {
+    let files = repository_files(root, exclude)?;
     let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
     let docker_watch = primitives::watch::docker_watch_paths(
         root,
@@ -2838,6 +2893,7 @@ fn catalog_config_with_default_branch(
         workflow_templates: BTreeMap::new(),
         adopted_workflow_surface: false,
         actionlint_config_variables_null: false,
+        ci_required: true,
         package_update_channels: None,
     };
     enable_mr_boxington_commands(&mut config);
@@ -7791,6 +7847,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
         };
         must(
@@ -10889,10 +10946,81 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     fn configured_repository_config(unit: &str) -> String {
         format!(
-            "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
-             [policy]\nci_required = true\n\n\
+             "schema = 1\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
+             [policy]\nci_required = true\ndco_required = false\n\n\
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"{unit}\"]\nfile = \"rust-crate.yml\"\n"
         )
+    }
+
+    #[test]
+    fn generation_config_supported_overrides_reach_rendered_output() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\ngithub_runner = \"ubuntu-test\"\nvelnor_labels = [\"self-hosted\", \"fixture-runner\"]\ndefault_branch = \"trunk\"\n\n[policy]\nci_required = false\nactionlint_config_variables_null = true\n";
+        let root = configured_repository("generation-overrides", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Both, "main"),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.config.github_runner, "ubuntu-test");
+        assert_eq!(
+            scanned.config.velnor_labels,
+            vec!["self-hosted", "fixture-runner"]
+        );
+        assert_eq!(scanned.config.default_branch, "trunk");
+        assert!(!scanned.config.ci_required);
+        assert!(scanned.config.actionlint_config_variables_null);
+
+        let files = must(
+            generated_files(&scanned.config),
+            "render configured repository",
+        );
+        let pull_request =
+            WorkflowIr::from_config(&scanned.config).render(WorkflowKind::PullRequest);
+        let main = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
+            "generated main workflow",
+        );
+        let actionlint = must_some(
+            files.get(&PathBuf::from(".github/actionlint.yaml")),
+            "generated actionlint config",
+        );
+        assert!(pull_request.contains("runs-on: ubuntu-test"));
+        assert!(pull_request.contains("runs-on: [self-hosted, fixture-runner]"));
+        assert!(!pull_request.contains("name: ci-required"));
+        assert!(main.contains("branches: [trunk]"));
+        assert!(!main.contains("name: ci-required"));
+        assert!(actionlint.contains("config-variables: null"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_scan_exclude_removes_files_from_scan_shape() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[scan]\nexclude = [\"excluded/**\"]\n";
+        let root = configured_repository("scan-exclude", Some(config));
+        let excluded = root.join("excluded");
+        must(fs::create_dir_all(&excluded), "create excluded package");
+        must(
+            fs::write(
+                excluded.join("Cargo.toml"),
+                "[package]\nname = \"excluded\"\nversion = \"0.1.0\"\n",
+            ),
+            "write excluded manifest",
+        );
+
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan repository with exclusions",
+        );
+        assert!(scanned
+            .shape
+            .files()
+            .iter()
+            .all(|file| !file.starts_with("excluded/")));
+        assert!(scanned
+            .config
+            .units
+            .iter()
+            .all(|unit| unit.root != "excluded"));
+        let _ = fs::remove_dir_all(root);
     }
 
     fn generate_repository(root: &Path, force: bool) -> WriteOutcome {
@@ -11011,7 +11139,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         generate_repository(&root, false);
         let recorded = recorded_state(&root).inputs.config;
 
-        let after = before.replace("ci_required = true", "ci_required = false");
+        let after = before.replace("dco_required = false", "dco_required = true");
         assert_ne!(after, before, "the flip must change the config");
         must(
             fs::write(root.join(".github-gen").join("velnor-workflow.toml"), after),

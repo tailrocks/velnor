@@ -737,6 +737,7 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
         };
         let id = "workspace-with-a-long-name".to_owned();

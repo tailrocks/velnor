@@ -1150,6 +1150,7 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
         }
     }
@@ -1171,7 +1172,7 @@ mod tests {
         generation: Option<&str>,
     ) -> Result<super::super::Surface, GeneratorError> {
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {
@@ -1208,11 +1209,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5b28774542a543b5c2fce41fc7c701067f81a5ea8d72278504163838c386db69",
+                "7daa673a4aa9099026c13c41d4f1bfe0933df69639ae50d88e4e3c265444c0ff",
             ),
             (
                 "preview.yml",
-                "4d8c76b54887b7efc2dfdcc266018868a1c4f5538c4324ce73414e6cbe2a046b",
+                "52815bd54bdc56d6a49ed9d1b08dffde7abf20a51cadfda8042a4ef086d7bd08",
             ),
             (
                 "maintenance.yml",
