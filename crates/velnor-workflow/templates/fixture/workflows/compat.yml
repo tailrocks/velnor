@@ -188,7 +188,7 @@ jobs:
           scenario: compat
           evidence-id: ${{ matrix.package }}
           lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
-          output: evidence/compat-${{ matrix.config.lane }}-${{ matrix.package }}.json
+          output: evidence/compat-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}-${{ matrix.package }}.json
           observations: |
             --observe-command command-files=mbx run --quiet --locked -p fixture-harness --example command_files
             --observe-file artifact-tree=tree.txt
