@@ -17,6 +17,7 @@ mod lanes;
 mod pipeline;
 mod plan;
 mod regen;
+pub(crate) mod release;
 pub(crate) mod watch;
 
 use std::collections::BTreeMap;
@@ -47,6 +48,18 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The `release.yml` publisher: tag-triggered, verify-then-publish.
+pub(crate) const RELEASE: &str = "release";
+/// The `preview.yml` rolling artifact lane.
+pub(crate) const PREVIEW: &str = "preview";
+/// The `maintenance.yml` cache-hygiene workflow.
+pub(crate) const MAINTENANCE: &str = "maintenance";
+/// The release artifact provenance signer.
+pub(crate) const RELEASE_SIGNER: &str = "release-signer";
+/// The pinned policy provider workflow.
+pub(crate) const POLICY_PROVIDER: &str = "policy-provider";
+/// A reviewed workflow body declared verbatim by the repository.
+pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 
 /// The pinned action references every emitted job uses.
 ///
@@ -371,6 +384,12 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DockerImage),
         Box::new(pipeline::HomebrewTap),
         Box::new(pipeline::DocsLint),
+        Box::new(release::Release),
+        Box::new(release::Preview),
+        Box::new(release::Maintenance),
+        Box::new(release::ReleaseSigner),
+        Box::new(release::PolicyProvider),
+        Box::new(release::StaticWorkflow),
     ]
 }
 
@@ -447,6 +466,9 @@ pub(crate) struct Surface {
     pub(crate) files: BTreeMap<PathBuf, String>,
     /// Unit contracts after the unit-contract primitives ran.
     pub(crate) units: Vec<Unit>,
+    /// Workflow file names a declared row adds to the owned surface: a
+    /// release-side family the scan did not own becomes owned by declaring it.
+    pub(crate) added_files: Vec<String>,
 }
 
 /// Render the declared CI surface for a scanned repository.
@@ -555,7 +577,57 @@ pub(crate) fn generate(
         nodes.extend(rendered.nodes);
     }
 
-    Ok(Surface { files, units })
+    // A declared file family can add a workflow the scan did not own: a
+    // release lane becomes part of the surface by being declared, and the
+    // caller extends the owned file list so it is emitted and recorded.
+    let mut added_files: Vec<String> = Vec::new();
+    for row in &rows {
+        if row.unit_contract || !release::is_release_side(&row.primitive) {
+            continue;
+        }
+        let Some(file) = &row.file else {
+            continue;
+        };
+        if config.workflow_files.iter().any(|owned| owned == file) {
+            continue;
+        }
+        reject_owned_file(config, file, &row.primitive)?;
+        if !added_files.contains(file) {
+            added_files.push(file.clone());
+        }
+    }
+    added_files.sort();
+    Ok(Surface {
+        files,
+        units,
+        added_files,
+    })
+}
+
+/// A file a non-surface renderer owns cannot be added by a declaration: the
+/// caller would emit the declared bytes and then have the legacy render
+/// overwrite them. Naming the renderer that owns the file turns the silent
+/// clobber into a usage error.
+fn reject_owned_file(
+    config: &ProjectConfig,
+    file: &str,
+    primitive: &str,
+) -> Result<(), GeneratorError> {
+    // The nested per-unit workflows are rendered for every scanned unit unless
+    // the surface was adopted as reviewed templates.
+    if !config.adopted_workflow_surface
+        && let Some(unit) = config
+            .units
+            .iter()
+            .find(|unit| nested_unit_workflow_file(unit) == file)
+    {
+        return Err(GeneratorError::usage(format!(
+            "`[[declare]]` primitive `{primitive}` declares `{file}`, which the `{}` family renders for unit `{}`; declare the unit's pipeline or adopt the workflow surface instead",
+            pipeline_id(unit.kind),
+            unit.id
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -668,6 +740,38 @@ fn rows_for(
     }
     rows.extend(aggregates);
     rows.extend(contracts.iter().map(ResolvedRow::declared));
+    // Declared release-side families: the file rows they name, rendered by the
+    // family's primitive.
+    for row in declared
+        .iter()
+        .filter(|row| release::is_release_side(&row.primitive))
+    {
+        rows.push(ResolvedRow::declared(row));
+    }
+    // Release-side families: a default row per owned file, rendered by the
+    // same primitives a declared row uses, unless the config declares the
+    // family itself.
+    if !config.adopted_workflow_surface {
+        for (file, family) in release::RELEASE_SIDE_FILES {
+            if !config.workflow_files.iter().any(|owned| owned == file) {
+                continue;
+            }
+            if declared.iter().any(|row| row.file.as_deref() == Some(file)) {
+                continue;
+            }
+            // A repository without a release contract omits the publisher.
+            if *family == RELEASE && config.release.is_none() {
+                continue;
+            }
+            rows.push(ResolvedRow {
+                primitive: (*family).to_owned(),
+                units: Vec::new(),
+                file: Some((*file).to_owned()),
+                unit_contract: false,
+                args: BTreeMap::new(),
+            });
+        }
+    }
     validate(config, declared, &rows)?;
     Ok(rows)
 }
@@ -906,6 +1010,33 @@ fn validate(
             )));
         }
     }
+    // The declared release-side families render whole-repository workflow
+    // files: each names the canonical file it owns, and no units.
+    for row in declared
+        .iter()
+        .filter(|row| release::is_release_side(&row.primitive))
+    {
+        if !row.units.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "`[[declare]]` primitive `{}` renders one whole-repository workflow and takes no `units`",
+                row.primitive
+            )));
+        }
+        let file = row.file.as_deref().ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "`[[declare]]` primitive `{}` renders a workflow file and needs `file`",
+                row.primitive
+            ))
+        })?;
+        if let Some(canonical) = release::canonical_release_side_file(&row.primitive)
+            && file != canonical
+        {
+            return Err(GeneratorError::usage(format!(
+                "`[[declare]]` primitive `{}` must declare `{canonical}`, not `{file}`",
+                row.primitive
+            )));
+        }
+    }
     // Declaration order is canonical: the aggregate composes callers in the
     // order the rows were declared, so that order is pinned to the scan.
     let ordered = covered.iter().map(|(_, unit)| *unit).collect::<Vec<_>>();
@@ -949,6 +1080,12 @@ mod tests {
             UNIT_AGGREGATION,
             WATCH_GRAPH,
             REGEN_GATE,
+            RELEASE,
+            PREVIEW,
+            MAINTENANCE,
+            RELEASE_SIGNER,
+            POLICY_PROVIDER,
+            STATIC_WORKFLOW,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");
             ids.push(contract);
