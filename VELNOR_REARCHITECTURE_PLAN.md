@@ -5086,7 +5086,7 @@ report; file:line pointers are the report's, re-inspected only for F-V1):
   open; no independent verifier-side perf validation (V5/V6 pending).
 - Concurrency/reliability (2 items): step-log publisher has network awaits
   with no application timeout fed by unbounded channels (head-of-line stall
-  + unbounded memory growth; fix: ~30 s `tokio::time::timeout` with
+  and unbounded memory growth; fix: ~30 s `tokio::time::timeout` with
   drop-and-reconnect); no live dual-lane cancel/timeout verdict (V4
   pending — code paths tested, end-to-end unproven).
 - Architecture/code quality (4 items): god-files persist vs the P3 target
