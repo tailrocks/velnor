@@ -7145,8 +7145,17 @@ fn job_user_secret_names(job: &AgentJobRequestMessage) -> Vec<String> {
 }
 
 fn is_user_secret_variable(name: &str) -> bool {
+    // Case-insensitive: a `Secrets.*` spelling carries the same secret bytes
+    // as `secrets.*`, so the trust gate must refuse it on the same paths.
+    // The trailing dot anchors the prefix — `secretsX.*` is not a secret
+    // context — and `str::get` keeps non-ASCII names panic-free.
     let normalized = name.trim();
-    normalized.starts_with("secrets.") || normalized.starts_with("secret.")
+    normalized
+        .get(.."secrets.".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("secrets."))
+        || normalized
+            .get(.."secret.".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("secret."))
 }
 
 fn write_sanitized_job_message_dump(
@@ -14646,6 +14655,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_secret_prefix_match_is_case_insensitive() {
+        // F-V4: a `Secrets.*` spelling carries the same secret bytes as
+        // `secrets.*`, so the trust gate refuses it on the same paths — a
+        // fork job carrying a case-variant user secret is refused on a
+        // trusted pool, naming the variable.
+        for name in [
+            "Secrets.DOCKERHUB_TOKEN",
+            "SECRETS.DOCKERHUB_TOKEN",
+            "sEcReTs.DOCKERHUB_TOKEN",
+            "Secret.DOCKERHUB_TOKEN",
+            "SECRET.DOCKERHUB_TOKEN",
+        ] {
+            let mut variables = serde_json::Map::new();
+            variables.insert(
+                name.to_string(),
+                serde_json::json!({ "value": "secret", "isSecret": true }),
+            );
+            variables.insert(
+                "system.github.token".to_string(),
+                serde_json::json!({ "value": "ghs", "isSecret": true }),
+            );
+            let job = minimal_job_with_variables(serde_json::Value::Object(variables));
+            let error =
+                validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::ForkPR)
+                    .unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains(name), "{text}");
+            assert!(text.contains("fork-pr"), "{text}");
+        }
+    }
+
+    #[test]
+    fn user_secret_prefix_requires_the_dotted_context() {
+        // The case-insensitive match stays anchored: `secretsX.*` and other
+        // near-misses are not secret contexts, so an `isSecret` variable
+        // under such a name flows like any other protocol value.
+        for name in [
+            "secretsX.DOCKERHUB_TOKEN",
+            "SECRETSX.DOCKERHUB_TOKEN",
+            "mysecrets.DOCKERHUB_TOKEN",
+            "secret-token",
+        ] {
+            let mut variables = serde_json::Map::new();
+            variables.insert(
+                name.to_string(),
+                serde_json::json!({ "value": "secret", "isSecret": true }),
+            );
+            variables.insert(
+                "system.github.token".to_string(),
+                serde_json::json!({ "value": "ghs", "isSecret": true }),
+            );
+            let job = minimal_job_with_variables(serde_json::Value::Object(variables));
+            validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::ForkPR)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        }
+    }
+
     /// A job message with complete trust signals: a `push` job when `event`
     /// is `push`, a fork pull-request job otherwise.
     fn admission_job(
@@ -14960,8 +15027,38 @@ mod tests {
 
         let push = admission_job("push", None, true);
         let fork_pr = admission_job("pull_request", Some("mallory/base"), true);
+        // The F-V2 + F-V4 path: an id-carrying fork `workflow_run` event with
+        // a case-variant user secret exercises the id walk and the
+        // case-insensitive secret scan inside the same decision.
+        let fork_workflow_run: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Admission",
+                "requestId": 1,
+                "variables": {
+                    "github.event_name": { "value": "workflow_run" },
+                    "github.repository": { "value": "octo/base" },
+                    "Secrets.MIXED_CASE": { "value": "secret", "isSecret": true },
+                },
+                "contextData": { "github": { "event": {
+                    "workflow_run": {
+                        "head_repository": { "full_name": "mallory/base", "id": 2 },
+                        "repository": { "id": 1 },
+                    }
+                } } },
+                "resources": { "repositories": [{
+                    "alias": "self",
+                    "name": "octo/base",
+                    "properties": { "cloneUrl": "https://github.com/octo/base.git" },
+                }] },
+            }))
+            .unwrap();
         assert_eq!(TrustClass::derive(&push), TrustClass::Trusted);
         assert_eq!(TrustClass::derive(&fork_pr), TrustClass::ForkPR);
+        assert_eq!(TrustClass::derive(&fork_workflow_run), TrustClass::ForkPR);
 
         // 10k full admission decisions per class; pure message walks must stay
         // far below the bound even on a loaded serial-gate runner.
@@ -14977,11 +15074,17 @@ mod tests {
             validate_job_trust_policy(black_box(&fork_pr), "trusted", black_box(class))
                 .unwrap_err();
             assert_eq!(black_box(admitted), crate::trust_scope::FAIL_CLOSED);
+
+            let class = TrustClass::derive(black_box(&fork_workflow_run));
+            let admitted = class.admitted_scope("trusted");
+            validate_job_trust_policy(black_box(&fork_workflow_run), "trusted", black_box(class))
+                .unwrap_err();
+            assert_eq!(black_box(admitted), crate::trust_scope::FAIL_CLOSED);
         }
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(5),
-            "20k admission decisions took {elapsed:?}",
+            elapsed < Duration::from_secs(10),
+            "30k admission decisions took {elapsed:?}",
         );
     }
 

@@ -1394,11 +1394,30 @@ mod tests {
 
     #[test]
     fn host_docker_requires_explicit_trusted_scope() {
-        assert!(github_trust_scope_allows_host_docker("trusted"));
-        assert!(github_trust_scope_allows_host_docker(" Trusted "));
-        assert!(!github_trust_scope_allows_host_docker(""));
-        assert!(!github_trust_scope_allows_host_docker("   "));
-        assert!(!github_trust_scope_allows_host_docker("unknown"));
+        // The single predicate behind every capability gate (F-V5): the exact
+        // value `trusted`, case-insensitively, after trimming. Near-misses
+        // stay refused.
+        for scope in ["trusted", " Trusted ", "TRUSTED", "Trusted"] {
+            assert!(
+                github_trust_scope_allows_host_docker(scope),
+                "scope {scope:?} unlocks host capability"
+            );
+        }
+        for scope in [
+            "",
+            "   ",
+            "unknown",
+            "untrusted",
+            "release",
+            "trustedx",
+            "xtrusted",
+            "trust ed",
+        ] {
+            assert!(
+                !github_trust_scope_allows_host_docker(scope),
+                "scope {scope:?} refuses host capability"
+            );
+        }
     }
 
     #[test]
