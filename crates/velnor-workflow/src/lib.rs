@@ -9636,6 +9636,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(delete.contains("gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\""));
         assert!(delete.contains("[ \"$live_http\" = \"404\" ]"));
         assert!(delete.contains("jq -er '.name | strings'"));
+        // The publish job has no checkout: `gh` must target the repository
+        // explicitly instead of inferring it from a local git remote.
+        assert!(publish.contains("GH_REPO: ${{ github.repository }}"));
+        // Assets are passed as exact verified paths. A `preview-*-${VERSION}`
+        // glob can never match (the version already follows the `preview-`
+        // separator) and gh re-globs asset arguments itself, so an unmatched
+        // pattern would fail the publish after the debs were built.
+        assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-amd64.deb\""));
+        assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-arm64.deb\""));
+        assert!(!publish.contains("artifacts/velnor-runner-preview-*-${VERSION}"));
     }
 
     #[test]

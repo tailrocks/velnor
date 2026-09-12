@@ -625,6 +625,9 @@ jobs:
       VERSION: ${{ needs.identity.outputs.version }}
       NAME: ${{ needs.identity.outputs.name }}
       COMMIT: ${{ needs.identity.outputs.commit }}
+      # This job checks out nothing: without GH_REPO every `gh` call tries to
+      # infer the repository from a local git remote and fails.
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -718,13 +721,17 @@ jobs:
           # release. `preview` is a moving tag by contract: the only mutable
           # ref this repository publishes.
           gh release delete preview --cleanup-tag --yes || true
-          # shellcheck disable=SC2086 # The unquoted globs are the asset list.
+          # Exact asset paths: the Assemble step already verified these four
+          # files, and a `preview-*-${VERSION}` glob can never match — the
+          # version follows the `preview-` separator directly, so the glob
+          # would demand a second dash. gh also re-globs asset arguments
+          # itself, so an unmatched pattern dies here instead of at upload.
           gh release create preview --target "$COMMIT" --prerelease --title "$NAME" \
             SHA256SUMS release-manifest.json \
-            artifacts/velnor-runner-preview-*-${VERSION}-amd64.deb \
-            artifacts/velnor-runner-preview-*-${VERSION}-amd64.deb.sha256 \
-            artifacts/velnor-runner-preview-*-${VERSION}-arm64.deb \
-            artifacts/velnor-runner-preview-*-${VERSION}-arm64.deb.sha256
+            "artifacts/velnor-runner-preview-${VERSION}-amd64.deb" \
+            "artifacts/velnor-runner-preview-${VERSION}-amd64.deb.sha256" \
+            "artifacts/velnor-runner-preview-${VERSION}-arm64.deb" \
+            "artifacts/velnor-runner-preview-${VERSION}-arm64.deb.sha256"
 
       - name: Verify the published rolling preview
         env:
