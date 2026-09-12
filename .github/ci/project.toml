@@ -251,10 +251,10 @@ label = "Rust production topology"
 kind = "rust"
 root = "."
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/**", "crates/velnor-workflow/src/runtime.rs", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "tools/**"]
-github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary"]
-github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary"]
-velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary"]
-velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary"]
+github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
 [unit.cache]
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
