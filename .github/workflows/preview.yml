@@ -94,11 +94,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          - arch: x86_64
             deb_arch: amd64
             target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
-          - arch: arm64
+          - arch: aarch64
             deb_arch: arm64
             target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm

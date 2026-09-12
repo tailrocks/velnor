@@ -10197,6 +10197,22 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(release_workflow.contains("actions/cache@"));
         assert!(!release_workflow.contains("docker/setup-qemu-action@"));
 
+        // The preview guest matrix must reuse the release guest-image arch
+        // spellings: the binfmt gate compares GUEST_ARCH against the kernel
+        // spelling "x86_64", so a deb-spelled matrix value silently skips
+        // qemu-user-static and fails `arch-test arm64` on the x86_64 lane.
+        let preview_workflow = render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE);
+        let preview_guest_lane = preview_workflow
+            .split_once("\n  guest-payload:")
+            .map_or("", |(_, lane)| {
+                lane.split_once("\n  build:").map_or(lane, |(job, _)| job)
+            });
+        assert!(preview_guest_lane.contains("- arch: x86_64\n            deb_arch: amd64"));
+        assert!(preview_guest_lane.contains("- arch: aarch64\n            deb_arch: arm64"));
+        assert!(preview_guest_lane.contains("if [ \"$GUEST_ARCH\" = \"x86_64\" ]"));
+        assert!(!preview_guest_lane.contains("- arch: amd64"));
+        assert!(!preview_guest_lane.contains("- arch: arm64"));
+
         let docker = must_some(
             config
                 .units
