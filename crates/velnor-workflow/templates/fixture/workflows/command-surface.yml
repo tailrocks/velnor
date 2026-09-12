@@ -1,0 +1,160 @@
+name: command-surface
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: command-surface-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  commands:
+    name: command surface (${{ matrix.config.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    # The legacy `::set-env::` command below is honored only through this
+    # job-level opt-in: upstream reads `ACTIONS_ALLOW_UNSECURE_COMMANDS`
+    # from the process environment first and the job `env` context second,
+    # and the pin proves both runners honor the second half.
+    env:
+      ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: prepare
+        name: Prepare the hashFiles tree
+        run: |
+          set -euo pipefail
+          mkdir -p pin/sub
+          printf 'real\n' > pin/real.txt
+          printf 'inner\n' > pin/sub/inner.txt
+          ln -s real.txt pin/link.txt
+          ln -s sub pin/dirlink
+      # `::set-output::` is deprecated but still honored on both runners
+      # (GitHub postponed the removal; hosted runners warn and honor), so
+      # the pin asserts the value lands in `steps` exactly like the
+      # `GITHUB_OUTPUT` channel. Every hash below is runner-computed: the
+      # pin compares hashes to each other, never to a literal, so no
+      # workflow author can fabricate the signal.
+      - id: emit
+        name: Emit outputs and hashes
+        # The legacy command name is assembled at RUNTIME (`::$legacy ...`):
+        # actionlint statically rejects the deprecated `::set-output` form,
+        # so the literal cannot appear in the pin (same statically-opaque
+        # trick as the status-conditions bad-if shape). The runner still
+        # sees the exact deprecated command on stdout.
+        run: |
+          set -euo pipefail
+          legacy="set-output"
+          echo "::$legacy name=via_command::cmd-value"
+          {
+            echo "via_file=file-value"
+            echo "hash_link_follow=${{ hashFiles('--follow-symbolic-links', 'pin/link.txt') }}"
+            echo "hash_link_plain=${{ hashFiles('pin/link.txt') }}"
+            echo "hash_real=${{ hashFiles('pin/real.txt') }}"
+            echo "hash_dir_follow=${{ hashFiles('--follow-symbolic-links', 'pin/dirlink/**') }}"
+            echo "hash_dir_plain=${{ hashFiles('pin/dirlink/**') }}"
+            echo "hash_sub=${{ hashFiles('pin/sub/**') }}"
+          } >> "${GITHUB_OUTPUT}"
+      - id: legacy
+        name: Set env through the job-level opt-in
+        # Same runtime assembly as above: the literal `::set-env` form
+        # would trip actionlint's deprecated-commands rule.
+        run: |
+          set -euo pipefail
+          legacy="set-env"
+          echo "::$legacy name=PIN_LEGACY_ENV::restored"
+      - id: checkenv
+        name: Record the restored env value
+        run: |
+          set -euo pipefail
+          echo "legacy_env=${PIN_LEGACY_ENV:-}" >> "${GITHUB_OUTPUT}"
+      - name: Assert command-surface parity
+        if: ${{ always() }}
+        env:
+          VIA_COMMAND: ${{ steps.emit.outputs.via_command }}
+          VIA_FILE: ${{ steps.emit.outputs.via_file }}
+          HASH_LINK_FOLLOW: ${{ steps.emit.outputs.hash_link_follow }}
+          HASH_LINK_PLAIN: ${{ steps.emit.outputs.hash_link_plain }}
+          HASH_REAL: ${{ steps.emit.outputs.hash_real }}
+          HASH_DIR_FOLLOW: ${{ steps.emit.outputs.hash_dir_follow }}
+          HASH_DIR_PLAIN: ${{ steps.emit.outputs.hash_dir_plain }}
+          HASH_SUB: ${{ steps.emit.outputs.hash_sub }}
+          LEGACY_ENV: ${{ steps.checkenv.outputs.legacy_env }}
+        run: |
+          set -euo pipefail
+          test "${VIA_COMMAND}" = cmd-value
+          test "${VIA_FILE}" = file-value
+          test -z "${HASH_LINK_PLAIN}"
+          test -n "${HASH_LINK_FOLLOW}"
+          test "${HASH_LINK_FOLLOW}" = "${HASH_REAL}"
+          test -z "${HASH_DIR_PLAIN}"
+          test -n "${HASH_DIR_FOLLOW}"
+          test "${HASH_DIR_FOLLOW}" = "${HASH_SUB}"
+          test "${LEGACY_ENV}" = restored
+      # `steps` is computed by the runner, not written by this workflow, so
+      # the outputs of every step above are the behavioural signal no
+      # workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > "${{ runner.temp }}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        if: ${{ always() }}
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: command-surface
+          evidence-id: command-surface
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: out/result.json
+          observations: |
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: command-surface-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          path: out/result.json
+          if-no-files-found: error
+
+  compare-commands:
+    name: compare command surface
+    if: always() && (github.event_name == 'push' || inputs.lanes == 'both')
+    needs: [commands]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: command-surface-*
+          path: artifacts
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: command-surface
+          directory: artifacts

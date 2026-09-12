@@ -129,6 +129,8 @@ const FIXTURE_ATTESTATION_NEGATIVE_WORKFLOW_TEMPLATE: &str =
 const FIXTURE_BACKEND_PARITY_WORKFLOW_TEMPLATE: &str =
     include_str!("../templates/fixture/workflows/backend-parity.yml");
 const FIXTURE_CI_WORKFLOW_TEMPLATE: &str = include_str!("../templates/fixture/workflows/ci.yml");
+const FIXTURE_COMMAND_SURFACE_WORKFLOW_TEMPLATE: &str =
+    include_str!("../templates/fixture/workflows/command-surface.yml");
 const FIXTURE_COMPAT_PUBLIC_UNMERGED_WORKFLOW_TEMPLATE: &str =
     include_str!("../templates/fixture/workflows/compat-public-unmerged.yml");
 const FIXTURE_COMPAT_WORKFLOW_TEMPLATE: &str =
@@ -1338,6 +1340,10 @@ const FIXTURE_WORKFLOW_TEMPLATES: &[(&str, &str)] = &[
         FIXTURE_BACKEND_PARITY_WORKFLOW_TEMPLATE,
     ),
     ("ci.yml", FIXTURE_CI_WORKFLOW_TEMPLATE),
+    (
+        "command-surface.yml",
+        FIXTURE_COMMAND_SURFACE_WORKFLOW_TEMPLATE,
+    ),
     (
         "compat-public-unmerged.yml",
         FIXTURE_COMPAT_PUBLIC_UNMERGED_WORKFLOW_TEMPLATE,

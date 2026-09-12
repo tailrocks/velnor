@@ -10,7 +10,7 @@ use crate::{
     container::{JobContainerSpec, Shell},
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
-    workflow_command::parse_workflow_commands,
+    workflow_command::parse_workflow_commands_with_job_env,
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
@@ -2599,7 +2599,8 @@ where
                     )?;
                     let live_sender = self.step_log_sender.clone();
                     let mut on_output = |_: CommandStream, line: &str| {
-                        streamed_masks.extend(parse_workflow_commands(line).masks);
+                        streamed_masks
+                            .extend(parse_workflow_commands_with_job_env(line, &env).masks);
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -2661,6 +2662,7 @@ where
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
                         &step_result.stderr,
+                        &env,
                     ));
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
@@ -3228,6 +3230,7 @@ where
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
             &step_result.stderr,
+            &env,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3365,6 +3368,7 @@ where
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
             &step_result.stderr,
+            &env,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3969,7 +3973,7 @@ where
             if line.starts_with("__VELNOR_MISE_BIN__") {
                 return;
             }
-            live_masks.extend(parse_workflow_commands(line).masks);
+            live_masks.extend(parse_workflow_commands_with_job_env(line, &env).masks);
             if let Some(live) = live_step.as_ref() {
                 emit_live_step_log(
                     &live_sender,
@@ -12729,10 +12733,12 @@ impl JobExpressionContext<'_> {
         args: &[expression::Value],
     ) -> Result<expression::Value, expression::ExpressionError> {
         let mut patterns: Vec<String> = Vec::new();
+        let mut follow_symbolic_links = false;
         for (position, arg) in args.iter().enumerate() {
             let arg = arg.convert_to_string();
             if position == 0 && arg.starts_with("--") {
                 if arg.eq_ignore_ascii_case("--follow-symbolic-links") {
+                    follow_symbolic_links = true;
                     continue;
                 }
                 return Err(expression::ExpressionError::evaluation(format!(
@@ -12748,7 +12754,11 @@ impl JobExpressionContext<'_> {
         let Some(workspace) = self.state.workspace_host.as_ref() else {
             return Ok(expression::Value::string(""));
         };
-        Ok(expression::Value::string(hash_files(workspace, &patterns)))
+        Ok(expression::Value::string(hash_files(
+            workspace,
+            &patterns,
+            follow_symbolic_links,
+        )))
     }
 }
 
@@ -13410,9 +13420,13 @@ fn rendered_output_line(line: &str) -> Option<String> {
     }
 }
 
-fn parse_workflow_commands_from_output(stdout: &str, stderr: &str) -> StepCommandState {
-    let mut state = parse_workflow_commands(stdout);
-    state.merge(parse_workflow_commands(stderr));
+fn parse_workflow_commands_from_output(
+    stdout: &str,
+    stderr: &str,
+    job_env: &[(String, String)],
+) -> StepCommandState {
+    let mut state = parse_workflow_commands_with_job_env(stdout, job_env);
+    state.merge(parse_workflow_commands_with_job_env(stderr, job_env));
     state
 }
 
@@ -13442,7 +13456,7 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
     }
 }
 
-fn hash_files(workspace: &Path, patterns: &[String]) -> String {
+fn hash_files(workspace: &Path, patterns: &[String], follow_symbolic_links: bool) -> String {
     let Ok(globs) = build_ordered_globs(patterns) else {
         return String::new();
     };
@@ -13454,10 +13468,15 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     // traverses each remaining root lexically with the complete matcher set.
     for root in search_roots {
         let mut files = Vec::new();
-        if root.is_file() {
+        if hash_root_is_file(&root, follow_symbolic_links) {
             files.push(root);
-        } else {
-            collect_workspace_files(&root, &mut files);
+        } else if follow_symbolic_links || hash_root_is_real_dir(&root) {
+            // The cycle guard is per search root: two roots can legitimately
+            // resolve to the same directory through different lexical paths
+            // (a symlinked directory alongside its target), and both lexical
+            // spellings hash, exactly as the glob generator yields both.
+            let mut visited = BTreeSet::new();
+            collect_workspace_files(&root, &mut files, follow_symbolic_links, &mut visited);
             files.sort();
         }
         for path in files {
@@ -13568,7 +13587,46 @@ fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
     builder.build().context("build glob set")
 }
 
-fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
+/// A search root that is itself a symlink resolves only in follow mode:
+/// without the flag the glob generator stats without following, so a link
+/// is neither a file to hash nor a directory to traverse.
+fn hash_root_is_file(root: &Path, follow_symbolic_links: bool) -> bool {
+    if follow_symbolic_links {
+        root.is_file()
+    } else {
+        fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_file())
+    }
+}
+
+fn hash_root_is_real_dir(root: &Path) -> bool {
+    fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// Collect candidate files under `dir` for `hashFiles`.
+///
+/// `DirEntry::file_type` never follows symlinks, which is exactly the
+/// no-follow mode: a symlink is neither a directory to descend nor a file
+/// to hash, so it is skipped. With `--follow-symbolic-links` (upstream
+/// passes `followSymbolicLinks` to the bundled @actions/glob) a symlink
+/// resolves to whatever it points at: a file hashes under its lexical
+/// path, a directory is traversed, and a broken link is skipped.
+/// Traversed directories are canonicalized into `visited` so a symlink
+/// cycle terminates instead of recursing forever; a directory that cannot
+/// be canonicalized — a loop makes `canonicalize` fail — is not entered.
+fn collect_workspace_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    follow_symbolic_links: bool,
+    visited: &mut BTreeSet<PathBuf>,
+) {
+    if follow_symbolic_links {
+        let Ok(canonical) = dir.canonicalize() else {
+            return;
+        };
+        if !visited.insert(canonical) {
+            return;
+        }
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -13577,8 +13635,19 @@ fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
+        if follow_symbolic_links && file_type.is_symlink() {
+            let Ok(target) = fs::metadata(&path) else {
+                continue;
+            };
+            if target.is_dir() {
+                collect_workspace_files(&path, files, true, visited);
+            } else if target.is_file() {
+                files.push(path);
+            }
+            continue;
+        }
         if file_type.is_dir() {
-            collect_workspace_files(&path, files);
+            collect_workspace_files(&path, files, follow_symbolic_links, visited);
             continue;
         }
         if !file_type.is_file() {
@@ -22041,7 +22110,7 @@ fi"#
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
         assert_eq!(results[0].state.error_count, 1);
-        assert_eq!(results[0].state.warning_count, 0);
+        assert_eq!(results[0].state.warning_count, 1);
         assert_eq!(results[0].state.notice_count, 0);
         assert_uuid(&summary.step_logs[0].step_id);
         assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
@@ -22100,9 +22169,9 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.warning_count, 1);
+        assert_eq!(results[0].state.warning_count, 2);
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
-        assert_eq!(summary.step_logs[0].warning_count, 1);
+        assert_eq!(summary.step_logs[0].warning_count, 2);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo answer=42\n"
@@ -22228,6 +22297,7 @@ fi"#
         let digest = hash_files(
             &workspace,
             &["**/*.txt".to_string(), "nested/gamma.bin".to_string()],
+            false,
         );
 
         assert_eq!(
@@ -22248,6 +22318,7 @@ fi"#
         let actual = hash_files(
             &workspace,
             &["zeta.txt".to_string(), "alpha.txt".to_string()],
+            false,
         );
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("zeta.txt")).unwrap());
@@ -22258,7 +22329,8 @@ fi"#
             actual,
             hash_files(
                 &workspace,
-                &["alpha.txt".to_string(), "zeta.txt".to_string()]
+                &["alpha.txt".to_string(), "zeta.txt".to_string()],
+                false
             )
         );
         fs::remove_dir_all(temp).unwrap();
@@ -22273,7 +22345,7 @@ fi"#
         fs::write(workspace.join("crates/direct/Cargo.toml"), "direct\n").unwrap();
         fs::write(workspace.join("crates/direct/fuzz/Cargo.toml"), "nested\n").unwrap();
 
-        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()]);
+        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()], false);
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("crates/direct/Cargo.toml")).unwrap());
 
@@ -22295,6 +22367,194 @@ fi"#
 
         assert_eq!(first, "hash=");
         assert_ne!(second, "hash=");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_skips_symlinks_without_the_follow_flag() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        fs::write(workspace.join("sub/inner.txt"), "inner\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("sub", workspace.join("dirlink")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
+
+        // Patterns naming only links match nothing without the flag.
+        assert_eq!(hash_files(&workspace, &["link.txt".to_string()], false), "");
+        assert_eq!(
+            hash_files(&workspace, &["dirlink/**".to_string()], false),
+            ""
+        );
+        assert_eq!(
+            hash_files(&workspace, &["broken.txt".to_string()], false),
+            ""
+        );
+        // A broad pattern hashes the real files and nothing else.
+        assert_eq!(
+            hash_files(&workspace, &["**/*.txt".to_string()], false),
+            hash_files(
+                &workspace,
+                &["real.txt".to_string(), "sub/inner.txt".to_string()],
+                false
+            )
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follows_symlinks_with_the_follow_flag() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        fs::write(workspace.join("sub/inner.txt"), "inner\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("sub", workspace.join("dirlink")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
+
+        // A followed file link hashes its target's content under the link's
+        // lexical path, so it equals the direct hash of the same content.
+        let direct = hash_files(&workspace, &["real.txt".to_string()], false);
+        assert!(!direct.is_empty());
+        assert_eq!(
+            hash_files(&workspace, &["link.txt".to_string()], true),
+            direct
+        );
+        // A followed directory link traverses like its target.
+        assert_eq!(
+            hash_files(&workspace, &["dirlink/**".to_string()], true),
+            hash_files(&workspace, &["sub/**".to_string()], true)
+        );
+        // A broken link contributes nothing and fails nothing.
+        assert_eq!(
+            hash_files(&workspace, &["broken.txt".to_string()], true),
+            ""
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_flag_terminates_on_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("loop/nested")).unwrap();
+        fs::write(workspace.join("loop/nested/deep.txt"), "deep\n").unwrap();
+        symlink("..", workspace.join("loop/nested/up")).unwrap();
+        symlink("loop", workspace.join("self")).unwrap();
+
+        let direct = hash_files(&workspace, &["loop/nested/deep.txt".to_string()], true);
+        assert!(!direct.is_empty());
+        // The cycle links add no files: the broad hash equals the hash of the
+        // one real file, and the traversal terminates instead of recursing.
+        assert_eq!(
+            hash_files(&workspace, &["**/*.txt".to_string()], true),
+            direct
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_flag_flows_through_expression_evaluation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
+
+        // Before the flag was honored this resolved to `hash=`; the option
+        // was parsed and silently dropped.
+        assert_eq!(
+            state
+                .resolve_expressions("hash=${{ hashFiles('link.txt') }}")
+                .unwrap(),
+            "hash="
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("hash=${{ hashFiles('--follow-symbolic-links', 'link.txt') }}")
+                .unwrap(),
+            state
+                .resolve_expressions("hash=${{ hashFiles('real.txt') }}")
+                .unwrap()
+        );
+        let invalid = state.resolve_expressions("hash=${{ hashFiles('--bogus', 'real.txt') }}");
+        assert!(invalid.is_err());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unsecure_command_opt_in_flows_from_job_env_to_step_parsing() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+
+        // The executor parses step output with the step's effective
+        // environment, so a job-level opt-in honors the legacy command.
+        let job_env = vec![(
+            "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+            "true".to_string(),
+        )];
+        let state =
+            parse_workflow_commands_from_output("::set-env name=RESTORED::yes\n", "", &job_env);
+        assert_eq!(state.env.get("RESTORED").map(String::as_str), Some("yes"));
+
+        let refused = parse_workflow_commands_from_output("::set-env name=MODE::x\n", "", &[]);
+        assert!(refused.env.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_symlink_benchmark() {
+        use std::hint::black_box;
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        for dir in 0..20 {
+            let dir = workspace.join(format!("pkg{dir}"));
+            fs::create_dir_all(dir.join("src")).unwrap();
+            for file in 0..10 {
+                fs::write(dir.join(format!("src/f{file}.rs")), "fn main() {}\n").unwrap();
+            }
+            symlink("src", dir.join("aliased")).unwrap();
+        }
+        symlink("pkg0/src/f0.rs", workspace.join("top-link.rs")).unwrap();
+
+        let plain = vec!["**/*.rs".to_string()];
+        let followed = hash_files(black_box(&workspace), black_box(&plain), true);
+        assert!(!followed.is_empty());
+        assert_ne!(
+            followed,
+            hash_files(&workspace, &["pkg0/src/f0.rs".to_string()], false)
+        );
+
+        let started = Instant::now();
+        for _ in 0..50 {
+            let digest = hash_files(black_box(&workspace), black_box(&plain), true);
+            assert_eq!(digest, followed);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "50 follow-mode hashes of a 200-file symlinked tree took {elapsed:?}",
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

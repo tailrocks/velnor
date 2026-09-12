@@ -58,12 +58,24 @@ fn unsupported_command_message_disabled(command: &str) -> String {
     )
 }
 
+/// `Constants.Runner.UnsupportedCommandMessage` (@397b032,
+/// src/Runner.Common/Constants.cs), formatted with the command name: the
+/// deprecation warning `SetOutputCommandExtension` and
+/// `SaveStateCommandExtension` attach to every use.
+fn unsupported_command_message(command: &str) -> String {
+    format!(
+        "The `{command}` command is deprecated and will be disabled soon. Please upgrade to using Environment Files. For more information see: https://github.blog/changelog/2022-10-11-github-actions-deprecating-save-state-and-set-output-commands/"
+    )
+}
+
 /// Runner-wide opt-ins the command processors consult.
 ///
 /// Upstream reads each of these from the runner process environment first and
-/// then from the job `env` context. Only the process half is modelled here: the
-/// job env context is not threaded into command parsing yet, so a workflow that
-/// sets the opt-in in `env:` is refused rather than honored.
+/// then from the job `env` context (`SetEnvCommandExtension`,
+/// `AddPathCommandExtension`, and `ValidateStopToken` all follow the same
+/// process-then-`env`-context order). Both halves are modelled here: the
+/// caller passes the step's effective environment — job env, step env, and
+/// dynamic entries — as the `env`-context half.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CommandPolicy {
     allow_unsecure_commands: bool,
@@ -72,15 +84,34 @@ struct CommandPolicy {
 
 impl CommandPolicy {
     fn from_runner_env() -> Self {
-        Self {
-            allow_unsecure_commands: try_parse_bool(
-                std::env::var(ALLOW_UNSECURE_COMMANDS).ok().as_deref(),
-            ),
-            allow_unsecure_stop_command_tokens: convert_to_boolean(
+        Self::from_job_env(&[])
+    }
+
+    /// Mirror the upstream lookup order exactly: the process environment
+    /// wins, and the job env context is only consulted when the process
+    /// value did not already opt in. The lookup is an exact-name match —
+    /// upstream reads the `env` context through
+    /// `CaseSensitiveDictionaryContextData` off Windows — and a repeated
+    /// name resolves last-wins, matching process-environment semantics.
+    fn from_job_env(job_env: &[(String, String)]) -> Self {
+        let job_value = |name: &str| {
+            job_env
+                .iter()
+                .rfind(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        let allow_unsecure_commands =
+            try_parse_bool(std::env::var(ALLOW_UNSECURE_COMMANDS).ok().as_deref())
+                || try_parse_bool(job_value(ALLOW_UNSECURE_COMMANDS));
+        let allow_unsecure_stop_command_tokens =
+            convert_to_boolean(
                 std::env::var(ALLOW_UNSECURE_STOP_COMMAND_TOKENS)
                     .ok()
                     .as_deref(),
-            ),
+            ) || convert_to_boolean(job_value(ALLOW_UNSECURE_STOP_COMMAND_TOKENS));
+        Self {
+            allow_unsecure_commands,
+            allow_unsecure_stop_command_tokens,
         }
     }
 }
@@ -102,6 +133,16 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
     parse_workflow_commands_with_policy(output, CommandPolicy::from_runner_env())
 }
 
+/// Parse step output with the step's effective environment supplying the
+/// job-`env`-context half of the unsecure opt-ins, exactly as upstream
+/// consults `context.ExpressionValues["env"]` after the process environment.
+pub fn parse_workflow_commands_with_job_env(
+    output: &str,
+    job_env: &[(String, String)],
+) -> StepCommandState {
+    parse_workflow_commands_with_policy(output, CommandPolicy::from_job_env(job_env))
+}
+
 fn parse_workflow_commands_with_policy(output: &str, policy: CommandPolicy) -> StepCommandState {
     let mut state = StepCommandState::default();
     let mut stopped_token = None::<String>;
@@ -117,25 +158,19 @@ fn parse_workflow_commands_with_policy(output: &str, policy: CommandPolicy) -> S
             }
             continue;
         }
-        match command.name.to_ascii_lowercase().as_str() {
+        let command_name = command.name.to_ascii_lowercase();
+        match command_name.as_str() {
             "stop-commands" => {
                 process_stop_commands(&mut state, command.value, policy, &mut stopped_token);
             }
-            "set-output" => {
-                if let Some(name) = command.properties.get("name") {
-                    state.outputs.insert(name.clone(), command.value);
-                }
-                record_deprecated_command_telemetry(&mut state, "set-output");
-            }
+            "set-output" => process_set_output(&mut state, line, &command),
             "set-env" => process_set_env(&mut state, line, &command, policy),
             "add-path" => process_add_path(&mut state, line, command.value, policy),
-            "save-state" => {
-                if let Some(name) = command.properties.get("name") {
-                    state.state.insert(name.clone(), command.value);
-                }
-                record_deprecated_command_telemetry(&mut state, "save-state");
-            }
+            "save-state" => process_save_state(&mut state, line, &command),
             "add-mask" => process_add_mask(&mut state, command.value),
+            "add-matcher" | "remove-matcher" => {
+                reject_problem_matcher(&mut state, line, &command_name);
+            }
             // group/endgroup/debug render in place via
             // executor::rendered_output_line — no state to record here.
             "error" => {
@@ -261,6 +296,74 @@ fn process_add_path(
     }
     state.path.retain(|path| path != &value);
     state.path.push(value);
+}
+
+/// `SetOutputCommandExtension.ProcessCommand` (@397b032,
+/// src/Runner.Worker/ActionCommandManager.cs).
+///
+/// The stdout command is deprecated but still honored — GitHub postponed the
+/// removal (2023-07-24 changelog) and hosted runners warn-and-honor to this
+/// day — so the output is stored exactly like upstream, with the deprecation
+/// warning on every use and the telemetry once per parse. Upstream gates the
+/// warning on the server variable `DistributedTask.DeprecateStepOutputCommands`,
+/// which Velnor has no channel for; the flag is on for github.com (warnings
+/// observed on hosted runners), so warning unconditionally is hosted parity.
+/// A missing or empty `name` throws upstream, which the command manager
+/// turns into two step errors and a failed command result.
+fn process_set_output(state: &mut StepCommandState, line: &str, command: &WorkflowCommand<'_>) {
+    push_warning(state, unsupported_command_message("set-output"));
+    record_deprecated_command_telemetry(state, "set-output");
+    let Some(name) = command
+        .properties
+        .get("name")
+        .filter(|name| !name.is_empty())
+    else {
+        push_command_failure(
+            state,
+            line,
+            "Required field 'name' is missing in ##[set-output] command.".to_string(),
+        );
+        return;
+    };
+    state.outputs.insert(name.clone(), command.value.clone());
+}
+
+/// `SaveStateCommandExtension.ProcessCommand` (@397b032,
+/// src/Runner.Worker/ActionCommandManager.cs): the same deprecated-but-honored
+/// shape as `set-output`, storing intra-action state instead of outputs.
+fn process_save_state(state: &mut StepCommandState, line: &str, command: &WorkflowCommand<'_>) {
+    push_warning(state, unsupported_command_message("save-state"));
+    record_deprecated_command_telemetry(state, "save-state");
+    let Some(name) = command
+        .properties
+        .get("name")
+        .filter(|name| !name.is_empty())
+    else {
+        push_command_failure(
+            state,
+            line,
+            "Required field 'name' is missing in ##[save-state] command.".to_string(),
+        );
+        return;
+    };
+    state.state.insert(name.clone(), command.value.clone());
+}
+
+/// Problem matchers (`AddMatcherCommandExtension` /
+/// `RemoveMatcherCommandExtension` upstream) need a log-scanning regex engine
+/// the runner does not have, so the commands cannot be honored — but silently
+/// dropping a registered command is worse than refusing it: a workflow that
+/// relies on matchers would pass with no annotations and nothing in the log
+/// to say why. Reject loudly instead, in the same two-error shape the
+/// command manager gives every other refused command.
+fn reject_problem_matcher(state: &mut StepCommandState, line: &str, command: &str) {
+    push_command_failure(
+        state,
+        line,
+        format!(
+            "The `{command}` command is not supported by this runner: problem matchers are not implemented."
+        ),
+    );
 }
 
 fn blocked_set_env_name(name: &str) -> Option<&'static str> {
@@ -492,9 +595,9 @@ mod tests {
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.masks, vec!["top-secret"]);
         assert_eq!(state.error_count, 1);
-        assert_eq!(state.warning_count, 1);
+        assert_eq!(state.warning_count, 3);
         assert_eq!(state.notice_count, 1);
-        assert_eq!(state.annotations.len(), 3);
+        assert_eq!(state.annotations.len(), 5);
         assert_eq!(
             state.telemetry,
             vec![
@@ -508,11 +611,11 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
-        assert_eq!(state.annotations[0].message, "broken");
-        assert_eq!(state.annotations[0].path.as_deref(), Some("src/main.rs"));
-        assert_eq!(state.annotations[0].start_line, Some(7));
-        assert_eq!(state.annotations[0].end_line, Some(7));
+        assert_eq!(state.annotations[2].level, StepAnnotationLevel::Failure);
+        assert_eq!(state.annotations[2].message, "broken");
+        assert_eq!(state.annotations[2].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(state.annotations[2].start_line, Some(7));
+        assert_eq!(state.annotations[2].end_line, Some(7));
     }
 
     #[test]
@@ -577,7 +680,7 @@ mod tests {
         assert!(!state.outputs.contains_key("ignored"));
         assert_eq!(state.outputs["answer"], "42");
         assert_eq!(state.error_count, 0);
-        assert_eq!(state.warning_count, 1);
+        assert_eq!(state.warning_count, 2);
         assert_eq!(state.telemetry.len(), 1);
     }
 
@@ -750,5 +853,189 @@ mod tests {
 
         assert_eq!(state.notice_count, 1);
         assert_eq!(state.annotations[0].title.as_deref(), Some("sccache stats"));
+    }
+
+    #[test]
+    fn warns_on_every_deprecated_output_command_use() {
+        let state = parse_workflow_commands(
+            "::set-output name=one::1\n\
+             ::set-output name=two::2\n\
+             ::save-state name=cleanup::yes\n",
+        );
+
+        assert_eq!(state.outputs["one"], "1");
+        assert_eq!(state.outputs["two"], "2");
+        assert_eq!(state.state["cleanup"], "yes");
+        assert_eq!(state.error_count, 0);
+        assert_eq!(state.warning_count, 3);
+        assert_eq!(
+            state
+                .annotations
+                .iter()
+                .map(|annotation| annotation.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "The `set-output` command is deprecated and will be disabled soon. Please upgrade to using Environment Files. For more information see: https://github.blog/changelog/2022-10-11-github-actions-deprecating-save-state-and-set-output-commands/",
+                "The `set-output` command is deprecated and will be disabled soon. Please upgrade to using Environment Files. For more information see: https://github.blog/changelog/2022-10-11-github-actions-deprecating-save-state-and-set-output-commands/",
+                "The `save-state` command is deprecated and will be disabled soon. Please upgrade to using Environment Files. For more information see: https://github.blog/changelog/2022-10-11-github-actions-deprecating-save-state-and-set-output-commands/",
+            ]
+        );
+        // The warning fires per use; the telemetry stays once per command.
+        assert_eq!(state.telemetry.len(), 2);
+    }
+
+    #[test]
+    fn refuses_nameless_set_output_and_save_state() {
+        let state = parse_workflow_commands(
+            "::set-output::nameless\n\
+             ::set-output name=::empty\n\
+             ::save-state::nameless\n",
+        );
+
+        assert!(state.outputs.is_empty());
+        assert!(state.state.is_empty());
+        // The deprecation warning still fires before the name check, exactly
+        // like upstream: warn, telemetry, then the throw.
+        assert_eq!(state.warning_count, 3);
+        assert_eq!(state.error_count, 6);
+        assert_eq!(
+            state
+                .annotations
+                .iter()
+                .filter(|annotation| annotation.level == StepAnnotationLevel::Failure)
+                .map(|annotation| annotation.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Unable to process command '::set-output::nameless' successfully.",
+                "Required field 'name' is missing in ##[set-output] command.",
+                "Unable to process command '::set-output name=::empty' successfully.",
+                "Required field 'name' is missing in ##[set-output] command.",
+                "Unable to process command '::save-state::nameless' successfully.",
+                "Required field 'name' is missing in ##[save-state] command.",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_problem_matcher_commands_loudly() {
+        let state = parse_workflow_commands(
+            "::add-matcher::/github/workspace/matchers.json\n\
+             ::remove-matcher owner=tsc::\n\
+             ::remove-matcher::/github/workspace/matchers.json\n",
+        );
+
+        assert_eq!(state.error_count, 6);
+        assert_eq!(state.warning_count, 0);
+        assert_eq!(
+            state
+                .annotations
+                .iter()
+                .map(|annotation| annotation.message.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Unable to process command '::add-matcher::/github/workspace/matchers.json' successfully.",
+                "The `add-matcher` command is not supported by this runner: problem matchers are not implemented.",
+                "Unable to process command '::remove-matcher owner=tsc::' successfully.",
+                "The `remove-matcher` command is not supported by this runner: problem matchers are not implemented.",
+                "Unable to process command '::remove-matcher::/github/workspace/matchers.json' successfully.",
+                "The `remove-matcher` command is not supported by this runner: problem matchers are not implemented.",
+            ]
+        );
+        assert!(state
+            .annotations
+            .iter()
+            .all(|annotation| annotation.level == StepAnnotationLevel::Failure));
+    }
+
+    #[test]
+    fn honors_unsecure_opt_ins_from_job_env() {
+        let job_env = vec![(ALLOW_UNSECURE_COMMANDS.to_string(), "true".to_string())];
+        let state = parse_workflow_commands_with_job_env(
+            "::set-env name=MODE::release\n\
+             ::add-path::/opt/tool\n",
+            &job_env,
+        );
+
+        assert_eq!(state.env["MODE"], "release");
+        assert_eq!(state.path, vec!["/opt/tool"]);
+        assert_eq!(state.error_count, 0);
+
+        let stop_env = vec![(
+            ALLOW_UNSECURE_STOP_COMMAND_TOKENS.to_string(),
+            "1".to_string(),
+        )];
+        let stopped = parse_workflow_commands_with_job_env(
+            "::stop-commands::pause-logging\n::add-mask::hidden\n::pause-logging::\n\
+             ::add-mask::seen\n",
+            &stop_env,
+        );
+
+        assert_eq!(stopped.masks, vec!["pause-logging", "seen"]);
+        assert_eq!(stopped.error_count, 0);
+    }
+
+    #[test]
+    fn job_env_opt_in_requires_an_exact_true_name_and_value() {
+        // A false-valued job entry does not opt in.
+        let refused = parse_workflow_commands_with_job_env(
+            "::set-env name=MODE::release\n",
+            &[(
+                "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+                "false".to_string(),
+            )],
+        );
+        assert!(refused.env.is_empty());
+        assert_eq!(refused.error_count, 2);
+
+        // The env-context lookup is case-sensitive off Windows: a
+        // differently-cased name is not the opt-in.
+        let miscased = parse_workflow_commands_with_job_env(
+            "::set-env name=MODE::release\n",
+            &[(
+                "actions_allow_unsecure_commands".to_string(),
+                "true".to_string(),
+            )],
+        );
+        assert!(miscased.env.is_empty());
+        assert_eq!(miscased.error_count, 2);
+
+        // A repeated name resolves last-wins, matching process semantics.
+        let shadowed = parse_workflow_commands_with_job_env(
+            "::set-env name=MODE::release\n",
+            &[
+                (
+                    "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+                    "false".to_string(),
+                ),
+            ],
+        );
+        assert!(shadowed.env.is_empty());
+        assert_eq!(shadowed.error_count, 2);
+    }
+
+    #[test]
+    fn workflow_command_parse_benchmark() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let line =
+            "::set-output name=answer::42\n::add-mask::secret\n::warning::careful\nnot a command\n";
+        let output = line.repeat(250);
+
+        let started = Instant::now();
+        for _ in 0..2_000 {
+            let state = parse_workflow_commands(black_box(&output));
+            assert_eq!(state.outputs["answer"], "42");
+            assert_eq!(state.warning_count, 500);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "2k parses of a 1k-line mixed output took {elapsed:?}",
+        );
     }
 }
