@@ -5314,3 +5314,47 @@ tree admits trusted-pool jobs through `AdmittedTrust` and the
 `admission_conformance_*` tests assert the narrowed pair production
 persists. Main's §102 registry record stands as landed history for #663;
 the operational mechanism is §13's file-session design.
+
+## 105. R1-pub: bounded cancel-path step-log mirror (4096 records / 64MiB) — 2026-09-13
+
+Root cause (why the architecture allowed the bug class): the executor
+streams one `StepLog` per live output line (`emit_live_step_log`) plus
+cumulative per-step snapshots over an unbounded channel, and the step-log
+publisher mirrored every streamed record into an unbounded `Vec`. A verbose
+job could therefore accumulate hundreds of thousands of cloned records with
+no cap, no eviction count, and no marker — and `merged_partial_step_logs`
+folded whatever survived into the cancel-path log with no record that the
+head had been truncated. Two unbounded stages in series with no accounting
+is silent loss by construction.
+
+Fix (no legacy paths kept): `StreamedStepLogMirror`
+(`crates/velnor-runner/src/runner.rs`) replaces the `Vec` mirror. It
+retains the newest 4096 records / 64MiB (estimated heap: payload strings +
+fixed per-record overhead), evicts oldest-first, and counts every eviction
+(records + bytes, monotonic for the job). A single record larger than the
+byte bound is still retained so the newest record is always present.
+`merged_partial_step_logs` takes the lifetime eviction count and renders a
+truncation marker — first line of the earliest retained step, or a
+synthetic `velnor-step-log-mirror` step when nothing was retained.
+`drain_step_publishers` emits a `step-log-mirror-drained
+stored_records=… stored_bytes=… evicted_records=… evicted_bytes=…`
+forensics lifecycle line on every terminal path (including publisher abort)
+plus a stderr warning when evictions are nonzero.
+
+Corrected justification (supersedes the unsupported line-buffering-bound
+premise flagged in review): the bound lives at the consumer, not the
+producer. `StepLog.lines` is intentionally an unbounded `Vec<String>` with
+no producer-side MAX/truncate, and the channel stays unbounded: batching or
+capping at the producer would delay the live Results Service feed and shed
+lines GitHub already displayed, and the synchronous executor thread must
+never block on a slow feed. The mirror is the only durable accumulation of
+that stream, so it is the correct — and only — place the bound is enforced.
+The normal path is unaffected (the executor's returned `step_logs` bypass
+the mirror); the mirror feeds the cancel path alone.
+
+Gates observed in the R1-pub worktree: `mbx fmt -- --check` clean; `mbx
+clippy --locked --all-targets --all-features -p velnor-runner -- -D
+warnings` clean; targeted nextest 8/8
+(`merged_partial_step_logs_*`, `streamed_step_log_mirror_*`,
+`canceled_job_uploads_merged_partial_step_logs`); full `mbx nextest run
+--locked --all-features -p velnor-runner` 1827 passed, 1 skipped, 0 failed.
