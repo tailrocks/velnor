@@ -77,6 +77,12 @@ assets = [
   ["../velnor-tools/debian/velnor-fleet-policy-audit.service", "lib/systemd/system/velnor-fleet-policy-audit.service", "644"],
   ["../velnor-tools/debian/velnor-fleet-policy-audit.timer", "lib/systemd/system/velnor-fleet-policy-audit.timer", "644"],
   ["../../fleet/release-refs.toml", "usr/share/velnor/fleet/release-refs.toml", "644"],
+  # Generated desired-policy allowlists for org-scoped daemons. A runner host
+  # never runs the fleet publisher, so the packaged copy is the only guarantee
+  # that `prove::org_desired_policy` can resolve a policy there.
+  ["../../fleet/policies/ChainArgos-desired-policy.json", "usr/share/velnor/fleet/policies/ChainArgos-desired-policy.json", "644"],
+  ["../../fleet/policies/jackin-project-desired-policy.json", "usr/share/velnor/fleet/policies/jackin-project-desired-policy.json", "644"],
+  ["../../fleet/policies/tailrocks-desired-policy.json", "usr/share/velnor/fleet/policies/tailrocks-desired-policy.json", "644"],
   # Recreates /run/velnor + the package-transaction lock on every boot; /run is
   # tmpfs, so without this the preinst/postinst lock gates fail closed after a
   # reboot until an operator manually creates the path.

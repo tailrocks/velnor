@@ -2369,7 +2369,7 @@ async fn run_with_jit_prewarmer(
 /// Append one line to the daemon supervisor's forensic log
 /// (`<config-base>/logs/daemon.log`): slot spawns/exits/recycles and pass
 /// failures, so fleet-level incidents are reconstructable from disk.
-fn daemon_forensic_log(config_base: &Path, message: &str) {
+pub(crate) fn daemon_forensic_log(config_base: &Path, message: &str) {
     slot_log::append_log_line(
         &config_base.join("logs"),
         slot_log::DAEMON_LOG,
