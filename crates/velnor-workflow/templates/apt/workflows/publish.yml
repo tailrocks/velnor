@@ -3,7 +3,7 @@ name: Publish apt repo
 on:
   push:
     branches: [main]
-    paths: [package-state.json]
+    paths: [package-state.json, package-state-preview.json]
   workflow_dispatch:
     inputs:
       lanes:
@@ -40,6 +40,8 @@ jobs:
       matrix:
         config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
     runs-on: ${{ matrix.config.runner }}
+    outputs:
+      preview-version: ${{ steps.preview.outputs.version }}
     steps:
       - name: Checkout publisher policy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -111,6 +113,80 @@ jobs:
             --signer "$SIGNER" \
             --expect-signer "$SIGNER" \
             --verify-oci
+
+      - name: Resolve rolling preview release
+        id: preview
+        if: ${{ hashFiles('package-state-preview.json') != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          state_version=$(jq -er '.version | select(test("^[0-9]+[.][0-9]+[.][0-9]+~preview[.][0-9]+[+][0-9a-f]{7}$"))' package-state-preview.json)
+          state_ref=$(jq -er '.source_ref' package-state-preview.json)
+          state_commit=$(jq -er '.source_commit | select(test("^[0-9a-f]{40}$"))' package-state-preview.json)
+          test "$(jq -r .source_repository package-state-preview.json)" = tailrocks/velnor
+          test "$state_ref" = refs/heads/main
+          # A push can write any state file it likes, so the rolling release
+          # itself is the only authority on what may be published: the state row
+          # must describe exactly the signed `preview` release on tailrocks/velnor.
+          gh api repos/tailrocks/velnor/releases/tags/preview > preview-release.json
+          jq -e --arg version "$state_version" --arg commit "$state_commit" '
+            type == "object" and (.draft | not) and .prerelease == true and
+            .tag_name == "preview" and .target_commitish == $commit and
+            .name == ("Preview " + $version) and
+            ([.assets[].name] | sort) ==
+            (["release-manifest.json", "SHA256SUMS",
+              "velnor-runner-preview-" + $version + "-amd64.deb",
+              "velnor-runner-preview-" + $version + "-amd64.deb.sha256",
+              "velnor-runner-preview-" + $version + "-arm64.deb",
+              "velnor-runner-preview-" + $version + "-arm64.deb.sha256"] | sort)
+          ' preview-release.json >/dev/null
+          printf 'version=%s\ncommit=%s\n' "$state_version" "$state_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Download preview coherence inputs
+        if: ${{ steps.preview.outputs.version != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.preview.outputs.version }}
+        run: scripts/verify-release.sh download --suite preview --version "$VERSION" --dir incoming-preview
+
+      - name: Verify preview build attestations
+        if: ${{ steps.preview.outputs.version != '' }}
+        env:
+          COMMIT: ${{ steps.preview.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.preview.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Attestation gating for the preview suite lives here (the caller),
+          # not in verify-release.sh: only hosted velnor builds may feed this
+          # channel, bound to the exact main commit the rolling release names.
+          for artifact in \
+            "velnor-runner-preview-${VERSION}-amd64.deb" \
+            "velnor-runner-preview-${VERSION}-arm64.deb"; do
+            gh attestation verify "incoming-preview/$artifact" \
+              --repo tailrocks/velnor \
+              --signer-workflow tailrocks/velnor/.github/workflows/ci-release-package-signer.yml \
+              --source-ref refs/heads/main \
+              --source-digest "$COMMIT" \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --deny-self-hosted-runners
+          done
+
+      - name: Verify preview source, package, and signer coherence
+        if: ${{ steps.preview.outputs.version != '' }}
+        env:
+          COMMIT: ${{ steps.preview.outputs.commit }}
+          SIGNER: ${{ steps.signer.outputs.fingerprint }}
+          VERSION: ${{ steps.preview.outputs.version }}
+        run: |
+          scripts/verify-release.sh verify \
+            --suite preview \
+            --version "$VERSION" \
+            --incoming incoming-preview \
+            --commit "$COMMIT" \
+            --signer "$SIGNER" \
+            --expect-signer "$SIGNER"
 
       - name: Import and validate publisher key
         if: matrix.config.writer
@@ -208,6 +284,77 @@ jobs:
           [ -s previous-pointer.json ] \
             || { echo "::error::signed rollback identity unavailable" >&2; exit 1; }
 
+      - name: Recover signed previous preview pair or arm bootstrap
+        id: preview-mode
+        if: ${{ matrix.config.writer && steps.preview.outputs.version != '' }}
+        env:
+          VERSION: ${{ steps.preview.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p previous-preview
+          # Bootstrap is legal only when no preview publication exists at all:
+          # a live preview distribution must be recovered and strictly
+          # extended, never silently restarted. Anything but 200/404 fails
+          # closed instead of choosing a mode on behalf of the operator.
+          code="$(curl -sS -o previous-preview/InRelease -w '%{http_code}' \
+            "$APT_BASE_URL/dists/preview/InRelease" || true)"
+          mode=bootstrap
+          if [ "$code" = 200 ]; then
+            gpgv --keyring ./velnor-keyring.gpg previous-preview/InRelease
+            mode=strict
+          elif [ "$code" != 404 ]; then
+            echo "::error::live preview distribution is unreadable (HTTP $code); refusing to publish over it" >&2
+            exit 1
+          fi
+          if [ "$mode" = strict ]; then
+            # Recover the exact retained pair the live signed index pins.
+            prior_version=''
+            for arch in amd64 arm64; do
+              packages="previous-preview/Packages-$arch"
+              curl -fsS "$APT_BASE_URL/dists/preview/main/binary-$arch/Packages.gz" \
+                | gzip -dc > "$packages"
+              row="$(awk -v candidate="$VERSION" '
+                BEGIN {RS=""; FS="\n"}
+                {pkg=ver=file=digest=""; for(i=1;i<=NF;i++) {
+                  if($i~/^Package: /) pkg=substr($i,10)
+                  if($i~/^Version: /) ver=substr($i,10)
+                  if($i~/^Filename: /) file=substr($i,11)
+                  if($i~/^SHA256: /) digest=substr($i,9)
+                }}
+                pkg=="velnor-runner" && ver!=candidate {print ver "|" file "|" digest}
+              ' "$packages" | sort -t'|' -k1,1V | tail -n1)"
+              [ -n "$row" ] || { echo "::error::signed preview $arch index has no rollback row" >&2; exit 1; }
+              IFS='|' read -r row_version filename digest <<<"$row"
+              [ -n "$row_version" ] && [ -n "$filename" ] && [ -n "$digest" ] \
+                || { echo "::error::signed preview $arch rollback row is incomplete" >&2; exit 1; }
+              deb="previous-preview/$(basename "$filename")"
+              case "$deb" in
+                *velnor-runner-preview-*) ;;
+                *) echo "::error::signed preview rollback is not a preview package" >&2; exit 1 ;;
+              esac
+              curl -fsS "$APT_BASE_URL/$filename" -o "$deb"
+              printf '%s  %s\n' "$digest" "$deb" | sha256sum --check --strict
+              [ "$(dpkg-deb -f "$deb" Version)" = "$row_version" ]
+              [ "$(dpkg-deb -f "$deb" Architecture)" = "$arch" ]
+              if [ -n "$prior_version" ] && [ "$prior_version" != "$row_version" ]; then
+                echo "::error::signed preview architecture rollback versions differ" >&2
+                exit 1
+              fi
+              prior_version="$row_version"
+            done
+            [ -n "$prior_version" ] \
+              || { echo "::error::signed preview rollback pair unavailable" >&2; exit 1; }
+            # Strict monotonicity before the script can even assert it again.
+            dpkg --compare-versions "$VERSION" gt "$prior_version" \
+              || { echo "::error::preview candidate $VERSION is not newer than retained rollback $prior_version" >&2; exit 1; }
+            printf '%s\n' '"preview"' > previous-pointer-preview.json
+          else
+            # First publication of the preview suite: nothing to recover.
+            rm -rf previous-preview
+            printf 'null\n' > previous-pointer-preview.json
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
       - name: Build and sign isolated staging repository
         if: matrix.config.writer
         env:
@@ -221,6 +368,31 @@ jobs:
             --prev-dir previous \
             --previous-pointer previous-pointer.json \
             --signer "$SIGNER"
+
+      - name: Stage the preview suite in the same tree
+        if: ${{ matrix.config.writer && steps.preview.outputs.version != '' }}
+        env:
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          MODE: ${{ steps.preview-mode.outputs.mode }}
+          SIGNER: ${{ steps.signer.outputs.fingerprint }}
+          VERSION: ${{ steps.preview.outputs.version }}
+        run: |
+          set -euo pipefail
+          publish_args=(
+            --suite preview
+            --version "$VERSION"
+            --incoming incoming-preview
+            --previous-pointer previous-pointer-preview.json
+            --signer "$SIGNER"
+          )
+          if [ "$MODE" = strict ]; then
+            publish_args+=(--prev-dir previous-preview)
+          else
+            # First publication of the preview suite: initialized from the
+            # candidate pair alone, with a null previous pointer.
+            publish_args+=(--bootstrap)
+          fi
+          scripts/verify-release.sh publish "${publish_args[@]}"
 
       - name: Setup Pages
         if: matrix.config.writer
@@ -252,6 +424,8 @@ jobs:
 
       - name: Verify deployed signed metadata
         if: matrix.config.writer
+        env:
+          PREVIEW_VERSION: ${{ needs.build.outputs.preview-version }}
         run: |
           set -euo pipefail
           curl -fsS "$APT_BASE_URL/dists/stable/InRelease" -o InRelease
@@ -261,6 +435,15 @@ jobs:
           gpg --batch --yes --dearmor --output velnor-keyring.gpg velnor.gpg
           gpgv --keyring ./velnor-keyring.gpg InRelease
           gpgv --keyring ./velnor-keyring.gpg publication-record.json.sig publication-record.json
+          if [ -n "${PREVIEW_VERSION:-}" ]; then
+            curl -fsS "$APT_BASE_URL/dists/preview/InRelease" -o InRelease-preview
+            curl -fsS "$APT_BASE_URL/publication-record-preview.json" -o publication-record-preview.json
+            curl -fsS "$APT_BASE_URL/publication-record-preview.json.sig" -o publication-record-preview.json.sig
+            gpgv --keyring ./velnor-keyring.gpg InRelease-preview
+            gpgv --keyring ./velnor-keyring.gpg publication-record-preview.json.sig publication-record-preview.json
+            test "$(jq -er '.suite' publication-record-preview.json)" = preview
+            test "$(jq -er '.crate_version' publication-record-preview.json)" = "$PREVIEW_VERSION"
+          fi
 
       - name: Confirm comparison lane
         if: ${{ !matrix.config.writer }}

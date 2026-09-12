@@ -4,6 +4,6 @@
   (`crates/velnor-workflow`). Never hand-edit files in this directory: change
   the generator or this repository's generation configuration and regenerate
   (`cd crates/velnor-workflow && mbx run --locked --manifest-path Cargo.toml --
-  --plain --force ../..`). AGENTS.md files are the only hand-maintained files
-  under `.github`.
+  --plain --force ../..`). This file is the only hand-maintained file under
+  `.github`; `.github/workflows/AGENTS.md` is generated.
 - Do not reference or use the `velnor-actions` repository.

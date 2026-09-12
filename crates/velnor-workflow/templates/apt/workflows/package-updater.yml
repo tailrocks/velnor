@@ -79,7 +79,7 @@ jobs:
             tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz\ntablerock-*-aarch64-unknown-linux-gnu.tar.gz\ntablerock-*-x86_64-unknown-linux-gnu.tar.gz\ntablerock-app-*-aarch64-apple-darwin.zip'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
             tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz\nparallax-*-aarch64-unknown-linux-gnu.tar.gz\nparallax-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
             tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz\nholla-*-aarch64-unknown-linux-gnu.tar.gz\nholla-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-*-amd64.deb\nvelnor-runner-*-arm64.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
+            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-[0-9]*-amd64.deb\nvelnor-runner-[0-9]*-arm64.deb'; PREVIEW_ASSET_PATTERNS=$'velnor-runner-preview-*-amd64.deb\nvelnor-runner-preview-*-arm64.deb'; ALLOWED_CHANNELS=$'stable\npreview' ;;
             tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-x86_64-unknown-linux-gnu.deb\nholla-*-aarch64-unknown-linux-gnu.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
             *) echo "unknown consumer" >&2; exit 1 ;;
           esac
@@ -124,6 +124,68 @@ jobs:
             done < verified/artifacts.list
             source_ref="refs/tags/$tag"
             source_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/$tag" --jq .sha)
+          elif test "$CHANNEL" = preview && test "$CONSUMER_REPOSITORY" = tailrocks/velnor-apt; then
+            test "$SOURCE_REPOSITORY" = tailrocks/velnor
+            # The rolling preview is ephemeral by design: an absent release is
+            # the same verified no-op as an empty stable listing, while any
+            # other fetch failure fails closed.
+            if ! gh api "repos/$SOURCE_REPOSITORY/releases/tags/preview" > verified/release.json 2>preview-fetch.err; then
+              if grep -q 'HTTP 404' preview-fetch.err; then
+                rm -f preview-fetch.err
+                echo "available=false" >> "$GITHUB_OUTPUT"
+                echo "No rolling preview release is published; updater is a verified no-op."
+                exit 0
+              fi
+              cat preview-fetch.err >&2
+              rm -f preview-fetch.err
+              echo "::error::could not determine whether the rolling preview exists; refusing a fail-open no-op" >&2
+              exit 1
+            fi
+            rm -f preview-fetch.err
+            jq -e '
+              type=="object" and (.draft|not) and .prerelease == true and
+              .tag_name == "preview" and (.target_commitish|test("^[0-9a-f]{40}$")) and
+              (.name|test("^Preview [0-9]+[.][0-9]+[.][0-9]+~preview[.][0-9]+[+][0-9a-f]{7}$")) and
+              (.assets|type=="array")
+            ' verified/release.json >/dev/null
+            source_ref=refs/heads/main
+            source_digest=$(jq -r .target_commitish verified/release.json)
+            main_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/main" --jq .sha)
+            [[ "$main_digest" =~ ^[0-9a-f]{40}$ ]]
+            gh api "repos/$SOURCE_REPOSITORY/compare/$source_digest...$main_digest" > verified/source-to-main.json
+            jq -e --arg source "$source_digest" --arg main "$main_digest" '
+              .base_commit.sha == $source and .merge_base_commit.sha == $source and
+              .behind_by == 0 and
+              ((.status == "identical" and .ahead_by == 0 and .total_commits == 0 and $source == $main) or
+               (.status == "ahead" and .ahead_by > 0 and .total_commits == .ahead_by and .commits[-1].sha == $main))
+            ' verified/source-to-main.json >/dev/null
+            version=$(jq -r '.name|sub("^Preview ";"")' verified/release.json)
+            mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
+              # shellcheck disable=SC2053 # Policy values are intentional glob patterns.
+              while IFS= read -r pattern; do [[ "$name" == $pattern ]] && printf '%s\n' "$name"; done <<<"$PREVIEW_ASSET_PATTERNS"
+            done | sort -u)
+            # Exactly one asset per admitted preview pattern: more means a
+            # duplicated or foreign asset, fewer means a partial release.
+            preview_pattern_count=$(printf '%s\n' "$PREVIEW_ASSET_PATTERNS" | grep -c .)
+            test "$preview_pattern_count" -ge 1
+            test "${#matches[@]}" -eq "$preview_pattern_count"
+            test "$(printf '%s\n' "${matches[@]}" | sort -u | wc -l | tr -d ' ')" -eq "$preview_pattern_count"
+            printf '%s\n' "${matches[@]}" > verified/artifacts.list
+            : > verified/assets.jsonl
+            : > verified/SHA256SUMS
+            while IFS= read -r artifact; do
+              [[ "$artifact" != */* && "$artifact" != *..* ]]
+              gh release download preview -R "$SOURCE_REPOSITORY" -p "$artifact" -p "$artifact.sha256" -D verified
+              checksum=$(sha256sum "verified/$artifact" | cut -d' ' -f1)
+              sidecar=$(awk 'NF {print $1; exit}' "verified/$artifact.sha256")
+              [[ "$checksum" =~ ^[0-9a-f]{64}$ && "$sidecar" = "$checksum" ]]
+              printf '%s  %s\n' "$checksum" "$artifact" >> verified/SHA256SUMS
+              jq -cn --arg name "$artifact" --arg sha256 "$checksum" '{name:$name,sha256:$sha256}' >> verified/assets.jsonl
+            done < verified/artifacts.list
+            jq -Sn --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$source_ref" \
+              --arg source_commit "$source_digest" --arg version "$version" --slurpfile assets verified/assets.jsonl \
+              '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
+              > verified/release-manifest.json
           elif test "$CHANNEL" = preview; then
             test "$CONSUMER_REPOSITORY" = jackin-project/homebrew-tap
             test "$SOURCE_REPOSITORY" = jackin-project/jackin
@@ -172,6 +234,23 @@ jobs:
             echo "unsupported package channel: $CHANNEL" >&2
             exit 1
           fi
+          # Name the exact signer workflow admitted for this channel/consumer
+          # pair, and record whether self-hosted builders are excluded. The
+          # provenance step consumes these instead of re-deriving policy.
+          case "$CHANNEL:$CONSUMER_REPOSITORY" in
+            stable:*)
+              printf '%s\n' "tailrocks/velnor/.github/workflows/ci-release-package-signer.yml" > verified/signer-workflow
+              : > verified/deny-self-hosted-runners
+              ;;
+            preview:tailrocks/velnor-apt)
+              printf '%s\n' "tailrocks/velnor/.github/workflows/ci-release-package-signer.yml" > verified/signer-workflow
+              : > verified/deny-self-hosted-runners
+              ;;
+            preview:jackin-project/homebrew-tap)
+              printf '%s\n' "jackin-project/jackin/.github/workflows/preview.yml" > verified/signer-workflow
+              ;;
+            *) echo "unsupported channel/consumer pair: $CHANNEL:$CONSUMER_REPOSITORY" >&2; exit 1 ;;
+          esac
           echo "available=true" >> "$GITHUB_OUTPUT"
           [[ "$source_digest" =~ ^[0-9a-f]{40}$ ]]
           jq -e --arg repo "$SOURCE_REPOSITORY" --arg ref "$source_ref" --arg commit "$source_digest" '
@@ -197,7 +276,6 @@ jobs:
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           case "$CONSUMER_REPOSITORY" in
@@ -214,13 +292,10 @@ jobs:
           : > verified/verification.jsonl
           while IFS= read -r artifact; do
             verified_digest=""
-            if test "$CHANNEL" = preview; then
-              signer_workflow="$SOURCE_REPOSITORY/.github/workflows/preview.yml"
-              candidate_digests=("$source_digest")
-            else
-              signer_workflow="tailrocks/velnor/.github/workflows/ci-release-package-signer.yml"
-              candidate_digests=("$source_digest")
-            fi
+            signer_workflow=$(cat verified/signer-workflow)
+            deny_args=()
+            if test -e verified/deny-self-hosted-runners; then deny_args+=(--deny-self-hosted-runners); fi
+            candidate_digests=("$source_digest")
             for signer_digest in "${candidate_digests[@]}"; do
               report=$(mktemp)
               verify_args=(
@@ -233,8 +308,7 @@ jobs:
                 --predicate-type https://slsa.dev/provenance/v1
                 --format json
               )
-              if test "$CHANNEL" = stable; then verify_args+=(--deny-self-hosted-runners); fi
-              if gh attestation verify "${verify_args[@]}" > "$report"; then
+              if gh attestation verify "${verify_args[@]}" "${deny_args[@]}" > "$report"; then
                 test -z "$verified_digest"
                 verified_digest="$signer_digest"
                 jq -c --arg accepted_signer_digest "$signer_digest" \
@@ -317,7 +391,7 @@ jobs:
             tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz\ntablerock-*-aarch64-unknown-linux-gnu.tar.gz\ntablerock-*-x86_64-unknown-linux-gnu.tar.gz\ntablerock-app-*-aarch64-apple-darwin.zip'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
             tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz\nparallax-*-aarch64-unknown-linux-gnu.tar.gz\nparallax-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
             tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz\nholla-*-aarch64-unknown-linux-gnu.tar.gz\nholla-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-*-amd64.deb\nvelnor-runner-*-arm64.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
+            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-[0-9]*-amd64.deb\nvelnor-runner-[0-9]*-arm64.deb'; PREVIEW_ASSET_PATTERNS=$'velnor-runner-preview-*-amd64.deb\nvelnor-runner-preview-*-arm64.deb'; ALLOWED_CHANNELS=$'stable\npreview' ;;
             tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-x86_64-unknown-linux-gnu.deb\nholla-*-aarch64-unknown-linux-gnu.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
             *) echo "unknown consumer" >&2; exit 1 ;;
           esac
@@ -362,6 +436,68 @@ jobs:
             done < verified/artifacts.list
             source_ref="refs/tags/$tag"
             source_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/$tag" --jq .sha)
+          elif test "$CHANNEL" = preview && test "$CONSUMER_REPOSITORY" = tailrocks/velnor-apt; then
+            test "$SOURCE_REPOSITORY" = tailrocks/velnor
+            # The rolling preview is ephemeral by design: an absent release is
+            # the same verified no-op as an empty stable listing, while any
+            # other fetch failure fails closed.
+            if ! gh api "repos/$SOURCE_REPOSITORY/releases/tags/preview" > verified/release.json 2>preview-fetch.err; then
+              if grep -q 'HTTP 404' preview-fetch.err; then
+                rm -f preview-fetch.err
+                echo "available=false" >> "$GITHUB_OUTPUT"
+                echo "No rolling preview release is published; updater is a verified no-op."
+                exit 0
+              fi
+              cat preview-fetch.err >&2
+              rm -f preview-fetch.err
+              echo "::error::could not determine whether the rolling preview exists; refusing a fail-open no-op" >&2
+              exit 1
+            fi
+            rm -f preview-fetch.err
+            jq -e '
+              type=="object" and (.draft|not) and .prerelease == true and
+              .tag_name == "preview" and (.target_commitish|test("^[0-9a-f]{40}$")) and
+              (.name|test("^Preview [0-9]+[.][0-9]+[.][0-9]+~preview[.][0-9]+[+][0-9a-f]{7}$")) and
+              (.assets|type=="array")
+            ' verified/release.json >/dev/null
+            source_ref=refs/heads/main
+            source_digest=$(jq -r .target_commitish verified/release.json)
+            main_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/main" --jq .sha)
+            [[ "$main_digest" =~ ^[0-9a-f]{40}$ ]]
+            gh api "repos/$SOURCE_REPOSITORY/compare/$source_digest...$main_digest" > verified/source-to-main.json
+            jq -e --arg source "$source_digest" --arg main "$main_digest" '
+              .base_commit.sha == $source and .merge_base_commit.sha == $source and
+              .behind_by == 0 and
+              ((.status == "identical" and .ahead_by == 0 and .total_commits == 0 and $source == $main) or
+               (.status == "ahead" and .ahead_by > 0 and .total_commits == .ahead_by and .commits[-1].sha == $main))
+            ' verified/source-to-main.json >/dev/null
+            version=$(jq -r '.name|sub("^Preview ";"")' verified/release.json)
+            mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
+              # shellcheck disable=SC2053 # Policy values are intentional glob patterns.
+              while IFS= read -r pattern; do [[ "$name" == $pattern ]] && printf '%s\n' "$name"; done <<<"$PREVIEW_ASSET_PATTERNS"
+            done | sort -u)
+            # Exactly one asset per admitted preview pattern: more means a
+            # duplicated or foreign asset, fewer means a partial release.
+            preview_pattern_count=$(printf '%s\n' "$PREVIEW_ASSET_PATTERNS" | grep -c .)
+            test "$preview_pattern_count" -ge 1
+            test "${#matches[@]}" -eq "$preview_pattern_count"
+            test "$(printf '%s\n' "${matches[@]}" | sort -u | wc -l | tr -d ' ')" -eq "$preview_pattern_count"
+            printf '%s\n' "${matches[@]}" > verified/artifacts.list
+            : > verified/assets.jsonl
+            : > verified/SHA256SUMS
+            while IFS= read -r artifact; do
+              [[ "$artifact" != */* && "$artifact" != *..* ]]
+              gh release download preview -R "$SOURCE_REPOSITORY" -p "$artifact" -p "$artifact.sha256" -D verified
+              checksum=$(sha256sum "verified/$artifact" | cut -d' ' -f1)
+              sidecar=$(awk 'NF {print $1; exit}' "verified/$artifact.sha256")
+              [[ "$checksum" =~ ^[0-9a-f]{64}$ && "$sidecar" = "$checksum" ]]
+              printf '%s  %s\n' "$checksum" "$artifact" >> verified/SHA256SUMS
+              jq -cn --arg name "$artifact" --arg sha256 "$checksum" '{name:$name,sha256:$sha256}' >> verified/assets.jsonl
+            done < verified/artifacts.list
+            jq -Sn --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$source_ref" \
+              --arg source_commit "$source_digest" --arg version "$version" --slurpfile assets verified/assets.jsonl \
+              '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
+              > verified/release-manifest.json
           elif test "$CHANNEL" = preview; then
             test "$CONSUMER_REPOSITORY" = jackin-project/homebrew-tap
             test "$SOURCE_REPOSITORY" = jackin-project/jackin
@@ -410,6 +546,23 @@ jobs:
             echo "unsupported package channel: $CHANNEL" >&2
             exit 1
           fi
+          # Name the exact signer workflow admitted for this channel/consumer
+          # pair, and record whether self-hosted builders are excluded. The
+          # provenance step consumes these instead of re-deriving policy.
+          case "$CHANNEL:$CONSUMER_REPOSITORY" in
+            stable:*)
+              printf '%s\n' "tailrocks/velnor/.github/workflows/ci-release-package-signer.yml" > verified/signer-workflow
+              : > verified/deny-self-hosted-runners
+              ;;
+            preview:tailrocks/velnor-apt)
+              printf '%s\n' "tailrocks/velnor/.github/workflows/ci-release-package-signer.yml" > verified/signer-workflow
+              : > verified/deny-self-hosted-runners
+              ;;
+            preview:jackin-project/homebrew-tap)
+              printf '%s\n' "jackin-project/jackin/.github/workflows/preview.yml" > verified/signer-workflow
+              ;;
+            *) echo "unsupported channel/consumer pair: $CHANNEL:$CONSUMER_REPOSITORY" >&2; exit 1 ;;
+          esac
           echo "available=true" >> "$GITHUB_OUTPUT"
           [[ "$source_digest" =~ ^[0-9a-f]{40}$ ]]
           jq -e --arg repo "$SOURCE_REPOSITORY" --arg ref "$source_ref" --arg commit "$source_digest" '
@@ -435,7 +588,6 @@ jobs:
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
           GH_TOKEN: ${{ github.token }}
-          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           case "$CONSUMER_REPOSITORY" in
@@ -452,13 +604,10 @@ jobs:
           : > verified/verification.jsonl
           while IFS= read -r artifact; do
             verified_digest=""
-            if test "$CHANNEL" = preview; then
-              signer_workflow="$SOURCE_REPOSITORY/.github/workflows/preview.yml"
-              candidate_digests=("$source_digest")
-            else
-              signer_workflow="tailrocks/velnor/.github/workflows/ci-release-package-signer.yml"
-              candidate_digests=("$source_digest")
-            fi
+            signer_workflow=$(cat verified/signer-workflow)
+            deny_args=()
+            if test -e verified/deny-self-hosted-runners; then deny_args+=(--deny-self-hosted-runners); fi
+            candidate_digests=("$source_digest")
             for signer_digest in "${candidate_digests[@]}"; do
               report=$(mktemp)
               verify_args=(
@@ -471,8 +620,7 @@ jobs:
                 --predicate-type https://slsa.dev/provenance/v1
                 --format json
               )
-              if test "$CHANNEL" = stable; then verify_args+=(--deny-self-hosted-runners); fi
-              if gh attestation verify "${verify_args[@]}" > "$report"; then
+              if gh attestation verify "${verify_args[@]}" "${deny_args[@]}" > "$report"; then
                 test -z "$verified_digest"
                 verified_digest="$signer_digest"
                 jq -c --arg accepted_signer_digest "$signer_digest" \
