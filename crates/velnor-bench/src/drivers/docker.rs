@@ -84,7 +84,7 @@ fn remove_scratch_directory(path: &Path) -> Result<()> {
     }
 }
 
-fn parse_docker_id(stdout: &str) -> Result<String> {
+pub(super) fn parse_docker_id(stdout: &str) -> Result<String> {
     let id = stdout.trim();
     if id.len() < 12
         || id.len() > 64
@@ -991,6 +991,8 @@ impl Workload for DockerWorkload {
             i64::try_from(disk_after).unwrap_or(i64::MAX) - i64::try_from(disk_before).unwrap_or(0);
         resources.process_count = context.runner.process_count() as u64;
         resources.docker_invocations = context.runner.count_of("docker") as u64;
+        let docker_census =
+            crate::census::DockerCensus::from_invocations(context.runner.invocations());
 
         Ok(Observation {
             total_ms,
@@ -998,6 +1000,8 @@ impl Workload for DockerWorkload {
             checkout_phases_ms: BTreeMap::new(),
             resources,
             git: GitEvidence::NotMeasured,
+            docker_census,
+            fault: None,
         })
     }
 

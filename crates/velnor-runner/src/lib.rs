@@ -33,6 +33,8 @@ mod docker_lease;
 pub mod execution;
 mod executor;
 mod expression;
+#[cfg(test)]
+mod fault_injection;
 mod fs_copy;
 pub(crate) mod gha_cache;
 mod git_mirror;

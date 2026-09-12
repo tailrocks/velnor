@@ -45,7 +45,12 @@ rsa = { version = "0.9.8", features = ["pem"] }
 # bundled: compile SQLite from source so cross/deb release legs stay hermetic.
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+# float_roundtrip: serde_json's default float parser is correctly-rounded only
+# to 16 significant digits; the 17th digit can come back one ulp off, which
+# breaks bit-exact round trips of Summary mean/variance through NDJSON records
+# (observed live: 434.15526315789475 parsed back ...8947). Exact parsing keeps
+# record validation sound across a write/read cycle.
+serde_json = { version = "1.0.140", features = ["float_roundtrip"] }
 serde_yaml = { package = "noyalib", version = "0.0.28", features = ["compat-serde-yaml"] }
 globset = "0.4.16"
 rayon = "1.12.0"

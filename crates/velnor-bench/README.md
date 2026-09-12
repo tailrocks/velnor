@@ -57,13 +57,16 @@ One NDJSON record per scenario run, `velnor.bench.result.v2`:
 ```text
 schema, run_id, recorded_at_unix_ms, scenario, family, driver, runnability,
 environment { velnor.bench.environment.v1 — every field mandatory },
-observations[ { total_ms, stages_ms{}, checkout_phases_ms{}, resources{}, git{} } ],
-summaries { total_ms, stages_ms{}, checkout_phases_ms{}, lane_ms{},
+observations[ { total_ms, stages_ms{}, checkout_phases_ms{}, resources{}, git{},
+                docker_census{ by_class{ label: {count, latency_ms} } },
+                fault? {class, injected, contained, residue[], detail} } ],
+summaries { total_ms, stages_ms{}, checkout_phases_ms{}, docker_census{ label: {count, latency_ms} },
+            lane_ms{},
             cpu_user_us, cpu_system_us, max_rss_bytes, block_input_ops,
             block_output_ops, process_count, docker_invocations,
             cache_hits, cache_misses, bytes_copied, bytes_downloaded,
             bytes_reused },
-notes[]
+notes[], context{}
 ```
 
 `observations[].git` is tagged evidence, not an unqualified counter object:
@@ -83,6 +86,15 @@ discriminator `{"status":"no_git_process"}` as an input alias; new output
 always uses `no_git_trace_observed`.
 
 Each summary carries `samples, min, max, mean, variance, p50, p95, p99`.
+`docker_census` labels are the runner's closed `DockerOp` vocabulary; validation
+rejects any other label and any census whose total disagrees with
+`resources.docker_invocations`. `fault` is present exactly on `fault/*` rows and
+must name a catalogue class that actually triggered. `context` carries the
+comparison dimensions (`--context key=value`): runner identity, trust class,
+image tag — what differs between two runs being compared.
+
+Two companion schemas: soak reports (`velnor.bench.soak.v1`, from `soak`) and
+comparisons (`velnor.bench.comparison.v1`, from `compare`).
 
 `environment` records CPU model (the brand string, not the architecture — the
 replaced script recorded `platform.processor()`, which is the architecture),
@@ -105,31 +117,37 @@ claim about job acquisition latency.
 
 ## Instrumentation boundary
 
-The runner already records per-job host-Docker metrics at its `CommandRunner`
-seam. The benchmark still needs a trusted bridge that reads those typed
-`velnor.docker` fields into `BenchRecord`; the harness's `sys::Runner` counters
-must not be presented as the runner's process census.
+The runner records per-job host-Docker metrics at its `CommandRunner` seam,
+and the benchmark consumes them through two trusted bridges. In both cases
+the harness reuses the runner's own types and vocabulary; it never recounts
+at its own call sites and never invents a second classifier.
 
-### 1. Consume the runner's per-job Docker metrics
+### 1. The runner's per-job Docker census
 
 `crates/velnor-runner/src/executor.rs` defines `trait CommandRunner` as the
 single choke point for every host process spawn. The product-side
 `crates/velnor-runner/src/docker/metrics.rs` scope records invocation count,
-closed operation class, latency, timeout, and exit status, and emits totals on
-all job exits. Wire those fields into the benchmark's Docker observations; do
-not recreate a second call-site counter.
+closed operation class, latency, timeout, and exit status, emits totals on
+all job exits, and exposes the same counters machine-readably through
+`docker::metrics::snapshot()`.
 
-Until that bridge exists, this crate's `sys::Runner` counts only processes the
-harness itself spawns, which is a strict subset of a real job's process count.
+The harness side (`census::DockerCensus`) derives the per-iteration census
+from its recorded invocations using the runner's own `docker::classify`, so
+there is exactly one classifier and one twelve-label vocabulary. Until the
+`velnor-job` driver exists this census covers the invocations the harness
+itself spawns — a strict subset of a real job's census, stated on the record.
+When the driver lands, the same per-class record shape is filled from the
+runner's `velnor.docker` totals instead.
 
 ### 2. Per-phase checkout spans and GIT_TRACE2 counters
 
-`crates/velnor-runner/src/checkout.rs` needs a `tracing` span per phase —
-mirror lock wait, mirror fetch, workspace fetch, workspace checkout, mtime
-normalization — matching `stage::CheckoutPhase`. The trace file layer already
-records span close events with busy/idle timings
-(`crates/velnor-runner/src/telemetry.rs`), so spans alone make the breakdown
-readable from `trace.jsonl` with no new sink.
+The runner emits one `tracing` span per checkout phase — mirror lock wait,
+mirror fetch, workspace fetch, workspace checkout, mtime normalization — and
+the trace file layer records span close events with busy/idle timings
+(`crates/velnor-runner/src/telemetry.rs`). `trace::checkout_phases_from_trace`
+parses those close records back into `CheckoutPhase` timings; the span-name
+table is pinned on the runner side by a test that runs a real checkout
+(`checkout_emits_the_five_bench_phase_spans`). No new sink was needed.
 
 Byte and ref counters do **not** need a runner change: `gittrace` sets
 `GIT_TRACE2_EVENT` on the Git processes Cargo spawns and reads the documented
@@ -166,6 +184,31 @@ Two behavioural differences, both deliberate:
   `network-egress` and is reported as unrun without it. The script's offline
   variant only appended a path dependency, which is a different measurement.
 
+## Fault catalogue, soak, and comparison
+
+The matrix holds 38 rows: the original 33 plus `lifecycle/trust-partition`
+and four `fault/*` rows. `fault::FAULT_CATALOGUE` names all 27 failure
+classes across the process, HTTP, filesystem, and signal seams. Four are
+measurable today through `docker-direct` — the harness injects a real fault
+(SIGKILL mid-step, failing user command, absent object, network conflict)
+into a real container lifecycle and asserts the real containment; each
+observation carries the `FaultOutcome`, and `run` exits nonzero when any
+outcome is uncontained (the record is still written). The other 23 classes
+need the `velnor-job` driver and stay declared-but-unrun. Scripted
+process-seam injection for runner-internal paths lives in the runner's
+`fault_injection.rs` decorator, proven against the real checkout.
+
+`soak` repeats a scenario round after round and samples owned-object residue
+(the verdict: zero every round) plus scratch growth and timing drift (evidence,
+no threshold yet). `compare` divides two same-scenario, same-driver records
+into per-quantile ratios, gated on sample size like the percentiles — a p95
+ratio needs n>=20 on both sides — and surfaces the records' `--context`
+differences so the reader sees what was compared. That is also the
+trust-partition protocol: run `lifecycle/trust-partition` once per trust
+class with `--context trust-class=...` and compare the admission, capacity,
+and checkout stages. Velnor-vs-actions/runner is the same operation with
+`--context runner=...` once both dispatch drivers exist.
+
 ## Usage
 
 ```shell
@@ -173,6 +216,12 @@ velnor-bench --velnor-repo . --fixture-repo ../velnor-actions-fixture probe
 velnor-bench --velnor-repo . list
 velnor-bench --velnor-repo . --network-egress \
   run --scenario docker/existing-image --iterations 20 --output bench.ndjson
+velnor-bench --velnor-repo . \
+  run --scenario fault/step-command-fails --iterations 5 --output faults.ndjson
+velnor-bench --velnor-repo . \
+  soak --scenario docker/existing-image --rounds 10 --output soak.ndjson
+velnor-bench --velnor-repo . \
+  compare --baseline bench-a.ndjson --candidate bench-b.ndjson
 ```
 
 `--github-credentials` and `--network-egress` are asserted by the operator, not

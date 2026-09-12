@@ -26,4 +26,4 @@ pub mod metrics;
 
 pub use deadline::{classify, deadline_for, DockerOp, DockerTimeout};
 pub use facts::{Fact, FactKey, FactLifetime};
-pub use metrics::{begin_job, observe, JobDockerScope};
+pub use metrics::{begin_job, observe, snapshot, ClassTotal, JobDockerScope, Snapshot};
