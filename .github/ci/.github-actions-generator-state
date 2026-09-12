@@ -1,5 +1,10 @@
 # Generated ownership state; do not edit.
-schema = 1
+schema = 2
+[inputs]
+config	08f44b07b5901a25
+scan	ea362a2639c6dbf5
+generator	1
+[outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
 .github/ci/project.toml	3a7331ccde80f58e
