@@ -6,10 +6,9 @@
 //! keeps the generator's default behavior), and is fail-closed: a config that
 //! fails to parse or validate stops generation instead of being ignored.
 //!
-//! This phase only carries and digests the config. It does not yet feed the
-//! renderer: policy overrides and declared primitives are consumed by later
-//! phases, so a value that parses and validates can never change generated
-//! bytes here.
+//! The scan pass applies the supported workflow, scan, and policy overrides
+//! after it has resolved the repository shape. Declared primitives and the
+//! remaining policy contract are consumed by their owning later phases.
 
 mod canonical;
 
@@ -131,8 +130,7 @@ struct WorkflowSection {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScanSection {
-    /// Repository paths the scan must ignore. The list is consumed when
-    /// declared primitives land; it is carried and digested until then.
+    /// Repository paths the scan must ignore.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclude: Vec<String>,
 }
@@ -204,6 +202,37 @@ impl RepoGenerationConfig {
         self.workflow.package_update_channels.clone()
     }
 
+    /// The repository paths excluded from the scan.
+    pub(crate) fn scan_exclude(&self) -> Result<&[String], GeneratorError> {
+        validate_excludes(&self.scan.exclude)?;
+        Ok(&self.scan.exclude)
+    }
+
+    /// Hosted runner override, when declared.
+    pub(crate) fn github_runner(&self) -> Option<&str> {
+        self.workflow.github_runner.as_deref()
+    }
+
+    /// Velnor label override, when declared.
+    pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
+        self.workflow.velnor_labels.as_deref()
+    }
+
+    /// Default branch override, when declared.
+    pub(crate) fn default_branch(&self) -> Option<&str> {
+        self.workflow.default_branch.as_deref()
+    }
+
+    /// Whether the generated actionlint config should emit null variables.
+    pub(crate) fn actionlint_config_variables_null(&self) -> Option<bool> {
+        self.policy.actionlint_config_variables_null
+    }
+
+    /// Whether the generated CI aggregate should be required.
+    pub(crate) fn ci_required(&self) -> Option<bool> {
+        self.policy.ci_required
+    }
+
     fn schema_error(&self, path: &Path) -> Result<(), GeneratorError> {
         match self.schema {
             Some(CONFIG_SCHEMA) => Ok(()),
@@ -237,6 +266,7 @@ impl RepoGenerationConfig {
             )
         })?;
         validate_repository_slug(repository)?;
+        validate_workflow(&self.workflow)?;
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -364,6 +394,36 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
+    if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
+        return Err(GeneratorError::usage(
+            "[workflow] github_runner must not be empty",
+        ));
+    }
+    if let Some(labels) = &workflow.velnor_labels {
+        if labels.is_empty() {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not be empty",
+            ));
+        }
+        if labels.iter().any(String::is_empty) {
+            return Err(GeneratorError::usage(
+                "[workflow] velnor_labels must not contain empty labels",
+            ));
+        }
+    }
+    if workflow
+        .velnor_runner_group
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(GeneratorError::usage(
+            "[workflow] velnor_runner_group must not be empty",
+        ));
+    }
+    Ok(())
+}
+
 /// The update channels the rendered `package-update.yml` matrix can grant. The
 /// consumer-side `package-updater.yml` implements a `stable` arm and a
 /// `preview` arm and nothing else, so any other channel renders a scheduled job
@@ -480,7 +540,7 @@ mod tests {
 
     fn shape_for(root: &Path) -> crate::scan::RepositoryShape {
         must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan config test repository",
         )
     }

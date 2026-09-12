@@ -1181,6 +1181,7 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
         }
     }
@@ -1202,7 +1203,7 @@ mod tests {
         generation: Option<&str>,
     ) -> Result<super::super::Surface, GeneratorError> {
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {

@@ -5,10 +5,15 @@ use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 use super::{RepositoryShape, ScanContext};
 use crate::{parent_path, GeneratorError};
 
-pub(crate) fn repository_files(root: &Path) -> Result<Vec<String>, GeneratorError> {
+pub(crate) fn repository_files(
+    root: &Path,
+    exclude: &[String],
+) -> Result<Vec<String>, GeneratorError> {
     if !root.is_dir() {
         return Err(GeneratorError::usage(format!(
             "not a repository directory: {}",
@@ -28,8 +33,25 @@ pub(crate) fn repository_files(root: &Path) -> Result<Vec<String>, GeneratorErro
         collect_files(root, root, &mut files)?;
         files
     };
+    let excludes = exclude_set(exclude)?;
+    files.retain(|file| !excludes.is_match(file));
     files.sort();
     Ok(files)
+}
+
+fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern).map_err(|error| {
+            GeneratorError::usage(format!(
+                "[scan] exclude is not a valid glob: {pattern}: {error}"
+            ))
+        })?;
+        builder.add(glob);
+    }
+    builder.build().map_err(|error| {
+        GeneratorError::usage(format!("[scan] exclude could not be compiled: {error}"))
+    })
 }
 
 /// Tracked files under `root`, relative to it. `Ok(None)` means `root` is not
@@ -328,7 +350,7 @@ mod tests {
         );
         git(&root, &["commit", "-qm", "tracked"]);
 
-        let files = must(repository_files(&root), "scan tracked repository");
+        let files = must(repository_files(&root, &[]), "scan tracked repository");
         assert_eq!(files, vec!["tracked.txt".to_owned()]);
     }
 
@@ -345,7 +367,7 @@ mod tests {
             "write nested file",
         );
 
-        let mut files = must(repository_files(&root), "scan plain directory");
+        let mut files = must(repository_files(&root, &[]), "scan plain directory");
         files.sort();
         assert_eq!(
             files,
