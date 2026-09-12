@@ -16,7 +16,7 @@ use crate::{
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
     workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
     RunnerMode, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
-    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW, VELNOR_POLICY_WORKFLOW_REV,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
     VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
 };
 
@@ -883,10 +883,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_policy(output: &mut String, runners: RunnerMode, trusted: bool) {
         let _ = (runners, trusted);
-        let _ = writeln!(
-            output,
-            "  policy:\n    name: Advisory policy\n    uses: {VELNOR_POLICY_WORKFLOW}@{VELNOR_POLICY_WORKFLOW_REV}\n    with:\n      policy-revision: {VELNOR_POLICY_WORKFLOW_REV}\n    permissions:\n      contents: read",
-        );
+        output.push_str(&crate::inline_policy_job(
+            "Advisory policy",
+            VELNOR_POLICY_WORKFLOW_REV,
+        ));
     }
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
