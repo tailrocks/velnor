@@ -273,13 +273,13 @@ pub struct ReleaseArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ReleaseCommand {
-    /// Emit a coherent release record from this (release-build) binary. Refuses
-    /// to run from a development build.
+    /// Emit a coherent record from this (release-build) binary: a stable release
+    /// record, or a deb's own package record with `--binary`. Refuses to run
+    /// from a development build.
     Emit(ReleaseEmitArgs),
     /// Re-assemble and re-verify a record from downloaded artifacts.
     Assemble(ReleaseAssembleArgs),
-    /// Verify a release record against its independent checksum and internal
-    /// coherence.
+    /// Verify a record against its independent checksum and internal coherence.
     VerifyRecord(ReleaseVerifyRecordArgs),
     /// Validate the installed binary/package/manifest against the active record.
     /// Run by both `.service` units before ExecStart.
@@ -294,12 +294,20 @@ pub enum ReleaseCommand {
 
 #[derive(Debug, Args)]
 pub struct ReleaseEmitArgs {
-    /// Path to the assembled release record JSON to validate + persist.
+    /// Path to the assembled release or package record JSON to validate + persist.
     #[arg(long)]
     pub record: PathBuf,
     /// Release store root the immutable record is written under.
     #[arg(long, default_value = crate::args::ACTIVE_RELEASE_DIR)]
     pub out_dir: PathBuf,
+    /// Write canonical record bytes + a `.sha256` sidecar here instead of
+    /// storing the record in the release store (the packaging lanes' staging path).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Runner binary a package record is staged against; emission refuses a
+    /// record whose architecture entry does not name exactly these bytes.
+    #[arg(long)]
+    pub binary: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -475,7 +483,12 @@ macro_rules! fwd_release {
 }
 fwd_release!(
     ReleaseEmitArgs,
-    crate::args::ReleaseEmitArgs { record, out_dir }
+    crate::args::ReleaseEmitArgs {
+        record,
+        out_dir,
+        out,
+        binary
+    }
 );
 fwd_release!(
     ReleaseAssembleArgs,

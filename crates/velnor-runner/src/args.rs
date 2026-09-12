@@ -53,6 +53,13 @@ pub enum ReleaseCommand {
 pub struct ReleaseEmitArgs {
     pub record: PathBuf,
     pub out_dir: PathBuf,
+    /// Write canonical record bytes plus a `.sha256` sidecar here instead of
+    /// storing the record in the release store. The packaging lanes use this to
+    /// stage the record they ship inside the deb.
+    pub out: Option<PathBuf>,
+    /// The runner binary a package record must be staged against; emission
+    /// refuses a record whose architecture entry does not name these bytes.
+    pub binary: Option<PathBuf>,
 }
 
 #[derive(Debug)]
