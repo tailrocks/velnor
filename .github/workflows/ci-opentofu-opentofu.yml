@@ -27,7 +27,7 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-6e59b98d5d1a6d42017465b045554a18d97d7e68
+          name: velnor-workflow-runtime-9c1a0782ec6138207986ee42016c0af1282ee02c
           path: .velnor-workflow-runtime
       - name: Add Velnor workflow runtime to PATH
         shell: bash
