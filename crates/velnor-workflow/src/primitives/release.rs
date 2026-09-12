@@ -1063,6 +1063,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use sha2::{Digest as _, Sha256};
+
     use super::*;
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
@@ -1070,6 +1072,27 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{context}: {error}"),
         }
+    }
+
+    /// The digest of a rendered workflow, as the hex the `sha256sum` output
+    /// spells: the pin the legacy-render test compares against.
+    fn digest_of(content: &str) -> String {
+        Sha256::digest(content.as_bytes()).iter().fold(
+            String::with_capacity(64),
+            |mut output, byte| {
+                let _ = write!(output, "{byte:02x}");
+                output
+            },
+        )
+    }
+
+    fn rendered(surface: &super::super::Surface, file: &str) -> String {
+        let path = PathBuf::from(".github/workflows").join(file);
+        surface
+            .files
+            .get(&path)
+            .unwrap_or_else(|| panic!("the surface is missing {file}"))
+            .clone()
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
@@ -1201,31 +1224,68 @@ mod tests {
         super::super::generate(root, &shape, config, generation.as_ref())
     }
 
-    /// The default rows render byte-identically to the legacy name-keyed
-    /// dispatch: one implementation, two entry points.
+    /// The default rows render the legacy release surface, pinned to the bytes
+    /// the reviewed renderer produced. The digests are the expectation, not a
+    /// second call into the same code, so a renderer change shows up here and
+    /// has to be carried into the pin deliberately; the structural assertions
+    /// below say what the pinned bytes are for.
     #[test]
     fn default_rows_render_the_legacy_release_surface() {
-        let root = scanned_root("default");
-        let files = [
-            "release.yml",
-            "preview.yml",
-            "maintenance.yml",
-            "ci-release-package-signer.yml",
-            "velnor-workflow-policy.yml",
+        const PINNED: &[(&str, &str)] = &[
+            (
+                "release.yml",
+                "88532575f09f21c4dd6e045a55d528d053366806f622830f019ee4d228bab13e",
+            ),
+            (
+                "preview.yml",
+                "bbd3a2cc82f21409b288b30b9f4e6dc1d1bb173d766b4915609d3762686595d8",
+            ),
+            (
+                "maintenance.yml",
+                "ba5fef94b52fb31521ff44b170c8edfb723fe47187a1cf79c91f76d010f84d00",
+            ),
+            (
+                "ci-release-package-signer.yml",
+                "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
+            ),
+            (
+                "velnor-workflow-policy.yml",
+                "78a1fe789a20bc3568587ec831aea85d7fd18c04885ee632219b0180b454e72b",
+            ),
         ];
+        let root = scanned_root("default");
+        let files = PINNED.iter().map(|(file, _)| *file).collect::<Vec<_>>();
         let config = config(&files, Some(binary_spec()));
         let surface = generate(&root, &config, None);
-        let legacy = crate::generated_files(&config);
-        for file in files {
-            let path = PathBuf::from(".github/workflows").join(file);
-            let rendered = surface
-                .files
-                .get(&path)
-                .unwrap_or_else(|| panic!("the surface is missing {file}"));
-            let expected = legacy
-                .get(&path)
-                .unwrap_or_else(|| panic!("the legacy surface is missing {file}"));
-            assert_eq!(rendered, expected, "{file} diverges from the legacy render");
+        for (file, digest) in PINNED {
+            let rendered = rendered(&surface, file);
+            assert_eq!(
+                digest_of(&rendered),
+                *digest,
+                "{file} diverges from the pinned legacy render"
+            );
+        }
+        // The publisher verifies before it publishes; the rolling preview and
+        // the signer stay tag- and attestation-driven.
+        let release = rendered(&surface, "release.yml");
+        assert!(release.contains("name: Release"), "{release}");
+        assert!(release.contains("Publish GitHub release"), "{release}");
+        assert!(release.contains("Verify archive checksums"), "{release}");
+        for (file, marker) in [
+            ("preview.yml", "Preview"),
+            ("maintenance.yml", "cache"),
+            ("ci-release-package-signer.yml", "attest"),
+            ("velnor-workflow-policy.yml", "velnor-workflow"),
+        ] {
+            let rendered = rendered(&surface, file);
+            assert!(
+                rendered.contains(marker),
+                "{file} must still carry its `{marker}` contract: {rendered}"
+            );
+            assert!(
+                rendered.starts_with(crate::GENERATED_HEADER),
+                "{file} must carry the generated header: {rendered}"
+            );
         }
         assert!(surface.added_files.is_empty());
         let _ = fs::remove_dir_all(root);
@@ -1361,5 +1421,35 @@ mod tests {
             );
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    /// A declared file that a non-surface renderer owns is rejected at
+    /// declaration time. The nested per-unit workflows are rendered by the
+    /// legacy renderer for every scanned unit, so a row that slips past the
+    /// pipeline family — here narrowed with `coverage = "explicit"` — would
+    /// otherwise be emitted and then silently overwritten.
+    #[test]
+    fn a_declared_file_a_nested_unit_renderer_owns_is_rejected() {
+        let root = scanned_root("owned-nested");
+        let mut config = config(&[], None);
+        config.units = vec![unit("rust-example"), unit("rust-other")];
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-example\"]\nfile = \"ci-rust-example.yml\"\n\n\
+                 [declare.args]\ncoverage = \"explicit\"\n\n\
+                 [[declare]]\nprimitive = \"static-workflow\"\nfile = \"ci-rust-other.yml\"\n\n\
+                 [declare.args]\ntemplate = '''\nname: Custom\n'''\n",
+            ),
+        ) {
+            Ok(_) => panic!("a declared nested-unit file must fail closed, and did not"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("`ci-rust-other.yml`, which the `rust-crate-pipeline` family renders for unit `rust-other`"),
+            "the error must name the colliding path and its renderer: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }
