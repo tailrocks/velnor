@@ -6,21 +6,21 @@ use serde_json::{Map, Value};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, Read, Write},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
-    sync::{mpsc::UnboundedReceiver, oneshot, Semaphore},
+    sync::{mpsc::Receiver, oneshot, Semaphore},
     task::JoinHandle,
 };
 use tracing::Instrument as _;
@@ -42,8 +42,9 @@ use crate::{
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, CommandRunner, DockerJobEngine, ExecutableStep,
-        JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
+        condition_is_statically_false, BoundedStepSender, CommandRunner, DockerJobEngine,
+        ExecutableStep, JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
+        STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -82,6 +83,18 @@ const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-call deadline for every best-effort step-publish network operation
+/// (Results Service, live feed, timeline). A stalled backend wedges at most
+/// one publish: the feed drops its connection and reconnects on the next
+/// send, and stateless HTTP publishes simply retry on the next event.
+const STEP_PUBLISH_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Memory ceiling for the streamed-step-log mirror (cancel-path partial
+/// logs): evict oldest first once either bound is exceeded. A single record
+/// larger than the byte cap is still retained alone — the same record is
+/// inherently retained in `ScriptJobResult`, so keeping one copy in the
+/// mirror adds no new wedge vector.
+const STREAMED_STEP_LOG_MIRROR_MAX_LOGS: usize = 4096;
+const STREAMED_STEP_LOG_MIRROR_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const PENDING_JIT_REGISTRATION_FILE: &str = ".jit-registration-pending.json";
 const PENDING_JIT_REGISTRATION_VERSION: u8 = 1;
 /// Keep lifecycle duration fields bounded to the same one-day policy used by
@@ -6319,33 +6332,33 @@ async fn handle_job_request(
                     .context("derive persistent target GC scope")?
                     .to_string_lossy()
                     .to_string();
-                let cargo_bin_scope = crate::container::cargo_executable_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                let cargo_bin_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::cargo_executable_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &cargo_root,
                 )
-                .strip_prefix(&cargo_root)
-                .context("derive Cargo executable GC scope")?
-                .to_string_lossy()
-                .to_string();
-                let mise_install_scope = crate::container::mise_executable_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                .context("derive Cargo executable GC scope")?;
+                let mise_install_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::mise_executable_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &mise_root,
                 )
-                .strip_prefix(&mise_root)
-                .context("derive mise install GC scope")?
-                .to_string_lossy()
-                .to_string();
-                let mise_binary_scope = crate::container::mise_binary_store_host(
-                    &work_root,
-                    &effective_trust_scope,
-                    &repository_key,
+                .context("derive mise install GC scope")?;
+                let mise_binary_scope = crate::storage::gc_scope_below_root(
+                    &crate::container::mise_binary_store_host(
+                        &work_root,
+                        &effective_trust_scope,
+                        &repository_key,
+                    ),
+                    &mise_root,
                 )
-                .strip_prefix(&mise_root)
-                .context("derive mise binary GC scope")?
-                .to_string_lossy()
-                .to_string();
+                .context("derive mise binary GC scope")?;
                 let actions_cache = crate::storage::cache_class_path(
                     &work_root,
                     &effective_trust_scope,
@@ -6736,9 +6749,17 @@ async fn handle_job_request(
                 None,
             );
         }
-        let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (step_start_tx, step_start_receiver) =
+            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let step_start_sender = BoundedStepSender::new(step_start_tx);
+        // Counter handles only: cloning the senders here would hold the
+        // channels open past execution and the publishers would never drain.
+        let step_start_drops = step_start_sender.drops_handle();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
-        let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (step_log_tx, step_log_receiver) =
+            tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let step_log_sender = BoundedStepSender::new(step_log_tx);
+        let step_log_drops = step_log_sender.drops_handle();
         let console_log_path = Some(job_console_log_path(
             config_dir,
             args.work_dir.clone(),
@@ -6746,8 +6767,11 @@ async fn handle_job_request(
         ));
         // Every StepLog the executor streams is mirrored here so the
         // cancellation path (where the executor never returns its final
-        // ScriptJobResult) can still persist the partial job log.
-        let streamed_step_logs = Arc::new(Mutex::new(Vec::new()));
+        // ScriptJobResult) can still persist the partial job log. The mirror
+        // is entry- and byte-capped (oldest evicted first, evictions
+        // counted) so a stalled publisher plus a chatty job cannot grow
+        // it without bound.
+        let streamed_step_logs = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
@@ -6810,7 +6834,15 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
-                drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+                drain_step_publishers(
+                    step_timeline,
+                    step_logs_publisher,
+                    forensics.clone(),
+                    &step_start_drops,
+                    &step_log_drops,
+                    &streamed_step_logs,
+                )
+                .await;
                 let completion = complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
@@ -6882,8 +6914,15 @@ async fn handle_job_request(
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
                     // Same contract as complete_acquired_job_failure: never complete
                     // with zero steps, or GitHub hides the rejection reason.
-                    drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone())
-                        .await;
+                    drain_step_publishers(
+                        step_timeline,
+                        step_logs_publisher,
+                        forensics.clone(),
+                        &step_start_drops,
+                        &step_log_drops,
+                        &streamed_step_logs,
+                    )
+                    .await;
                     let completion = complete_acquired_job_failure(
                         &run_service_job,
                         &AcquiredJobIdentity::from_job(&job),
@@ -6941,19 +6980,35 @@ async fn handle_job_request(
         // slower publisher deadline; abort only a stalled publisher. Drain
         // BEFORE reading the streamed-step-log mirror so a canceled job's
         // partial logs below are complete.
-        drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
+        drain_step_publishers(
+            step_timeline,
+            step_logs_publisher,
+            forensics.clone(),
+            &step_start_drops,
+            &step_log_drops,
+            &streamed_step_logs,
+        )
+        .await;
         let outputs = job_result.outputs;
         let mut step_logs = job_result.step_logs;
         if step_logs.is_empty() && matches!(job_result.result, TaskResult::Canceled) {
             // Cancel path: the executor errored before returning its final
-            // step_logs, but the publisher mirrored every streamed StepLog.
-            // Persist what ran instead of completing with an empty log.
-            let streamed = std::mem::take(
-                &mut *streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            // step_logs, so the mirror is the persisted log's only source —
+            // and it is lossy twice over (bounded-channel drops before the
+            // publisher, oldest-first evictions inside it). Persist what ran
+            // instead of completing with an empty log, and stamp a marker
+            // when any of it was lost so the gap is GitHub-visible.
+            let mut mirror = streamed_step_logs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mirror_evicted = mirror.evicted();
+            let streamed = mirror.take_logs();
+            drop(mirror);
+            step_logs = merged_partial_step_logs(
+                streamed,
+                step_log_drops.load(Ordering::Relaxed),
+                mirror_evicted,
             );
-            step_logs = merged_partial_step_logs(streamed);
         }
         let teardown = job_result.teardown;
         let execution_timings = job_result.timings;
@@ -7089,6 +7144,9 @@ async fn drain_step_publishers(
     step_timeline: JoinHandle<()>,
     step_logs_publisher: JoinHandle<()>,
     forensics: SlotForensics,
+    step_start_drops: &AtomicU64,
+    step_log_drops: &AtomicU64,
+    streamed_step_logs: &Arc<Mutex<StreamedStepLogMirror>>,
 ) {
     let started = Instant::now();
     tokio::join!(
@@ -7099,10 +7157,41 @@ async fn drain_step_publishers(
         ),
         drain_step_publisher("log", step_logs_publisher, STEP_LOG_PUBLISH_DRAIN_TIMEOUT),
     );
+    // Read after both publishers exit so no further mirror push can land:
+    // on the cancel path this count (with the channel drops) is the only
+    // record of what the persisted partial log lost.
+    let mirror_evicted = streamed_step_logs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .evicted();
     forensics.lifecycle(&format!(
-        "step-publishers-drained elapsed_ms={}",
-        duration_ms(started.elapsed())
+        "step-publishers-drained elapsed_ms={} dropped_step_starts={} dropped_step_logs={} mirror_evicted_logs={}",
+        duration_ms(started.elapsed()),
+        step_start_drops.load(Ordering::Relaxed),
+        step_log_drops.load(Ordering::Relaxed),
+        mirror_evicted,
     ));
+}
+
+/// Bound one best-effort step-publish network call: a stalled backend must
+/// fail this call, never wedge the publisher task behind it.
+async fn publish_with_timeout<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    publish_with_timeout_for(STEP_PUBLISH_SEND_TIMEOUT, future).await
+}
+
+async fn publish_with_timeout_for<T>(
+    timeout: Duration,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!(
+            "step publish timed out after {}s",
+            timeout.as_secs()
+        )),
+    }
 }
 
 fn should_execute_job(args: &RunArgs) -> bool {
@@ -7145,8 +7234,17 @@ fn job_user_secret_names(job: &AgentJobRequestMessage) -> Vec<String> {
 }
 
 fn is_user_secret_variable(name: &str) -> bool {
+    // Case-insensitive: a `Secrets.*` spelling carries the same secret bytes
+    // as `secrets.*`, so the trust gate must refuse it on the same paths.
+    // The trailing dot anchors the prefix — `secretsX.*` is not a secret
+    // context — and `str::get` keeps non-ASCII names panic-free.
     let normalized = name.trim();
-    normalized.starts_with("secrets.") || normalized.starts_with("secret.")
+    normalized
+        .get(.."secrets.".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("secrets."))
+        || normalized
+            .get(.."secret.".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("secret."))
 }
 
 fn write_sanitized_job_message_dump(
@@ -7609,9 +7707,75 @@ fn start_broker_cancellation_poll(
     })
 }
 
+/// Entry- and byte-capped mirror of every streamed `StepLog`, read only by
+/// the cancel path (where the executor never returns its final
+/// `ScriptJobResult`). Oldest evicted first; arrival order is preserved so
+/// `merged_partial_step_logs` still folds live chunks under completions.
+/// Evictions are counted: on the cancel path the mirror (fed by the lossy
+/// bounded channel) is the persisted log's only source, so silent loss
+/// there would be GitHub-visible data loss with no marker.
+#[derive(Debug, Default)]
+struct StreamedStepLogMirror {
+    logs: VecDeque<StepLog>,
+    bytes: u64,
+    evicted: u64,
+}
+
+impl StreamedStepLogMirror {
+    fn push(&mut self, log: StepLog) {
+        let size = step_log_mirror_bytes(&log);
+        while !self.logs.is_empty()
+            && (self.logs.len() >= STREAMED_STEP_LOG_MIRROR_MAX_LOGS
+                || self.bytes.saturating_add(size) > STREAMED_STEP_LOG_MIRROR_MAX_BYTES)
+        {
+            if let Some(evicted) = self.logs.pop_front() {
+                self.bytes = self.bytes.saturating_sub(step_log_mirror_bytes(&evicted));
+                self.evicted = self.evicted.saturating_add(1);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(size);
+        self.logs.push_back(log);
+    }
+
+    fn take_logs(&mut self) -> Vec<StepLog> {
+        self.bytes = 0;
+        std::mem::take(&mut self.logs).into_iter().collect()
+    }
+
+    /// Records evicted oldest-first past the caps. Read after the step-log
+    /// publisher drains (no further pushes can land) for the forensics
+    /// line and the cancel-path truncation marker.
+    fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.logs.len()
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// Approximate retained heap of a mirrored record: the string payloads.
+/// (Annotations and telemetry are small fixed-shape records; skipping them
+/// keeps the accounting proportional to the log text that dominates it.)
+fn step_log_mirror_bytes(log: &StepLog) -> u64 {
+    (log.step_id.len()
+        + log.display_name.len()
+        + log.started_at.len()
+        + log.completed_at.len()
+        + log.summary.len()
+        + log.lines.iter().map(String::len).sum::<usize>()
+        + log.masks.iter().map(String::len).sum::<usize>()) as u64
+}
+
 fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
-    mut receiver: UnboundedReceiver<StepStartEvent>,
+    mut receiver: Receiver<StepStartEvent>,
 ) -> JoinHandle<()> {
     // Build Twirp client for Results Service step status updates if available.
     let twirp_client = job
@@ -7648,9 +7812,13 @@ fn start_step_timeline_publisher(
                     completed_at: None,
                     conclusion: crate::protocol::StepConclusion::Unknown as u8,
                 };
-                if let Err(e) = client
-                    .update_steps(&[step], &plan_id, &job_id, change_order)
-                    .await
+                if let Err(e) = publish_with_timeout(client.update_steps(
+                    &[step],
+                    &plan_id,
+                    &job_id,
+                    change_order,
+                ))
+                .await
                 {
                     eprintln!(
                         "Best-effort Twirp step start failed for '{}': {}",
@@ -7662,7 +7830,9 @@ fn start_step_timeline_publisher(
             }
 
             // Also update the distributed task timeline (legacy path)
-            if let Err(error) = publish_timeline_step_started(&job, &event).await {
+            if let Err(error) =
+                publish_with_timeout(publish_timeline_step_started(&job, &event)).await
+            {
                 eprintln!(
                     "Best-effort timeline step start update failed for '{}': {}",
                     event.step_id,
@@ -7675,9 +7845,9 @@ fn start_step_timeline_publisher(
 
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
-    mut receiver: UnboundedReceiver<StepLog>,
+    mut receiver: Receiver<StepLog>,
     console_log_path: Option<PathBuf>,
-    streamed_step_logs: Arc<Mutex<Vec<StepLog>>>,
+    streamed_step_logs: Arc<Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -7738,9 +7908,11 @@ fn start_step_log_publisher(
 
         // Open ONE persistent WebSocket connection for the entire job (matching the
         // official GitHub runner which keeps a single connection open per job).
+        // The connect is deadline-bound: a stalled handshake must not wedge
+        // the publisher before the first log line.
         let mut ws_conn = if let Some(client) = &feed_client {
             eprintln!("[feed] Connecting to WebSocket feed...");
-            match client.connect().await {
+            match publish_with_timeout(client.connect()).await {
                 Ok(ws) => {
                     eprintln!("[feed] WebSocket connected.");
                     Some(ws)
@@ -7771,7 +7943,11 @@ fn start_step_log_publisher(
                 },
                 _ = ping_interval.tick() => {
                     if let Some(ws) = ws_conn.as_mut()
-                        && let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
+                        && let Err(e) = publish_with_timeout(
+                            crate::protocol::FeedStreamClient::send_ping(ws),
+                        )
+                        .await
+                    {
                             eprintln!(
                                 "[feed] keepalive ping failed: {}; dropping to reconnect on next send",
                                 sanitized_retry_error(&e)
@@ -7860,9 +8036,13 @@ fn start_step_log_publisher(
                         }),
                         conclusion: conclusion as u8,
                     };
-                    if let Err(e) = client
-                        .update_steps(&[step], &plan_id, &job_id, change_order)
-                        .await
+                    if let Err(e) = publish_with_timeout(client.update_steps(
+                        &[step],
+                        &plan_id,
+                        &job_id,
+                        change_order,
+                    ))
+                    .await
                     {
                         eprintln!(
                             "Best-effort Twirp step completion failed for '{}': {}",
@@ -7879,9 +8059,13 @@ fn start_step_log_publisher(
                     // into the "Show timestamps" toggle column.
                     if !log.skipped {
                         let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
-                        if let Err(e) = client
-                            .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
-                            .await
+                        if let Err(e) = publish_with_timeout(client.upload_step_log(
+                            &plan_id,
+                            &job_id,
+                            &log.step_id,
+                            &timestamped,
+                        ))
+                        .await
                         {
                             tracing::warn!(
                                 job_id = %job_id,
@@ -7898,14 +8082,13 @@ fn start_step_log_publisher(
                         // Upstream scrubs the file line by line before
                         // queueing it (Runner.Worker/FileCommandManager.cs:256-267).
                         if !masked_summary.is_empty()
-                            && let Err(e) = client
-                                .upload_step_summary(
-                                    &plan_id,
-                                    &job_id,
-                                    &log.step_id,
-                                    &masked_summary,
-                                )
-                                .await
+                            && let Err(e) = publish_with_timeout(client.upload_step_summary(
+                                &plan_id,
+                                &job_id,
+                                &log.step_id,
+                                &masked_summary,
+                            ))
+                            .await
                         {
                             eprintln!(
                                 "Best-effort step summary upload failed for '{}': {}",
@@ -7916,7 +8099,9 @@ fn start_step_log_publisher(
                     }
                 }
 
-                if let Err(error) = publish_timeline_step_log(&job, &log).await {
+                if let Err(error) =
+                    publish_with_timeout(publish_timeline_step_log(&job, &log)).await
+                {
                     eprintln!(
                         "Best-effort timeline step log upload failed for '{}': {}",
                         log.step_id,
@@ -7952,7 +8137,7 @@ struct LiveFeedBatch {
     start_line: i64,
 }
 
-fn step_log_batch(first: StepLog, receiver: &mut UnboundedReceiver<StepLog>) -> Vec<StepLog> {
+fn step_log_batch(first: StepLog, receiver: &mut Receiver<StepLog>) -> Vec<StepLog> {
     let mut logs = vec![first];
     loop {
         match receiver.try_recv() {
@@ -7990,9 +8175,12 @@ async fn send_live_feed_batch(
     job_id: &str,
     batch: LiveFeedBatch,
 ) {
+    // Drop-and-reconnect on stall: every feed operation is deadline-bound,
+    // and a failed or timed-out send drops the connection so the next batch
+    // reconnects instead of queueing behind a wedged socket.
     if ws_conn.is_none()
         && let Some(client) = feed_client
-        && let Ok(ws) = client.connect().await
+        && let Ok(ws) = publish_with_timeout(client.connect()).await
     {
         eprintln!("[feed] WebSocket reconnected.");
         *ws_conn = Some(ws);
@@ -8004,14 +8192,14 @@ async fn send_live_feed_batch(
     // LOG FORMAT CONTRACT (docs/reference/interface.md): live feed frames are
     // rendered VERBATIM by the GitHub UI, which adds its own timestamp column.
     let feed_lines = live_feed_lines(&batch.lines);
-    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
+    if let Err(e) = publish_with_timeout(crate::protocol::FeedStreamClient::send_log_lines(
         ws,
         &batch.step_id,
         feed_lines.clone(),
         Some(batch.start_line),
         Some(plan_id),
         Some(job_id),
-    )
+    ))
     .await
     {
         eprintln!(
@@ -8021,15 +8209,15 @@ async fn send_live_feed_batch(
         *ws_conn = None;
         // Reconnect once and resend this batch so no step's live log is lost.
         if let Some(client) = feed_client
-            && let Ok(mut ws2) = client.connect().await
-            && crate::protocol::FeedStreamClient::send_log_lines(
+            && let Ok(mut ws2) = publish_with_timeout(client.connect()).await
+            && publish_with_timeout(crate::protocol::FeedStreamClient::send_log_lines(
                 &mut ws2,
                 &batch.step_id,
                 feed_lines,
                 Some(batch.start_line),
                 Some(plan_id),
                 Some(job_id),
-            )
+            ))
             .await
             .is_ok()
         {
@@ -8444,8 +8632,8 @@ fn execute_script_job(
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
@@ -8965,8 +9153,8 @@ fn execute_script_job_inner(
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
     telemetry_admission: Option<crate::ops::JobAdmission>,
@@ -9046,7 +9234,7 @@ fn execute_script_job_inner(
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
     if let Some(sender) = &step_start_sender {
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: setup_step_id.clone(),
             display_name: "Set up job".to_string(),
             order: 1,
@@ -9072,7 +9260,7 @@ fn execute_script_job_inner(
         summary: String::new(),
     };
     if let Some(sender) = &step_log_sender {
-        let _ = sender.send(setup_log.clone());
+        sender.send_best_effort(setup_log.clone());
     }
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
@@ -9097,7 +9285,7 @@ fn execute_script_job_inner(
     let initialize_containers_step = (!container.services.is_empty()).then(|| {
         let step_id = uuid::Uuid::new_v4().to_string();
         if let Some(sender) = &step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: step_id.clone(),
                 display_name: "Initialize containers".to_string(),
                 order: 2,
@@ -9126,7 +9314,7 @@ fn execute_script_job_inner(
         let backend_step_id = crate::executor::github_backend_step_id(&plan.step_id);
         // Emit step events so GitHub shows the checkout step in the job's step list.
         if let Some(sender) = &step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: backend_step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
@@ -9169,7 +9357,7 @@ fn execute_script_job_inner(
                 summary: String::new(),
             };
             if let Some(sender) = &step_log_sender {
-                let _ = sender.send(log.clone());
+                sender.send_best_effort(log.clone());
             }
             eager_checkout_step_logs.push(log);
         }
@@ -9318,7 +9506,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &step_log_sender {
-            let _ = sender.send(log.clone());
+            sender.send_best_effort(log.clone());
         }
         log
     });
@@ -9464,7 +9652,7 @@ fn execute_script_job_inner(
         let post_name = post_step_display_name(&plan.display_name);
         let post_ts = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: post_step_id.clone(),
                 display_name: post_name.clone(),
                 order: post_order,
@@ -9492,7 +9680,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &post_step_log_sender {
-            let _ = sender.send(post_log.clone());
+            sender.send_best_effort(post_log.clone());
         }
         extra_step_logs.push(post_log);
     }
@@ -9503,7 +9691,7 @@ fn execute_script_job_inner(
         let stop_step_id = uuid::Uuid::new_v4().to_string();
         let stop_started_at = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
-            let _ = sender.send(StepStartEvent {
+            sender.send_best_effort(StepStartEvent {
                 step_id: stop_step_id.clone(),
                 display_name: "Stop containers".to_string(),
                 order: post_order,
@@ -9533,7 +9721,7 @@ fn execute_script_job_inner(
             summary: String::new(),
         };
         if let Some(sender) = &post_step_log_sender {
-            let _ = sender.send(stop_log.clone());
+            sender.send_best_effort(stop_log.clone());
         }
         extra_step_logs.push(stop_log);
     }
@@ -9542,7 +9730,7 @@ fn execute_script_job_inner(
     let complete_step_id = uuid::Uuid::new_v4().to_string();
     let complete_order = post_order + 1;
     if let Some(sender) = &post_step_start_sender {
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: complete_step_id.clone(),
             display_name: "Complete job".to_string(),
             order: complete_order,
@@ -9568,7 +9756,7 @@ fn execute_script_job_inner(
         summary: String::new(),
     };
     if let Some(sender) = &post_step_log_sender {
-        let _ = sender.send(complete_log.clone());
+        sender.send_best_effort(complete_log.clone());
     }
     extra_step_logs.push(complete_log);
 
@@ -11571,7 +11759,18 @@ async fn upload_results_step_log_with_client(
 /// cumulative, so it replaces the accumulated chunks. Steps still running when
 /// the job was canceled have no final snapshot — stamp them so the combined
 /// job log renders their partial output as a finished step.
-fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
+///
+/// `dropped_logs` (bounded-channel drops before the publisher) and
+/// `mirror_evicted` (oldest-first mirror evictions past the caps) are the
+/// records this merge never saw. When either is nonzero the merged output
+/// carries a truncation marker — a warning line atop the first rendered
+/// step, or a synthetic notice record when nothing survived — so the
+/// GitHub-visible completion never silently drops early step output.
+fn merged_partial_step_logs(
+    streamed: Vec<StepLog>,
+    dropped_logs: u64,
+    mirror_evicted: u64,
+) -> Vec<StepLog> {
     let mut merged: Vec<StepLog> = Vec::new();
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     for log in streamed {
@@ -11601,7 +11800,48 @@ fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
             log.completed_at = now.clone();
         }
     }
+    if dropped_logs > 0 || mirror_evicted > 0 {
+        let marker = format!(
+            "##[warning]Velnor truncated this canceled-job partial log: \
+             {dropped_logs} streamed step-log record(s) dropped before the mirror, \
+             {mirror_evicted} evicted from it (oldest first); early step output is missing."
+        );
+        // Skipped steps render nothing in the combined job log, so the
+        // marker goes on the first rendered step when one exists.
+        if let Some(first) = merged.iter_mut().find(|log| !log.skipped) {
+            first.lines.insert(0, marker);
+        } else if !merged.is_empty() {
+            merged[0].lines.insert(0, marker);
+        } else {
+            merged.push(cancel_log_truncation_notice(&now, marker));
+        }
+    }
     merged
+}
+
+/// Synthetic notice record for a canceled job whose partial log lost
+/// everything (channel drops plus mirror evictions left no step at all).
+/// Same contract as the failure path's synthetic steps: never complete
+/// with zero steps hiding the reason — here the reason is the loss.
+fn cancel_log_truncation_notice(now: &str, marker: String) -> StepLog {
+    StepLog {
+        step_id: "velnor-cancel-log-truncation".to_string(),
+        display_name: "Velnor partial-log truncation notice".to_string(),
+        order: 0,
+        started_at: now.to_string(),
+        completed_at: now.to_string(),
+        lines: vec![marker],
+        masks: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: 0,
+        skipped: false,
+        failure_ignored: false,
+        error_count: 0,
+        warning_count: 1,
+        notice_count: 0,
+        summary: String::new(),
+    }
 }
 
 /// Upload the combined job log as a per-job `job-log-<job-id>` artifact
@@ -14646,6 +14886,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn user_secret_prefix_match_is_case_insensitive() {
+        // F-V4: a `Secrets.*` spelling carries the same secret bytes as
+        // `secrets.*`, so the trust gate refuses it on the same paths — a
+        // fork job carrying a case-variant user secret is refused on a
+        // trusted pool, naming the variable.
+        for name in [
+            "Secrets.DOCKERHUB_TOKEN",
+            "SECRETS.DOCKERHUB_TOKEN",
+            "sEcReTs.DOCKERHUB_TOKEN",
+            "Secret.DOCKERHUB_TOKEN",
+            "SECRET.DOCKERHUB_TOKEN",
+        ] {
+            let mut variables = serde_json::Map::new();
+            variables.insert(
+                name.to_string(),
+                serde_json::json!({ "value": "secret", "isSecret": true }),
+            );
+            variables.insert(
+                "system.github.token".to_string(),
+                serde_json::json!({ "value": "ghs", "isSecret": true }),
+            );
+            let job = minimal_job_with_variables(serde_json::Value::Object(variables));
+            let error =
+                validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::ForkPR)
+                    .unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains(name), "{text}");
+            assert!(text.contains("fork-pr"), "{text}");
+        }
+    }
+
+    #[test]
+    fn user_secret_prefix_requires_the_dotted_context() {
+        // The case-insensitive match stays anchored: `secretsX.*` and other
+        // near-misses are not secret contexts, so an `isSecret` variable
+        // under such a name flows like any other protocol value.
+        for name in [
+            "secretsX.DOCKERHUB_TOKEN",
+            "SECRETSX.DOCKERHUB_TOKEN",
+            "mysecrets.DOCKERHUB_TOKEN",
+            "secret-token",
+        ] {
+            let mut variables = serde_json::Map::new();
+            variables.insert(
+                name.to_string(),
+                serde_json::json!({ "value": "secret", "isSecret": true }),
+            );
+            variables.insert(
+                "system.github.token".to_string(),
+                serde_json::json!({ "value": "ghs", "isSecret": true }),
+            );
+            let job = minimal_job_with_variables(serde_json::Value::Object(variables));
+            validate_job_trust_policy(&job, "trusted", crate::trust_class::TrustClass::ForkPR)
+                .unwrap_or_else(|error| panic!("{name}: {error:#}"));
+        }
+    }
+
     /// A job message with complete trust signals: a `push` job when `event`
     /// is `push`, a fork pull-request job otherwise.
     fn admission_job(
@@ -14960,8 +15258,38 @@ mod tests {
 
         let push = admission_job("push", None, true);
         let fork_pr = admission_job("pull_request", Some("mallory/base"), true);
+        // The F-V2 + F-V4 path: an id-carrying fork `workflow_run` event with
+        // a case-variant user secret exercises the id walk and the
+        // case-insensitive secret scan inside the same decision.
+        let fork_workflow_run: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan", "scopeIdentifier": "scope" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Admission",
+                "requestId": 1,
+                "variables": {
+                    "github.event_name": { "value": "workflow_run" },
+                    "github.repository": { "value": "octo/base" },
+                    "Secrets.MIXED_CASE": { "value": "secret", "isSecret": true },
+                },
+                "contextData": { "github": { "event": {
+                    "workflow_run": {
+                        "head_repository": { "full_name": "mallory/base", "id": 2 },
+                        "repository": { "id": 1 },
+                    }
+                } } },
+                "resources": { "repositories": [{
+                    "alias": "self",
+                    "name": "octo/base",
+                    "properties": { "cloneUrl": "https://github.com/octo/base.git" },
+                }] },
+            }))
+            .unwrap();
         assert_eq!(TrustClass::derive(&push), TrustClass::Trusted);
         assert_eq!(TrustClass::derive(&fork_pr), TrustClass::ForkPR);
+        assert_eq!(TrustClass::derive(&fork_workflow_run), TrustClass::ForkPR);
 
         // 10k full admission decisions per class; pure message walks must stay
         // far below the bound even on a loaded serial-gate runner.
@@ -14977,11 +15305,17 @@ mod tests {
             validate_job_trust_policy(black_box(&fork_pr), "trusted", black_box(class))
                 .unwrap_err();
             assert_eq!(black_box(admitted), crate::trust_scope::FAIL_CLOSED);
+
+            let class = TrustClass::derive(black_box(&fork_workflow_run));
+            let admitted = class.admitted_scope("trusted");
+            validate_job_trust_policy(black_box(&fork_workflow_run), "trusted", black_box(class))
+                .unwrap_err();
+            assert_eq!(black_box(admitted), crate::trust_scope::FAIL_CLOSED);
         }
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(5),
-            "20k admission decisions took {elapsed:?}",
+            elapsed < Duration::from_secs(10),
+            "30k admission decisions took {elapsed:?}",
         );
     }
 
@@ -22127,6 +22461,212 @@ runs:
     }
 
     #[test]
+    fn streamed_step_log_mirror_evicts_oldest_at_entry_cap() {
+        let mut mirror = StreamedStepLogMirror::default();
+        for index in 0..STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 10 {
+            mirror.push(partial_step_log(&format!("step-{index}"), &["line"], ""));
+        }
+        assert_eq!(mirror.len(), STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        // Every eviction is counted for the forensics line and the
+        // cancel-path truncation marker.
+        assert_eq!(mirror.evicted(), 10);
+        let logs = mirror.take_logs();
+        assert_eq!(logs.len(), STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        // Oldest evicted first, arrival order preserved for the merge.
+        assert_eq!(logs[0].step_id, "step-10");
+        assert_eq!(
+            logs[STREAMED_STEP_LOG_MIRROR_MAX_LOGS - 1].step_id,
+            format!("step-{}", STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 9)
+        );
+        assert_eq!(mirror.len(), 0);
+        assert_eq!(mirror.bytes(), 0);
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_evicts_oldest_at_byte_cap() {
+        let mut mirror = StreamedStepLogMirror::default();
+        let big_line = "x".repeat(1024 * 1024);
+        for index in 0..100 {
+            let mut log = partial_step_log(&format!("step-{index}"), &[], "");
+            log.lines = vec![big_line.clone()];
+            mirror.push(log);
+        }
+        assert!(mirror.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
+        assert!(mirror.len() < 100);
+        // Byte-cap evictions are counted too: pushed minus retained.
+        assert_eq!(mirror.evicted(), 100 - mirror.len() as u64);
+        // The most recent window survives the byte cap.
+        let logs = mirror.take_logs();
+        assert_eq!(logs[logs.len() - 1].step_id, "step-99");
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_keeps_single_oversize_record() {
+        let mut mirror = StreamedStepLogMirror::default();
+        let mut log = partial_step_log("huge", &[], "");
+        log.lines = vec!["x".repeat(STREAMED_STEP_LOG_MIRROR_MAX_BYTES as usize + 1)];
+        mirror.push(log);
+        // One record is retained alone: the same record is inherently
+        // retained in `ScriptJobResult`, so keeping one copy in the mirror
+        // adds no new wedge vector — while dropping it would lose the
+        // cancel-path log without bounding anything further.
+        assert_eq!(mirror.len(), 1);
+        assert_eq!(mirror.take_logs()[0].step_id, "huge");
+    }
+
+    #[tokio::test]
+    async fn publish_with_timeout_for_bounds_stalled_publish() {
+        let err = publish_with_timeout_for::<()>(
+            Duration::from_millis(10),
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        // Fast and failed publishes pass through unchanged.
+        assert_eq!(
+            publish_with_timeout_for(Duration::from_secs(5), async { Ok::<_, anyhow::Error>(7) })
+                .await
+                .unwrap(),
+            7
+        );
+        let inner = publish_with_timeout_for(Duration::from_secs(5), async {
+            Err::<(), _>(anyhow::anyhow!("backend exploded"))
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(inner.contains("backend exploded"), "{inner}");
+    }
+
+    #[tokio::test]
+    async fn drain_step_publishers_waits_for_both_publishers_before_exit() {
+        let timeline_done = Arc::new(AtomicBool::new(false));
+        let logs_done = Arc::new(AtomicBool::new(false));
+        let timeline_flag = Arc::clone(&timeline_done);
+        let logs_flag = Arc::clone(&logs_done);
+        let timeline = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            timeline_flag.store(true, Ordering::SeqCst);
+        });
+        let logs_publisher = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            logs_flag.store(true, Ordering::SeqCst);
+        });
+        let log_dir = std::env::temp_dir().join(format!(
+            "r1pub-drain-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        let forensics = SlotForensics::new(log_dir.clone(), "r1pub-drain-test".to_string());
+        let start_drops = AtomicU64::new(4);
+        let log_drops = AtomicU64::new(9);
+        let mirror = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        for index in 0..STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 7 {
+            mirror
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(partial_step_log(&format!("step-{index}"), &["line"], ""));
+        }
+        drain_step_publishers(
+            timeline,
+            logs_publisher,
+            forensics,
+            &start_drops,
+            &log_drops,
+            &mirror,
+        )
+        .await;
+        // Drain-before-exit: terminal completion is ordered after both
+        // publishers finish, so both flags are set when drain returns.
+        assert!(timeline_done.load(Ordering::SeqCst));
+        assert!(logs_done.load(Ordering::SeqCst));
+        // The forensics line carries all three loss counts, including the
+        // mirror evictions the cancel path needs to account for.
+        let lifecycle = std::fs::read_to_string(log_dir.join(crate::slot_log::LIFECYCLE_LOG))
+            .expect("drain must append the forensics line");
+        assert!(lifecycle.contains("step-publishers-drained"), "{lifecycle}");
+        assert!(lifecycle.contains("dropped_step_starts=4"), "{lifecycle}");
+        assert!(lifecycle.contains("dropped_step_logs=9"), "{lifecycle}");
+        assert!(lifecycle.contains("mirror_evicted_logs=7"), "{lifecycle}");
+        let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    #[tokio::test]
+    async fn drain_step_publisher_aborts_a_stalled_publisher() {
+        let stalled = tokio::spawn(std::future::pending::<()>());
+        let started = Instant::now();
+        drain_step_publisher("test", stalled, Duration::from_millis(10)).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain did not abort the stalled publisher: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn bounded_step_publish_soak_proves_memory_ceiling() {
+        // Soak: a chatty job (100k live log lines) against a stalled
+        // publisher (no receiver progress). The bounded channel must absorb
+        // the burst as counted drops and the mirror must hold the ceiling —
+        // neither may grow with the number of emitted events.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        let mirror = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        let started = Instant::now();
+        let events: u64 = 100_000;
+        for index in 0..events {
+            let mut log = partial_step_log("soak", &[], "");
+            log.lines = vec![format!("soak line {index}")];
+            sender.send_best_effort(log.clone());
+            // Same push the log publisher performs per streamed record.
+            mirror
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(log);
+        }
+        let elapsed = started.elapsed();
+        let mirror_guard = mirror
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        eprintln!(
+            "step-publish soak: {events} events in {elapsed:?}, drops={}, mirror_len={}, mirror_bytes={}",
+            sender.drops(),
+            mirror_guard.len(),
+            mirror_guard.bytes(),
+        );
+        assert_eq!(
+            sender.drops(),
+            events - STEP_PUBLISH_CHANNEL_CAPACITY as u64
+        );
+        assert!(mirror_guard.len() <= STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
+        assert!(mirror_guard.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
+        // The soak's overflow is fully accounted: every record past the
+        // entry cap was counted as an oldest-first eviction.
+        assert_eq!(
+            mirror_guard.evicted(),
+            events - STREAMED_STEP_LOG_MIRROR_MAX_LOGS as u64
+        );
+        drop(mirror_guard);
+        // The sender never blocked: 100k events must stream in bounded time.
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "soak sender blocked: {elapsed:?}"
+        );
+        // The stalled publisher still drains exactly one capacity once it
+        // makes progress — nothing was lost except the counted drops.
+        let mut drained = 0u64;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+    }
+
+    #[test]
     fn merged_partial_step_logs_fold_chunks_and_stamp_unfinished_steps() {
         let streamed = vec![
             partial_step_log("build", &["compiling a"], ""),
@@ -22136,7 +22676,7 @@ runs:
             // landed must not duplicate its lines.
             partial_step_log("checkout", &["cloned"], ""),
         ];
-        let merged = merged_partial_step_logs(streamed);
+        let merged = merged_partial_step_logs(streamed, 0, 0);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].step_id, "build");
         assert_eq!(merged[0].lines, vec!["compiling a", "compiling b"]);
@@ -22147,6 +22687,75 @@ runs:
         assert_eq!(merged[1].step_id, "checkout");
         assert_eq!(merged[1].lines, vec!["cloned"]);
         assert_eq!(merged[1].completed_at, "2026-08-31T00:00:01.0000000Z");
+    }
+
+    #[test]
+    fn merged_partial_step_logs_stamps_truncation_marker_when_records_lost() {
+        let streamed = vec![partial_step_log("build", &["compiling"], "")];
+        // No loss: no marker, output unchanged.
+        let merged = merged_partial_step_logs(streamed.clone(), 0, 0);
+        assert_eq!(merged[0].lines, vec!["compiling"]);
+        // Channel drops alone stamp the marker with both counts.
+        let merged = merged_partial_step_logs(streamed.clone(), 12, 0);
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].lines[0].contains("12 streamed step-log record(s) dropped"),
+            "{}",
+            merged[0].lines[0]
+        );
+        assert!(
+            merged[0].lines[0].contains("0 evicted"),
+            "{}",
+            merged[0].lines[0]
+        );
+        assert_eq!(merged[0].lines[1], "compiling");
+        // Mirror evictions alone stamp it too.
+        let merged = merged_partial_step_logs(streamed, 0, 4096);
+        assert!(
+            merged[0].lines[0].contains("4096 evicted"),
+            "{}",
+            merged[0].lines[0]
+        );
+    }
+
+    #[test]
+    fn merged_partial_step_logs_synthesizes_notice_when_everything_lost() {
+        // Nothing survived, but records were lost: the merge must not
+        // complete with zero steps hiding the gap.
+        let merged = merged_partial_step_logs(Vec::new(), 3, 5);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].step_id, "velnor-cancel-log-truncation");
+        assert!(!merged[0].skipped);
+        assert!(!merged[0].completed_at.is_empty());
+        assert!(
+            merged[0].lines[0].contains("3 streamed step-log record(s) dropped"),
+            "{}",
+            merged[0].lines[0]
+        );
+        assert!(
+            merged[0].lines[0].contains("5 evicted"),
+            "{}",
+            merged[0].lines[0]
+        );
+        // Nothing lost and nothing streamed: still empty, no noise.
+        let merged = merged_partial_step_logs(Vec::new(), 0, 0);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn merged_partial_step_logs_marker_skips_unrendered_steps() {
+        let mut skipped = partial_step_log("skipped-step", &["hidden"], "");
+        skipped.skipped = true;
+        let streamed = vec![skipped, partial_step_log("build", &["compiling"], "")];
+        let merged = merged_partial_step_logs(streamed, 1, 0);
+        // The marker must land where the combined job log renders it:
+        // skipped steps are omitted there.
+        assert_eq!(merged[0].lines, vec!["hidden"]);
+        assert!(
+            merged[1].lines[0].contains("truncated"),
+            "{}",
+            merged[1].lines[0]
+        );
     }
 
     #[cfg(feature = "test-support")]
@@ -22254,10 +22863,14 @@ runs:
 
         let job = results_job(&server.uri());
         let client = crate::protocol::TwirpResultsClient::new(server.uri(), "token").unwrap();
-        let step_logs = merged_partial_step_logs(vec![
-            partial_step_log("build", &["compiling a"], ""),
-            partial_step_log("build", &["compiling b"], ""),
-        ]);
+        let step_logs = merged_partial_step_logs(
+            vec![
+                partial_step_log("build", &["compiling a"], ""),
+                partial_step_log("build", &["compiling b"], ""),
+            ],
+            0,
+            0,
+        );
         upload_results_job_log_with_client(&client, &job, &step_logs)
             .await
             .unwrap();

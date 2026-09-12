@@ -666,6 +666,10 @@ impl Workload for CargoWorkload {
                 ..Resources::default()
             },
             git,
+            docker_census: crate::census::DockerCensus::from_invocations(
+                context.runner.invocations(),
+            ),
+            fault: None,
         };
         self.restore(context, &workspace)?;
         Ok(observation)

@@ -1,0 +1,135 @@
+name: status-conditions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: "velnor | github | both (default: both)"
+        type: choice
+        default: both
+        options: [velnor, github, both]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: status-conditions-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  status:
+    name: status branches (${{ matrix.config.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'both')) && ('[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]') || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && ('[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]') || '[{"lane":"Velnor","runner":{"group":"velnor-trusted","labels":"velnor-target-mvp"},"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # This job fails BY DESIGN in both lanes: only a real failure makes
+      # `failure()` true, and the pin below asserts the runners agree on
+      # every status-function branch plus the fail-closed unevaluable step.
+      - id: real-failure
+        name: Fail for real
+        run: |
+          set -euo pipefail
+          echo 'payload=not-json' >> "${GITHUB_OUTPUT}"
+          echo 'intentional status-branch failure is safe and expected' >&2
+          exit 41
+      - id: on-failure
+        name: Run on failure()
+        if: failure()
+        run: echo "failure() branch ran"
+      - id: on-success
+        name: Skip on success()
+        if: success()
+        run: echo "success() branch ran (must not happen)"
+      - id: on-cancelled
+        name: Skip on cancelled()
+        if: cancelled()
+        run: echo "cancelled() branch ran (must not happen)"
+      - id: bad-if
+        name: Fail on unevaluable condition
+        # Deliberately invalid JSON that only exists at RUNTIME (statically
+        # opaque, so the actionlint gate stays green): both runners must fail
+        # this step, never run or skip it. The `always() &&` guard is
+        # load-bearing: after `real-failure` the implicit `success() &&`
+        # prefix would short-circuit a bare `fromJSON(...)` condition to a
+        # skip on both runners, so the bad-JSON RHS must sit behind a status
+        # function that actually evaluates it.
+        if: always() && fromJSON(steps.real-failure.outputs.payload) == ''
+        run: echo "unevaluable branch ran (must not happen)"
+      - name: Assert status-function branches
+        if: ${{ always() }}
+        env:
+          REAL_OUTCOME: ${{ steps.real-failure.outcome }}
+          REAL_CONCLUSION: ${{ steps.real-failure.conclusion }}
+          ON_FAILURE_OUTCOME: ${{ steps.on-failure.outcome }}
+          ON_SUCCESS_OUTCOME: ${{ steps.on-success.outcome }}
+          ON_CANCELLED_OUTCOME: ${{ steps.on-cancelled.outcome }}
+          BAD_IF_OUTCOME: ${{ steps.bad-if.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          test "${REAL_OUTCOME}" = failure
+          test "${REAL_CONCLUSION}" = failure
+          test "${ON_FAILURE_OUTCOME}" = success
+          test "${ON_SUCCESS_OUTCOME}" = skipped
+          test "${ON_CANCELLED_OUTCOME}" = skipped
+          test "${BAD_IF_OUTCOME}" = failure
+          test "${JOB_STATUS}" = failure
+      # `steps` is computed by the runner, not written by this workflow, so
+      # the outcome and conclusion of every step above are the behavioural
+      # signal no workflow author can fabricate.
+      - name: Dump runner-computed step outcomes
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cat > "${{ runner.temp }}/steps.json" <<'STEPS'
+          ${{ toJSON(steps) }}
+          STEPS
+      - name: Collect observed lane evidence
+        if: ${{ always() }}
+        uses: ./.github/actions/collect-evidence
+        with:
+          scenario: status-result
+          evidence-id: status-branches
+          lane: ${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          output: out/result.json
+          observations: |
+            --observe-steps steps=${{ runner.temp }}/steps.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: status-result-${{ matrix.config.lane == 'GitHub' && 'github' || 'velnor' }}
+          path: out/result.json
+          if-no-files-found: error
+
+  compare-status:
+    name: compare status branches
+    if: always() && (github.event_name == 'push' || inputs.lanes == 'both')
+    needs: [status]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: status-result-*
+          path: artifacts
+      - uses: ./.github/actions/compare-evidence
+        with:
+          scenario: status-result
+          directory: artifacts

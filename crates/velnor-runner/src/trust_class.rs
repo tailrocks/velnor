@@ -5,30 +5,39 @@
 //! from the job message alone — the `github.event_name` variable (or, on a raw
 //! pre-hydration message, the `github.event_name` context value), the
 //! head/base repository comparison (`github.repository` against the event
-//! payload's `pull_request.head.repo` or `workflow_run.head_repository`), the
+//! payload's `pull_request.head.repo` or `workflow_run.head_repository`,
+//! with the payload's repository numeric ids as corroboration), the
 //! self [`RepositoryResource`]'s name and `cloneUrl` property as
-//! corroboration, and the plan scope identifier as a
-//! structural-completeness signal.
+//! corroboration (the URL must name the job's own GitHub server host), and
+//! the plan scope identifier as a structural-completeness signal.
 //!
 //! Derivation rules:
 //!
 //! * A missing, empty, or malformed event signal fails closed to
 //!   [`TrustClass::Unknown`]: no event name, no base repository, no plan
 //!   scope, no head repository on a pull-request or `workflow_run` event, an
-//!   unparseable event payload, or a repository resource that contradicts the
-//!   base repository.
+//!   unparseable event payload, repository numeric ids that contradict equal
+//!   full names, or a repository resource that contradicts the base
+//!   repository.
 //! * Any event whose name starts with `pull_request` (case-insensitive:
 //!   `pull_request`, `pull_request_target`, `pull_request_review`, …) is a
 //!   pull-request event. Same-repo (`head == base`, compared
 //!   case-insensitively like the rest of the runner) derives
 //!   [`TrustClass::Trusted`]; a fork derives [`TrustClass::ForkPR`]. A
 //!   `pull_request_target` from a fork is [`TrustClass::ForkPR`]: it runs
-//!   base-repo code but operates on fork-controlled inputs.
+//!   base-repo code but operates on fork-controlled inputs. Equal names
+//!   whose numeric ids both parse but disagree
+//!   (`pull_request.head.repo.id` vs `pull_request.base.repo.id`) are a
+//!   contradictory payload: [`TrustClass::Unknown`].
 //! * A `workflow_run` event (case-insensitive) compares the triggering run's
 //!   head repository (`workflow_run.head_repository.full_name`) against the
 //!   base the same way: a fork head derives [`TrustClass::ForkPR`] — base
 //!   workflow code over a fork-controlled head sha and repository — and a
 //!   missing or malformed head fails closed to [`TrustClass::Unknown`].
+//!   The numeric-id contradiction check is the same as for pull requests
+//!   (`workflow_run.head_repository.id` vs `workflow_run.repository.id`).
+//!   Either check can only ever move `Trusted` to `Unknown`, never the
+//!   reverse: a fork verdict is returned before the ids are consulted.
 //! * Any other well-formed event name derives [`TrustClass::Trusted`], because
 //!   GitHub reserves the `pull_request` prefix for pull-request-scoped events
 //!   and `workflow_run` is handled above; every remaining event executes
@@ -95,11 +104,14 @@ impl TrustClass {
                 return Self::Unknown;
             }
         } else if is_workflow_run_event(event) {
-            let Some(head) = workflow_run_head_repository(job) else {
+            let Some(run) = workflow_run_repos(job) else {
                 return Self::Unknown;
             };
-            if !repository_eq(base, &head) {
+            if !repository_eq(base, &run.head_full_name) {
                 return Self::ForkPR;
+            }
+            if run.numeric_ids_contradict() {
+                return Self::Unknown;
             }
         }
         if repository_resources_contradict(job, base) {
@@ -271,13 +283,17 @@ fn repository_eq(left: &str, right: &str) -> bool {
 }
 
 /// Head and base repository identities read from the `github.event` payload.
-struct PullRequestRepos {
+///
+/// One struct serves both fork-sensitive event shapes — `pull_request` and
+/// `workflow_run` — so the numeric-id contradiction check cannot exist on one
+/// path and be forgotten on the other.
+struct HeadBaseRepos {
     head_full_name: String,
     head_id: Option<String>,
     base_id: Option<String>,
 }
 
-impl PullRequestRepos {
+impl HeadBaseRepos {
     /// Equal full names with both numeric ids present but disagreeing is a
     /// contradictory payload: refuse to affirm trust. A fork verdict never
     /// reaches this check, and both outcomes below it are untrusted, so the
@@ -313,7 +329,7 @@ fn with_github_event<T>(
 
 /// `pull_request.head.repo.full_name` plus the corroborating numeric ids from
 /// `pull_request.{head,base}.repo.id`.
-fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> {
+fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
     with_github_event(job, |event| {
         let pull = context_get(event, "pull_request")?;
         let head_repo = context_get(pull, "head").and_then(|head| context_get(head, "repo"))?;
@@ -324,7 +340,7 @@ fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> 
             .and_then(|base| context_get(base, "repo"))
             .and_then(|repo| context_get(repo, "id"))
             .and_then(json_id);
-        Some(PullRequestRepos {
+        Some(HeadBaseRepos {
             head_full_name,
             head_id,
             base_id,
@@ -332,18 +348,29 @@ fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> 
     })
 }
 
-/// `workflow_run.head_repository.full_name`: the repository that owns the head
-/// sha the triggering run executed. A `workflow_run` requested by a fork pull
-/// request runs this repository's workflow file but checks out and reports on
-/// fork-controlled code, so the head/base comparison is the same fork signal
-/// as for `pull_request_target` (and the executor's artifact producer gate
-/// treats the same two `full_name` values as fork-sensitive).
-fn workflow_run_head_repository(job: &AgentJobRequestMessage) -> Option<String> {
+/// `workflow_run.head_repository.full_name` plus the corroborating numeric ids
+/// from `workflow_run.head_repository.id` and `workflow_run.repository.id`.
+/// The head repository owns the head sha the triggering run executed. A
+/// `workflow_run` requested by a fork pull request runs this repository's
+/// workflow file but checks out and reports on fork-controlled code, so the
+/// head/base comparison is the same fork signal as for `pull_request_target`
+/// (and the executor's artifact producer gate treats the same two `full_name`
+/// values as fork-sensitive).
+fn workflow_run_repos(job: &AgentJobRequestMessage) -> Option<HeadBaseRepos> {
     with_github_event(job, |event| {
         let run = context_get(event, "workflow_run")?;
         let head = context_get(run, "head_repository")?;
-        let full_name = context_get(head, "full_name")?.as_str()?;
-        normalize_full_name(full_name).map(str::to_owned)
+        let head_full_name = context_get(head, "full_name")?.as_str()?;
+        let head_full_name = normalize_full_name(head_full_name)?.to_owned();
+        let head_id = context_get(head, "id").and_then(json_id);
+        let base_id = context_get(run, "repository")
+            .and_then(|repository| context_get(repository, "id"))
+            .and_then(json_id);
+        Some(HeadBaseRepos {
+            head_full_name,
+            head_id,
+            base_id,
+        })
     })
 }
 
@@ -396,7 +423,13 @@ fn repository_resources_contradict(job: &AgentJobRequestMessage, base: &str) -> 
     {
         // Read exactly the way the checkout planner reads it (`checkout.rs`
         // `self_clone_url`): the same signal, the same key, the same fallback.
-        match clone_url_repository(url) {
+        // The URL must additionally name the job's own GitHub server host:
+        // checkout clones it verbatim, so a base-matching path on any other
+        // host corroborates nothing.
+        let Some(expected_host) = expected_clone_host(job) else {
+            return true;
+        };
+        match clone_url_repository(url, &expected_host) {
             Some(repo) => {
                 corroborated = true;
                 if !repository_eq(&repo, base) {
@@ -409,28 +442,127 @@ fn repository_resources_contradict(job: &AgentJobRequestMessage, base: &str) -> 
     !corroborated
 }
 
-/// `owner/repo` parsed from an `https://host/owner/repo(.git)` clone URL. The
-/// last two non-empty path segments are the identity; anything else shaped is
-/// unparseable.
-fn clone_url_repository(url: &str) -> Option<String> {
-    let after_scheme = url.rsplit("://").next()?;
-    let without_host = after_scheme.split_once('/')?.1;
-    let mut segments: Vec<&str> = without_host
+/// The public GitHub host: the clone-URL host jobs carry when no
+/// `github.server_url` signal names another one. The same default the
+/// checkout planner uses (`checkout.rs`).
+const GITHUB_COM_HOST: &str = "github.com";
+
+/// The host a self clone URL must name: the job's own GitHub server.
+///
+/// Read like every other `github.*` signal — the `github.server_url`
+/// variable first, then the `github.server_url` context value — defaulting
+/// to [`GITHUB_COM_HOST`] when the job carries none. A present-but-garbled
+/// server URL yields no host: without the job's server identity no clone
+/// host can be affirmed, so the corroboration fails closed.
+fn expected_clone_host(job: &AgentJobRequestMessage) -> Option<String> {
+    let Some(raw) = job_variable(job, "github.server_url")
+        .or_else(|| context_string(job, "github", "server_url"))
+    else {
+        return Some(GITHUB_COM_HOST.to_owned());
+    };
+    server_url_host(raw)
+}
+
+/// The host half of a `github.server_url` value: the authority of a
+/// `scheme://...` URL, or a bare `host[:port][/...]`, lowercased for
+/// comparison.
+fn server_url_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = after_scheme.split('/').next()?;
+    authority_host(authority)
+}
+
+/// `owner/repo` parsed from a clone URL that names `expected_host`.
+///
+/// Understands the two shapes git accepts — `scheme://[user@]host[:port]/path`
+/// and scp-like `[user@]host:path` — and requires the URL's host to equal the
+/// job's GitHub server host (case-insensitively). Exactly two non-empty path
+/// segments are the identity; a deeper path is unparseable, not a longer name
+/// for its tail: taking the last two would let `evil/octo/base` corroborate
+/// a base of `octo/base`.
+fn clone_url_repository(url: &str, expected_host: &str) -> Option<String> {
+    let url = url.trim();
+    let (host, path) = if url.contains("://") {
+        let (scheme, rest) = url.split_once("://")?;
+        if scheme.is_empty()
+            || !scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+        {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        (authority_host(authority)?, path)
+    } else {
+        let (host, path) = split_scp_target(url)?;
+        if host.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return None;
+        }
+        (host.to_ascii_lowercase(), path)
+    };
+    if !host.eq_ignore_ascii_case(expected_host) {
+        return None;
+    }
+    let segments: Vec<&str> = path
         .split('/')
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .collect();
-    if segments.len() < 2 {
+    if segments.len() != 2 {
         return None;
     }
-    let repo = segments.pop()?;
-    let owner = segments.pop()?;
+    let owner = segments[0];
+    let repo = segments[1];
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
     let full_name = format!("{owner}/{repo}");
     normalize_full_name(&full_name).map(str::to_owned)
+}
+
+/// Split an scp-like clone target (`[user@]host:path`) into host and path.
+/// No `://`, one colon boundary: the host part carries no slash, the path
+/// part is non-empty.
+fn split_scp_target(url: &str) -> Option<(&str, &str)> {
+    let (host_part, path) = url.split_once(':')?;
+    if host_part.is_empty() || host_part.contains('/') || path.is_empty() {
+        return None;
+    }
+    let host = host_part.rsplit('@').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, path))
+}
+
+/// The host of a URL authority (`[user@]host[:port]`), lowercased for
+/// comparison. Userinfo and a numeric port are accepted and dropped; anything
+/// else shaped — empty, bracketed, whitespace-bearing, or a non-numeric
+/// port — is unparseable. GitHub server identities are DNS names.
+fn authority_host(authority: &str) -> Option<String> {
+    let without_userinfo = authority.rsplit('@').next()?;
+    if without_userinfo.is_empty() || without_userinfo.starts_with('[') {
+        return None;
+    }
+    let mut parts = without_userinfo.split(':');
+    let host = parts.next()?;
+    if host.is_empty() || host.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return None;
+    }
+    for port in parts {
+        if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    Some(host.to_ascii_lowercase())
 }
 
 fn job_variable<'job>(job: &'job AgentJobRequestMessage, name: &str) -> Option<&'job str> {
@@ -535,6 +667,27 @@ mod tests {
                 "head_repository": { "full_name": head_full_name },
             }
         })
+    }
+
+    /// A `workflow_run` event carrying the repository numeric ids GitHub's
+    /// run object provides: `head_repository.id` and `repository.id`.
+    /// `None` omits that side's object entirely; values pass through
+    /// verbatim so both JSON numbers and strings can be exercised.
+    fn workflow_run_event_with_ids(
+        head_full_name: &str,
+        head_id: Option<serde_json::Value>,
+        base_id: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut head = json!({ "full_name": head_full_name });
+        if let Some(id) = head_id {
+            head["id"] = id;
+        }
+        let mut run = serde_json::Map::new();
+        run.insert("head_repository".to_string(), head);
+        if let Some(id) = base_id {
+            run.insert("repository".to_string(), json!({ "id": id }));
+        }
+        json!({ "workflow_run": run })
     }
 
     /// The trusted baseline every fail-closed regression test mutates by
@@ -681,6 +834,63 @@ mod tests {
                         ],
                     } },
                 ],
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::ForkPR);
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_matching_numeric_ids_are_trusted() {
+        // Equal names with agreeing numeric ids affirm the same-repo verdict.
+        // Ids arrive as JSON numbers or strings; both spellings compare.
+        for (head_id, base_id) in [
+            (json!(1), json!(1)),
+            (json!("1"), json!("1")),
+            (json!(1), json!("1")),
+        ] {
+            let job = signal_job(
+                variables("workflow_run", "octo/base"),
+                Some(json!({
+                    "event": workflow_run_event_with_ids("octo/base", Some(head_id), Some(base_id)),
+                })),
+                self_repository("octo/base"),
+                Some("scope"),
+            );
+            assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+        }
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_one_sided_ids_carry_no_signal() {
+        // The contradiction needs both ids: a missing side is no signal,
+        // exactly like the pull-request path.
+        for (head_id, base_id) in [(Some(json!(2)), None), (None, Some(json!(1))), (None, None)] {
+            let job = signal_job(
+                variables("workflow_run", "octo/base"),
+                Some(json!({
+                    "event": workflow_run_event_with_ids("octo/base", head_id, base_id),
+                })),
+                self_repository("octo/base"),
+                Some("scope"),
+            );
+            assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+        }
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_ids_cannot_override_a_fork() {
+        // The fork verdict returns before the ids are consulted: agreeing
+        // ids on a fork head change nothing.
+        let job = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({
+                "event": workflow_run_event_with_ids(
+                    "mallory/base",
+                    Some(json!(2)),
+                    Some(json!(2))
+                ),
             })),
             self_repository("octo/base"),
             Some("scope"),
@@ -877,6 +1087,65 @@ mod tests {
             Some("scope"),
         );
         assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_conformance_clone_url_shapes_corroborate() {
+        // Every clone-URL shape git accepts corroborates when it names the
+        // job's server host and the base path: `https`, `ssh://`, scp-like,
+        // token userinfo, ports, letter case, and the `.git` suffix are all
+        // normalized away before the comparison. The name signal is blanked
+        // so only the URL corroborates.
+        for clone_url in [
+            "https://github.com/octo/base.git",
+            "https://github.com/octo/base",
+            "https://github.com/octo/base.git/",
+            "https://GitHub.COM/octo/base.git",
+            "https://token@github.com/octo/base.git",
+            "https://github.com:443/octo/base.git",
+            "ssh://git@github.com/octo/base.git",
+            "ssh://git@github.com:22/octo/base.git",
+            "git@github.com:octo/base.git",
+            "git@github.com:octo/base",
+            "github.com:octo/base.git",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Trusted,
+                "clone URL {clone_url:?} names the base on the job's server"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_conformance_ghes_clone_url_corroborates_against_server_url() {
+        // A GHES job names its own host: the clone URL corroborates against
+        // `github.server_url`, not github.com — from the variable or, on a
+        // raw pre-hydration message, from the `github` context object.
+        for server_url in [
+            "https://ghe.corp",
+            "https://ghe.corp/",
+            "https://GHE.corp:8443",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["variables"]["github.server_url"] = json!({ "value": server_url });
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
+                json!("https://ghe.corp/octo/base.git");
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Trusted,
+                "server URL {server_url:?}"
+            );
+        }
+
+        let mut baseline = trusted_baseline();
+        baseline["contextData"] = json!({ "github": { "server_url": "https://ghe.corp" } });
+        baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] =
+            json!("git@ghe.corp:octo/base.git");
+        assert_eq!(derive_json(baseline), TrustClass::Trusted);
     }
 
     #[test]
@@ -1091,6 +1360,27 @@ mod tests {
     }
 
     #[test]
+    fn trust_class_regression_workflow_run_contradictory_numeric_ids_are_unknown() {
+        // F-V2: the `workflow_run` path carries the same contradiction check
+        // as the pull-request path — equal names with disagreeing
+        // `head_repository.id` / `repository.id` fail closed.
+        for (head_id, base_id) in [
+            (json!(2), json!(1)),
+            (json!("2"), json!("1")),
+            (json!(2), json!("1")),
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["variables"]["github.event_name"]["value"] = json!("workflow_run");
+            baseline["contextData"] = json!({
+                "github": {
+                    "event": workflow_run_event_with_ids("octo/base", Some(head_id), Some(base_id)),
+                }
+            });
+            assert_eq!(derive_json(baseline), TrustClass::Unknown);
+        }
+    }
+
+    #[test]
     fn trust_class_regression_contradictory_repository_name_is_unknown() {
         let mut baseline = trusted_baseline();
         baseline["resources"]["repositories"][0]["name"] = json!("mallory/base");
@@ -1120,6 +1410,158 @@ mod tests {
                 derive_json(baseline),
                 TrustClass::Unknown,
                 "clone URL {clone_url:?} names no repository"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_deep_clone_url_path_cannot_corroborate() {
+        // A path deeper than `owner/repo` is unparseable — it must not
+        // corroborate via its tail. Each URL below ends in the base
+        // `octo/base`, so a last-two-segments parse would affirm `Trusted`;
+        // the name signal stays friendly to prove the URL alone refuses.
+        for clone_url in [
+            "https://github.com/evil/octo/base",
+            "https://github.com/evil/octo/base.git",
+            "https://token@github.com/evil/octo/base.git",
+            "ssh://git@github.com/evil/octo/base.git",
+            "git@github.com:evil/octo/base.git",
+            "git@github.com:evil/octo/base",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "clone URL {clone_url:?} is deeper than owner/repo"
+            );
+        }
+    }
+
+    #[test]
+    fn clone_url_repository_requires_exactly_two_path_segments() {
+        // Direct contract: two segments parse (with the `.git` suffix and
+        // empty segments from slashes normalized away); one segment and
+        // three segments are unparseable even when the tail names a repo.
+        assert_eq!(
+            clone_url_repository("https://github.com/octo/base.git", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        assert_eq!(
+            clone_url_repository("https://github.com/octo/base/", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        assert_eq!(
+            clone_url_repository("git@github.com:octo/base.git", "github.com").as_deref(),
+            Some("octo/base")
+        );
+        for url in [
+            "https://github.com/onlyone.git",
+            "https://github.com/a/b/c",
+            "https://github.com/evil/octo/base",
+            "git@github.com:evil/octo/base.git",
+            "ssh://git@github.com/a/b/c.git",
+        ] {
+            assert_eq!(
+                clone_url_repository(url, "github.com"),
+                None,
+                "clone URL {url:?} is not exactly owner/repo"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_clone_url_on_foreign_host_is_unknown() {
+        // F-V3: a base-matching path on any host but the job's own server
+        // corroborates nothing — checkout clones the URL verbatim. The
+        // resource name still matches the base here: a hostile URL is not
+        // rescued by a friendly name.
+        for clone_url in [
+            "https://evil.example/octo/base.git",
+            "https://github.com.evil.example/octo/base.git",
+            "https://evil.example:443/octo/base.git",
+            "https://token@evil.example/octo/base.git",
+            "git@evil.example:octo/base.git",
+            "ssh://git@evil.example/octo/base.git",
+            "ssh://git@evil.example:22/octo/base.git",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "clone URL {clone_url:?} names the base on a foreign host"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_clone_url_must_name_the_job_server() {
+        // The host check runs against `github.server_url`, whichever side
+        // carries the github.com default: a GHES job with a github.com URL
+        // (or the reverse) is contradictory either way.
+        for (server_url, clone_url) in [
+            ("https://ghe.corp", "https://github.com/octo/base.git"),
+            ("https://github.com", "https://ghe.corp/octo/base.git"),
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["variables"]["github.server_url"] = json!({ "value": server_url });
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "server URL {server_url:?} with clone URL {clone_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_garbled_server_url_fails_the_corroboration() {
+        // A present-but-garbled `github.server_url` names no server, so no
+        // clone host can be affirmed — even the github.com default the URL
+        // itself would match.
+        for server_url in [
+            "",
+            "   ",
+            "not a url",
+            "https://",
+            "https://[::1]/x",
+            "https://ghe.corp:notaport/x",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["variables"]["github.server_url"] = json!({ "value": server_url });
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "server URL {server_url:?} names no server"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_class_regression_hostless_clone_url_is_unknown() {
+        // No determinable host, no corroboration: bare paths, local paths,
+        // and `file:` URLs never name the job's server. The name signal is
+        // blanked so only the URL speaks.
+        for clone_url in [
+            "github.com/octo/base",
+            "github.com/octo/base.git",
+            "octo/base",
+            "/octo/base",
+            "file:///octo/base.git",
+            "https://github.com",
+            "https:///octo/base.git",
+            ":octo/base",
+            "git@github.com:",
+            "git@:octo/base",
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["resources"]["repositories"][0]["name"] = serde_json::Value::Null;
+            baseline["resources"]["repositories"][0]["properties"]["cloneUrl"] = json!(clone_url);
+            assert_eq!(
+                derive_json(baseline),
+                TrustClass::Unknown,
+                "clone URL {clone_url:?} names no host"
             );
         }
     }
@@ -1179,9 +1621,40 @@ mod tests {
             self_repository("octo/base"),
             Some("scope"),
         );
+        // The F-V2 path: an id-carrying same-repo run pays the id parse and
+        // the contradiction comparison on top of the name walk.
+        let trusted_workflow_run = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({
+                "event": workflow_run_event_with_ids(
+                    "octo/base",
+                    Some(json!(1)),
+                    Some(json!(1))
+                ),
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        // The F-V3 path: an SSH clone URL pays the scp split and the host
+        // check on top of the segment walk.
+        let ssh_push = signal_job(
+            variables("push", "octo/base"),
+            None,
+            json!([{
+                "alias": "self",
+                "name": "octo/base",
+                "properties": { "cloneUrl": "git@github.com:octo/base.git" },
+            }]),
+            Some("scope"),
+        );
         assert_eq!(TrustClass::derive(&push), TrustClass::Trusted);
         assert_eq!(TrustClass::derive(&fork_pr), TrustClass::ForkPR);
         assert_eq!(TrustClass::derive(&fork_workflow_run), TrustClass::ForkPR);
+        assert_eq!(
+            TrustClass::derive(&trusted_workflow_run),
+            TrustClass::Trusted
+        );
+        assert_eq!(TrustClass::derive(&ssh_push), TrustClass::Trusted);
 
         // 20k derivations per class; a pure JSON walk must stay far below the
         // bound even on a loaded serial-gate runner.
@@ -1193,11 +1666,19 @@ mod tests {
                 TrustClass::derive(black_box(&fork_workflow_run)),
                 TrustClass::ForkPR
             );
+            assert_eq!(
+                TrustClass::derive(black_box(&trusted_workflow_run)),
+                TrustClass::Trusted
+            );
+            assert_eq!(
+                TrustClass::derive(black_box(&ssh_push)),
+                TrustClass::Trusted
+            );
         }
         let elapsed = started.elapsed();
         assert!(
-            elapsed < Duration::from_secs(5),
-            "60k trust derivations took {elapsed:?}",
+            elapsed < Duration::from_secs(10),
+            "100k trust derivations took {elapsed:?}",
         );
     }
 }

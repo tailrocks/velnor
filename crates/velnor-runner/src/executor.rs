@@ -10,7 +10,7 @@ use crate::{
     container::{JobContainerSpec, Shell},
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
-    workflow_command::parse_workflow_commands,
+    workflow_command::{parse_workflow_commands_with_job_env, DeprecatedCommandScope},
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
@@ -35,7 +35,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const CACHE_GLOB_MANIFEST_FILE: &str = ".velnor-cache-glob-v1.json";
@@ -1273,6 +1273,56 @@ pub struct StepStartEvent {
     pub order: i32,
 }
 
+/// Capacity of the bounded step-publish channels (step starts and step logs).
+/// The executor runs on a dedicated synchronous thread, so every send is a
+/// non-blocking `try_send`: a stalled publisher surfaces as counted drops,
+/// never as executor backpressure or unbounded queue memory.
+pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
+
+/// Best-effort step-publish sender over a bounded channel.
+///
+/// Publishing is advisory — the authoritative step records travel in
+/// `ScriptJobResult` — so a full channel (stalled publisher) drops the event
+/// and bumps the counter instead of blocking the execution thread. The runner
+/// reads the counter at drain time for the forensics line. Exception: on the
+/// cancel path the executor never returns `ScriptJobResult`, so the streamed
+/// mirror (fed through this channel) is the persisted log's only source —
+/// drops there surface in the cancel-path truncation marker.
+#[derive(Debug, Clone)]
+pub struct BoundedStepSender<T> {
+    sender: Sender<T>,
+    drops: Arc<AtomicU64>,
+}
+
+impl<T> BoundedStepSender<T> {
+    pub fn new(sender: Sender<T>) -> Self {
+        Self {
+            sender,
+            drops: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Cloneable handle to the drop counter; the runner keeps this (not a
+    /// sender clone, which would hold the channel open past drain).
+    pub fn drops_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.drops)
+    }
+
+    pub fn drops(&self) -> u64 {
+        self.drops.load(Ordering::Relaxed)
+    }
+
+    /// Non-blocking best-effort send. A full channel (stalled publisher) or
+    /// a gone publisher drops the event and counts it; both are fine because
+    /// the authoritative records travel in `ScriptJobResult` — except on the
+    /// cancel path, where the count feeds the truncation marker instead.
+    pub fn send_best_effort(&self, value: T) {
+        if self.sender.try_send(value).is_err() {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Aggregates an executing composite action into ONE step record. GitHub
 /// registers a single timeline step per composite; embedded steps append
 /// `##[group]<name>`-headed sections into the parent's log instead of
@@ -1391,6 +1441,57 @@ struct PostNativeAction {
     /// embedded: GitHub runs embedded posts under ONE `Post Run <composite>`
     /// step (EmbeddedStepsWithPostRegistered).
     umbrella_display: Option<String>,
+}
+
+/// One registered post step on the unified LIFO stack.
+///
+/// Upstream keeps a single `Stack<IStep> PostJobSteps` on the job context
+/// (`src/Runner.Worker/ExecutionContext.cs:222`) which StepsRunner drains
+/// with `TryPop` (`src/Runner.Worker/StepsRunner.cs`), so a mixed job runs
+/// native and JavaScript posts in exact reverse registration order. Two
+/// separately-reversed lists ran every native post before every JavaScript
+/// post regardless of registration order; this enum is what makes that
+/// mis-ordering unrepresentable — there is only one stack to drain.
+#[derive(Debug, Clone)]
+enum PostAction {
+    JavaScript(PostJavaScriptAction),
+    Native(PostNativeAction),
+}
+
+impl PostAction {
+    fn condition(&self) -> Option<&str> {
+        match self {
+            PostAction::JavaScript(post) => post.condition.as_deref(),
+            PostAction::Native(post) => post.condition.as_deref(),
+        }
+    }
+
+    #[cfg(test)]
+    fn step_id(&self) -> &str {
+        match self {
+            PostAction::JavaScript(post) => post.step_id.as_str(),
+            PostAction::Native(post) => post.step_id.as_str(),
+        }
+    }
+
+    fn display_name(&self) -> &str {
+        match self {
+            PostAction::JavaScript(post) => post.display_name.as_str(),
+            PostAction::Native(post) => post.display_name.as_str(),
+        }
+    }
+}
+
+/// One LIFO drain position after its post condition was evaluated.
+///
+/// A post whose condition cannot be evaluated is not dropped: upstream fails
+/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
+/// emits a failed record in position and keeps draining — the failed result
+/// flips the job conclusion exactly like a main-step failure.
+#[derive(Debug, Clone)]
+enum PostDrainItem {
+    Run(PostAction),
+    ConditionFailed { action: PostAction, message: String },
 }
 
 impl ExecutableStep {
@@ -1646,8 +1747,8 @@ impl LifecycleTelemetry {
 /// a second executor and must not be constructed on the microvm path.
 pub(crate) struct DockerJobEngine<R> {
     runner: R,
-    step_start_sender: Option<UnboundedSender<StepStartEvent>>,
-    step_log_sender: Option<UnboundedSender<StepLog>>,
+    step_start_sender: Option<BoundedStepSender<StepStartEvent>>,
+    step_log_sender: Option<BoundedStepSender<StepLog>>,
     initial_order: i32,
     trailing_post_action_count: usize,
     /// Workflow-level env from the job message — shown first in every step's
@@ -1679,6 +1780,11 @@ pub(crate) struct DockerJobEngine<R> {
     /// are definitionally not the job, take an inert token through
     /// [`DockerJobEngine::inert`].
     cancellation: crate::execution::cancel::JobCancellation,
+    /// Job-global deprecated-command telemetry flags (upstream `Global`
+    /// scope: N steps using `set-output` emit one `DeprecatedCommand`
+    /// entry). Threaded through every full step-output parse; streaming
+    /// mask-only parses use a throwaway instead.
+    deprecated_command_scope: DeprecatedCommandScope,
 }
 
 #[derive(Debug, Clone)]
@@ -1711,6 +1817,7 @@ where
             job_network_guard: None,
             lifecycle_telemetry: None,
             cancellation,
+            deprecated_command_scope: DeprecatedCommandScope::default(),
         }
     }
 
@@ -1754,12 +1861,12 @@ where
         self
     }
 
-    pub fn with_step_start_sender(mut self, sender: UnboundedSender<StepStartEvent>) -> Self {
+    pub fn with_step_start_sender(mut self, sender: BoundedStepSender<StepStartEvent>) -> Self {
         self.step_start_sender = Some(sender);
         self
     }
 
-    pub fn with_step_log_sender(mut self, sender: UnboundedSender<StepLog>) -> Self {
+    pub fn with_step_log_sender(mut self, sender: BoundedStepSender<StepLog>) -> Self {
         self.step_log_sender = Some(sender);
         self
     }
@@ -1811,7 +1918,7 @@ where
         let Some(sender) = &self.step_start_sender else {
             return started_at;
         };
-        let _ = sender.send(StepStartEvent {
+        sender.send_best_effort(StepStartEvent {
             step_id: step_id.into(),
             display_name: display_name.into(),
             order: *order,
@@ -1821,7 +1928,7 @@ where
 
     fn emit_step_log(&self, log: &StepLog) {
         if let Some(sender) = &self.step_log_sender {
-            let _ = sender.send(log.clone());
+            sender.send_best_effort(log.clone());
         }
     }
 
@@ -2073,8 +2180,9 @@ where
         // cancellation target without any call site naming it.
         let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
         let mut step_error = None;
-        let mut post_actions = Vec::new();
-        let mut native_post_actions = Vec::new();
+        // The single post-action stack, in registration (step) order; drained
+        // LIFO below like upstream's `PostJobSteps`.
+        let mut post_actions: Vec<PostAction> = Vec::new();
         let mut timeline_order = self.initial_order;
         let mut composite_frame: Option<CompositeFrame> = None;
         let mut target_materialized = false;
@@ -2206,7 +2314,20 @@ where
                         stdout: String::new(),
                         stderr: message,
                     };
-                    if reports {
+                    if let Some(frame) = composite_frame.as_mut() {
+                        // An unevaluable inner condition still fails the
+                        // composite: without the absorb the umbrella would
+                        // render exit 0 while the job fails.
+                        if step.reports_timeline_start() {
+                            frame.append_inner(
+                                &display_name,
+                                &step_log_prelude(step, &step_state),
+                                &result,
+                            );
+                        } else {
+                            frame.absorb(&result);
+                        }
+                    } else if reports {
                         let log = step_log_with_name(
                             &step_backend_id,
                             &display_name,
@@ -2263,6 +2384,72 @@ where
                 continue;
             }
             let mut post_registered = false;
+            // The pre step's own condition (`runs.pre-if`), evaluated once.
+            // False skips the pre while main still runs; unevaluable fails
+            // the step without running main or registering post — upstream's
+            // pre step never runs, so neither its main nor its post is
+            // registered (`src/Runner.Worker/ActionRunner.cs` registers post from
+            // a pre or main that runs, and a failed pre fails the job while
+            // main skips).
+            let pre_condition = match step {
+                ExecutableStep::JavaScript { invocation, .. }
+                    if invocation.pre_container_path.is_some() =>
+                {
+                    Some(step_state.evaluate_post_condition(invocation.pre_condition.as_deref()))
+                }
+                _ => None,
+            };
+            if let Some(Err(error)) = pre_condition.as_ref() {
+                let message =
+                    format!("Step '{display_name}' pre-condition could not be evaluated: {error}");
+                eprintln!("{message}");
+                let reports = composite_frame.is_none() && step.reports_timeline_start();
+                let mut failed_started_at = String::new();
+                if reports {
+                    failed_started_at = self.emit_step_started(
+                        step_backend_id.clone(),
+                        &display_name,
+                        &mut timeline_order,
+                    );
+                }
+                let result = StepExecutionResult {
+                    exit_code: 1,
+                    state: StepCommandState::default(),
+                    skipped: false,
+                    failure_ignored: false,
+                    stdout: String::new(),
+                    stderr: message,
+                };
+                if let Some(frame) = composite_frame.as_mut() {
+                    // An unevaluable inner pre-condition still fails the
+                    // composite: without the absorb the umbrella would
+                    // render exit 0 while the job fails.
+                    if step.reports_timeline_start() {
+                        frame.append_inner(
+                            &display_name,
+                            &step_log_prelude(step, &step_state),
+                            &result,
+                        );
+                    } else {
+                        frame.absorb(&result);
+                    }
+                } else if reports {
+                    let log = step_log_with_name(
+                        &step_backend_id,
+                        &display_name,
+                        timeline_order,
+                        &failed_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &step_log_prelude(step, &step_state),
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                }
+                state.apply(&step_context_id, &result);
+                results.push(result);
+                continue;
+            }
             if let ExecutableStep::JavaScript {
                 step_id,
                 invocation,
@@ -2271,10 +2458,10 @@ where
                 ..
             } = step
                 && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
-                && step_state.post_condition_met(invocation.pre_condition.as_deref())
+                && matches!(pre_condition, Some(Ok(true)))
             {
                 if invocation.post_container_path.is_some() {
-                    post_actions.push(PostJavaScriptAction {
+                    post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
                         step_id: step_id.clone(),
                         display_name: display_name.clone(),
                         invocation: invocation.clone(),
@@ -2284,7 +2471,7 @@ where
                         umbrella_display: composite_frame
                             .as_ref()
                             .map(|frame| frame.display_name.clone()),
-                    });
+                    }));
                     post_registered = true;
                 }
                 let pre_step_id = uuid::Uuid::new_v4().to_string();
@@ -2293,7 +2480,7 @@ where
                 } else {
                     unix_now_rfc3339()
                 };
-                let mut result = self.execute_javascript_action_in_started_container(
+                let mut result = match self.execute_javascript_action_in_started_container(
                     container,
                     step_id,
                     invocation,
@@ -2302,7 +2489,30 @@ where
                     temp_host,
                     &step_state,
                     effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
-                )?;
+                ) {
+                    Ok(result) => result,
+                    // Cancel re-evaluation
+                    // (`src/Runner.Worker/StepsRunner.cs:146-187`): a pre
+                    // killed by cancellation records its failure and the job
+                    // continues to re-evaluated remaining steps — never an
+                    // early return that would also drop the post drain below.
+                    // The post stays registered: the pre ran, which is what
+                    // registers it upstream (`src/Runner.Worker/ActionRunner.cs`).
+                    Err(error) if state.is_cancelled() => {
+                        eprintln!("Step '{display_name}' pre step was cancelled: {error:#}");
+                        StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: String::new(),
+                            stderr: format!(
+                                "Step '{display_name}' pre step was cancelled: {error:#}"
+                            ),
+                        }
+                    }
+                    Err(error) => return Err(error),
+                };
                 let failed = result.exit_code != 0;
                 if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
@@ -2346,7 +2556,7 @@ where
                 } = step
                 && invocation.post_container_path.is_some()
             {
-                post_actions.push(PostJavaScriptAction {
+                post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
                     step_id: step_context_id.clone(),
                     display_name: display_name.clone(),
                     invocation: invocation.clone(),
@@ -2356,7 +2566,7 @@ where
                     umbrella_display: composite_frame
                         .as_ref()
                         .map(|frame| frame.display_name.clone()),
-                });
+                }));
             }
             if let ExecutableStep::Native {
                 invocation,
@@ -2367,7 +2577,7 @@ where
                 && let Some(condition) =
                     native_post_condition(invocation.adapter, invocation.cache_kind)
             {
-                native_post_actions.push(PostNativeAction {
+                post_actions.push(PostAction::Native(PostNativeAction {
                     step_id: step_context_id.clone(),
                     display_name: display_name.clone(),
                     invocation: invocation.clone(),
@@ -2377,7 +2587,7 @@ where
                     umbrella_display: composite_frame
                         .as_ref()
                         .map(|frame| frame.display_name.clone()),
-                });
+                }));
             }
             let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
@@ -2445,7 +2655,16 @@ where
                     )?;
                     let live_sender = self.step_log_sender.clone();
                     let mut on_output = |_: CommandStream, line: &str| {
-                        streamed_masks.extend(parse_workflow_commands(line).masks);
+                        // Mask-only: the throwaway scope keeps streaming from
+                        // consuming the job's telemetry once-flags.
+                        streamed_masks.extend(
+                            parse_workflow_commands_with_job_env(
+                                line,
+                                &env,
+                                &mut DeprecatedCommandScope::default(),
+                            )
+                            .masks,
+                        );
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -2507,6 +2726,8 @@ where
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
                         &step_result.stderr,
+                        &env,
+                        &mut self.deprecated_command_scope,
                     ));
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
@@ -2619,10 +2840,34 @@ where
                     // a step that fails by throwing still honors
                     // continue-on-error — outcome stays failure, the reported
                     // conclusion is success, and the job runs remaining steps.
-                    if step.continue_on_error() && !state.is_cancelled() {
-                        eprintln!(
-                            "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
-                        );
+                    //
+                    // Cancel re-evaluation
+                    // (`src/Runner.Worker/StepsRunner.cs:146-187`,
+                    // `RunStepAsync` OperationCanceledException catch): a step
+                    // killed by cancellation records its failure and the loop
+                    // CONTINUES. Every remaining condition is re-evaluated
+                    // fresh against the cancelled status, so `always()` and
+                    // `cancelled()` cleanup still runs while ordinary steps
+                    // skip — the `break` below would silently drop exactly
+                    // the cleanup upstream runs. The runner reports the job
+                    // `Canceled` from its own flag, so no `step_error` is set:
+                    // returning `Ok` also preserves the cleanup step logs the
+                    // `Err` path would discard.
+                    //
+                    // Known rendering delta: upstream records the killed step
+                    // `Canceled`; Velnor's outcome has no cancelled value, so
+                    // it records failure. Under cancellation `success()` and
+                    // `failure()` are false either way — only the
+                    // `steps.<id>.outcome` string differs.
+                    let cancelled = state.is_cancelled();
+                    if cancelled || step.continue_on_error() {
+                        if cancelled {
+                            eprintln!("Step '{display_name}' was cancelled: {error:#}");
+                        } else {
+                            eprintln!(
+                                "Step '{display_name}' failed with an execution error but continue-on-error is set: {error:#}"
+                            );
+                        }
                         let mut salvaged_state = script_plan
                             .as_ref()
                             .and_then(|plan| plan.collect_state().ok())
@@ -2632,7 +2877,11 @@ where
                             exit_code: 1,
                             state: salvaged_state,
                             skipped: false,
-                            failure_ignored: true,
+                            // `continue-on-error` stays gated on
+                            // not-cancelled: a killed step never reports
+                            // success, which is what keeps `success()` false
+                            // for every re-evaluated remaining step.
+                            failure_ignored: !cancelled,
                             stdout: String::new(),
                             stderr: format!("{error:#}"),
                         };
@@ -2684,15 +2933,31 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        let native_post_actions = native_post_actions
-            .into_iter()
-            .rev()
-            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
-            .collect::<Vec<_>>();
+        // Registration order above is step order, so reverse is upstream's
+        // `TryPop` sequence; every entry keeps its own post condition
+        // evaluated against the job's final status. False drops the entry;
+        // unevaluable keeps its LIFO position as a failed record (never a
+        // silent skip — upstream fails the post step).
         let post_actions = post_actions
             .into_iter()
             .rev()
-            .filter(|post_action| state.post_condition_met(post_action.condition.as_deref()))
+            .filter_map(|post_action| {
+                match state.evaluate_post_condition(post_action.condition()) {
+                    Ok(true) => Some(PostDrainItem::Run(post_action)),
+                    Ok(false) => None,
+                    Err(error) => {
+                        let message = format!(
+                            "Post step '{}' condition could not be evaluated: {error}",
+                            post_action.display_name()
+                        );
+                        eprintln!("{message}");
+                        Some(PostDrainItem::ConditionFailed {
+                            action: post_action,
+                            message,
+                        })
+                    }
+                }
+            })
             .collect::<Vec<_>>();
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
@@ -2708,20 +2973,132 @@ where
         let _post_cancellation = crate::execution::cancel::set_active(post_cancellation);
         reserve_github_post_step_orders(
             &mut timeline_order,
-            native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
+            post_actions.len() + self.trailing_post_action_count,
         );
         // GitHub runs all embedded-composite posts as ONE `Post Run
         // <composite>` step (EmbeddedStepsWithPostRegistered); consecutive
-        // posts sharing an umbrella collapse into a single step record.
-        let mut native_post_iter = native_post_actions.into_iter().peekable();
-        while let Some(first) = native_post_iter.next() {
+        // native posts sharing an umbrella collapse into a single step
+        // record. A JavaScript post between two natives keeps its own record —
+        // only consecutive natives group — but every entry still executes in
+        // the stack's LIFO position.
+        let mut post_iter = post_actions.into_iter().peekable();
+        while let Some(item) = post_iter.next() {
+            let post_action = match item {
+                // The failed record keeps its LIFO position; the drain
+                // continues with the remaining posts, and the failed result
+                // flips the job conclusion like any step failure.
+                PostDrainItem::ConditionFailed { action, message } => {
+                    let failed_step_id = uuid::Uuid::new_v4().to_string();
+                    let failed_name = post_step_display_name(action.display_name());
+                    let failed_started_at = self.emit_step_started(
+                        failed_step_id.clone(),
+                        failed_name.clone(),
+                        &mut timeline_order,
+                    );
+                    let result = StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: message,
+                    };
+                    let prelude = match &action {
+                        PostAction::JavaScript(post) => {
+                            javascript_post_log_prelude(&post.invocation, &state)
+                        }
+                        PostAction::Native(post) => {
+                            native_post_log_prelude(&post.invocation, &state)
+                        }
+                    };
+                    let log = step_log_with_name(
+                        &failed_step_id,
+                        &failed_name,
+                        timeline_order,
+                        &failed_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                        &prelude,
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                    state.apply(&failed_step_id, &result);
+                    executed_physical_actions += 1;
+                    results.push(result);
+                    continue;
+                }
+                PostDrainItem::Run(post_action) => post_action,
+            };
+            let first = match post_action {
+                PostAction::JavaScript(post_action) => {
+                    let js_post_step_id = uuid::Uuid::new_v4().to_string();
+                    let js_post_name = post_step_display_name(&post_action.display_name);
+                    let js_post_started_at = self.emit_step_started(
+                        js_post_step_id.clone(),
+                        js_post_name.clone(),
+                        &mut timeline_order,
+                    );
+                    let result = self.execute_javascript_action_in_started_container(
+                        container,
+                        &js_post_step_id,
+                        &post_action.invocation,
+                        post_action
+                            .invocation
+                            .post_container_path
+                            .as_deref()
+                            .expect("post action must have post entrypoint"),
+                        &state.action_state_env(&post_action.step_id),
+                        temp_host,
+                        &state,
+                        effective_step_timeout(
+                            post_action.timeout_minutes,
+                            self.job_timeout_minutes,
+                        ),
+                    );
+                    match result {
+                        Ok(mut result) => {
+                            if result.exit_code != 0 && post_action.continue_on_error {
+                                result.failure_ignored = true;
+                            }
+                            let log = step_log_with_name(
+                                &js_post_step_id,
+                                &js_post_name,
+                                timeline_order,
+                                &js_post_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &javascript_post_log_prelude(&post_action.invocation, &state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                            state.apply(&js_post_step_id, &result);
+                            executed_physical_actions += 1;
+                            results.push(result);
+                        }
+                        Err(error) => {
+                            if step_error.is_none() {
+                                step_error = Some(error);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                PostAction::Native(first) => first,
+            };
             let mut group = vec![first];
             if let Some(umbrella) = group[0].umbrella_display.clone() {
-                while native_post_iter
-                    .peek()
-                    .is_some_and(|next| next.umbrella_display.as_deref() == Some(umbrella.as_str()))
-                {
-                    group.push(native_post_iter.next().expect("peeked"));
+                while post_iter.peek().is_some_and(|next| {
+                    matches!(
+                        next,
+                        PostDrainItem::Run(PostAction::Native(candidate))
+                            if candidate.umbrella_display.as_deref() == Some(umbrella.as_str())
+                    )
+                }) {
+                    let Some(PostDrainItem::Run(PostAction::Native(next))) = post_iter.next()
+                    else {
+                        unreachable!("peeked a native post sharing the umbrella");
+                    };
+                    group.push(next);
                 }
             }
             let display_base = group[0]
@@ -2814,55 +3191,6 @@ where
             };
             self.emit_step_log(&log);
             step_logs.push(log);
-        }
-        for post_action in post_actions {
-            let js_post_step_id = uuid::Uuid::new_v4().to_string();
-            let js_post_name = post_step_display_name(&post_action.display_name);
-            let js_post_started_at = self.emit_step_started(
-                js_post_step_id.clone(),
-                js_post_name.clone(),
-                &mut timeline_order,
-            );
-            let result = self.execute_javascript_action_in_started_container(
-                container,
-                &js_post_step_id,
-                &post_action.invocation,
-                post_action
-                    .invocation
-                    .post_container_path
-                    .as_deref()
-                    .expect("post action must have post entrypoint"),
-                &state.action_state_env(&post_action.step_id),
-                temp_host,
-                &state,
-                effective_step_timeout(post_action.timeout_minutes, self.job_timeout_minutes),
-            );
-            match result {
-                Ok(mut result) => {
-                    if result.exit_code != 0 && post_action.continue_on_error {
-                        result.failure_ignored = true;
-                    }
-                    let log = step_log_with_name(
-                        &js_post_step_id,
-                        &js_post_name,
-                        timeline_order,
-                        &js_post_started_at,
-                        &unix_now_rfc3339(),
-                        &result,
-                        &javascript_post_log_prelude(&post_action.invocation, &state),
-                    );
-                    self.emit_step_log(&log);
-                    step_logs.push(log);
-                    state.apply(&js_post_step_id, &result);
-                    executed_physical_actions += 1;
-                    results.push(result);
-                }
-                Err(error) => {
-                    if step_error.is_none() {
-                        step_error = Some(error);
-                    }
-                }
-            }
         }
         if target_materialized
             && step_error.is_none()
@@ -2967,6 +3295,8 @@ where
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
             &step_result.stderr,
+            &env,
+            &mut self.deprecated_command_scope,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3104,6 +3434,8 @@ where
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
             &step_result.stderr,
+            &env,
+            &mut self.deprecated_command_scope,
         ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
@@ -3708,7 +4040,16 @@ where
             if line.starts_with("__VELNOR_MISE_BIN__") {
                 return;
             }
-            live_masks.extend(parse_workflow_commands(line).masks);
+            // Mask-only: the throwaway scope keeps streaming from consuming
+            // the job's telemetry once-flags.
+            live_masks.extend(
+                parse_workflow_commands_with_job_env(
+                    line,
+                    &env,
+                    &mut DeprecatedCommandScope::default(),
+                )
+                .masks,
+            );
             if let Some(live) = live_step.as_ref() {
                 emit_live_step_log(
                     &live_sender,
@@ -4795,7 +5136,7 @@ fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
 }
 
 fn emit_live_step_log(
-    sender: &Option<UnboundedSender<StepLog>>,
+    sender: &Option<BoundedStepSender<StepLog>>,
     step_id: &str,
     display_name: &str,
     order: i32,
@@ -4806,7 +5147,7 @@ fn emit_live_step_log(
     let Some(sender) = sender else {
         return;
     };
-    let _ = sender.send(StepLog {
+    sender.send_best_effort(StepLog {
         step_id: step_id.to_string(),
         display_name: display_name.to_string(),
         order,
@@ -12186,6 +12527,10 @@ impl JobExecutionState {
     /// Pre/post step conditions. An absent condition runs unconditionally
     /// (`ActionRunner` only registers a pre/post step when its condition is
     /// satisfied), otherwise the `success()` default applies as above.
+    ///
+    /// A condition that fails to evaluate returns `Err`, which callers turn
+    /// into a failed pre/post record — upstream fails the owning step
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`), never silently skips it.
     fn evaluate_post_condition(
         &self,
         condition: Option<&str>,
@@ -12197,28 +12542,6 @@ impl JobExecutionState {
             return Ok(true);
         };
         self.evaluate_condition_expression(strip_expression(condition))
-    }
-
-    /// Whether a pre/post step's condition is satisfied.
-    ///
-    /// Deferred root cause: upstream fails the owning step when a pre/post
-    /// condition cannot be evaluated
-    /// (`src/Runner.Worker/StepsRunner.cs:231-242`). Velnor registers pre/post
-    /// steps outside the main step-result path, so there is no result row to
-    /// fail here; giving them one belongs to the lifecycle work package. Until
-    /// then the condition is fail-*closed* and the error is reported — never
-    /// fail-open, which is the divergence this module removes.
-    fn post_condition_met(&self, condition: Option<&str>) -> bool {
-        match self.evaluate_post_condition(condition) {
-            Ok(condition_met) => condition_met,
-            Err(error) => {
-                eprintln!(
-                    "Pre/post step condition {:?} could not be evaluated: {error}",
-                    condition.unwrap_or_default()
-                );
-                false
-            }
-        }
     }
 
     fn evaluate_condition_expression(
@@ -12486,10 +12809,12 @@ impl JobExpressionContext<'_> {
         args: &[expression::Value],
     ) -> Result<expression::Value, expression::ExpressionError> {
         let mut patterns: Vec<String> = Vec::new();
+        let mut follow_symbolic_links = false;
         for (position, arg) in args.iter().enumerate() {
             let arg = arg.convert_to_string();
             if position == 0 && arg.starts_with("--") {
                 if arg.eq_ignore_ascii_case("--follow-symbolic-links") {
+                    follow_symbolic_links = true;
                     continue;
                 }
                 return Err(expression::ExpressionError::evaluation(format!(
@@ -12505,7 +12830,11 @@ impl JobExpressionContext<'_> {
         let Some(workspace) = self.state.workspace_host.as_ref() else {
             return Ok(expression::Value::string(""));
         };
-        Ok(expression::Value::string(hash_files(workspace, &patterns)))
+        Ok(expression::Value::string(hash_files(
+            workspace,
+            &patterns,
+            follow_symbolic_links,
+        )?))
     }
 }
 
@@ -13167,9 +13496,14 @@ fn rendered_output_line(line: &str) -> Option<String> {
     }
 }
 
-fn parse_workflow_commands_from_output(stdout: &str, stderr: &str) -> StepCommandState {
-    let mut state = parse_workflow_commands(stdout);
-    state.merge(parse_workflow_commands(stderr));
+fn parse_workflow_commands_from_output(
+    stdout: &str,
+    stderr: &str,
+    job_env: &[(String, String)],
+    scope: &mut DeprecatedCommandScope,
+) -> StepCommandState {
+    let mut state = parse_workflow_commands_with_job_env(stdout, job_env, scope);
+    state.merge(parse_workflow_commands_with_job_env(stderr, job_env, scope));
     state
 }
 
@@ -13199,9 +13533,13 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
     }
 }
 
-fn hash_files(workspace: &Path, patterns: &[String]) -> String {
+fn hash_files(
+    workspace: &Path,
+    patterns: &[String],
+    follow_symbolic_links: bool,
+) -> Result<String, expression::ExpressionError> {
     let Ok(globs) = build_ordered_globs(patterns) else {
-        return String::new();
+        return Ok(String::new());
     };
     let search_roots = hash_file_search_roots(workspace, patterns);
     let mut seen = BTreeSet::new();
@@ -13211,10 +13549,15 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     // traverses each remaining root lexically with the complete matcher set.
     for root in search_roots {
         let mut files = Vec::new();
-        if root.is_file() {
+        if hash_root_is_file(&root, follow_symbolic_links) {
             files.push(root);
-        } else {
-            collect_workspace_files(&root, &mut files);
+        } else if follow_symbolic_links || hash_root_is_real_dir(&root) {
+            // The cycle guard is per search root: two roots can legitimately
+            // resolve to the same directory through different lexical paths
+            // (a symlinked directory alongside its target), and both lexical
+            // spellings hash, exactly as the glob generator yields both.
+            let mut chain = Vec::new();
+            collect_workspace_files(&root, &mut files, follow_symbolic_links, &mut chain);
             files.sort();
         }
         for path in files {
@@ -13228,14 +13571,29 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
         }
     }
     if matches.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
-    let mut digests: Vec<_> = matches
+    // Upstream hashes every yielded path and throws on the first read
+    // failure — node exits 1, `HashFilesFunction` throws
+    // `InvalidOperationException`, and expression evaluation fails — so a
+    // matched-but-unreadable file (a no-follow broken symlink above all)
+    // errors here too instead of being silently dropped.
+    let digest_results: Vec<_> = matches
         .par_iter()
         .enumerate()
-        .filter_map(|(index, path)| sha256_file_digest(path).ok().map(|digest| (index, digest)))
+        .map(|(index, path)| sha256_file_digest(path).map(|digest| (index, digest)))
         .collect();
+    let mut digests: Vec<_> = digest_results
+        .into_iter()
+        .collect::<Result<_, _>>()
+        .map_err(|_| {
+            expression::ExpressionError::evaluation(format!(
+                "hashFiles('{}') failed. Fail to hash files under directory '{}'",
+                patterns.join(", "),
+                workspace.display()
+            ))
+        })?;
     digests.sort_by_key(|(index, _)| *index);
 
     let mut aggregate = Sha256::new();
@@ -13243,7 +13601,7 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
         aggregate.update(digest);
     }
     let digest = aggregate.finalize();
-    hex_digest(&digest)
+    Ok(hex_digest(&digest))
 }
 
 fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMatcher)>> {
@@ -13325,7 +13683,86 @@ fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
     builder.build().context("build glob set")
 }
 
-fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
+/// A search root that is itself a file hashes in both modes, and so does a
+/// root that links to a file: upstream's File branch has no isFile check,
+/// so an lstat link that matches lexically is yielded and read through.
+/// A no-follow link to a directory is neither hashed nor traversed, while a
+/// broken-link root is yielded and fails at read time — exactly upstream's
+/// `statSync` throw. (Follow mode omits broken links during traversal via
+/// `omitBrokenSymbolicLinks`, so a broken root resolves to nothing there.)
+fn hash_root_is_file(root: &Path, follow_symbolic_links: bool) -> bool {
+    if follow_symbolic_links {
+        return root.is_file();
+    }
+    let Ok(metadata) = fs::symlink_metadata(root) else {
+        return false;
+    };
+    if metadata.file_type().is_file() {
+        return true;
+    }
+    if !metadata.file_type().is_symlink() {
+        return false;
+    }
+    // A link to a file hashes; a link to a directory does not; a broken
+    // link is yielded as a candidate and fails at digest time when — and
+    // only when — it matches lexically. A link to anything else (a fifo,
+    // a socket) is skipped: opening it for a digest would block.
+    match fs::metadata(root) {
+        Ok(target) => target.is_file(),
+        Err(_) => true,
+    }
+}
+
+fn hash_root_is_real_dir(root: &Path) -> bool {
+    fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// Collect candidate files under `dir` for `hashFiles`.
+///
+/// `DirEntry::file_type` never follows symlinks, which is the no-follow
+/// stat: a symlink is never a directory to descend — but upstream's File
+/// branch has no isFile check, so a link to a file IS a file to hash, in
+/// both modes, read through under its lexical path at digest time. Only
+/// directory traversal differs: with `--follow-symbolic-links` (upstream
+/// passes `followSymbolicLinks` to the bundled @actions/glob) a link to a
+/// directory is traversed, and a broken link is skipped
+/// (`omitBrokenSymbolicLinks`); without the flag a broken link is yielded
+/// as a candidate and fails at digest time when it matches lexically —
+/// upstream's `statSync` throw.
+/// `chain` is upstream's `traversalChain`, fixed to the item level by
+/// construction: each descended directory pushes its canonical path and
+/// pops it on return, so only an ancestor blocks a descend. Sibling
+/// aliases of one target BOTH yield while true cycles terminate; a
+/// never-shrinking visited set would over-dedupe the siblings. A
+/// directory that cannot be canonicalized — a loop makes `canonicalize`
+/// fail — is not entered.
+fn collect_workspace_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    follow_symbolic_links: bool,
+    chain: &mut Vec<PathBuf>,
+) {
+    if !follow_symbolic_links {
+        collect_workspace_children(dir, files, false, chain);
+        return;
+    }
+    let Ok(canonical) = dir.canonicalize() else {
+        return;
+    };
+    if chain.contains(&canonical) {
+        return;
+    }
+    chain.push(canonical.clone());
+    collect_workspace_children(dir, files, true, chain);
+    debug_assert_eq!(chain.pop(), Some(canonical));
+}
+
+fn collect_workspace_children(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    follow_symbolic_links: bool,
+    chain: &mut Vec<PathBuf>,
+) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -13334,8 +13771,26 @@ fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
+        if file_type.is_symlink() {
+            match fs::metadata(&path) {
+                Ok(target) if target.is_dir() => {
+                    if follow_symbolic_links {
+                        collect_workspace_files(&path, files, true, chain);
+                    }
+                }
+                Ok(target) if target.is_file() => files.push(path),
+                // A link to a fifo or socket is skipped in both modes:
+                // opening it for a digest would block.
+                Ok(_) => {}
+                // A broken link is omitted in follow mode but yielded
+                // without the flag, failing at digest time iff matched.
+                Err(_) if follow_symbolic_links => {}
+                Err(_) => files.push(path),
+            }
+            continue;
+        }
         if file_type.is_dir() {
-            collect_workspace_files(&path, files);
+            collect_workspace_files(&path, files, follow_symbolic_links, chain);
             continue;
         }
         if !file_type.is_file() {
@@ -21579,12 +22034,12 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
-        .with_step_start_sender(sender);
+        .with_step_start_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -21632,9 +22087,9 @@ fi"#
                 timeout_minutes: None,
             }),
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor =
-            DockerJobEngine::inert(StdoutCommandRunner::default()).with_step_log_sender(sender);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(StdoutCommandRunner::default())
+            .with_step_log_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -21653,6 +22108,92 @@ fi"#
     }
 
     #[test]
+    fn bounded_step_sender_drops_instead_of_blocking_when_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let sender = BoundedStepSender::new(tx);
+        let started = Instant::now();
+        for order in 0..5 {
+            sender.send_best_effort(StepStartEvent {
+                step_id: format!("step-{order}"),
+                display_name: String::new(),
+                order,
+            });
+        }
+        // Five sends into capacity 2 with no receiver progress must return
+        // immediately: the execution thread never blocks on publishing.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "best-effort send blocked: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(sender.drops(), 3);
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event);
+        }
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[0].step_id, "step-0");
+        assert_eq!(received[1].step_id, "step-1");
+    }
+
+    #[test]
+    fn bounded_step_sender_counts_drops_after_publisher_exit() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<StepLog>(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        drop(rx);
+        sender.send_best_effort(StepLog {
+            step_id: "gone".to_string(),
+            display_name: String::new(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["line".to_string()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        });
+        assert_eq!(sender.drops(), 1);
+    }
+
+    #[test]
+    fn step_publish_channel_throughput_brief() {
+        // Brief benchmark: fill/drain cycles over the production capacity.
+        // Asserts the ceiling generously (loaded CI must not flake); the
+        // printed line is the measurement.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let sender = BoundedStepSender::new(tx);
+        let started = Instant::now();
+        let mut received = 0u64;
+        for _ in 0..100 {
+            for order in 0..STEP_PUBLISH_CHANNEL_CAPACITY {
+                sender.send_best_effort(StepStartEvent {
+                    step_id: "bench".to_string(),
+                    display_name: String::new(),
+                    order: order as i32,
+                });
+            }
+            while rx.try_recv().is_ok() {
+                received += 1;
+            }
+        }
+        let elapsed = started.elapsed();
+        eprintln!("step-publish throughput: {received} events in {elapsed:?}");
+        assert_eq!(received, 100 * STEP_PUBLISH_CHANNEL_CAPACITY as u64);
+        assert_eq!(sender.drops(), 0);
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "step-publish throughput regressed: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn live_stream_carries_add_mask_values_after_registration() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -21667,9 +22208,9 @@ fi"#
             continue_on_error: false,
             timeout_minutes: None,
         })];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let mut executor =
-            DockerJobEngine::inert(StreamingMaskRunner::default()).with_step_log_sender(sender);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(StreamingMaskRunner::default())
+            .with_step_log_sender(BoundedStepSender::new(sender));
 
         executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -21798,7 +22339,7 @@ fi"#
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
         assert_eq!(results[0].state.error_count, 1);
-        assert_eq!(results[0].state.warning_count, 0);
+        assert_eq!(results[0].state.warning_count, 1);
         assert_eq!(results[0].state.notice_count, 0);
         assert_uuid(&summary.step_logs[0].step_id);
         assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
@@ -21857,13 +22398,67 @@ fi"#
         let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
-        assert_eq!(results[0].state.warning_count, 1);
+        assert_eq!(results[0].state.warning_count, 2);
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
-        assert_eq!(summary.step_logs[0].warning_count, 1);
+        assert_eq!(summary.step_logs[0].warning_count, 2);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo answer=42\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn deprecated_command_telemetry_fires_once_per_job_across_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let script_step = |id: &str| {
+            ExecutableStep::Script(ScriptStep {
+                id: id.into(),
+                display_name: String::new(),
+                script: "node old-action.js".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            })
+        };
+        let steps = vec![script_step("first"), script_step("second")];
+        let mut executor = DockerJobEngine::inert(StderrCommandRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // The mock runner emits `::set-output::` on every step's stderr:
+        // each step honors the command and warns per use, but the job as a
+        // whole emits one telemetry entry — upstream's
+        // `Global.HasDeprecatedSetOutput` gate, with the streaming
+        // mask-only parses on throwaway scopes so they consume nothing.
+        let results = &summary.step_results;
+        assert_eq!(results.len(), 2);
+        let deprecated_entries = |state: &StepCommandState| {
+            state
+                .telemetry
+                .iter()
+                .filter(|telemetry| telemetry.message == "DeprecatedCommand: set-output")
+                .count()
+        };
+        for result in results {
+            assert_eq!(result.state.outputs["answer"], "42");
+            assert_eq!(result.state.warning_count, 2);
+        }
+        assert_eq!(deprecated_entries(&results[0].state), 1);
+        assert_eq!(deprecated_entries(&results[1].state), 0);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -21985,7 +22580,9 @@ fi"#
         let digest = hash_files(
             &workspace,
             &["**/*.txt".to_string(), "nested/gamma.bin".to_string()],
-        );
+            false,
+        )
+        .unwrap();
 
         assert_eq!(
             digest,
@@ -22005,7 +22602,9 @@ fi"#
         let actual = hash_files(
             &workspace,
             &["zeta.txt".to_string(), "alpha.txt".to_string()],
-        );
+            false,
+        )
+        .unwrap();
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("zeta.txt")).unwrap());
         expected.update(sha256_file_digest(&workspace.join("alpha.txt")).unwrap());
@@ -22015,8 +22614,10 @@ fi"#
             actual,
             hash_files(
                 &workspace,
-                &["alpha.txt".to_string(), "zeta.txt".to_string()]
+                &["alpha.txt".to_string(), "zeta.txt".to_string()],
+                false
             )
+            .unwrap()
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -22030,7 +22631,7 @@ fi"#
         fs::write(workspace.join("crates/direct/Cargo.toml"), "direct\n").unwrap();
         fs::write(workspace.join("crates/direct/fuzz/Cargo.toml"), "nested\n").unwrap();
 
-        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()]);
+        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()], false).unwrap();
         let mut expected = Sha256::new();
         expected.update(sha256_file_digest(&workspace.join("crates/direct/Cargo.toml")).unwrap());
 
@@ -22052,6 +22653,278 @@ fi"#
 
         assert_eq!(first, "hash=");
         assert_ne!(second, "hash=");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_no_follow_hashes_file_links_and_errors_on_broken_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        fs::write(workspace.join("sub/inner.txt"), "inner\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("sub", workspace.join("dirlink")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
+
+        // Upstream's File branch has no isFile check: a lexically-matching
+        // file link is yielded and read through, so no-follow hashes the
+        // target's content exactly like follow mode does.
+        let target = hash_files(&workspace, &["real.txt".to_string()], false).unwrap();
+        assert!(!target.is_empty());
+        assert_eq!(
+            hash_files(&workspace, &["link.txt".to_string()], false).unwrap(),
+            target
+        );
+        // A directory link is still neither hashed nor traversed without
+        // the flag: its lstat is not a directory to descend.
+        assert_eq!(
+            hash_files(&workspace, &["dirlink/**".to_string()], false).unwrap(),
+            ""
+        );
+        // A lexically-matching broken link is yielded and fails at read
+        // time, failing the whole evaluation like upstream's statSync
+        // throw — even as one match among many in a broad pattern.
+        assert!(hash_files(&workspace, &["broken.txt".to_string()], false).is_err());
+        assert!(hash_files(&workspace, &["**/*.txt".to_string()], false).is_err());
+        // Without the broken link the broad pattern hashes the real files
+        // plus the file link's target content.
+        fs::remove_file(workspace.join("broken.txt")).unwrap();
+        assert_eq!(
+            hash_files(&workspace, &["**/*.txt".to_string()], false).unwrap(),
+            hash_files(
+                &workspace,
+                &[
+                    "link.txt".to_string(),
+                    "real.txt".to_string(),
+                    "sub/inner.txt".to_string(),
+                ],
+                false
+            )
+            .unwrap()
+        );
+        // A non-recursive glob reaches the link identically to a direct
+        // root: `*.txt` hashes link plus real, never real alone.
+        assert_eq!(
+            hash_files(&workspace, &["*.txt".to_string()], false).unwrap(),
+            hash_files(
+                &workspace,
+                &["link.txt".to_string(), "real.txt".to_string()],
+                false
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            hash_files(&workspace, &["*.txt".to_string()], false).unwrap(),
+            target
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follows_symlinks_with_the_follow_flag() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("sub")).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        fs::write(workspace.join("sub/inner.txt"), "inner\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("sub", workspace.join("dirlink")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
+
+        // A followed file link hashes its target's content under the link's
+        // lexical path, so it equals the direct hash of the same content.
+        let direct = hash_files(&workspace, &["real.txt".to_string()], false).unwrap();
+        assert!(!direct.is_empty());
+        assert_eq!(
+            hash_files(&workspace, &["link.txt".to_string()], true).unwrap(),
+            direct
+        );
+        // A followed directory link traverses like its target.
+        assert_eq!(
+            hash_files(&workspace, &["dirlink/**".to_string()], true).unwrap(),
+            hash_files(&workspace, &["sub/**".to_string()], true).unwrap()
+        );
+        // Sibling aliases BOTH yield: the broad hash covers the dirlink and
+        // sub spellings of inner.txt, so a two-spelling pattern differs
+        // from the single file.
+        assert_eq!(
+            hash_files(&workspace, &["**/*.txt".to_string()], true).unwrap(),
+            hash_files(
+                &workspace,
+                &[
+                    "dirlink/inner.txt".to_string(),
+                    "link.txt".to_string(),
+                    "real.txt".to_string(),
+                    "sub/inner.txt".to_string(),
+                ],
+                true
+            )
+            .unwrap()
+        );
+        assert_ne!(
+            hash_files(&workspace, &["**/inner.txt".to_string()], true).unwrap(),
+            hash_files(&workspace, &["sub/inner.txt".to_string()], true).unwrap()
+        );
+        // A broken link contributes nothing and fails nothing.
+        assert_eq!(
+            hash_files(&workspace, &["broken.txt".to_string()], true).unwrap(),
+            ""
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_flag_terminates_on_symlink_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("loop/nested")).unwrap();
+        fs::write(workspace.join("loop/nested/deep.txt"), "deep\n").unwrap();
+        symlink("..", workspace.join("loop/nested/up")).unwrap();
+        symlink("loop", workspace.join("self")).unwrap();
+
+        let single = hash_files(&workspace, &["loop/nested/deep.txt".to_string()], true).unwrap();
+        assert!(!single.is_empty());
+        // The ancestor-chain guard terminates the `up` cycle, but the
+        // sibling alias still yields: the broad hash covers the file twice
+        // — once per lexical spelling — exactly like upstream's
+        // traversalChain, so it differs from the single file.
+        let file_hash = sha256_file_digest(&workspace.join("loop/nested/deep.txt")).unwrap();
+        let mut expected = Sha256::new();
+        expected.update(file_hash);
+        expected.update(file_hash);
+        let broad = hash_files(&workspace, &["**/*.txt".to_string()], true).unwrap();
+        assert_eq!(broad, hex_digest(&expected.finalize()));
+        assert_ne!(broad, single);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_flag_flows_through_expression_evaluation() {
+        use std::os::unix::fs::symlink;
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("real.txt"), "real\n").unwrap();
+        symlink("real.txt", workspace.join("link.txt")).unwrap();
+        symlink("missing.txt", workspace.join("broken.txt")).unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
+
+        // A file link resolves through to its target with or without the
+        // flag; only directory traversal needs the opt-in.
+        let target = state
+            .resolve_expressions("hash=${{ hashFiles('real.txt') }}")
+            .unwrap();
+        assert_ne!(target, "hash=");
+        assert_eq!(
+            state
+                .resolve_expressions("hash=${{ hashFiles('link.txt') }}")
+                .unwrap(),
+            target
+        );
+        assert_eq!(
+            state
+                .resolve_expressions("hash=${{ hashFiles('--follow-symbolic-links', 'link.txt') }}")
+                .unwrap(),
+            target
+        );
+        // A no-follow broken link fails expression evaluation (upstream's
+        // statSync throw surfacing as InvalidOperationException); follow
+        // mode omits it and resolves empty.
+        assert!(state
+            .resolve_expressions("hash=${{ hashFiles('broken.txt') }}")
+            .is_err());
+        assert_eq!(
+            state
+                .resolve_expressions(
+                    "hash=${{ hashFiles('--follow-symbolic-links', 'broken.txt') }}"
+                )
+                .unwrap(),
+            "hash="
+        );
+        let invalid = state.resolve_expressions("hash=${{ hashFiles('--bogus', 'real.txt') }}");
+        assert!(invalid.is_err());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unsecure_command_opt_in_flows_from_job_env_to_step_parsing() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+
+        // The executor parses step output with the step's effective
+        // environment, so a job-level opt-in honors the legacy command.
+        let job_env = vec![(
+            "ACTIONS_ALLOW_UNSECURE_COMMANDS".to_string(),
+            "true".to_string(),
+        )];
+        let state = parse_workflow_commands_from_output(
+            "::set-env name=RESTORED::yes\n",
+            "",
+            &job_env,
+            &mut DeprecatedCommandScope::default(),
+        );
+        assert_eq!(state.env.get("RESTORED").map(String::as_str), Some("yes"));
+
+        let refused = parse_workflow_commands_from_output(
+            "::set-env name=MODE::x\n",
+            "",
+            &[],
+            &mut DeprecatedCommandScope::default(),
+        );
+        assert!(refused.env.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hash_files_follow_symlink_benchmark() {
+        use std::hint::black_box;
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        for dir in 0..20 {
+            let dir = workspace.join(format!("pkg{dir}"));
+            fs::create_dir_all(dir.join("src")).unwrap();
+            for file in 0..10 {
+                fs::write(dir.join(format!("src/f{file}.rs")), "fn main() {}\n").unwrap();
+            }
+            symlink("src", dir.join("aliased")).unwrap();
+        }
+        symlink("pkg0/src/f0.rs", workspace.join("top-link.rs")).unwrap();
+
+        let plain = vec!["**/*.rs".to_string()];
+        let followed = hash_files(black_box(&workspace), black_box(&plain), true).unwrap();
+        assert!(!followed.is_empty());
+        assert_ne!(
+            followed,
+            hash_files(&workspace, &["pkg0/src/f0.rs".to_string()], false).unwrap()
+        );
+
+        let started = Instant::now();
+        for _ in 0..50 {
+            let digest = hash_files(black_box(&workspace), black_box(&plain), true).unwrap();
+            assert_eq!(digest, followed);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(60),
+            "50 follow-mode hashes of a 401-file aliased tree took {elapsed:?}",
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -23113,12 +23986,48 @@ fi"#
             "noSuchFunction('a')",
             "contains('a')",
             "github.ref ==",
+            // The live dual-lane pin evaluates `fromJSON` over a runtime
+            // output holding invalid JSON, behind an `always() &&` guard so
+            // the implicit `success() &&` prefix cannot short-circuit it to
+            // a skip after the designed failure; upstream throws out of
+            // `JToken.ReadFrom` (`FromJson.cs`) exactly like the serde
+            // failure below, so both runners fail the step.
+            "fromJSON('not json')",
         ] {
             assert!(
                 state.evaluate_condition(Some(condition)).is_err(),
                 "{condition} must fail the step rather than run it"
             );
         }
+        // Failed-state trap the live pin must avoid: after the designed
+        // failure the implicit `success() &&` prefix short-circuits a bare
+        // `fromJSON(...)` condition to a skip on both runners (GitHub docs;
+        // `evaluate_condition_expression`), so the pin would assert nothing.
+        // The `always() &&` guard forces evaluation of the RHS instead.
+        let mut failed = JobExecutionState::default();
+        failed.apply(
+            "real-failure",
+            &StepExecutionResult {
+                exit_code: 1,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert!(
+            !failed
+                .evaluate_condition(Some("fromJSON('not json')"))
+                .unwrap(),
+            "bare fromJSON skips after a failure — the live pin must not use this shape"
+        );
+        assert!(
+            failed
+                .evaluate_condition(Some("always() && fromJSON('not json') == ''"))
+                .is_err(),
+            "the live-pin shape must fail the step, not skip it"
+        );
         // A failed condition is not "provably false" either: the planner must
         // not prune the step on it.
         assert!(!condition_is_statically_false(
@@ -23126,6 +24035,737 @@ fi"#
             &[],
             &[]
         ));
+    }
+
+    /// Requests job cancellation on the Nth `docker exec`, then optionally
+    /// throws on later execs — the production shape where the termination
+    /// ladder kills the running step's process group mid-step and every
+    /// remaining condition is re-evaluated against the cancelled status.
+    struct CancelDuringExecRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        cancel_on_exec: usize,
+        fail_after_cancel: usize,
+        execs: usize,
+    }
+
+    impl CommandRunner for CancelDuringExecRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.first().is_some_and(|arg| arg == "exec") {
+                self.execs += 1;
+                if self.execs == self.cancel_on_exec {
+                    self.token
+                        .request(crate::execution::cancel::CancelReason::ServerRequested);
+                }
+                if self.token.is_cancelled() && self.fail_after_cancel > 0 {
+                    self.fail_after_cancel -= 1;
+                    anyhow::bail!("process terminated by signal");
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    fn script_step(id: &str, script: &str, condition: Option<&str>) -> ExecutableStep {
+        ExecutableStep::Script(ScriptStep {
+            id: id.into(),
+            display_name: String::new(),
+            script: script.into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: condition.map(str::to_string),
+            continue_on_error: false,
+            timeout_minutes: None,
+        })
+    }
+
+    fn exec_count(calls: &[(String, Vec<String>)]) -> usize {
+        calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .count()
+    }
+
+    /// Cancel re-evaluation at loop level
+    /// (`src/Runner.Worker/StepsRunner.cs:188-198`): the token already fired
+    /// before any step ran, so ordinary steps skip on their implicit
+    /// `success()`, `failure()` cleanup does not run — the status is
+    /// cancelled, not failure — and `always()`/`cancelled()` steps run.
+    #[test]
+    fn cancel_reevaluation_runs_cleanup_and_skips_ordinary_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("ordinary", "echo ordinary", None),
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step("on-always", "echo always", Some("always()")),
+            script_step("on-cancelled", "echo cancelled", Some("cancelled()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+        let mut executor = DockerJobEngine::new(
+            RecordingRunner {
+                calls: Vec::new(),
+                stdin: Vec::new(),
+                env: Vec::new(),
+                codes: Vec::new(),
+            },
+            token,
+        );
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(results[0].skipped);
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(!results[3].skipped);
+        assert_eq!(results[3].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Cancel re-evaluation mid-loop (`src/Runner.Worker/StepsRunner.cs:146-187`):
+    /// cancellation arrives while the first step runs, so every later
+    /// condition is evaluated fresh against the cancelled status — the next
+    /// ordinary step and the `failure()` step skip without dispatching while
+    /// `always()` and `cancelled()` steps still run.
+    #[test]
+    fn cancel_during_step_reevaluates_remaining_conditions() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("first", "echo first", None),
+            script_step("second", "echo second", None),
+            script_step("on-always", "echo always", Some("always()")),
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step("on-cancelled", "echo cancelled", Some("cancelled()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringExecRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                cancel_on_exec: 1,
+                fail_after_cancel: 0,
+                execs: 0,
+            },
+            token,
+        );
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 5);
+        assert!(!results[0].skipped);
+        assert_eq!(results[0].exit_code, 0);
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(results[3].skipped);
+        assert!(!results[4].skipped);
+        assert_eq!(results[4].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 3);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A step killed by cancellation records its failure and the loop
+    /// CONTINUES (`RunStepAsync` OperationCanceledException catch): breaking
+    /// here would silently drop the `always()` cleanup upstream runs. The
+    /// runner reports the job `Canceled` from its own flag; the executor
+    /// returns `Ok` so the cleanup step logs persist.
+    #[test]
+    fn cancelled_execution_error_continues_to_cleanup() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("killed", "echo killed", None),
+            script_step("ordinary", "echo ordinary", None),
+            script_step("cleanup", "echo cleanup", Some("always()")),
+            script_step("on-failure", "echo failure", Some("failure()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringExecRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                cancel_on_exec: 1,
+                fail_after_cancel: 1,
+                execs: 0,
+            },
+            token,
+        );
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 4);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        assert!(!summary.step_results[0].failure_ignored);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("process terminated by signal"),
+            "killed step keeps the execution error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert!(summary.step_results[1].skipped);
+        assert!(!summary.step_results[2].skipped);
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        assert!(summary.step_results[3].skipped);
+        assert_eq!(exec_count(&executor.runner().calls), 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Loop-level `src/Runner.Worker/StepsRunner.cs:231-242`: a step whose
+    /// condition cannot be evaluated fails — reported, not run, not skipped —
+    /// and the remaining steps still run, with `failure()` true afterwards.
+    #[test]
+    fn unevaluable_condition_fails_step_and_continues() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            script_step("ordinary", "echo ordinary", None),
+            script_step("on-failure", "echo failure", Some("failure()")),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: Vec::new(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].exit_code, 1);
+        assert!(!results[0].skipped);
+        assert!(!results[0].failure_ignored);
+        assert!(
+            results[0].stderr.contains("could not be evaluated"),
+            "failed step reports the condition error: {:?}",
+            results[0].stderr
+        );
+        assert!(results[1].skipped);
+        assert!(!results[2].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        assert_eq!(exec_count(&executor.runner().calls), 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.pre-if` fails the step without running main and
+    /// without registering post: upstream's pre never runs, so neither its
+    /// main nor its post is registered, and the failed pre fails the job.
+    #[test]
+    fn unevaluable_pre_condition_fails_step_without_running_main() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "guarded".into(),
+            display_name: "Run guarded-action".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                pre_condition: Some("noSuchFunction('a')".into()),
+                main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                post_condition: Some("always()".into()),
+                action_container_path: "/__a/_actions/guarded".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 1);
+        assert!(!results[0].skipped);
+        assert!(
+            results[0]
+                .stderr
+                .contains("pre-condition could not be evaluated"),
+            "failed step reports the pre-condition error: {:?}",
+            results[0].stderr
+        );
+        // Neither the main entrypoint nor the post entrypoint was dispatched:
+        // failing the pre registers nothing.
+        for (_, args) in &executor.runner().calls {
+            for arg in args {
+                assert!(
+                    !arg.contains("main.js") && !arg.contains("post.js"),
+                    "unevaluable pre must dispatch nothing: {arg:?}"
+                );
+            }
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.post-if` fails the post record in its LIFO
+    /// position while the remaining posts still execute
+    /// (`src/Runner.Worker/StepsRunner.cs:231-242`); the failed result flips
+    /// the job conclusion like any step failure.
+    #[test]
+    fn unevaluable_post_condition_fails_post_and_keeps_lifo() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("noSuchFunction('a')".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::Native {
+                step_id: "sccache".into(),
+                display_name: "Run sccache".into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // Two mains, one executed post, one failed post record.
+        assert_eq!(summary.step_results.len(), 4);
+        let post_logs: Vec<_> = summary
+            .step_logs
+            .iter()
+            .filter(|log| log.display_name.starts_with("Post "))
+            .collect();
+        assert_eq!(post_logs.len(), 2);
+        // LIFO: the later-registered sccache post drains first and succeeds;
+        // the guarded post keeps its position as a failed record.
+        assert_eq!(post_logs[0].display_name, "Post Run sccache");
+        assert_eq!(post_logs[0].exit_code, 0);
+        assert_eq!(post_logs[1].display_name, "Post Run guarded-action");
+        assert_eq!(post_logs[1].exit_code, 1);
+        assert!(
+            summary
+                .step_results
+                .iter()
+                .any(|result| result.exit_code != 0
+                    && !result.failure_ignored
+                    && result.stderr.contains("could not be evaluated")),
+            "failed post record flips the job conclusion"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Status-function evaluation across job states, in the repo's
+    /// timing-gated style: pure expression evaluation must stay far below
+    /// the bound even on a loaded serial-gate runner.
+    #[test]
+    fn status_function_evaluation_benchmark() {
+        use std::hint::black_box;
+
+        let fresh = JobExecutionState::default();
+        let mut failed = JobExecutionState::default();
+        failed.apply(
+            "failed",
+            &StepExecutionResult {
+                exit_code: 1,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut cancelled = JobExecutionState::default();
+        cancelled.set_cancellation(token.clone());
+        token.request(crate::execution::cancel::CancelReason::ServerRequested);
+
+        // The fixture states answer per upstream before timing anything.
+        assert!(fresh.evaluate_condition(Some("success()")).unwrap());
+        assert!(!fresh.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!failed.evaluate_condition(Some("success()")).unwrap());
+        assert!(failed.evaluate_condition(Some("failure()")).unwrap());
+        assert!(!cancelled.evaluate_condition(Some("success()")).unwrap());
+        assert!(!cancelled.evaluate_condition(Some("failure()")).unwrap());
+        assert!(cancelled.evaluate_condition(Some("cancelled()")).unwrap());
+        assert!(cancelled.evaluate_condition(Some("always()")).unwrap());
+
+        let states = [&fresh, &failed, &cancelled];
+        let conditions = [
+            "success()",
+            "failure()",
+            "cancelled()",
+            "always()",
+            "failure() && steps.failed.outcome == 'failure'",
+            "cancelled() && job.status == 'cancelled'",
+        ];
+        let started = Instant::now();
+        for _ in 0..10_000 {
+            for state in &states {
+                for condition in &conditions {
+                    let _ = black_box(state)
+                        .evaluate_condition(Some(black_box(condition)))
+                        .unwrap();
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "180k status-function evaluations took {elapsed:?}",
+        );
+    }
+
+    /// An unevaluable inner main condition fails the composite umbrella,
+    /// not just the job: without the absorb the umbrella would render exit
+    /// 0 while the job fails.
+    #[test]
+    fn unevaluable_condition_inside_composite_fails_umbrella() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+            },
+            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: Vec::new(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("could not be evaluated"),
+            "failed step reports the condition error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert_eq!(summary.step_logs.len(), 1);
+        assert_eq!(summary.step_logs[0].display_name, "Run local composite");
+        assert_eq!(
+            summary.step_logs[0].exit_code, 1,
+            "umbrella must render failed, not exit 0"
+        );
+        assert!(
+            summary.step_logs[0]
+                .lines
+                .iter()
+                .any(|line| line.starts_with("##[group]")),
+            "failed inner step leaves a section in the umbrella log: {:?}",
+            summary.step_logs[0].lines
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.pre-if` inside a composite fails the umbrella
+    /// without running main or registering post.
+    #[test]
+    fn unevaluable_pre_condition_inside_composite_fails_umbrella() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                    pre_condition: Some("noSuchFunction('a')".into()),
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("always()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert_eq!(summary.step_logs.len(), 1);
+        assert_eq!(
+            summary.step_logs[0].exit_code, 1,
+            "umbrella must render failed, not exit 0"
+        );
+        for (_, args) in &executor.runner().calls {
+            for arg in args {
+                assert!(
+                    !arg.contains("main.js") && !arg.contains("post.js"),
+                    "unevaluable pre must dispatch nothing: {arg:?}"
+                );
+            }
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Node-action analogue of [`CancelDuringExecRunner`]: the first
+    /// `run_timeout_with_env` call (the JavaScript pre entrypoint) fires the
+    /// job token and throws like the ladder-killed child, so the pre lands
+    /// in the cancel-salvage arm; later calls succeed so cleanup still runs.
+    struct CancelDuringNodeRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        fired: bool,
+    }
+
+    impl CommandRunner for CancelDuringNodeRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if !self.fired {
+                self.fired = true;
+                self.token
+                    .request(crate::execution::cancel::CancelReason::ServerRequested);
+                anyhow::bail!("process terminated by signal");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// A JavaScript pre killed by cancellation salvages a failed result that
+    /// keeps the execution error, like the main-step cancel arm — and the
+    /// `always()` cleanup plus the registered post still run.
+    #[test]
+    fn cancelled_pre_step_keeps_execution_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("always()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            script_step("cleanup", "echo cleanup", Some("always()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringNodeRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                fired: false,
+            },
+            token,
+        );
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // Killed pre, cleanup, and the post that stayed registered.
+        assert_eq!(summary.step_results.len(), 3);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("process terminated by signal"),
+            "cancelled pre keeps the execution error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert!(!summary.step_results[1].skipped);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -26560,13 +28200,13 @@ bitcoin-processor-app.push=true")
                 timeout_minutes: None,
             },
         ];
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let mut executor = DockerJobEngine::inert(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
         })
         .with_initial_order(1)
-        .with_step_log_sender(sender);
+        .with_step_log_sender(BoundedStepSender::new(sender));
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -26617,6 +28257,297 @@ bitcoin-processor-app.push=true")
             ]
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_mixed_native_and_javascript_post_actions_in_reverse_registration_order() {
+        // Upstream conformance: `PostJobSteps` is ONE stack drained LIFO
+        // (`src/Runner.Worker/ExecutionContext.cs:222`,
+        // `src/Runner.Worker/StepsRunner.cs`), so a JavaScript post registered
+        // between two native posts runs between them — not after both.
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let sccache = |step_id: &str, display_name: &str| ExecutableStep::Native {
+            step_id: step_id.into(),
+            display_name: display_name.into(),
+            invocation: NativeActionInvocation {
+                git_ref: "v1".into(),
+                adapter: NativeActionAdapter::Sccache,
+                cache_kind: None,
+                source_path: None,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let steps = vec![
+            sccache("sccache-first", "Run sccache-first"),
+            ExecutableStep::JavaScript {
+                step_id: "middle".into(),
+                display_name: "Run middle-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/middle/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/middle/dist/post.js".into()),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/middle".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            sccache("sccache-last", "Run sccache-last"),
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        })
+        .with_initial_order(1)
+        .with_step_log_sender(BoundedStepSender::new(sender));
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        // Three mains plus three posts.
+        assert_eq!(results.len(), 6);
+        // Post-execution markers in runner-call order: each sccache post runs
+        // `--stop-server` (the main runs `--start-server`), the JavaScript
+        // post runs its post entrypoint. LIFO puts the JavaScript post between
+        // the two native posts; the old grouped drain ran both natives first.
+        let post_markers = executor
+            .runner()
+            .calls
+            .iter()
+            .filter_map(|(_, args)| {
+                if args.contains(&"node:20-bookworm".into())
+                    && args.last().is_some_and(|arg| arg.ends_with("post.js"))
+                {
+                    Some("js-post")
+                } else if args
+                    .last()
+                    .is_some_and(|arg| arg.contains("sccache --stop-server"))
+                {
+                    Some("native-post")
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(post_markers, vec!["native-post", "js-post", "native-post"]);
+
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        assert_eq!(
+            logs.iter()
+                .map(|log| (log.order, log.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "Run sccache-first"),
+                (3, "Run middle-action"),
+                (4, "Run sccache-last"),
+                (6, "Post Run sccache-last"),
+                (7, "Post Run middle-action"),
+                (8, "Post Run sccache-first"),
+            ]
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unified_post_stack_still_gates_each_post_on_its_condition() {
+        // The merge unifies ORDER only: every entry keeps its own post
+        // condition evaluated against the job's final status.
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "sccache".into(),
+                display_name: "Run sccache".into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("failure()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "plain".into(),
+                display_name: "Run plain".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/plain/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/plain/dist/post.js".into()),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/plain".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        })
+        .with_initial_order(1)
+        .with_step_log_sender(BoundedStepSender::new(sender));
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        // All mains succeed, so `failure()` is false: the guarded post is
+        // skipped while the `always()` native post and the unconditional
+        // JavaScript post run in LIFO order.
+        assert_eq!(results.len(), 5);
+        let node_posts = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.contains(&"node:20-bookworm".into())
+                    && args.last().is_some_and(|arg| arg.ends_with("post.js"))
+            })
+            .count();
+        assert_eq!(node_posts, 1);
+        assert!(executor.runner().calls.iter().any(|(_, args)| {
+            args.last()
+                .is_some_and(|arg| arg.contains("sccache --stop-server"))
+        }));
+
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        assert_eq!(
+            logs.iter()
+                .map(|log| (log.order, log.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "Run sccache"),
+                (3, "Run guarded"),
+                (4, "Run plain"),
+                // Two surviving posts: complete order 9, first post 7.
+                (7, "Post Run plain"),
+                (8, "Post Run sccache"),
+            ]
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn unified_post_stack_drain_benchmark() {
+        use std::hint::black_box;
+
+        // A mixed stack like the conformance tests above: two `always()`
+        // native posts around one `failure()` JavaScript post.
+        let native = |step_id: &str| {
+            PostAction::Native(PostNativeAction {
+                step_id: step_id.into(),
+                display_name: step_id.into(),
+                invocation: NativeActionInvocation {
+                    git_ref: "v1".into(),
+                    adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: Some("always()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+                umbrella_display: None,
+            })
+        };
+        let stack = vec![
+            native("sccache-first"),
+            PostAction::JavaScript(PostJavaScriptAction {
+                step_id: "guarded".into(),
+                display_name: "guarded".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("failure()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: Some("failure()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+                umbrella_display: None,
+            }),
+            native("sccache-last"),
+        ];
+        let state = JobExecutionState::default();
+        // LIFO survivors on a successful job: the `failure()` post drops out.
+        assert_eq!(
+            stack
+                .iter()
+                .rev()
+                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
+                .map(PostAction::step_id)
+                .collect::<Vec<_>>(),
+            vec!["sccache-last", "sccache-first"]
+        );
+
+        // 20k drains of the mixed stack; pure expression evaluation must stay
+        // far below the bound even on a loaded serial-gate runner.
+        let started = Instant::now();
+        for _ in 0..20_000 {
+            let drained: Vec<&PostAction> = black_box(&stack)
+                .iter()
+                .rev()
+                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
+                .collect();
+            assert_eq!(drained.len(), 2);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "20k mixed post-stack drains took {elapsed:?}",
+        );
     }
 
     #[test]

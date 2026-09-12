@@ -10,10 +10,11 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 
 use velnor_bench::{
-    drivers,
+    compare, drivers,
     env::{EnvironmentIdentity, ProbeInputs},
     record::{BenchRecord, Summaries, RESULT_SCHEMA},
     scenario::{self, Capabilities, Runnability},
+    soak,
     sys::Runner,
 };
 
@@ -68,7 +69,40 @@ enum Command {
         /// Concurrency for the concurrent-jobs scenario.
         #[arg(long, default_value_t = 2)]
         concurrency: usize,
+        /// Comparison context entries (`key=value`): runner identity, trust
+        /// class, image tag — what differs between the runs being compared.
+        #[arg(long = "context", value_name = "KEY=VALUE")]
+        contexts: Vec<String>,
         /// Append the record here instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Run one scenario round after round, sampling owned-object residue and
+    /// scratch growth after every round. Emits an NDJSON soak report.
+    Soak {
+        /// Scenario id, as printed by `list`.
+        #[arg(long)]
+        scenario: String,
+        /// Soak rounds. At least 3; more rounds make the growth slope honest.
+        #[arg(long, default_value_t = 10)]
+        rounds: usize,
+        /// Concurrency for the concurrent-jobs scenario.
+        #[arg(long, default_value_t = 2)]
+        concurrency: usize,
+        /// Append the report here instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Compare two NDJSON result records for one scenario and emit an NDJSON
+    /// comparison. Ratios are gated on sample size like the percentiles.
+    Compare {
+        /// Baseline record (one NDJSON line).
+        #[arg(long)]
+        baseline: PathBuf,
+        /// Candidate record (one NDJSON line).
+        #[arg(long)]
+        candidate: PathBuf,
+        /// Append the comparison here instead of stdout.
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -132,6 +166,7 @@ fn main() -> Result<()> {
             scenario: id,
             iterations,
             concurrency,
+            contexts,
             output,
         } => {
             let declared = scenario::find(&id)
@@ -187,8 +222,17 @@ fn main() -> Result<()> {
                 observations,
                 summaries,
                 notes,
+                context: parse_contexts(&contexts)?,
             };
             record.validate()?;
+            let uncontained = record.observations.iter().any(|observation| {
+                observation.fault.as_ref().is_some_and(|outcome| {
+                    // A never-injected run is not a measurement of anything,
+                    // but its record — with the detail diagnostics — is still
+                    // written; the nonzero exit below marks the miss.
+                    !outcome.injected || !outcome.contained
+                })
+            });
             let line = record.to_ndjson()?;
             match output {
                 Some(path) => {
@@ -202,9 +246,125 @@ fn main() -> Result<()> {
                 }
                 None => println!("{line}"),
             }
+            if uncontained {
+                anyhow::bail!(
+                    "{id}: the record is written, but at least one fault outcome is uncontained or never injected"
+                );
+            }
+        }
+        Command::Soak {
+            scenario: id,
+            rounds,
+            concurrency,
+            output,
+        } => {
+            let declared = scenario::find(&id)
+                .ok_or_else(|| anyhow::anyhow!("{id} is not a declared scenario"))?;
+            let runnability = declared.runnability(capabilities);
+            let Some(driver) = runnability.driver() else {
+                anyhow::bail!(
+                    "{id} cannot soak on this host: missing {}",
+                    match &runnability {
+                        Runnability::Unrunnable { missing } => join_requirements(missing),
+                        _ => unreachable!("driver() is None only for Unrunnable"),
+                    }
+                );
+            };
+            let mut workload = drivers::build(declared, driver)?;
+            let mut context = drivers::Context {
+                work_root: work_root.clone(),
+                velnor_repo: cli.velnor_repo.clone(),
+                job_image: cli.job_image.clone(),
+                iterations: rounds,
+                concurrency,
+                runner,
+            };
+            let run_id = format!("{}-{}", std::process::id(), unix_ms());
+            let report = soak::run(
+                workload.as_mut(),
+                &mut context,
+                rounds,
+                &run_id,
+                unix_ms(),
+                declared.id,
+                driver,
+            )?;
+            let line = report.to_ndjson()?;
+            match output {
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    writeln!(file, "{line}")?;
+                    eprintln!(
+                        "wrote 1 soak report to {} (passed: {})",
+                        path.display(),
+                        report.verdict.passed
+                    );
+                }
+                None => println!("{line}"),
+            }
+            if !report.verdict.passed {
+                anyhow::bail!("{id}: soak failed with owned-object residue");
+            }
+        }
+        Command::Compare {
+            baseline,
+            candidate,
+            output,
+        } => {
+            let baseline_record: BenchRecord = read_record(&baseline)?;
+            let candidate_record: BenchRecord = read_record(&candidate)?;
+            baseline_record.validate().with_context(|| {
+                format!("baseline {} is not a valid record", baseline.display())
+            })?;
+            candidate_record.validate().with_context(|| {
+                format!("candidate {} is not a valid record", candidate.display())
+            })?;
+            let comparison = compare::compare(&baseline_record, &candidate_record)?;
+            let line = comparison.to_ndjson()?;
+            match output {
+                Some(path) => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    writeln!(file, "{line}")?;
+                    eprintln!("wrote 1 comparison to {}", path.display());
+                }
+                None => println!("{line}"),
+            }
         }
     }
     Ok(())
+}
+
+fn read_record(path: &std::path::Path) -> Result<BenchRecord> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .with_context(|| format!("{} holds no record", path.display()))?;
+    serde_json::from_str(line).with_context(|| format!("parsing {}", path.display()))
+}
+
+fn parse_contexts(contexts: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut map = std::collections::BTreeMap::new();
+    for entry in contexts {
+        let (key, value) = entry
+            .split_once('=')
+            .with_context(|| format!("--context {entry:?} must be KEY=VALUE"))?;
+        if key.trim().is_empty() {
+            anyhow::bail!("--context {entry:?} has an empty key");
+        }
+        map.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(map)
 }
 
 fn context_environment_gaps(environment: &EnvironmentIdentity) -> Vec<(&'static str, String)> {

@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use velnor_model::telemetry::TelemetryLane;
 
 use crate::{
+    census::DockerCensus,
     env::EnvironmentIdentity,
+    fault::FaultOutcome,
     gittrace::GitEvidence,
     scenario::{Driver, Family, Requirement, Runnability},
     stage::{CheckoutPhase, Stage},
@@ -39,6 +41,13 @@ pub struct Observation {
     pub checkout_phases_ms: BTreeMap<CheckoutPhase, u64>,
     pub resources: Resources,
     pub git: GitEvidence,
+    /// Per-class Docker invocation census, in the runner's closed vocabulary.
+    /// Defaulted so records written before the census existed still parse.
+    #[serde(default)]
+    pub docker_census: DockerCensus,
+    /// Fault outcome. `Some` exactly for the `fault/*` scenarios.
+    #[serde(default)]
+    pub fault: Option<FaultOutcome>,
 }
 
 impl Observation {
@@ -74,12 +83,26 @@ pub struct Resources {
     pub bytes_reused: u64,
 }
 
+/// Distribution summaries for one Docker operation class.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CensusSummary {
+    pub count: Summary,
+    pub latency_ms: Summary,
+}
+
 /// Distribution summaries over a scenario's observations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Summaries {
     pub total_ms: Summary,
     pub stages_ms: BTreeMap<Stage, Summary>,
     pub checkout_phases_ms: BTreeMap<CheckoutPhase, Summary>,
+    /// Per-class census summaries, keyed by the runner's class label. A class
+    /// is summarised when any observation carries it, with zeroes filled in
+    /// for the observations that do not: census absence is observed-zero, not
+    /// unobserved like a missing stage. Defaulted so records written before
+    /// the census existed still parse.
+    #[serde(default)]
+    pub docker_census: BTreeMap<String, CensusSummary>,
     /// Per-lane totals; the whole point of the lane split.
     pub lane_ms: BTreeMap<TelemetryLane, Summary>,
     pub cpu_user_us: Summary,
@@ -135,6 +158,49 @@ impl Summaries {
             }
         }
 
+        // The census labels are a closed set — the runner's DockerOp
+        // vocabulary — so iterate it. Unlike stages, a class missing from some
+        // observation is observed-zero for that round, not unobserved: the
+        // census only carries classes the round actually invoked. Zero-fill
+        // the gaps so an intermittent class is summarised instead of silently
+        // dropped.
+        let mut docker_census = BTreeMap::new();
+        for op in velnor_runner::docker::DockerOp::ALL {
+            let label = op.label();
+            if observations
+                .iter()
+                .any(|observation| observation.docker_census.by_class.contains_key(label))
+            {
+                let counts: Vec<u64> = observations
+                    .iter()
+                    .map(|observation| {
+                        observation
+                            .docker_census
+                            .by_class
+                            .get(label)
+                            .map_or(0, |class| class.count)
+                    })
+                    .collect();
+                let latencies: Vec<u64> = observations
+                    .iter()
+                    .map(|observation| {
+                        observation
+                            .docker_census
+                            .by_class
+                            .get(label)
+                            .map_or(0, |class| class.latency_ms)
+                    })
+                    .collect();
+                docker_census.insert(
+                    label.to_owned(),
+                    CensusSummary {
+                        count: Summary::new(&counts)?,
+                        latency_ms: Summary::new(&latencies)?,
+                    },
+                );
+            }
+        }
+
         let mut lane_ms = BTreeMap::new();
         for lane in [TelemetryLane::Velnor, TelemetryLane::Github] {
             let values: Vec<u64> = observations
@@ -148,6 +214,7 @@ impl Summaries {
             total_ms: field(|observation| observation.total_ms)?,
             stages_ms,
             checkout_phases_ms,
+            docker_census,
             lane_ms,
             cpu_user_us: field(|observation| observation.resources.cpu_user_us)?,
             cpu_system_us: field(|observation| observation.resources.cpu_system_us)?,
@@ -181,6 +248,11 @@ pub struct BenchRecord {
     pub summaries: Summaries,
     /// Anything a reader must know to interpret the numbers honestly.
     pub notes: Vec<String>,
+    /// Comparison dimensions: runner identity, trust class, image tag — the
+    /// answer to "what differs between the two runs being compared". Defaulted
+    /// so records written before it existed still parse.
+    #[serde(default)]
+    pub context: BTreeMap<String, String>,
 }
 
 /// Why a record is not a valid measurement.
@@ -218,6 +290,21 @@ pub enum RecordError {
         required: usize,
     },
     SummaryMismatch,
+    UnknownCensusLabel {
+        label: String,
+    },
+    CensusCountMismatch {
+        census: u64,
+        resources: u64,
+    },
+    MissingFaultOutcome,
+    UnexpectedFaultOutcome,
+    UnknownFaultClass {
+        class: String,
+    },
+    FaultResidueWhileContained {
+        class: String,
+    },
 }
 
 impl std::fmt::Display for RecordError {
@@ -294,6 +381,30 @@ impl std::fmt::Display for RecordError {
                     "record summaries are not derived from observations"
                 )
             }
+            Self::UnknownCensusLabel { label } => write!(
+                formatter,
+                "census label {label:?} is not in the runner's DockerOp vocabulary"
+            ),
+            Self::CensusCountMismatch { census, resources } => write!(
+                formatter,
+                "census counts {census} docker invocations but resources report {resources}"
+            ),
+            Self::MissingFaultOutcome => write!(
+                formatter,
+                "a fault scenario observation must carry its fault outcome"
+            ),
+            Self::UnexpectedFaultOutcome => write!(
+                formatter,
+                "only fault scenario observations may carry a fault outcome"
+            ),
+            Self::UnknownFaultClass { class } => write!(
+                formatter,
+                "fault outcome names unknown catalogue class {class:?}"
+            ),
+            Self::FaultResidueWhileContained { class } => write!(
+                formatter,
+                "fault outcome for {class:?} claims containment with residue left behind"
+            ),
         }
     }
 }
@@ -358,6 +469,49 @@ impl BenchRecord {
         for observation in &self.observations {
             if !observation.git.is_valid() {
                 return Err(RecordError::InvalidGitEvidence);
+            }
+            if !observation.docker_census.labels_are_known() {
+                let label = observation
+                    .docker_census
+                    .by_class
+                    .keys()
+                    .find(|label| {
+                        !velnor_runner::docker::DockerOp::ALL
+                            .iter()
+                            .any(|op| op.label() == label.as_str())
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+                return Err(RecordError::UnknownCensusLabel { label });
+            }
+            if observation.docker_census.total() != observation.resources.docker_invocations {
+                return Err(RecordError::CensusCountMismatch {
+                    census: observation.docker_census.total(),
+                    resources: observation.resources.docker_invocations,
+                });
+            }
+            let is_fault_row = scenario.family == Family::Fault;
+            match &observation.fault {
+                None if is_fault_row => return Err(RecordError::MissingFaultOutcome),
+                Some(_) if !is_fault_row => return Err(RecordError::UnexpectedFaultOutcome),
+                Some(outcome) => {
+                    if crate::fault::find(&outcome.class).is_none() {
+                        return Err(RecordError::UnknownFaultClass {
+                            class: outcome.class.clone(),
+                        });
+                    }
+                    // A never-injected outcome still validates: rejecting it
+                    // here would discard the record — and the detail
+                    // diagnostics pinning down why the fault never triggered.
+                    // `run` writes the record and exits nonzero instead, on
+                    // the same path as an uncontained outcome.
+                    if outcome.contained && !outcome.residue.is_empty() {
+                        return Err(RecordError::FaultResidueWhileContained {
+                            class: outcome.class.clone(),
+                        });
+                    }
+                }
+                None => {}
             }
             if matches!(
                 &observation.git,
@@ -429,6 +583,16 @@ mod tests {
                 ..Resources::default()
             },
             git: GitEvidence::NotMeasured,
+            docker_census: DockerCensus {
+                by_class: BTreeMap::from([(
+                    "query".to_owned(),
+                    crate::census::ClassObservation {
+                        count: 2,
+                        latency_ms: 4,
+                    },
+                )]),
+            },
+            fault: None,
         }
     }
 
@@ -451,6 +615,7 @@ mod tests {
             observations: observations.clone(),
             summaries: Summaries::new(&observations).expect("summaries"),
             notes: Vec::new(),
+            context: BTreeMap::new(),
         }
     }
 
@@ -685,6 +850,8 @@ mod tests {
             checkout_phases_ms: BTreeMap::new(),
             resources: Resources::default(),
             git: GitEvidence::NotMeasured,
+            docker_census: DockerCensus::default(),
+            fault: None,
         };
         assert_eq!(observation.lane_ms(TelemetryLane::Github), 60);
         assert_eq!(observation.lane_ms(TelemetryLane::Velnor), 40);
@@ -714,5 +881,220 @@ mod tests {
                 required: crate::stats::MIN_SAMPLES,
             })
         );
+    }
+
+    #[test]
+    fn the_census_is_summarised_per_class() {
+        let record = record(Driver::DockerDirect, Stage::ContainerStart);
+        let summary = record
+            .summaries
+            .docker_census
+            .get("query")
+            .expect("query census summary");
+        assert_eq!(summary.count.samples, 4);
+        assert_eq!(summary.count.min, 2);
+        assert_eq!(summary.count.max, 2);
+        assert_eq!(summary.latency_ms.min, 4);
+    }
+
+    #[test]
+    fn a_census_class_missing_from_some_iterations_is_zero_filled_not_dropped() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        // One round invoked no docker at all: its census is empty and its
+        // resource count agrees, so absence is observed-zero.
+        record.observations[0].docker_census.by_class.clear();
+        record.observations[0].resources.docker_invocations = 0;
+        record.summaries = Summaries::new(&record.observations).expect("summaries");
+        let summary = record
+            .summaries
+            .docker_census
+            .get("query")
+            .expect("an intermittent class is still summarised");
+        assert_eq!(summary.count.samples, 4);
+        assert_eq!(summary.count.min, 0);
+        assert_eq!(summary.count.max, 2);
+        assert_eq!(summary.latency_ms.min, 0);
+        assert_eq!(summary.latency_ms.max, 4);
+        record.validate().expect("zero-filled summaries validate");
+    }
+
+    #[test]
+    fn a_census_label_outside_the_runner_vocabulary_is_rejected() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations[0].docker_census.by_class.insert(
+            "docker-exec".to_owned(),
+            crate::census::ClassObservation {
+                count: 1,
+                latency_ms: 1,
+            },
+        );
+        // Keep the totals consistent so the label is what fails.
+        record.observations[0].resources.docker_invocations = 3;
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::UnknownCensusLabel {
+                label: "docker-exec".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_census_that_disagrees_with_resources_is_rejected() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations[0].resources.docker_invocations = 99;
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::CensusCountMismatch {
+                census: 2,
+                resources: 99,
+            })
+        );
+    }
+
+    fn fault_record() -> BenchRecord {
+        let outcome = crate::fault::FaultOutcome {
+            class: "docker-kill-mid-step".to_owned(),
+            injected: true,
+            contained: true,
+            residue: Vec::new(),
+            detail: "kill delivered; teardown removed the container".to_owned(),
+        };
+        let observations: Vec<Observation> = (1..=4)
+            .map(|index| {
+                let mut observation = observation(index * 10, Stage::ContainerStart);
+                observation.fault = Some(outcome.clone());
+                observation
+            })
+            .collect();
+        BenchRecord {
+            schema: RESULT_SCHEMA.to_owned(),
+            run_id: "fault-test".to_owned(),
+            recorded_at_unix_ms: 1,
+            scenario: "fault/container-killed-mid-step".to_owned(),
+            family: Family::Fault,
+            driver: Driver::DockerDirect,
+            runnability: Runnability::Degraded {
+                driver: Driver::DockerDirect,
+                missing_for_preferred: vec![crate::scenario::Requirement::VelnorJobDriver],
+            },
+            environment: environment(),
+            observations: observations.clone(),
+            summaries: Summaries::new(&observations).expect("summaries"),
+            notes: Vec::new(),
+            context: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_fault_record_with_a_catalogued_outcome_validates() {
+        fault_record().validate().expect("valid fault record");
+    }
+
+    #[test]
+    fn a_fault_row_without_an_outcome_is_rejected() {
+        let mut record = fault_record();
+        record.observations[0].fault = None;
+        assert_eq!(record.validate(), Err(RecordError::MissingFaultOutcome));
+    }
+
+    #[test]
+    fn a_non_fault_row_with_an_outcome_is_rejected() {
+        let mut record = record(Driver::DockerDirect, Stage::ContainerStart);
+        record.observations[0].fault = Some(crate::fault::FaultOutcome {
+            class: "docker-kill-mid-step".to_owned(),
+            injected: true,
+            contained: true,
+            residue: Vec::new(),
+            detail: String::new(),
+        });
+        assert_eq!(record.validate(), Err(RecordError::UnexpectedFaultOutcome));
+    }
+
+    #[test]
+    fn a_fault_outcome_outside_the_catalogue_is_rejected() {
+        let mut record = fault_record();
+        record.observations[0]
+            .fault
+            .as_mut()
+            .expect("outcome")
+            .class = "docker-invented".to_owned();
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::UnknownFaultClass {
+                class: "docker-invented".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_fault_that_never_triggered_keeps_its_record() {
+        // Validation accepts the miss so `run` can write the record — with
+        // the detail diagnostics — and exit nonzero on the uncontained path.
+        let mut record = fault_record();
+        let outcome = record.observations[0].fault.as_mut().expect("outcome");
+        outcome.injected = false;
+        outcome.contained = false;
+        outcome.detail = "running=false kill_exit=0 wait_exit=-1".to_owned();
+        record
+            .validate()
+            .expect("an uninjected run is still a record");
+    }
+
+    #[test]
+    fn containment_with_residue_is_rejected() {
+        let mut record = fault_record();
+        let outcome = record.observations[0].fault.as_mut().expect("outcome");
+        outcome
+            .residue
+            .push("container velnor-bench-fault-1".to_owned());
+        assert_eq!(
+            record.validate(),
+            Err(RecordError::FaultResidueWhileContained {
+                class: "docker-kill-mid-step".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn records_written_before_the_census_still_parse() {
+        // The census and fault fields are defaulted: an old v2 line without
+        // them deserialises, with an empty census.
+        let record = record(Driver::DockerDirect, Stage::ContainerStart);
+        let mut value = serde_json::to_value(&record).expect("serialise");
+        for observation in value["observations"].as_array_mut().expect("observations") {
+            observation
+                .as_object_mut()
+                .expect("observation")
+                .remove("docker_census");
+            observation
+                .as_object_mut()
+                .expect("observation")
+                .remove("fault");
+        }
+        value
+            .get_mut("summaries")
+            .expect("summaries")
+            .as_object_mut()
+            .expect("summaries object")
+            .remove("docker_census");
+        let parsed: BenchRecord = serde_json::from_value(value).expect("old record parses");
+        assert!(parsed.summaries.docker_census.is_empty());
+        // The census defaults empty while resources still report invocations,
+        // so validation reports the mismatch honestly instead of passing.
+        assert_eq!(
+            parsed.validate(),
+            Err(RecordError::CensusCountMismatch {
+                census: 0,
+                resources: 2,
+            })
+        );
+        let mut reparsed = parsed.clone();
+        for observation in &mut reparsed.observations {
+            observation.resources.docker_invocations = 0;
+        }
+        reparsed.summaries = Summaries::new(&reparsed.observations).expect("summaries");
+        reparsed
+            .validate()
+            .expect("zero-docker old record validates");
     }
 }

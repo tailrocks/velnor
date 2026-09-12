@@ -3460,4 +3460,82 @@ mod tests {
             ["-C", "/__w", "clean", "-ffdx"]
         );
     }
+
+    /// In-memory JSONL sink with the runner's production shape: `fmt::json`
+    /// plus span-close events, the exact layer `telemetry::init` installs.
+    #[derive(Clone)]
+    struct BufferWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn checkout_emits_the_five_bench_phase_spans() {
+        // Span contract for `velnor-bench/src/trace.rs`: the benchmark reads
+        // checkout phase timings from trace.jsonl span-close records, keyed by
+        // these span names and `phase` fields. Renaming either side breaks
+        // this test on purpose. Real git over a file:// origin, so every span
+        // below fires through the production path, not a fake.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace);
+        let store = fixture.store();
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_current_span(true)
+            .with_writer({
+                let buffer = buffer.clone();
+                move || BufferWriter(buffer.clone())
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut runner = ProcessCommandRunner;
+            let mut log = Vec::new();
+            execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&store))
+                .expect("checkout over a file:// origin succeeds");
+        });
+
+        let bytes = buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let text = String::from_utf8(bytes).expect("trace output is UTF-8");
+        let mut closed: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).expect("trace line is JSON");
+            if record["fields"]["message"] != "close" {
+                continue;
+            }
+            let name = record["span"]["name"].as_str().unwrap_or("").to_owned();
+            let phase = record["span"]["phase"].as_str().unwrap_or("").to_owned();
+            closed.push((name, phase));
+        }
+        for (name, phase) in [
+            ("checkout.mirror.lock_wait", "mirror-lock-wait"),
+            ("checkout.mirror.fetch", "mirror-fetch"),
+            ("checkout.workspace.fetch", "workspace-fetch"),
+            ("checkout.workspace.checkout", "workspace-checkout"),
+            ("checkout.workspace.mtime_normalize", "mtime-normalization"),
+        ] {
+            assert!(
+                closed
+                    .iter()
+                    .any(|closed| closed.0 == name && closed.1 == phase),
+                "missing span-close ({name}, {phase}) in {closed:?}"
+            );
+        }
+    }
 }

@@ -20,3 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 velnor-runner = { path = "../velnor-runner", version = "0.1.269" }
+
+[dev-dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true

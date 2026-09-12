@@ -2349,4 +2349,138 @@ someone-elses-builder         docker-container
         drop(leases);
         fs::remove_dir_all(run_root).unwrap();
     }
+
+    /// A trusted job on a custom pool mounts its executable stores under the
+    /// admitted pool scope, and the runner leases exactly that scope: budget
+    /// GC must evict idle custom-pool and floor stores while the live
+    /// `bin/public-forks/<repo>` store survives. Legacy layout, where the
+    /// keys embed trust — the shape a class-namespace divergence (mounts
+    /// under `untrusted`, leases admitted-verbatim) would break by leaving
+    /// the live store unleased and evictable.
+    #[test]
+    fn custom_pool_legacy_leases_protect_mounted_executable_stores() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-custom-pool-lease-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let run_root = root.join("run");
+        // A job temp dir under a slot, so the store helpers normalize to the
+        // daemon-shared work root exactly like production.
+        let temp_host = work.join("slot-1/job-1/temp");
+        let trust = crate::trust_class::AdmittedTrust::narrow(
+            crate::trust_class::TrustClass::Trusted,
+            "public-forks",
+        );
+        let effective = trust.effective_scope();
+        assert_eq!(effective, "public-forks");
+        let repository_key = crate::container::sanitize_store_key("octo/base");
+
+        let cargo_root = crate::container::cargo_store_host(&temp_host, effective);
+        let mise_root = crate::container::mise_store_host(&temp_host, effective);
+        assert_eq!(
+            cargo_root,
+            work.join("_velnor_cargo"),
+            "custom-pool cargo root must be the legacy root"
+        );
+        // The mounts the job writes: the admitted namespace, not the class
+        // floor.
+        let live_bin =
+            crate::container::cargo_executable_store_host(&temp_host, effective, &repository_key);
+        assert_eq!(
+            live_bin,
+            work.join("_velnor_cargo/bin/public-forks/octo_base"),
+            "a trusted custom-pool job mounts its admitted namespace"
+        );
+        let live_installs =
+            crate::container::mise_executable_store_host(&temp_host, effective, &repository_key);
+        let live_binaries =
+            crate::container::mise_binary_store_host(&temp_host, effective, &repository_key);
+
+        // An idle same-pool store and an idle floor store, so the pass is not
+        // vacuously empty: both must be evictable while the live store stands.
+        let idle_bin = work.join("_velnor_cargo/bin/public-forks/octo_idle");
+        let floor_bin = work.join("_velnor_cargo/bin/untrusted/octo_base");
+        let idle_installs = work.join("_velnor_mise/installs/public-forks/octo_idle");
+        let idle_binaries = work.join("_velnor_mise/binaries/public-forks/octo_idle");
+        for path in [
+            &live_bin,
+            &live_installs,
+            &live_binaries,
+            &idle_bin,
+            &floor_bin,
+            &idle_installs,
+            &idle_binaries,
+        ] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("tool"), vec![0; 16]).unwrap();
+        }
+        // Idle stores sort before the live ones under the oldest-first
+        // budget walk, deterministically.
+        backdate(&idle_bin, DAY * 3);
+        backdate(&floor_bin, DAY * 2);
+        backdate(&idle_installs, DAY * 3);
+        backdate(&idle_binaries, DAY * 3);
+
+        // The runner's lease publication, through the shared derivation: one
+        // holder lease per live scope, read back through the real round-trip.
+        let stale_after = Duration::from_secs(60);
+        let holder = "job-1";
+        let scopes = [
+            (
+                "cargo",
+                crate::storage::gc_scope_below_root(&live_bin, &cargo_root).unwrap(),
+            ),
+            (
+                "mise",
+                crate::storage::gc_scope_below_root(&live_installs, &mise_root).unwrap(),
+            ),
+            (
+                "mise",
+                crate::storage::gc_scope_below_root(&live_binaries, &mise_root).unwrap(),
+            ),
+        ];
+        assert_eq!(scopes[0].1, "bin/public-forks/octo_base");
+        assert_eq!(scopes[1].1, "installs/public-forks/octo_base");
+        assert_eq!(scopes[2].1, "binaries/public-forks/octo_base");
+        let leases: Vec<_> = scopes
+            .iter()
+            .map(|(class, scope)| {
+                crate::capacity::ScopeLease::acquire(
+                    &run_root,
+                    class,
+                    &format!("{scope}/{holder}"),
+                    stale_after,
+                )
+                .unwrap()
+            })
+            .collect();
+        let active = crate::capacity::active_scopes(&run_root, stale_after).unwrap();
+
+        let listing = cache_listing_with_layout(&work, false, None).unwrap();
+        let mut policy = policy();
+        policy.in_use_scopes = active;
+        // Bind each class budget to its live bytes: every idle store must go,
+        // the live ones must stand.
+        policy.class_budgets = BTreeMap::from([(CacheStore::Cargo, 16), (CacheStore::Mise, 32)]);
+        let candidates = select_eviction_candidates(&listing, &policy);
+        let evicted: BTreeSet<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect();
+        for idle in [&idle_bin, &floor_bin, &idle_installs, &idle_binaries] {
+            assert!(
+                evicted.contains(idle),
+                "idle store {} must be evicted: {evicted:?}",
+                idle.display()
+            );
+        }
+        for live in [&live_bin, &live_installs, &live_binaries] {
+            assert!(
+                !evicted.contains(live),
+                "live custom-pool store {} is leased and must survive: {evicted:?}",
+                live.display()
+            );
+        }
+        drop(leases);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

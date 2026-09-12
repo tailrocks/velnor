@@ -145,6 +145,8 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-runner/src/{runner.rs (job admission + effective trust threading), trust_class.rs (admitted scope), trust_scope.rs (scope normalization), github_adapter.rs (cargo-target scope trap), storage.rs + container.rs + store_catalog.rs + cache.rs (explicit-scope store roots, pool+untrusted GC), executor.rs (job trust in execution state)}` (TrustClass enforcement in job admission on every pool; pool flag as ceiling) | codex-lead | complete — trust-admission-fork (`ee95c5d4`) |
 | `crates/velnor-runner/src/{gha_cache.rs (repo-identity namespace + live-job credential registry + route auth), runner.rs (admission registration hook), runtime_env.rs (single runtime-credential accessor)}` (GHA cache namespaced by server-attested repo+ref, never by the per-job token) | codex-lead | complete — gha-cache-repo-namespace |
 | `crates/velnor-runner/src/{runner.rs (derive-before-persist), ops.rs (admission row + telemetry)}, crates/velnor-model/src/job_summary.rs, crates/velnor-control/src/store/{migrations.rs (v18), records.rs}` (trust derived before admission persistence; job trust class + effective scope on admission row/telemetry) | codex-lead | complete — F-V1 (`65b1630d`; corrections `d37ad166`, `admit` binding) |
+| `crates/velnor-runner/src/{trust_class.rs (workflow_run numeric ids, clone-URL host + SSH), runner.rs (case-insensitive secret prefix), github_adapter.rs (shared trust predicate contract)}` (red-team F-V2..F-V5 trust fixes, fail-closed) | codex-lead | complete — R0-fv2v5 (`fe5ea25f`) |
+| `crates/velnor-runner/src/{trust_class.rs (exact-two clone-URL segments), storage.rs (shared lease-scope derivation), runner.rs (lease call sites), cache.rs (custom-pool lease-vs-mount conformance)}` (R0-fv2v5 review corrections: fail-closed clone-URL identity, converged lease/mount contract pinned) | codex-lead | complete — R0-fv2v5 correction |
 | *(convergence 2026-09-12: both rows kept as landed history. The two `gha-cache-repo-namespace` mechanisms collided — main's in-memory live-job registry (§102) vs the accepted wave package's durable file-session registry with fork read-through chains (§13, `aeb1f257`/`abe0a07b`); the converged tree keeps the file-session design and drops the registry. See the convergence record at the end of this file.)* | | |
 
 ## 8. Discovered bug classes
@@ -228,6 +230,18 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §103). |
 | 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§103). |
 | 2026-09-12 | Line convergence: one `perf/docker-rust-mbx` head now contains the perf trust line, the fix cache half, and `origin/main` — merges `02c2e9db` + `0f2b02f5`, full SHA record in §104. |
+| 2026-09-12 | R0-fv2v5 closed red-team F-V2 (`workflow_run` numeric ids), F-V3 (clone-URL host + SSH), F-V4 (case-insensitive secret prefix) in `fe5ea25f`; F-V5 verified closed by the §104 convergence with the shared trust predicate pinned by test (§105). |
+| 2026-09-12 | R0-fv2v5 correction fixed the clone-URL identity to exactly two path segments (`evil/octo/base` no longer corroborates `octo/base`) and re-verified the custom-pool lease report against the converged tree — the `StoreTrustClass` divergence it names was deleted by the convergence, and a lease-vs-mount conformance test now pins the admitted-verbatim contract (§105). |
+| 2026-09-12 | R1-post merged the native + JavaScript post-action lists into one LIFO stack per upstream `PostJobSteps`, keeping per-entry post conditions; the mixed-order conformance test matches upstream LIFO (§106). |
+| 2026-09-12 | R1-cond gave the step loop cancel re-evaluation (a killed step records failure and remaining conditions re-evaluate fresh instead of breaking), failed pre/post records on unevaluable conditions instead of silent skips, and a `status-conditions` dual-lane workflow pinning all four status functions plus the fail-closed unevaluable step for R2-v2v4's live run (§107). |
+| 2026-09-12 | R1-cond correction fixed the vacuous bad-if pin (an `always() &&` guard so the unevaluable RHS evaluates instead of short-circuiting to a skip), kept the execution error in the cancelled pre-step record, and absorbed unevaluable inner conditions into the composite umbrella so it renders failed (§107). |
+| 2026-09-12 | R1-cmd finished the command surface: warn-and-honor `set-output`/`save-state` with the name-required error (correcting the env-files-only premise against hosted behavior), loud `add-matcher`/`remove-matcher` rejection, job-env unsecure opt-ins, a real `hashFiles --follow-symbolic-links` mode, and a `command-surface` dual-lane pin for R2-v2v4's live run (§108). |
+| 2026-09-12 | R1-cmd correction fixed no-follow file-link hashing (target content, not empty) with the GitHub-lane pin assertion, follow-mode sibling double-yield behind an ancestor-chain guard, the no-follow broken-link expression error, and job-scoped deprecated-command telemetry (§108). |
+| 2026-09-13 | R1-cmd second correction re-ran the four review issues: all four cited `main`-tree line numbers, so each was re-verified against the `r0-fv2v5` tree and the fetched upstream sources instead of re-fixed, and the glob-reached-link gap the review named got a unit assertion plus a single-file `pin/l*.txt` pin the GitHub lane can prove (§108). |
+| 2026-09-13 | R1-pub bounded the step publishers: bounded channels with counted best-effort drops, a 30s deadline on every publish network call, feed drop-and-reconnect on stall, and an entry- plus byte-capped streamed-log mirror; drain-before-exit kept, with the drop counts on the forensics line (§109). |
+| 2026-09-13 | R1-pub correction counted the mirror evictions on the forensics line, stamped a truncation marker into the merged cancel-path log when drops/evictions are nonzero, and re-grounded the single-oversize-record carve-out on `ScriptJobResult` retention instead of the nonexistent producer line-buffering cap (§109). |
+| 2026-09-13 | R1-bench landed the WP-17 census/fault/soak/compare core: runner `docker::metrics::snapshot`, checkout span contract pinned, `CommandRunner` fault decorator, bench census/fault-catalogue/trace/soak/compare modules, `fault/*` + `lifecycle/trust-partition` rows, and the `float_roundtrip` record-integrity fix — all proven against a live Engine (§110). |
+| 2026-09-13 | R1-bench correction closed all five review issues: fail-closed fault residue sampling (`Result` + uncontained-on-sampling-error, network `not found` vocabulary fixed live), soak image sampling with per-round build-image teardown, zero-filled intermittent census classes, records kept for uninjected runs with the nonzero exit preserved, and spawn interception in the fault decorator with kill documented as passthrough (§110). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5314,3 +5328,795 @@ tree admits trusted-pool jobs through `AdmittedTrust` and the
 `admission_conformance_*` tests assert the narrowed pair production
 persists. Main's §102 registry record stands as landed history for #663;
 the operational mechanism is §13's file-session design.
+
+## 105. R0-fv2v5: red-team F-V2..F-V5 trust fixes — 2026-09-12
+
+Follow-up to the finalize anchor's red-team list. The report's pointers
+were taken on the pre-convergence cache-half branch and re-inspected only
+for F-V1, so each of F-V2..F-V5 was re-verified against the converged
+`origin/perf/docker-rust-mbx` head before fixing (`fe5ea25f`):
+
+- F-V2 (low): the `workflow_run` derivation path lacked the pull-request
+  path's numeric-id contradiction check. Both paths now read through one
+  `HeadBaseRepos` struct (`trust_class.rs`): a run compares
+  `workflow_run.head_repository.id` against `workflow_run.repository.id`
+  the same way a pull request compares `head.repo.id` against
+  `base.repo.id`, and equal names with disagreeing ids fail closed to
+  `Unknown`. The shared struct removes the enabling condition — the check
+  cannot exist on one path and be forgotten on the other — and either
+  check can only ever move `Trusted` to `Unknown`, never the reverse,
+  because the fork verdict returns before the ids are consulted.
+- F-V3 (low/robustness): `clone_url_repository` ignored the URL host and
+  failed every SSH-style URL to `Unknown`. It now parses the two shapes
+  git accepts (`scheme://[user@]host[:port]/path` and scp-like
+  `[user@]host:path`) and requires the host to equal the job's own
+  GitHub server host from `github.server_url` — the variable first,
+  then the `github` context value, defaulting to `github.com` exactly
+  like the checkout planner — because checkout clones the URL verbatim
+  and a base-matching path on any other host corroborates nothing. A
+  present-but-garbled server URL, a hostless URL (bare path, `file:`),
+  and a URL/host split across servers all fail the corroboration closed.
+  GHES jobs keep working: their URL corroborates against their own
+  `server_url` host. The `cloneUrl`-key spelling is deliberately
+  unchanged: it matches `checkout.rs` `self_clone_url` signal for
+  signal, and diverging would break that tie.
+- F-V4 (note, pre-existing): `is_user_secret_variable` (`runner.rs`)
+  matched the `secrets.`/`secret.` prefix case-sensitively, so a
+  `Secrets.*` user secret bypassed the trust gate and flowed to an
+  untrusted job. The prefix now matches case-insensitively,
+  dot-anchored (`secretsX.*` is still not a secret context) and
+  panic-free on non-ASCII names. The two related prefix sites were
+  audited and left alone: `secret_context_names` (secrets-context
+  synthesis, fail-closed direction — a case variant does not
+  synthesize, it is not leaked) and checkout's token-expression
+  resolver (expression semantics, not gating); masking itself is
+  name-independent over all `isSecret` values.
+- F-V5 (note): the reported site — an inline `StoreTrustClass`
+  namespace match at `github_adapter.rs:135-138` bypassing the shared
+  `container::store_trust_namespace` helper — no longer exists in any
+  form. The §104 convergence deleted the enum, the helper, and the
+  match together, and the converged store paths call only shared
+  helpers (`normalize_scope`, `cache_class_path_for_trust`,
+  `cargo_target_store_host`, `append_legacy_trust`). Verified by
+  re-inspection on the converged tree: zero `StoreTrustClass`
+  references remain anywhere in `crates/`, the store functions carry
+  no inline trust match, and the only trust-string predicate is the
+  shared `github_trust_scope_allows_host_docker`, which every
+  capability gate calls (executor ×3, adapter ×5,
+  `validate_job_trust_policy`). Closed by convergence; the test
+  artifact pins the shared predicate's contract instead
+  (case-insensitive `trusted`, near-misses refused).
+
+Tests, 12 new, all passing: `trust_class` conformance for agreeing and
+one-sided run ids, ids-never-override-a-fork, every clone-URL shape,
+and GHES-against-`server_url` (5); `trust_class` regression for
+contradictory run ids, foreign-host URLs, server/URL splits, garbled
+server URLs, and hostless URLs (5); runner gate refusal of
+case-variant user secrets plus dotted-context anchoring (2). Both
+timing-gated trust benchmarks grew to the new paths in the repo's
+established style: derivation is 100k walks over five message shapes
+(bound 10 s, observed 0.20 s) and admission is 30k decisions including
+an id-carrying fork run with a case-variant secret (bound 10 s,
+observed 0.07 s).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean on runner (with `test-support`), model, and control; full
+serial runner lib 1762 passed, 0 failed, 1 ignored (the §104 1750
+plus the 12 new tests); targeted trust/admission 115/115;
+`telemetry_integration` 5/5; model 129+4+6+4; control 237+8+18+7;
+velnorctl `trust_scope_single_source` 2/2.
+F-V2..F-V5 status: complete.
+
+Landing note: `perf/docker-rust-mbx` was deleted from origin by a
+leader branch-sync while this package was in flight (its trust content
+survives on `main` via #667, byte-identical for every file this
+package touches); the two commits were replayed onto the `main` tip
+and pushed as `r0-fv2v5` for PR-based integration — `main` itself was
+not pushed directly, and the deleted branch was not resurrected.
+
+Correction round (same date): two review issues were fixed on top of
+`r0-fv2v5`, each re-verified against this converged tree rather than
+taken on the report's pointers (which were read on the
+pre-convergence perf branch, like F-V1..F-V5 before them):
+
+- Clone-URL identity (real bug, fixed): `clone_url_repository`
+  took the last two path segments, so `https://host/a/b/c` parsed as
+  `b/c` and `https://github.com/evil/octo/base` corroborated a base
+  of `octo/base`; the unparseable-URL regression passed only via
+  mismatch. Any path that is not exactly `owner/repo` is now
+  unparseable, fail-closed. Two pinning tests (derive-level deep
+  paths with a friendly name signal, plus the direct parser
+  contract) fail on the old code and pass on the new — verified by
+  running them against the true pre-fix block.
+- Custom-pool legacy lease (reported against the perf branch; no
+  divergence on this tree, pinned by test): on the perf branch the
+  mounts collapse the admitted scope through
+  `store_trust_namespace(store_trust_class(...))` (custom pools to
+  `untrusted`) while the runner leases admitted-verbatim
+  `bin/public-forks/<repo>`, leaving the live store unleased. The
+  convergence deleted that enum and both helpers; on this tree
+  mounts and leases both derive from the admitted scope through the
+  same shared store-path helpers, so the divergence is already
+  structurally absent. Reintroducing the class collapse here would
+  break the admitted-verbatim contract the `public-forks`
+  conformance tests pin. The lease-scope strip moved into the one
+  shared `storage::gc_scope_below_root` helper the runner and the
+  new `custom_pool_legacy_leases_protect_mounted_executable_stores`
+  conformance test both call: a trusted job on pool `public-forks`
+  mounts and leases `bin/public-forks/<repo>` in the legacy layout,
+  real leases round-trip through `active_scopes`, and binding class
+  budgets evict idle same-pool and floor stores while every live
+  store survives. The test fails when the lease names another
+  namespace than the mount.
+
+Tests, 3 new, all passing; gates observed in this worktree:
+`cargo fmt --all --check` clean; `cargo check --workspace
+--all-targets` zero warnings; strict clippy clean workspace-wide
+(with `test-support`); full runner package 1816 passed, 0 failed, 1
+skipped; targeted trust/admission 156/156; velnorctl 78/78.
+
+## 106. R1-post: unified LIFO post-action stack — 2026-09-12
+
+`executor.rs` kept post steps as two separately-reversed lists
+(`post_actions`, then `native_post_actions`), so a mixed job ran every
+native post before every JavaScript post regardless of registration
+order (the BC-23 ordering item). Upstream keeps a single
+`Stack<IStep> PostJobSteps` on the job context, re-verified against
+`actions/runner` `main` for this package
+(`src/Runner.Worker/ExecutionContext.cs:222`, drained with `TryPop` by
+`src/Runner.Worker/StepsRunner.cs`), so mixed jobs run posts in exact
+reverse registration order.
+
+`001cd4d0` replaces both lists with one `Vec<PostAction>` (a
+JavaScript/Native enum with a shared `condition()` accessor):
+registration pushes in step order at the three existing sites, the
+drain is one reverse-then-filter with the unchanged
+`post_condition_met` predicate against the job's final status, and one
+loop executes entries in LIFO position. Both execution bodies are
+byte-identical in behavior — native consecutive-same-umbrella grouping
+and single-step JavaScript posts — so the merge changes ORDER only; an
+interleaved JavaScript post keeps its own step record between two
+native group records rather than joining either group. No manifest,
+fixture, or API surface changes: the enum is private and no step
+contract moved.
+
+Tests, 3 new, all passing:
+`executes_mixed_native_and_javascript_post_actions_in_reverse_registration_order`
+pins runner-call and step-log order for a native/JS/native job
+(LIFO `native-post, js-post, native-post`; verified to fail on the
+true pre-fix code, which drains `native-post, native-post, js-post`);
+`unified_post_stack_still_gates_each_post_on_its_condition` pins that
+a false `failure()` JavaScript post drops out while the `always()`
+native and unconditional JavaScript posts run in LIFO order; and
+`unified_post_stack_drain_benchmark` drains a 3-entry mixed stack 20k
+times in the repo's timing-gated style (bound 10 s, observed ~0.1 s).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`); serial runner lib 1768
+passed, 0 failed, 1 ignored (1765 base + 3 new); focused post-action
+13/13; full runner package all targets green. One transient single-test
+failure appeared in a 4-thread full-package run and did not reproduce
+in two full re-runs; parallel runner execution is
+documented-unstable and serial remains the accepted gate.
+
+R1-post status: complete. Open follow-up outside this bounded package:
+upstream never pushes embedded-composite posts to `PostJobSteps` at
+all (one `EmbeddedStepsWithPostRegistered` entry per composite, one
+`Post Run <composite>` record), while Velnor still renders JavaScript
+embedded posts as own records and only groups consecutive natives —
+unifying that rendering is a separate lifecycle work package.
+
+## 107. R1-cond: condition-function semantics + dual-lane pins — 2026-09-12
+
+Re-verified against `actions/runner` `main` for this package
+(`StepsRunner.cs`, `ActionRunner.cs`, `ExecutionContext.cs`
+`ApplyContinueOnError`/post children, `SuccessFunction.cs`,
+`FailureFunction.cs`, `AlwaysFunction.cs`, `CancelledFunction.cs`,
+`PipelineTemplateConverter.cs:670-729`, `FromJson.cs`). The status
+functions themselves already matched: composite-scoped
+`success()`/`failure()` vs job-scoped `cancelled()`, the implicit
+`success() && (...)` prefix with AST status-function detection, and
+fail-the-step on unevaluable main conditions. Three divergences
+remained, all fixed here:
+
+- Cancel re-evaluation. A step killed by cancellation surfaced as
+  `Err("process terminated by signal")` from the signaled host child,
+  and the `Err` arm broke the step loop — remaining `always()` and
+  `cancelled()` main steps never ran, exactly the cleanup upstream
+  runs after its `RunStepAsync` cancellation catch. The arm now
+  records the killed step as failed and CONTINUES when the job token
+  is cancelled, so every remaining condition re-evaluates fresh
+  (ordinary steps skip, `failure()` stays false, cleanup runs); no
+  `step_error` is set, because the runner reports the job `Canceled`
+  from its own flag and returning `Ok` preserves the cleanup step
+  logs the `Err` path would discard. The JavaScript pre-step `?` got
+  the same treatment (a killed pre records failure and skips main
+  while its post stays registered, since the pre ran).
+- Pre/post unevaluable conditions. The old `post_condition_met`
+  swallowed evaluation errors into silent skips (a documented
+  deferred root cause). An unevaluable `runs.pre-if` now fails the
+  step row without running main or registering post; an unevaluable
+  `runs.post-if` now emits a failed `Post <name>` record in its LIFO
+  position while the remaining posts still execute, and the failed
+  result flips the job conclusion like any step failure. The
+  bool-returning helper is deleted; both call sites use the
+  `Result`-returning evaluator.
+- Dual-lane pins. New `status-conditions` dual-lane workflow
+  (generator template + regen wiring; standalone so the designed
+  failure cannot redden `ci.yml`'s lane verdict): a real failure,
+  `failure()`/`success()`/`cancelled()` branches, an unevaluable
+  `always() && fromJSON`-over-runtime-output step, an `always()`
+  assert on all six outcomes plus `job.status`, and `steps.json`
+  evidence compared across lanes by its own `compare-status` job. The
+  unevaluable shape is deliberately runtime-only — actionlint
+  statically rejects unknown functions, wrong arities, unknown
+  contexts, bad format placeholders, and invalid `fromJSON` literals,
+  so a literal unevaluable condition would break the fixture's own
+  lint gate. The `always() &&` guard is load-bearing (correction
+  round, below): after the designed failure the implicit
+  `success() &&` prefix would short-circuit a bare `fromJSON(...)`
+  condition to a skip on both runners. Regen verified in a scratch
+  fixture worktree (exactly the two new files plus the `project.toml`
+  file list and generator state; byte-stable otherwise; idempotent;
+  surface audit, `test_audits.py`, and actionlint green). The fixture
+  regen commit and the live run belong to R2-v2v4.
+
+Tests, 7 new, all passing: pre-cancelled and mid-loop cancel
+re-evaluation (ordinary + `failure()` skip undispatched,
+`always()`/`cancelled()` run); killed-step error continues to
+cleanup (verified to fail on the pre-fix arm); unevaluable main
+condition fails the step and continues with `failure()` true after;
+unevaluable pre fails without dispatching main or post; unevaluable
+post fails in LIFO position while the sibling post runs; and a
+status-function benchmark (180k evaluations over fresh/failed/
+cancelled states, bound 10 s, observed 0.7 s). D-7 additionally pins
+the live `fromJSON`-over-invalid-JSON shape.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`); serial runner lib 1775
+passed, 0 failed, 1 ignored (1768 base + 7 new); full runner package
+all targets green; focused condition/cancel/post 73/73; model
+129+4+6+4; control 237+8+18+7; velnorctl 24+19+2+8; velnor-workflow
+197+2+2+8.
+
+R1-cond status: complete. Known deltas, kept explicit: a killed step
+records `Failure` (Velnor's outcome has no cancelled value; under
+cancellation the status functions read identically either way — only
+the `steps.<id>.outcome` string differs); a running `always()` step
+is killed by the ladder where upstream's re-evaluation would let it
+finish (BC-6 lifecycle, architectural follow-up); non-cancel
+execution errors still break the loop where upstream continues them
+as failures (same arm, deliberately untouched — separate package).
+
+Correction round (same date): three review issues, each re-verified
+against this tree rather than taken on pointers alone:
+
+- Vacuous bad-if pin (real bug, fixed): the fixture's bad-if step
+  used a bare `fromJSON(steps.real-failure.outputs.payload) == ''`
+  condition, but after the designed failure the implicit
+  `success() &&` prefix (GitHub docs; Velnor
+  `evaluate_condition_expression`) plus `&&` short-circuit (same in
+  upstream `And.cs` and Velnor `eval.rs`, both left-to-right with
+  early falsy exit) SKIPS the step on both runners instead of
+  evaluating `fromJSON` — so the `BAD_IF_OUTCOME=failure` assert
+  failed invisibly (the job fails by design anyway) and `steps.json`
+  agreed on `skipped`. The condition is now `always() &&
+  fromJSON(...) == ''`, which both runners evaluate to a step
+  failure. D-7 pins both halves: a bare `fromJSON` over a failed
+  state evaluates to `false` (the trap), while the live-pin shape is
+  `Err`.
+- Cancelled pre-step diagnostics (real bug, fixed): the salvaged
+  result used a generic `pre step was cancelled` stderr without the
+  execution error, unlike the main cancel arm which keeps `{error:#}`
+  (e.g. `process terminated by signal`). The pre record now carries
+  the error for log parity; a test with a cancel-firing node runner
+  pins the stderr plus the still-running cleanup and registered post.
+- Unevaluable inner conditions vs the composite umbrella (real bug,
+  fixed in both blocks): the pre-if failure block was copied from
+  the main-condition block, and neither appended nor absorbed into
+  the `CompositeFrame` — so a composite with an unevaluable inner
+  condition rendered exit 0 while the job failed. Both blocks now
+  `append_inner`/`absorb` exactly like the main Ok/Err arms. Two
+  tests pin the umbrella exit code for the main and pre paths; both
+  fail on the pre-fix code, which never touched the frame.
+
+Tests, 3 new + D-7 extended, all passing. Gates observed in this
+worktree: `cargo fmt --all -- --check` clean; `cargo
+check --workspace --all-targets` zero warnings; strict clippy clean
+workspace-wide (with `test-support`, `-D warnings`); serial runner
+lib 1733 passed, 0 failed, 1 ignored; full runner package all
+targets green; focused cancel 39 + condition 21 + post 17, all pass;
+model 129+4+6+4; control 237+8+18+7; velnorctl 24+19+2+8;
+velnor-workflow 197+2+2+8; actionlint on the reworked template
+reports only the pre-existing `ubuntu-26.04` runner-label note the
+fixture gate config allowlists — no diagnostics on the changed
+lines.
+
+## 108. R1-cmd: command surface + hashFiles parity — 2026-09-12
+
+Re-verified against `actions/runner` `main` for this package
+(`ActionCommandManager.cs` set-output/save-state/set-env/add-path/
+add-matcher/remove-matcher extensions, `ValidateStopToken`,
+`Constants.cs` `UnsupportedCommandMessage`, `Expressions/
+HashFilesFunction.cs` including the node `hashFiles` delegation with
+the `followSymbolicLinks` flag). Four red-team semantic-parity items
+closed, one of them against the report's own premise:
+
+- `set-output`/`save-state`: warn and honor, not env-files-only. The
+  report claimed GitHub's contract is env-files-only, but the enforced
+  runtime is warn-and-honor: GitHub postponed the removal (2023-07-24
+  changelog, "will continue to work as expected"), the runner still
+  stores outputs/state with a deprecation warning, and hosted logs as
+  recent as 2026-07 show the warning with no error. Disabling the
+  stdout commands in Velnor would have been anti-parity — a dual-lane
+  pin asserting empty outputs would fail on the GitHub lane — so
+  Velnor now matches upstream exactly: the output/state is stored, the
+  exact `UnsupportedCommandMessage` warning fires on every use, the
+  `DeprecatedCommand` telemetry stays once per job scope (correction
+  round, below), and a missing or empty `name` throws the upstream
+  `Required field 'name' is missing` pair instead of being silently
+  dropped. Upstream gates the
+  warning on the server variable
+  `DistributedTask.DeprecateStepOutputCommands`, which Velnor has no
+  channel for; the flag is on for github.com, so warning
+  unconditionally is hosted parity. The env-file half
+  (`GITHUB_OUTPUT`/`GITHUB_STATE`) already worked and is pinned live
+  beside the stdout channel.
+- `add-matcher`/`remove-matcher`: admission-rejected, loudly.
+  Honoring matchers needs a log-scanning regex engine the runner does
+  not have — a redesign-scale feature, deliberately not built here —
+  but the old `_ => {}` arm dropped a registered command with nothing
+  in the log. Both commands now fail in the same two-error shape as
+  every other refused command
+  (`Unable to process command ...` + `... not supported by this
+  runner: problem matchers are not implemented.`). Not live-pinned:
+  GitHub honors matchers, so no identical-outcome pin exists; Rust
+  regression tests pin the rejection.
+- Unsecure opt-ins read job env. `CommandPolicy` took only the
+  process half (a self-admitted gap); it now takes the step's
+  effective environment as the `env`-context half with the exact
+  upstream order — process first, job env only when the process did
+  not opt in — exact-name match (upstream reads the context through
+  `CaseSensitiveDictionaryContextData` off Windows) and last-wins
+  duplicates. All five executor call sites (three full parses, two
+  streaming mask closures) pass their in-scope `env`, so the live
+  mask set and the final state agree on stop-token policy.
+- `hashFiles --follow-symbolic-links` is a real mode. The flag was
+  parsed and dropped; it now flows into `hash_files`. Follow mode
+  resolves links the way the bundled @actions/glob does with
+  `followSymbolicLinks`: a file link hashes its target's content
+  under the link's lexical path, a directory link is traversed, a
+  broken link is skipped, and each descended directory pushes its
+  canonical path on an ancestor chain (upstream's `traversalChain`,
+  fixed to the item level) and pops it on return, so sibling
+  aliases BOTH yield while true cycles terminate. No-follow mode
+  hashes lexically-matching file links too — upstream's File branch
+  has no isFile check, so lstat links are yielded and read through —
+  while a lexically-matching broken link fails the whole evaluation,
+  exactly upstream's `statSync` throw surfacing as
+  `InvalidOperationException` (correction round, below).
+
+Tests, 12 new (6 command, 6 hash/executor), all passing: per-use
+deprecation warnings with exact upstream text; nameless
+set-output/save-state errors in warn-then-throw order; matcher
+rejection for the path, owner, and file forms; job-env opt-ins for
+commands and stop tokens plus exact-name/last-wins edges; symlink
+skip/follow/cycle hashes; end-to-end flag flow through expression
+evaluation including the invalid-option error; and executor-level
+proof the job env reaches step parsing. Two brief benchmarks in the
+repo's timing-gated style: 2k parses of a 1k-line mixed output
+(bound 10 s, observed 1.8 s) and 50 follow-mode hashes of a 401-file
+aliased tree (bound 60 s, observed 0.37 s; correction round, below).
+
+Dual-lane pins. New `command-surface` workflow (generator template +
+regen wiring; standalone so the legacy commands cannot redden
+`ci.yml`): stdout `set-output` and `GITHUB_OUTPUT` values asserted
+from `steps`, follow-vs-plain hash equalities that compare hashes to
+each other (never to a literal), and a job-level
+`ACTIONS_ALLOW_UNSECURE_COMMANDS` opt-in proving `::set-env::` works
+from job env — all on both lanes, with `steps.json` evidence
+compared by its own `compare-commands` job. The legacy command names
+are assembled at runtime (`::$legacy ...`): actionlint statically
+rejects the deprecated `::set-output`/`::set-env` literals, and the
+fixture gate runs bare actionlint, so the literals cannot appear —
+the same statically-opaque trick as the status-conditions bad-if
+shape. Regen verified in a scratch fixture worktree: exactly the new
+workflow pair (this pin plus R1-cond's still-pending
+status-conditions) with the `project.toml` file list and generator
+state, byte-stable otherwise, idempotent, actionlint clean under the
+fixture config, surface audit and `test_audits.py` green. The
+coverage audit flags both new dispatch workflows as unclassified in
+the hand-maintained `fixture-coverage.json` manifest (21 further
+errors are pure inventory drift against this branch) — that
+classification rides the regen commit, which with the live run
+belongs to R2-v2v4.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`, `-D warnings`); serial
+runner lib 1790 passed, 0 failed, 1 ignored (1778 base + 12 new);
+full runner package all targets green; focused command 23/23 and
+hash 10/10; model 129+4+6+4; control 237+8+18+7; velnorctl all
+green; velnor-workflow 197+2+2+8. One transient two-test failure
+appeared in a full-package workflow run (synthetic-surface tests
+unrelated to this change) and passed standalone and on full rerun;
+same documented-flake class as R1-post's.
+
+R1-cmd status: complete. Known deltas, kept explicit: command errors
+do not fail the step (upstream fails via `CommandResult`, Velnor
+derives outcome from exit code only — lifecycle package); the
+`echo`/`debug`/`group`/`notice` arms are untouched (the `notice`
+server gate and echo state are separate items); save-state has no
+live pin because intra-action state is only observable through post
+`STATE_` env and fixture actions are single-file composites — a
+multi-file node post-probe is a separate package.
+
+Correction round (same date): four review issues, each re-verified
+against upstream sources and a live probe of the real
+@actions/glob 0.7.0 (the runner's node `hashFiles` loop replicated:
+lexical workspace-prefix check, `statSync`-then-read per yielded
+path) rather than taken on pointers alone:
+
+- No-follow file links hash (real bug, fixed): the package claimed a
+  no-follow link root "resolves to nothing", but upstream's File
+  branch has no isFile check — an lstat link that matches lexically
+  is yielded and read through. The probe confirms no-follow
+  `hashFiles('pin/link.txt')` equals the target hash, so the pin's
+  `test -z HASH_LINK_PLAIN` would have reddened the GitHub lane;
+  both modes now hash file links, and the pin asserts plain ==
+  follow == real. (No-follow `dirlink/**` stays empty — a link is
+  never descended without the flag — so that pin assertion stands.)
+  The two tests that encoded `''` are reworked.
+- Follow-mode ancestor chain (real bug, fixed): the per-root
+  never-shrinking visited set hashed only the first spelling of an
+  aliased directory, but upstream's `traversalChain` is fixed to the
+  item level — only ancestors block a descend. The probe confirms
+  follow `pin/**/*.txt` yields `dirlink/inner.txt` AND
+  `sub/inner.txt`, and follow `pin/**/inner.txt` differs from the
+  single file. Collection now pushes the canonical path on descend
+  and pops it on return; the cycle test pins termination plus the
+  double-spelling digest, the follow test pins both sibling
+  equalities, and the benchmark tree is 401 files (each `aliased/`
+  spelling hashes), not 200.
+- No-follow broken links error (real bug, fixed): the probe confirms
+  no-follow `hashFiles('pin/broken.txt')` throws ENOENT out of node
+  — exit 1, `HashFilesFunction` throws `InvalidOperationException`,
+  expression evaluation fails — while follow mode omits it via
+  `omitBrokenSymbolicLinks`. `hash_files` now returns `Result` and
+  fails the evaluation on any matched-but-unreadable file with the
+  upstream-shaped message, mirroring the sibling `hash_artifact_dir`
+  (which never had the silent `.ok()` drop); no-follow broken links
+  are collected as candidates so only lexically-matching ones fail,
+  and a broad pattern over a tree containing one fails the whole
+  call, exactly like upstream. Pinned at both the `hash_files` and
+  the `resolve_expressions` level.
+- Deprecated-command telemetry is per-job (fidelity delta, fixed):
+  upstream gates on `Global.HasDeprecatedSetOutput` /
+  `HasDeprecatedSaveState`, but Velnor deduped per parse, so N steps
+  emitted N entries. The job engine now owns the once-flags and
+  threads them through every full step-output parse (one engine per
+  job, same lifetime as the cancellation token); the two streaming
+  mask-only parses take throwaways so they consume nothing. Pinned
+  by a shared-scope unit test and a two-step engine test.
+
+Tests, 1 new + 5 reworked/extended, all passing. Gates observed in
+this worktree: `cargo fmt --all -- --check` clean; `cargo
+check --workspace --all-targets` zero warnings; strict clippy clean
+workspace-wide (with `test-support`, `-D warnings`); serial runner
+lib 1791 passed, 0 failed, 1 ignored (1790 + 1 new); focused
+command 23/23 and hash 10/10; model 129+4+6+4; control
+237+8+18+7; velnorctl all green; velnor-workflow 197+2+2+8;
+actionlint on the reworked template reports only the pre-existing
+`ubuntu-26.04` runner-label note — no diagnostics on the changed
+lines. Full parallel runner-package runs show transient
+mirror-lease failures (varying 1–2–0 across identical runs, serial
+always green) that reproduce on the untouched base tree: a
+pre-existing parallel flake, not this change. One transient
+synthetic-surface failure in a workflow run passed on rerun — the
+same documented-flake class as R1-cmd's.
+
+Second correction round (2026-09-13): the follow-up review marked
+issues 1–3 NOT FIXED, but every line number it cited
+(`executor.rs:12484-12508`, `:13202-13346`,
+`runner.rs:12605-12633`) is the `main` tree, which does not contain
+this package at all — the fixes live on `r0-fv2v5`. Each issue was
+therefore re-verified against the package tree and the upstream
+sources fetched fresh (`HashFilesFunction.cs` including the
+`InvalidOperationException` message shape, the bundled node
+`hashFiles` loop, @actions/glob's globber/Pattern/options
+sources), not re-fixed on pointers:
+
+- Glob-reached file links hash (issue 1, already fixed):
+  `collect_workspace_children` pushes target-is-file links in both
+  modes, and the File branch genuinely has no isFile check
+  upstream. The review's exact `pin/*.txt` example is now a unit
+  assertion (`*.txt` equals the explicit link+real pair and differs
+  from real alone), and the pin gained a single-file glob-reached
+  assertion, `hashFiles('pin/l*.txt') == HASH_REAL`, which the
+  GitHub lane proves: a multi-file `pin/*.txt` equality would be
+  unsound there because upstream yields readdir order while Velnor
+  sorts per root.
+- Follow flag threading (issue 2, already fixed): the flag flows
+  from `hash_files_function` into `hash_files`, the guard is the
+  push-on-descend/pop-on-return ancestor chain (equivalent to
+  upstream's level-fixup `traversalChain`), and sibling aliases
+  both yield; no silent-discard path exists in this tree.
+- Broken-link error (issue 3, already fixed): `hash_files`
+  returns `Result`, a lexically-matching no-follow broken link
+  fails at digest time with the upstream-shaped message, and
+  follow mode omits it via the traversal skip; glob-build failure
+  still resolves empty, matching upstream's lenient minimatch
+  rather than its assert path.
+- Telemetry once-per-job (issue 4, already fixed, was
+  non-blocking): the engine-owned `DeprecatedCommandScope`
+  (one per `DockerJobEngine`, same lifetime as the job) threads
+  through all three full parses while both streaming mask-only
+  parses take documented throwaways; the `seen` dedupe in
+  `run_service_telemetry` remains as a wire-level backstop.
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; strict clippy clean workspace-wide (with `test-support`,
+`-D warnings`); serial runner lib 1791 passed, 0 failed,
+1 ignored; focused hash 10/10 and command 63/63; model
+129+4+6+4; control 237+8+18+7; velnorctl all green;
+velnor-workflow 197+2+2+8; actionlint on the reworked template
+reports only the pre-existing `ubuntu-26.04` runner-label note.
+
+## 109. R1-pub: bounded step publishers + publish deadlines — 2026-09-13
+
+The step publishers (`runner.rs` step-timeline and step-log tasks) were
+an unbounded-memory path in the job hot loop: two unbounded
+channels fed by the execution thread, a publisher loop whose network
+calls had no deadline, and a streamed-log mirror `Vec` that grew with
+every streamed record. One stalled backend (hung Results Service,
+wedged feed socket) therefore grew all three without bound while the
+job kept running.
+
+The enabling condition is removed at all three layers; publishing
+stays best-effort throughout (the authoritative step records travel
+in `ScriptJobResult`, never the channel):
+
+- Bounded channels (capacity 1024): both step channels are now
+  `mpsc::channel`, sent through the new `BoundedStepSender`, whose
+  `send_best_effort` is a non-blocking `try_send` that counts a drop
+  on full-or-closed instead of blocking the synchronous execution
+  thread. All 12 runner-side synthetic-step sends, the engine's
+  step-start/step-log emits, and the live per-line stream go through
+  it; the six engine tests that built unbounded channels now build
+  bounded ones.
+- 30s publish deadline: `publish_with_timeout` wraps every network
+  call inside both publisher tasks — Twirp step updates, step-log and
+  step-summary uploads, timeline step/log publishes, and feed
+  connect/ping/send — so a stalled backend fails one publish instead
+  of wedging the task behind it.
+- Drop-and-reconnect on stall: a failed or timed-out feed send or
+  ping drops the WebSocket (`ws_conn = None`) and the next batch
+  reconnects, extending the existing error-path pattern to timeouts;
+  stateless HTTP publishes simply retry on the next event.
+- Capped streamed-log mirror: the cancel-path mirror is now a
+  `StreamedStepLogMirror` capped at 4096 entries and 64 MiB of string
+  payload, oldest evicted first (evictions counted), arrival order
+  preserved so `merged_partial_step_logs` still folds live chunks
+  under completions. A single oversize record is retained alone (the
+  same record is inherently retained in `ScriptJobResult`, so the
+  carve-out adds no new wedge vector).
+- Drain-before-exit kept: terminal completion is still ordered after
+  both publishers drain, and the forensics line now carries the
+  counted drops plus the counted mirror evictions
+  (`step-publishers-drained elapsed_ms=… dropped_step_starts=…
+  dropped_step_logs=… mirror_evicted_logs=…`). The runner keeps
+  counter handles, not sender clones — a cloned sender would hold the
+  channel open past execution and the publishers would never drain.
+
+Tests, 10 new, all passing: bounded-drop counting (full channel,
+exited publisher), mirror entry/byte/single-oversize caps, publish
+deadline (timeout, passthrough, inner-error), drain ordering (both
+publishers finish before drain returns) plus drain abort of a stalled
+publisher, and the soak that proves the memory ceiling — 100k live
+log lines against a stalled publisher: 98,976 counted drops, mirror
+pinned at 4096 entries / ~204 KiB, sender never blocks. Benchmarks
+in brief (printed lines, generous ceilings so loaded CI cannot
+flake): 102,400 channel events in ~24ms; the 100k-event soak in
+~59ms.
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets` zero warnings; strict
+clippy clean workspace-wide and with `test-support` (`-D warnings`);
+serial runner lib 1756 passed, 0 failed, 1 ignored (1747 on the
+base tree + 10 new); no other crate uses the changed sender APIs
+(verified by grep; workspace check covers the `velnor-runner`
+dependents).
+
+R1-pub status: complete. Known deltas, kept explicit: drops are
+counted but the dropped events themselves are unrecoverable by
+design (advisory channel; authority stays in `ScriptJobResult` on
+every path except cancel, where the counted mirror below is the
+persisted log's only source); the finalize-path timeline/log uploads
+outside the publisher tasks keep their existing behavior (separate
+package if they need deadlines); no fixture dual-lane pin — publish
+transport behavior is not observable through workflow outputs.
+
+R1-pub correction — 2026-09-13 (review, both issues fixed): (1)
+the cancel path builds the GitHub-visible completion from the
+mirror, so "authority stays in `ScriptJobResult`" was false exactly
+there — past 4096 records / 64 MiB early steps vanished with no
+marker (channel drops counted only in forensics, mirror evictions
+not counted at all). The mirror now counts evictions, the forensics
+line carries `mirror_evicted_logs=…`, and the merged cancel-path log
+is stamped with a truncation marker (a `##[warning]` line atop the
+first rendered step, or a synthetic `velnor-cancel-log-truncation`
+notice record when nothing survived) whenever step-log drops or
+mirror evictions are nonzero. (2) The single-oversize-record
+carve-out was justified by a nonexistent producer line-buffering
+cap — no such cap exists (completion records carry full `lines`
+vecs). The carve-out now rests on the true argument, in the mirror
+comment, the `BoundedStepSender` docs (which also note the
+cancel-path exception to the advisory-channel premise), and this
+section: the same record is inherently retained in
+`ScriptJobResult`, so keeping one copy in the mirror adds no new
+wedge vector.
+
+Correction tests: 3 new (marker on drops/evictions, synthetic
+notice on total loss, marker skips unrendered skipped steps) plus
+strengthened pins — eviction counts on both mirror-cap tests and
+the soak (100k events: 95,904 counted evictions), and a forensics
+assertion on the drain test (`mirror_evicted_logs=7`).
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets` zero warnings; strict
+clippy clean workspace-wide and with `test-support` (`-D warnings`);
+serial runner lib 1759 passed, 0 failed, 1 ignored (1756 on the
+pre-correction tree + 3 new); serial runner lib with
+`test-support` 1804 passed, 0 failed, 1 ignored.
+
+## 110. R1-bench: WP-17 census, fault catalogue, soak, and comparison — 2026-09-13
+
+Bounded package: the benchmark core that is implementable and provable
+without the `velnor-job` dispatch driver. No simulation anywhere: every new
+measurement either drives real work or is reported as unrun with the missing
+requirement named.
+
+Runner side (`crates/velnor-runner`):
+
+- `docker::metrics::snapshot()` plus `Snapshot`/`ClassTotal`: the same
+  process counters the `velnor.docker` tracing fields derive from, exposed
+  machine-readably. Not a second counter; the snapshot test asserts the
+  totals equal the forensics fields.
+- Checkout span contract pinned: `checkout_emits_the_five_bench_phase_spans`
+  runs a real checkout over a `file://` origin under a JSON close-event
+  subscriber and asserts all five span names and `phase` fields the bench
+  trace reader keys on. Renaming either side breaks this test on purpose.
+- New `fault_injection.rs` (`cfg(test)` only): a `CommandRunner` decorator
+  with scripted fail/delay/spawn-error rules that intercepts on all ten
+  `run*` entry points. Conformance tests run the real `execute_checkout`
+  against an injected fetch failure (fails closed, code and reason in the
+  step log, sequence stops before the workspace checkout) and an unreachable
+  remote (loud error, never a silent skip).
+
+Bench side (`crates/velnor-bench`, matrix 33 → 38 rows):
+
+- `census`: per-class Docker census derived with the runner's own
+  `docker::classify`, so there is one classifier and one twelve-label
+  vocabulary. Carried on every observation and summarised per class;
+  validation rejects unknown labels and census/resource count disagreements.
+- `fault`: the 27-class catalogue across the process, HTTP, filesystem, and
+  signal seams. Four classes run today through `docker-direct`
+  (`drivers/fault.rs`: real SIGKILL mid-step, real failing user command,
+  real absent-object error, real network conflict); each observation carries
+  a `FaultOutcome`, and `run` exits nonzero when any outcome is uncontained
+  while still writing the record. The other 23 stay declared-but-unrun.
+- `trace`: `trace.jsonl` span-close reader for the checkout phases. The
+  round-trip test generates records with the real subscriber layer, proving
+  the field paths; name/phase disagreement is ignored, never misattributed.
+- `soak` + CLI: round-after-round residue sampling (verdict passes only on
+  zero owned-object residue every round) plus scratch-growth slope and
+  timing-drift ratio as evidence. New `velnor.bench.soak.v1` schema.
+- `compare` + CLI + record `context` map: A/B ratios gated on sample size
+  like the percentiles (a p95 ratio needs n>=20 on both sides), refusing
+  cross-scenario and cross-driver comparisons and surfacing `--context`
+  differences. New `velnor.bench.comparison.v1` schema.
+- New rows: `lifecycle/trust-partition` (no fallback: the trust-partition
+  cost protocol is two same-scenario `velnor-job` records, one per trust
+  class, divided by `compare`) and the four `fault/*` rows (honest
+  `docker-direct` degradation, like the docker rows, unlike the rust rows).
+
+Record-integrity fix found live: the first `compare` run failed with
+`SummaryMismatch` on a record that had validated at write time. Root cause
+was lossy float parsing, not the summaries: serde_json without
+`float_roundtrip` parses the 17th significant digit one ulp off
+(`434.15526315789475` came back `...8947`, proven bit-for-bit against
+`str::parse`). The workspace now enables `float_roundtrip` (lockfile gains
+no new packages), with a regression test pinning bit-exact round trip of a
+17-digit variance.
+
+Live evidence from this worktree (OrbStack Engine 29.4.0, busybox:1.36):
+`docker/existing-image` at n=20 emits a real p95 (492, below the max 515)
+and withholds p99; per-class census p50/p95 on counts and latencies; all
+four fault scenarios inject and contain (`wait_exit=3`, `wait_exit=137`,
+`inspect_exit=1 remove_exit=0`, `conflict_exit=1`, zero residue); a 5-round
+soak passes with zero residue; `compare` divides two n=20 records with the
+runner context difference surfaced. No bench-owned containers or networks
+remain on the daemon.
+
+Explicitly not done (needs the dispatch driver, a registered runner, and
+GitHub credentials — none available here): the `velnor-job` driver itself,
+any live Velnor-vs-actions/runner A/B numbers, product-level trust-partition
+numbers, and the 23 `velnor-job`-only fault classes. BC-27 is therefore
+narrowed, not closed: the harness now measures real container lifecycles,
+real faults, and real trends, but no product job benchmark exists yet.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets --locked` zero warnings; strict
+clippy clean on bench and on runner with `test-support` (`-D warnings`);
+bench 183 passed, 0 failed; serial runner lib 1772 passed, 0 failed,
+1 ignored; serial runner lib with `test-support` 1817 passed, 0 failed,
+1 ignored; model 129+4+6+4.
+
+R1-bench status: complete. Known deltas, kept explicit: soak disk growth
+has no pass/fail policy yet (reported as evidence); the `S8` acceptance
+named in the brief is not present in either repository at these heads, so
+the percentile acceptance (p95 at n>=20) was re-evaluated instead, with the
+live n=20 run above.
+
+R1-bench correction — 2026-09-13 (review, all five issues fixed): (1)
+fault residue sampling failed open — `container_residue` /
+`network_residue` (`drivers/fault.rs`) mapped every sampling error to empty
+residue, so a dead daemon read as proven containment. Both now return
+`Result`: exit 0 proves presence, a daemon not-found answer proves absence,
+and anything else (spawn failure, timeout, inconclusive stderr) is an error
+that yields an uncontained outcome whose detail names the sampling failure;
+the record is still written and `run` exits nonzero. The strict classifier
+caught a real vocabulary gap live: networks answer `network <name> not
+found`, not `No such ...`, so `is_not_found` now matches both, pinned by
+test. (2) Soak sampled only containers and networks while build workloads
+minted one owner-labelled image per round (held to teardown), so a build
+soak passed with unbounded accumulation invisible to both signals. Soak now
+samples owned images too (`owned_images` per round, counted in
+`max_residue`, defaulted so old reports still parse), and the build
+workloads remove each round's image at round end — plus the cache-warmup tag
+in `prepare`, since layers stay cached without the tag — with the removal
+measured in `Stage::Teardown` instead of the hardcoded 0; teardown recovery
+is kept as the safety net. (3) Census summaries dropped any class missing
+from even one observation, so a class in 19/20 rounds vanished silently.
+Absence is now zero-filled (census absence is observed-zero, unlike a
+missing stage) whenever any observation carries the class. (4) `validate()`
+rejected `injected=false` before `main` wrote the record, losing the detail
+diagnostics; the `FaultNotInjected` rejection is removed and `run` writes
+the record then exits nonzero on any uninjected or uncontained outcome.
+(5) `FaultInjectingRunner` passed `spawn` / `kill` through unlogged while
+the module doc claimed every spawn. `spawn` is now intercepted (rules match,
+budget consumed, logged; `Fail` surfaces as a spawn error naming the
+scripted code, since a spawn has no result channel) and `kill` is documented
+as deliberate passthrough — a pid handle carries no argv to match, and only
+the firecracker jailer path uses `spawn` / `kill`, so no docker or git path
+bypasses interception.
+
+Correction tests: 7 new, 1 replaced. Bench: the residue classifier proves
+presence/absence and fails closed on daemon-down, timeout, and empty
+failure; owned-image residue fails the soak verdict; an intermittent census
+class zero-fills and validates; the uninjected rejection test is replaced by
+an uninjected run keeping its record. Runner: spawn interception
+(fail-as-spawn-error, budget, log), spawn-error without reaching the inner
+runner, and kill passthrough under a catch-all rule.
+
+Live evidence from this worktree (OrbStack Engine, alpine:3.21): all four
+fault scenarios inject and contain at n=3 with exit 0; the fail-closed path
+was proven live mid-correction (the network-vocabulary gap produced
+uncontained outcomes with `residue sampling failed` details, the record
+still written, nonzero exit); build-cached, build-uncached, and
+existing-image soaks pass 3/3 rounds with zero container/network/image
+residue; build-cached records 3 cache hits + 1 miss per iteration with
+measured teardown, proving warmup-tag removal kept the layer cache; a
+fault record flipped to uninjected validates through `compare`; no
+bench-owned containers, networks, or images remain on the daemon.
+
+Correction gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets --locked` zero warnings;
+strict clippy clean on bench and on runner with `test-support`
+(`-D warnings`); bench 187 passed, 0 failed (183 pre-correction + 4 new);
+serial runner lib 1775 passed, 0 failed, 1 ignored (1772 + 3 new); serial
+runner lib with `test-support` 1820 passed, 0 failed, 1 ignored
+(1817 + 3 new).
