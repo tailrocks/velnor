@@ -1284,7 +1284,10 @@ pub const STEP_PUBLISH_CHANNEL_CAPACITY: usize = 1024;
 /// Publishing is advisory — the authoritative step records travel in
 /// `ScriptJobResult` — so a full channel (stalled publisher) drops the event
 /// and bumps the counter instead of blocking the execution thread. The runner
-/// reads the counter at drain time for the forensics line.
+/// reads the counter at drain time for the forensics line. Exception: on the
+/// cancel path the executor never returns `ScriptJobResult`, so the streamed
+/// mirror (fed through this channel) is the persisted log's only source —
+/// drops there surface in the cancel-path truncation marker.
 #[derive(Debug, Clone)]
 pub struct BoundedStepSender<T> {
     sender: Sender<T>,
@@ -1311,7 +1314,8 @@ impl<T> BoundedStepSender<T> {
 
     /// Non-blocking best-effort send. A full channel (stalled publisher) or
     /// a gone publisher drops the event and counts it; both are fine because
-    /// the authoritative records travel in `ScriptJobResult`.
+    /// the authoritative records travel in `ScriptJobResult` — except on the
+    /// cancel path, where the count feeds the truncation marker instead.
     pub fn send_best_effort(&self, value: T) {
         if self.sender.try_send(value).is_err() {
             self.drops.fetch_add(1, Ordering::Relaxed);

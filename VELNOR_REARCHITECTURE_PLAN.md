@@ -239,6 +239,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R1-cmd correction fixed no-follow file-link hashing (target content, not empty) with the GitHub-lane pin assertion, follow-mode sibling double-yield behind an ancestor-chain guard, the no-follow broken-link expression error, and job-scoped deprecated-command telemetry (§108). |
 | 2026-09-13 | R1-cmd second correction re-ran the four review issues: all four cited `main`-tree line numbers, so each was re-verified against the `r0-fv2v5` tree and the fetched upstream sources instead of re-fixed, and the glob-reached-link gap the review named got a unit assertion plus a single-file `pin/l*.txt` pin the GitHub lane can prove (§108). |
 | 2026-09-13 | R1-pub bounded the step publishers: bounded channels with counted best-effort drops, a 30s deadline on every publish network call, feed drop-and-reconnect on stall, and an entry- plus byte-capped streamed-log mirror; drain-before-exit kept, with the drop counts on the forensics line (§109). |
+| 2026-09-13 | R1-pub correction counted the mirror evictions on the forensics line, stamped a truncation marker into the merged cancel-path log when drops/evictions are nonzero, and re-grounded the single-oversize-record carve-out on `ScriptJobResult` retention instead of the nonexistent producer line-buffering cap (§109). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5895,17 +5896,18 @@ in `ScriptJobResult`, never the channel):
   stateless HTTP publishes simply retry on the next event.
 - Capped streamed-log mirror: the cancel-path mirror is now a
   `StreamedStepLogMirror` capped at 4096 entries and 64 MiB of string
-  payload, oldest evicted first, arrival order preserved so
-  `merged_partial_step_logs` still folds live chunks under
-  completions. A single oversize record is retained alone (it is
-  already bounded by the producer's line buffering).
+  payload, oldest evicted first (evictions counted), arrival order
+  preserved so `merged_partial_step_logs` still folds live chunks
+  under completions. A single oversize record is retained alone (the
+  same record is inherently retained in `ScriptJobResult`, so the
+  carve-out adds no new wedge vector).
 - Drain-before-exit kept: terminal completion is still ordered after
   both publishers drain, and the forensics line now carries the
-  counted drops
+  counted drops plus the counted mirror evictions
   (`step-publishers-drained elapsed_ms=… dropped_step_starts=…
-  dropped_step_logs=…`). The runner keeps counter handles, not sender
-  clones — a cloned sender would hold the channel open past execution
-  and the publishers would never drain.
+  dropped_step_logs=… mirror_evicted_logs=…`). The runner keeps
+  counter handles, not sender clones — a cloned sender would hold the
+  channel open past execution and the publishers would never drain.
 
 Tests, 10 new, all passing: bounded-drop counting (full channel,
 exited publisher), mirror entry/byte/single-oversize caps, publish
@@ -5928,8 +5930,42 @@ dependents).
 
 R1-pub status: complete. Known deltas, kept explicit: drops are
 counted but the dropped events themselves are unrecoverable by
-design (advisory channel; authority stays in `ScriptJobResult`); the
-finalize-path timeline/log uploads outside the publisher tasks keep
-their existing behavior (separate package if they need deadlines);
-no fixture dual-lane pin — publish transport behavior is not
-observable through workflow outputs.
+design (advisory channel; authority stays in `ScriptJobResult` on
+every path except cancel, where the counted mirror below is the
+persisted log's only source); the finalize-path timeline/log uploads
+outside the publisher tasks keep their existing behavior (separate
+package if they need deadlines); no fixture dual-lane pin — publish
+transport behavior is not observable through workflow outputs.
+
+R1-pub correction — 2026-09-13 (review, both issues fixed): (1)
+the cancel path builds the GitHub-visible completion from the
+mirror, so "authority stays in `ScriptJobResult`" was false exactly
+there — past 4096 records / 64 MiB early steps vanished with no
+marker (channel drops counted only in forensics, mirror evictions
+not counted at all). The mirror now counts evictions, the forensics
+line carries `mirror_evicted_logs=…`, and the merged cancel-path log
+is stamped with a truncation marker (a `##[warning]` line atop the
+first rendered step, or a synthetic `velnor-cancel-log-truncation`
+notice record when nothing survived) whenever step-log drops or
+mirror evictions are nonzero. (2) The single-oversize-record
+carve-out was justified by a nonexistent producer line-buffering
+cap — no such cap exists (completion records carry full `lines`
+vecs). The carve-out now rests on the true argument, in the mirror
+comment, the `BoundedStepSender` docs (which also note the
+cancel-path exception to the advisory-channel premise), and this
+section: the same record is inherently retained in
+`ScriptJobResult`, so keeping one copy in the mirror adds no new
+wedge vector.
+
+Correction tests: 3 new (marker on drops/evictions, synthetic
+notice on total loss, marker skips unrendered skipped steps) plus
+strengthened pins — eviction counts on both mirror-cap tests and
+the soak (100k events: 95,904 counted evictions), and a forensics
+assertion on the drain test (`mirror_evicted_logs=7`).
+
+Gates observed in this worktree: `cargo fmt --all -- --check`
+clean; `cargo check --workspace --all-targets` zero warnings; strict
+clippy clean workspace-wide and with `test-support` (`-D warnings`);
+serial runner lib 1759 passed, 0 failed, 1 ignored (1756 on the
+pre-correction tree + 3 new); serial runner lib with
+`test-support` 1804 passed, 0 failed, 1 ignored.
