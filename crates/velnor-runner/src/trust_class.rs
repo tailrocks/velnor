@@ -5,16 +5,18 @@
 //! from the job message alone — the `github.event_name` variable (or, on a raw
 //! pre-hydration message, the `github.event_name` context value), the
 //! head/base repository comparison (`github.repository` against the event
-//! payload's `pull_request.head.repo`), the self [`RepositoryResource`]'s
-//! name and `cloneUrl` property as corroboration, and the plan scope
-//! identifier as a structural-completeness signal.
+//! payload's `pull_request.head.repo` or `workflow_run.head_repository`), the
+//! self [`RepositoryResource`]'s name and `cloneUrl` property as
+//! corroboration, and the plan scope identifier as a
+//! structural-completeness signal.
 //!
 //! Derivation rules:
 //!
 //! * A missing, empty, or malformed event signal fails closed to
 //!   [`TrustClass::Unknown`]: no event name, no base repository, no plan
-//!   scope, no head repository on a pull-request event, an unparseable event
-//!   payload, or a repository resource that contradicts the base repository.
+//!   scope, no head repository on a pull-request or `workflow_run` event, an
+//!   unparseable event payload, or a repository resource that contradicts the
+//!   base repository.
 //! * Any event whose name starts with `pull_request` (case-insensitive:
 //!   `pull_request`, `pull_request_target`, `pull_request_review`, …) is a
 //!   pull-request event. Same-repo (`head == base`, compared
@@ -22,9 +24,15 @@
 //!   [`TrustClass::Trusted`]; a fork derives [`TrustClass::ForkPR`]. A
 //!   `pull_request_target` from a fork is [`TrustClass::ForkPR`]: it runs
 //!   base-repo code but operates on fork-controlled inputs.
+//! * A `workflow_run` event (case-insensitive) compares the triggering run's
+//!   head repository (`workflow_run.head_repository.full_name`) against the
+//!   base the same way: a fork head derives [`TrustClass::ForkPR`] — base
+//!   workflow code over a fork-controlled head sha and repository — and a
+//!   missing or malformed head fails closed to [`TrustClass::Unknown`].
 //! * Any other well-formed event name derives [`TrustClass::Trusted`], because
 //!   GitHub reserves the `pull_request` prefix for pull-request-scoped events
-//!   and every other event executes base-repository code.
+//!   and `workflow_run` is handled above; every remaining event executes
+//!   base-repository code.
 //! * [`TrustClass::Unknown`] is treated as untrusted: only [`TrustClass::Trusted`]
 //!   reports [`TrustClass::is_trusted`].
 //!
@@ -44,12 +52,13 @@ use serde_json::Value;
 /// construction site must run the derivation and take its fail-closed answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrustClass {
-    /// Affirmative same-repository evidence: a non-pull-request event with
-    /// complete signals, or a pull-request event whose head repository equals
-    /// the base repository.
+    /// Affirmative same-repository evidence: a non-fork-sensitive event with
+    /// complete signals, or a pull-request/`workflow_run` event whose head
+    /// repository equals the base repository.
     Trusted,
-    /// A pull-request event whose head repository differs from the base
-    /// repository. Untrusted.
+    /// A pull-request or `workflow_run` event whose head repository differs
+    /// from the base repository: base-repo code over fork-controlled inputs.
+    /// Untrusted.
     ForkPR,
     /// A signal was missing or unparseable, so no class could be affirmed.
     /// Treated as untrusted.
@@ -84,6 +93,13 @@ impl TrustClass {
             if pull.numeric_ids_contradict() {
                 return Self::Unknown;
             }
+        } else if is_workflow_run_event(event) {
+            let Some(head) = workflow_run_head_repository(job) else {
+                return Self::Unknown;
+            };
+            if !repository_eq(base, &head) {
+                return Self::ForkPR;
+            }
         }
         if repository_resources_contradict(job, base) {
             return Self::Unknown;
@@ -116,6 +132,10 @@ const PULL_REQUEST_PREFIX: &[u8; 12] = b"pull_request";
 fn is_pull_request_event(event: &str) -> bool {
     event.len() >= PULL_REQUEST_PREFIX.len()
         && event.as_bytes()[..PULL_REQUEST_PREFIX.len()].eq_ignore_ascii_case(PULL_REQUEST_PREFIX)
+}
+
+fn is_workflow_run_event(event: &str) -> bool {
+    event.eq_ignore_ascii_case("workflow_run")
 }
 
 /// The `github.event_name` variable, else the `github.event_name` context
@@ -194,11 +214,14 @@ impl PullRequestRepos {
     }
 }
 
-/// `pull_request.head.repo.full_name` plus the corroborating numeric ids from
-/// `pull_request.{head,base}.repo.id`. The `event` value may be an object or a
-/// JSON-encoded string (both arrive on the wire; the executor's event-path
-/// writer accepts the same two shapes).
-fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> {
+/// Run a projection over the `github.event` payload. The `event` value may be
+/// an object or a JSON-encoded string (both arrive on the wire; the
+/// executor's event-path writer accepts the same two shapes), and any level
+/// may use the V2 broker compact `{"d": [{k, v}]}` form.
+fn with_github_event<T>(
+    job: &AgentJobRequestMessage,
+    project: impl FnOnce(&Value) -> Option<T>,
+) -> Option<T> {
     let github = job.context_data.get("github")?;
     let event = context_get(github, "event")?;
     let parsed;
@@ -209,19 +232,42 @@ fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> 
         }
         value => value,
     };
-    let pull = context_get(event, "pull_request")?;
-    let head_repo = context_get(pull, "head").and_then(|head| context_get(head, "repo"))?;
-    let head_full_name = context_get(head_repo, "full_name")?.as_str()?;
-    let head_full_name = normalize_full_name(head_full_name)?.to_owned();
-    let head_id = context_get(head_repo, "id").and_then(json_id);
-    let base_id = context_get(pull, "base")
-        .and_then(|base| context_get(base, "repo"))
-        .and_then(|repo| context_get(repo, "id"))
-        .and_then(json_id);
-    Some(PullRequestRepos {
-        head_full_name,
-        head_id,
-        base_id,
+    project(event)
+}
+
+/// `pull_request.head.repo.full_name` plus the corroborating numeric ids from
+/// `pull_request.{head,base}.repo.id`.
+fn pull_request_repos(job: &AgentJobRequestMessage) -> Option<PullRequestRepos> {
+    with_github_event(job, |event| {
+        let pull = context_get(event, "pull_request")?;
+        let head_repo = context_get(pull, "head").and_then(|head| context_get(head, "repo"))?;
+        let head_full_name = context_get(head_repo, "full_name")?.as_str()?;
+        let head_full_name = normalize_full_name(head_full_name)?.to_owned();
+        let head_id = context_get(head_repo, "id").and_then(json_id);
+        let base_id = context_get(pull, "base")
+            .and_then(|base| context_get(base, "repo"))
+            .and_then(|repo| context_get(repo, "id"))
+            .and_then(json_id);
+        Some(PullRequestRepos {
+            head_full_name,
+            head_id,
+            base_id,
+        })
+    })
+}
+
+/// `workflow_run.head_repository.full_name`: the repository that owns the head
+/// sha the triggering run executed. A `workflow_run` requested by a fork pull
+/// request runs this repository's workflow file but checks out and reports on
+/// fork-controlled code, so the head/base comparison is the same fork signal
+/// as for `pull_request_target` (and the executor's artifact producer gate
+/// treats the same two `full_name` values as fork-sensitive).
+fn workflow_run_head_repository(job: &AgentJobRequestMessage) -> Option<String> {
+    with_github_event(job, |event| {
+        let run = context_get(event, "workflow_run")?;
+        let head = context_get(run, "head_repository")?;
+        let full_name = context_get(head, "full_name")?.as_str()?;
+        normalize_full_name(full_name).map(str::to_owned)
     })
 }
 
@@ -407,6 +453,14 @@ mod tests {
         })
     }
 
+    fn workflow_run_event(head_full_name: &str) -> serde_json::Value {
+        json!({
+            "workflow_run": {
+                "head_repository": { "full_name": head_full_name },
+            }
+        })
+    }
+
     /// The trusted baseline every fail-closed regression test mutates by
     /// exactly one signal: a `push` job with complete variables, resources,
     /// and plan scope.
@@ -445,11 +499,12 @@ mod tests {
 
     #[test]
     fn trust_class_conformance_non_pr_events_are_trusted() {
+        // `workflow_run` is deliberately absent: it carries a fork-controlled
+        // head and takes the payload-analysis path below.
         for event in [
             "workflow_dispatch",
             "schedule",
             "release",
-            "workflow_run",
             "merge_group",
             "workflow_call",
             "issue_comment",
@@ -466,6 +521,95 @@ mod tests {
                 "event {event} executes base-repository code"
             );
         }
+    }
+
+    #[test]
+    fn trust_class_conformance_same_repo_workflow_run_is_trusted() {
+        let job = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({
+                "event": workflow_run_event("octo/base"),
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_conformance_fork_workflow_run_is_fork_pr() {
+        // A `workflow_run` requested by a fork PR runs base workflow code over
+        // a fork-controlled head sha and repository: the same shape as a fork
+        // `pull_request_target`.
+        let job = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({
+                "event": workflow_run_event("mallory/base"),
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::ForkPR);
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_detection_is_case_insensitive() {
+        let job = signal_job(
+            variables("Workflow_Run", "octo/base"),
+            Some(json!({ "event": workflow_run_event("mallory/base") })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::ForkPR);
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_head_compares_case_insensitively() {
+        let job = signal_job(
+            variables("workflow_run", "Octo/Base"),
+            Some(json!({ "event": workflow_run_event("octo/base") })),
+            self_repository("OCTO/BASE"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::Trusted);
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_string_event_payload_classifies() {
+        let encoded = serde_json::to_string(&workflow_run_event("mallory/base"))
+            .expect("event payload encodes");
+        let job = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({ "event": encoded })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::ForkPR);
+    }
+
+    #[test]
+    fn trust_class_conformance_workflow_run_compact_context_classifies() {
+        let job = signal_job(
+            json!({}),
+            Some(json!({
+                "d": [
+                    { "k": "event_name", "v": "workflow_run" },
+                    { "k": "repository", "v": "octo/base" },
+                    { "k": "event", "v": {
+                        "d": [
+                            { "k": "workflow_run", "v": {
+                                "d": [{ "k": "head_repository", "v": {
+                                    "d": [{ "k": "full_name", "v": "mallory/base" }],
+                                } }],
+                            } },
+                        ],
+                    } },
+                ],
+            })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
+        assert_eq!(TrustClass::derive(&job), TrustClass::ForkPR);
     }
 
     #[test]
@@ -779,6 +923,37 @@ mod tests {
     }
 
     #[test]
+    fn trust_class_regression_workflow_run_without_event_payload_is_unknown() {
+        let mut baseline = trusted_baseline();
+        baseline["variables"]["github.event_name"]["value"] = json!("workflow_run");
+        assert_eq!(derive_json(baseline), TrustClass::Unknown);
+    }
+
+    #[test]
+    fn trust_class_regression_workflow_run_with_unparseable_string_event_is_unknown() {
+        let mut baseline = trusted_baseline();
+        baseline["variables"]["github.event_name"]["value"] = json!("workflow_run");
+        baseline["contextData"] = json!({ "github": { "event": "{not json" } });
+        assert_eq!(derive_json(baseline), TrustClass::Unknown);
+    }
+
+    #[test]
+    fn trust_class_regression_workflow_run_without_head_full_name_is_unknown() {
+        for event in [
+            json!({ "workflow_run": { "head_repository": { "id": 2 } } }),
+            json!({ "workflow_run": { "head_repository": { "full_name": "" } } }),
+            json!({ "workflow_run": { "head_repository": { "full_name": "bareword" } } }),
+            json!({ "workflow_run": {} }),
+            json!({}),
+        ] {
+            let mut baseline = trusted_baseline();
+            baseline["variables"]["github.event_name"]["value"] = json!("workflow_run");
+            baseline["contextData"] = json!({ "github": { "event": event } });
+            assert_eq!(derive_json(baseline), TrustClass::Unknown);
+        }
+    }
+
+    #[test]
     fn trust_class_regression_contradictory_numeric_ids_are_unknown() {
         // Equal full names with both numeric ids present but disagreeing is a
         // contradictory payload: trust cannot be affirmed.
@@ -872,8 +1047,15 @@ mod tests {
             self_repository("octo/base"),
             Some("scope"),
         );
+        let fork_workflow_run = signal_job(
+            variables("workflow_run", "octo/base"),
+            Some(json!({ "event": workflow_run_event("mallory/base") })),
+            self_repository("octo/base"),
+            Some("scope"),
+        );
         assert_eq!(TrustClass::derive(&push), TrustClass::Trusted);
         assert_eq!(TrustClass::derive(&fork_pr), TrustClass::ForkPR);
+        assert_eq!(TrustClass::derive(&fork_workflow_run), TrustClass::ForkPR);
 
         // 20k derivations per class; a pure JSON walk must stay far below the
         // bound even on a loaded serial-gate runner.
@@ -881,11 +1063,15 @@ mod tests {
         for _ in 0..20_000 {
             assert_eq!(TrustClass::derive(black_box(&push)), TrustClass::Trusted);
             assert_eq!(TrustClass::derive(black_box(&fork_pr)), TrustClass::ForkPR);
+            assert_eq!(
+                TrustClass::derive(black_box(&fork_workflow_run)),
+                TrustClass::ForkPR
+            );
         }
         let elapsed = started.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
-            "40k trust derivations took {elapsed:?}",
+            "60k trust derivations took {elapsed:?}",
         );
     }
 }

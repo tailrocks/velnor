@@ -4650,3 +4650,48 @@ claimed by codex-lead. Coordination protocol (§1) is unchanged: shared
 branches, isolated worktrees, rebase-before-push, never force-push, claims
 before writes, this file append-mostly. No new claims are made by this
 refresh (read-only).
+
+## 98. WP-6/job-trust-class correction: `workflow_run` from a fork is `ForkPR` — 2026-09-12
+
+Review finding against §97: every non-`pull_request*` event skipped payload
+analysis and derived `Trusted`, so a `workflow_run` requested by a fork PR —
+base workflow code over a fork-controlled head sha and repository, the exact
+shape the module calls `ForkPR` for `pull_request_target` — classified as
+`Trusted`. That violated the fail-closed invariant and disagreed with the
+executor's own fork-sensitive `workflow_run` checks
+(`repository_artifact_matches_trusted_producer` gates on the same
+`head_repository`/`repository` `full_name` values, `executor.rs`). The
+enabling condition was structural: one blanket-trust arm for all remaining
+event names with no fork-sensitive second path.
+
+Fix in the same file (`crates/velnor-runner/src/trust_class.rs`, still the
+WP-6/job-trust-class boundary claimed in §7): a `workflow_run` event
+(case-insensitive) now compares
+`github.event.workflow_run.head_repository.full_name` against the base with
+the same `repository_eq` comparison — mismatch derives `ForkPR`, a missing
+or malformed head (or payload) fails closed to `Unknown`. The event-payload
+projection was factored into one `with_github_event` helper shared by the
+`pull_request` and `workflow_run` paths, so object, JSON-string, and V2
+compact `{"d"}` forms behave identically on both; module and variant docs
+updated to match (`ForkPR` now covers fork `workflow_run`).
+
+Tests in-module, 40 total (was 31), all passing: 6 new
+`trust_class_conformance_workflow_run_*` (same-repo trusted, fork `ForkPR`,
+case-insensitive detection and head comparison, string-payload and
+compact-context forms) plus 3 new
+`trust_class_regression_workflow_run_*` (missing payload, unparseable string
+event, missing/malformed head all `Unknown`); the non-PR blanket-trust test
+no longer lists `workflow_run`, and the throughput benchmark now covers all
+three derivation paths (60k derivations under the same 5s bound). The
+`trust_class` filter run shows 41 because it also matches one pre-existing
+`store_trust_class` mapping test.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; module suite 41/41 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1688 passed with the same 3 pre-existing environmental
+failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
+exists but is empty — untouched code path). WP-6 status: derivation
+complete incl. this correction; pool-refuses-out-of-class enforcement and
+the flag-as-ceiling wiring remain unclaimed.
