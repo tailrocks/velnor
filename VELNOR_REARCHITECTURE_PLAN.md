@@ -190,6 +190,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
 | 2026-09-12 | gha-cache-repo-namespace landed: repo/ref-scoped hosted cache with isolated fallback (`aeb1f257`); BC-22 cache-namespacing half resolved, `pub mod gha_cache` narrowed to `pub(crate)`. |
 | 2026-09-12 | gha-cache-fork-isolation landed: trust-headed cache chains — ForkPR/Unknown jobs write an isolated `fork-` namespace and read through base scopes, trusted jobs never resolve fork namespaces; closes the repo-namespace save-gating follow-up. |
+| 2026-09-12 | gha-cache-fork-isolation fmt correction: the landed commit failed the read-only `cargo fmt -p velnor-runner -- --check` gate (one hunk in `fork_isolation_conformance_fork_v1_reads_through_to_base`); reformatted, no behavior change. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 

@@ -2990,9 +2990,10 @@ mod tests {
         assert_eq!(hit["cacheKey"], json!("base-key"));
 
         // The base entry downloads through the fork chain too.
-        let (mut body, _) = download_chain(&ctx.service, &entry_hash("base-key", "v1"), &chain_refs)
-            .await
-            .unwrap();
+        let (mut body, _) =
+            download_chain(&ctx.service, &entry_hash("base-key", "v1"), &chain_refs)
+                .await
+                .unwrap();
         let mut received = Vec::new();
         while let Some(frame) = body.frame().await {
             received.extend_from_slice(&frame.unwrap().into_data().unwrap());
