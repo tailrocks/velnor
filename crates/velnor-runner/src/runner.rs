@@ -538,34 +538,63 @@ fn intend_run_service_acquisition_in_journal(
 /// Done as soon as the identity is known and before the job message is even
 /// parsed, because this is what makes the row probeable: until the plan id is
 /// durable, no `renewjob` call can be built for it.
+///
+/// A missing provisional row is repaired, not fatal. The row is bookkeeping for
+/// a crash that may never have happened; the 200 acquire reply is the thing the
+/// bookkeeping was trying to predict, and it is *proof* this runner holds the
+/// job. Between the intent and this call the slot journal can become usable for
+/// the first time — another process registers the slot, or the journal
+/// directory is created — so "the intent is not there" no longer means "no
+/// acquire ever happened", and ending the run loop over it dropped the broker
+/// session under a job GitHub still considered assigned. That is exactly how a
+/// job comes to be failed with "The self-hosted runner lost communication with
+/// the server" while the runner is alive. `Ok(true)` reports that a row had to
+/// be rebuilt so the caller can record it; a journal that already held the
+/// acquired identity is adopted without comment, since that row already says
+/// more than the rebuild could.
+///
+/// A journal that cannot be *written at all* stays fatal. Silently carrying on
+/// without the durable step would recreate the lost-acquisition window this
+/// journal exists to close, and the job would be lost until its lease expired.
+///
+/// # Errors
+/// Journal read or write failure, or a journal rejection.
 fn resolve_run_service_acquisition_in_journal(
     journal_dir: &Path,
     config_dir: &Path,
     runner_request_id: &str,
+    run_service_url: &str,
     identity: &AcquiredJobIdentity,
-) -> Result<()> {
-    let Some((mut journal, _)) =
+) -> Result<bool> {
+    // `Ok(None)` is a configless runner: no journal-managed slot, no row to
+    // repair, and journal acceptance has always been a no-op there.
+    let Some((mut journal, slot_id)) =
         open_slot_journal(journal_dir, config_dir, "resolve a run-service acquisition")?
     else {
-        return Ok(());
+        return Ok(false);
     };
     let provisional = provisional_job_id(runner_request_id);
-    let generation = journal
+    let state = journal
         .materialized_state()
-        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
-        .jobs
-        .iter()
-        .find(|job| job.job_id == provisional)
-        .map(|job| job.generation)
-        .ok_or_else(|| {
-            anyhow::anyhow!("no acquisition intent exists for broker request {runner_request_id}")
-        })?;
-    crate::node::complete::resolve_acquisition(
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    if let Some(job) = state.jobs.iter().find(|job| job.job_id == provisional) {
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &provisional,
+            &velnor_model::JobId(identity.job_id.clone()),
+            &identity.plan_id,
+            job.generation,
+        )?;
+        return Ok(false);
+    }
+    crate::node::complete::reintend_resolved_acquisition(
         &mut journal,
-        &provisional,
         &velnor_model::JobId(identity.job_id.clone()),
+        &slot_id,
+        runner_request_id,
         &identity.plan_id,
-        generation,
+        run_service_url,
+        unix_epoch_now(),
     )
 }
 
@@ -5933,14 +5962,29 @@ async fn handle_v2_message(
     // The reply names the job, so retarget the provisional row now — before the
     // job message is even parsed. Until the plan id is durable no `renewjob`
     // call can be built for this row, which is to say the crash window between
-    // here and ownership is the one recovery can actually settle.
-    resolve_run_service_acquisition_in_journal(
+    // here and ownership is the one recovery can actually settle. A reply that
+    // lost its provisional row along the way is repaired out of the reply
+    // itself, because the 200 is the stronger evidence of the two.
+    let rebuilt_intent = match resolve_run_service_acquisition_in_journal(
         &acquisition_journal_dir,
         config_dir,
         &reference.runner_request_id,
+        run_service_url,
         &acquired_identity,
-    )
-    .context("retarget the acquisition intent onto the acquired job")?;
+    ) {
+        Ok(rebuilt) => rebuilt,
+        Err(error) => {
+            return Err(error).context("retarget the acquisition intent onto the acquired job")
+        }
+    };
+    if rebuilt_intent {
+        let note = format!(
+            "acquisition intent for request {} was missing at resolve time; rebuilt from the acquire reply as job {} plan {}",
+            reference.runner_request_id, acquired_identity.job_id, acquired_identity.plan_id
+        );
+        println!("{note}");
+        forensics.lifecycle(&note);
+    }
     let journal_dir = acquisition_journal_dir;
     let fallback_run_service_job = RunServiceJobContext {
         client: run_service.clone(),
@@ -16753,6 +16797,7 @@ jobs:
             &dir,
             &dir,
             "request-1",
+            "https://run.example/run",
             &AcquiredJobIdentity {
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
@@ -16779,6 +16824,181 @@ jobs:
         assert!(!state.jobs[0].provisional);
         assert_eq!(state.jobs[0].plan_id, "plan-1");
         drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The slot journal becoming usable only *after* the acquire reply is not a
+    /// reason to give the job back.
+    ///
+    /// The intent is written before the acquire call precisely so a crash in
+    /// that window leaves evidence. But the journal can come into being — or
+    /// gain its slot rows — between the intent and the resolve, in which case
+    /// the resolve finds no provisional row at all. Treating that as fatal used
+    /// to end the V2 run loop, which dropped the broker session under a job
+    /// GitHub still considered assigned, and GitHub failed it with "The
+    /// self-hosted runner lost communication with the server". The 200 is the
+    /// stronger evidence of the two: the row is rebuilt from the reply, and the
+    /// job goes on to run and complete.
+    #[test]
+    fn a_missing_acquisition_intent_is_rebuilt_from_the_acquire_reply() {
+        let dir = unique_temp_dir("acquire-rebuild-missing-intent");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+        // No `intend_run_service_acquisition_in_journal` call: the journal was
+        // not usable yet, which is exactly the state the incident produced.
+
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan-1".to_owned(),
+            job_id: "job-1".to_owned(),
+        };
+        let rebuilt = resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "https://run.example/run",
+            &identity,
+        )
+        .expect("a missing intent must be repaired, not end the run loop");
+        assert!(rebuilt, "the caller is told a row was rebuilt");
+
+        {
+            let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+            let state = journal.materialized_state().unwrap();
+            assert_eq!(state.jobs.len(), 1, "one rebuilt row, never a fork");
+            assert_eq!(state.jobs[0].job_id.0, "job-1");
+            assert_eq!(state.jobs[0].plan_id, "plan-1");
+            assert_eq!(
+                state.jobs[0].run_service_url, "https://run.example/run",
+                "the rebuilt row carries everything a renewjob probe needs"
+            );
+            assert!(
+                state.jobs[0].provisional,
+                "a 200 acquire reply retargets; only the durable marker owns"
+            );
+            assert_eq!(state.advertised_capacity(), 0, "the slot stays occupied");
+        }
+
+        // The rebuilt row has to be usable downstream, or the repair only moves
+        // the crash one step further along.
+        accept_run_service_job_in_journal(&dir, &dir, "job-1").unwrap();
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(!state.jobs[0].provisional, "the job reaches ownership");
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A journal that already holds the acquired identity is adopted, never
+    /// forked: an owned row for `job-1` *is* the evidence the rebuild would
+    /// write, and a second row for the same job would race the first one to the
+    /// terminal send.
+    #[test]
+    fn rebuilding_an_intent_adopts_an_existing_row_instead_of_forking_one() {
+        let dir = unique_temp_dir("acquire-rebuild-adopts-row");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+        // A previous attempt already carried this job to ownership.
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-0",
+            "msg-0",
+            "https://run.example/run",
+        )
+        .unwrap();
+        resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-0",
+            "https://run.example/run",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .unwrap();
+        accept_run_service_job_in_journal(&dir, &dir, "job-1").unwrap();
+
+        let rebuilt = resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "https://run.example/run",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert!(!rebuilt, "nothing had to be written");
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(
+            !state.jobs[0].provisional,
+            "the existing ownership is left exactly as it was"
+        );
+        assert_eq!(state.advertised_capacity(), 0);
+        drop(journal);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A configless runner has no journal to repair, and the resolve must stay
+    /// the no-op it has always been there — including not conjuring a config
+    /// directory into existence just because a broker message arrived.
+    #[test]
+    fn resolving_without_a_journal_stays_a_no_op() {
+        let dir = unique_temp_dir("acquire-resolve-configless");
+        let rebuilt = resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "https://run.example/run",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .unwrap();
+        assert!(!rebuilt);
+        assert!(
+            !dir.join("journal.db").exists(),
+            "no journal may be created for a runner with no config directory"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Repair is bounded by the journal, not by optimism. When the journal
+    /// cannot be written at all the error stays fatal: carrying on without the
+    /// durable step would recreate the lost-acquisition window this journal
+    /// exists to close, and the job would be stranded until its lease expired.
+    #[test]
+    fn an_unwritable_journal_is_still_fatal_at_resolve() {
+        let dir = unique_temp_dir("acquire-resolve-unwritable");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+        // A directory where the journal file belongs makes every write fail.
+        fs::remove_file(dir.join("journal.db")).unwrap();
+        fs::create_dir(dir.join("journal.db")).unwrap();
+
+        let error = resolve_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "https://run.example/run",
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".to_owned(),
+                job_id: "job-1".to_owned(),
+            },
+        )
+        .expect_err("a journal that cannot be written must not be skipped");
+
+        assert!(
+            !error.to_string().contains("no acquisition intent"),
+            "the failure is the journal, not a missing row: {error}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
