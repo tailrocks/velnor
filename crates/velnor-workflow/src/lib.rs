@@ -9975,6 +9975,12 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-amd64.deb\""));
         assert!(publish.contains("\"artifacts/velnor-runner-preview-${VERSION}-arm64.deb\""));
         assert!(!publish.contains("artifacts/velnor-runner-preview-*-${VERSION}"));
+        // GitHub rewrites uploaded asset names (`~` -> `.`), so the published
+        // release must be verified against the sanitized names, not the raw
+        // preview version.
+        assert!(publish.contains("asset_version=\"${VERSION//'~'/.}\""));
+        assert!(publish.contains("$asset_version + \"-amd64.deb\""));
+        assert!(!publish.contains("$version + \"-amd64.deb\""));
     }
 
     #[test]
