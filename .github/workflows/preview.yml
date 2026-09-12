@@ -280,6 +280,9 @@ jobs:
           git checkout --detach "$SOURCE_COMMIT"
           [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
+      - name: Install mold linker
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
           install_args: "rust"
@@ -310,7 +313,8 @@ jobs:
           # Host-native build: this job runs on the host arch, so the binary it
           # just built is executable here. The deb jobs cross-compile and can
           # never execute their target binary, so they copy these files instead
-          # of exporting them (the release lane's identical contract).
+          # of exporting them (the release lane's identical contract). The
+          # RUSTFLAGS above link through mold, so mold must be installed first.
           mbx build -q -p velnor-runner --release --locked --features release-build
           runner=target/release/velnor-runner
           "$runner" release export > build-identity.json
