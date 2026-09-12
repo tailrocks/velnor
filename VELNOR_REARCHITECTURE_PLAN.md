@@ -13,6 +13,31 @@ document for the duration of this effort; it is deleted when the work lands.
 Both branch heads were re-resolved against `origin` at program start and matched the
 SHAs recorded in the goal, so no newer head substitution was required.
 
+### 2026-09-12 — goal branches recreated at main tips (original SHAs kept as history)
+
+The Sep-4 lines merged to main and the remotes went main-only; the goal
+branches were then recreated at the main tips. Verified live on 2026-09-12
+(`git rev-parse HEAD origin/<branch> origin/main` agree on all three refs in
+each repo):
+
+| Repository | Branch | Recreated SHA (= `origin/main`) |
+| --- | --- | --- |
+| `tailrocks/velnor` | `perf/docker-rust-mbx` | `96bf1ed60933a351178f8811b4d33c976f74e3f9` |
+| `tailrocks/velnor-actions-fixture` | `codex/verifier-completion-fixes` | `5c2cbfdf8519520a744f3bdaf8dbbbc0e4c56db3` |
+
+The original starting SHAs in the table above
+(`2858e92df0eb78df4f1a6fe2ad4cbf86f1d56355`,
+`5c8b57aa64dcbfd8fe6b2f6edae625ae344fc496`) are retained as program history.
+Lineage note: the original commits are not direct ancestors of the recreated
+tips (the Sep-4/5 work reached main through PR merges, e.g. Velnor main
+#567–#661; Sep-4 branch content such as `docker_lease.rs` (T-004) is present at
+the recreated tip). All §93–§95 handoff SHAs (`f5f28ca`, `976516f`, `e8223f5`,
+fixture `9d03639`) likewise predate the recreation and are history, not heads.
+Remote state at recreation: Velnor `origin` carries `main` +
+`perf/docker-rust-mbx`; fixture `origin` carries `main` +
+`codex/verifier-completion-fixes` plus the still-open `rearch/ci-generation-config`
+and `rearch/generator-state-schema2` lines.
+
 Upstream semantic source of truth: `actions/runner`, resolved live to the latest
 stable release **v2.337.0** (published 2026-08-26), source commit
 `397b032cbf865e9c3ddfab89d533ec19325e1273`. Velnor pins the same version in
@@ -4373,3 +4398,206 @@ above, keep the verifier at
 on its clean `codex/verifier-completion-fixes` branch, and keep the dirty
 checkout-hydration worktree untouched. The complete architecture objective is
 still open.
+
+## 96. Living-plan refresh at the recreated tips — 2026-09-12
+
+Evidence basis for this section: direct inspection of both recreated tips on
+2026-09-12 (Velnor `96bf1ed6`, fixture `5c2cbfd`, see §0). The eight prior
+workflow child results assigned to this refresh (architecture+packages,
+red-team, six audits) arrived as `structured result submitted` summaries with
+no inspectable evidence attached, so per the workflow contract they were
+treated as pointers, not reused; no finding below is attributed to them. Any
+future refresh that does carry their bodies must reconcile against this
+section. Unresolved evidence: the full text of those eight results.
+
+### Current architecture (at `96bf1ed6`)
+
+- Workspace: 9 crates (`velnor-model`, `velnor-control`, `velnor-client`,
+  `velnor-render`, `velnorctl`, `velnor-runner`, `velnor-workflow`,
+  `velnor-bench`, `velnor-tools`) plus `tools/unit-collector`; edition 2024.
+- `velnor-workflow` is the sole, generic, scan-driven workflow generator: it
+  owns the `.github` surface of Velnor, `velnor-apt` and the fixture (#570,
+  #635, #637, #638); rearch phases 0 (scan extraction, #651), 1 (repo-owned
+  generation config + generator-state inputs, #654) and 2a (generic CI
+  primitives over scan + config, #659) are merged; the preview release lane
+  (#643) with its hardening (#645, #647, #650, #652, #653, #655, #658) and
+  per-consumer channels is live. Generator law: generic engine shapes, never
+  estate names; byte-stable output; regeneration fails closed on drift.
+- Runner: protocol pin stays `RUNNER_VERSION = "2.337.0"` (upstream
+  `actions/runner` v2.337.0 remains the semantic source of truth);
+  `MANIFEST_VERSION = 13`, crate `0.1.274`; toolchain `1.98.1` (BC-4 bump
+  landed) with a Renovate custom manager covering `rust-toolchain.toml` plus
+  the mise mirror sites (`renovate.json`, "rust toolchain" group) — WP-1 is
+  fully landed, channel and pin sites move as one PR.
+- Fixture baseline bound to Velnor `6e59b98d` (rearch phase 2a): manifest v13,
+  crate `0.1.274`, capability identity
+  `79a3a913b2e182b01ca2e40ea5478f7474bc5d5914957418581a2cd4c73cb785`,
+  29 admitted actions. Fixture audits moved from `.github/scripts` to
+  `scripts/` + the `verifier` Rust crate (`record`, `provenance`, `observe`,
+  `compare`); `.github` is fully generated.
+- Sep-5 canonical-branch content is in main through the PR line (T-004
+  `docker_lease.rs` present; T-017/T-018/T-021–T-025 bench/storage packages
+  present as `velnor-bench` drivers `cargo`/`docker`/`isolated_docker`).
+
+### Target architecture (unchanged in shape; sources of truth)
+
+`.rearch/reports/20-synthesis.md` (target + invariants + work graph),
+`21-redteam.md` (corrections + do-not-implement-as-written §5), finals
+`30-final-semantics.md`, `31-final-concurrency.md`, `32-final-security.md`,
+`33-final-architecture.md`, `34-final-redteam.md`, `35-benchmarks.md`. Shape:
+typestate `Slot<S>`/`Job<S>` with one supervisor per slot; `CancelToken` as a
+required field of `Running` with one termination ladder; `SendClaim`
+(non-`Clone`, consumed by `send()`); provisional acquire marker with 409 as
+the ownership oracle; `TrustClass` derived from the job's own event with the
+flag as ceiling; `StoreCatalog` as the sole path constructor with
+`HostCapacity` (from `statvfs`) as the only admission authority; typed sync
+Docker facade with per-call deadlines; `Redacted<String>` as the only sink
+type; collected evidence envelopes carrying unfabricable provenance.
+
+### Invariants
+
+I-1…I-28 in synthesis §4 stand, with the red-team corrections applied: I-11's
+statement is corrected per S1-2 (the plan must own the code that makes it
+true); I-14's mechanism stands but its statement is corrected per S2-3;
+I-13/I-28 carry the S1-3/S2-2 non-disjointness and adapter-table corrections;
+seven of the eleven ⚙ compiler-checked claims are qualified per S1-1 (the
+typestate cannot enforce cross-process invariants — fencing/ownership across
+processes need the durable generation + lease mechanism, not the signature
+alone).
+
+### Bug classes
+
+BC-1…BC-33 recorded in §§8/12–15. Closed or withdrawn since Sep-4: BC-8
+(withdrawn, checkout admission is fail-closed), BC-11 (typed evaluator),
+BC-20 (cross-repo fallback lock-in broken on both sides), BC-24 (durable
+sinks mask; encoded variants covered), BC-29 (argv injection unconstructible
+at the worst instance), BC-32/BC-33 (timing SLOs reportable), BC-9/BC-10
+(credential reaping; checkout slimmed), BC-4 (toolchain + manager), trust
+split-brain (fails closed). Still structural and open: BC-5 lifecycle
+typestate, BC-6 cancellation model, BC-1/BC-2/BC-3/BC-25 completion
+durability (T-019 landed the durable half; wire re-derivation and the
+`Acquired` escape-hatch deletion remain), BC-7 Docker facade, BC-14 Rust
+acceleration (persistent-target deletion, sccache bifurcation removal),
+BC-15/BC-21 trust derivation, BC-16 admission permits, BC-17 resource model,
+BC-22 store catalog/GC, BC-26 observability, BC-27 benchmark-of-product,
+BC-28 image/BuildKit (measured; slimming + persistent builders open).
+
+### Bottlenecks (observed, not projected)
+
+Docker CLI subprocess per-call latency on the job hot path (BC-7);
+`try_acquire_owned` admission permits failing acquired jobs under co-tenancy
+(BC-16); the shared control-plane pool and shared execution pool (WP-5);
+mirror exclusive lock held across the network (BC-10); per-job 1.2 GB tool
+copy and 3.0 GB image with cache thrown away per job (BC-28, measured);
+two append-only journals unbounded (WP-14); log-line timing re-parse already
+replaced by durable stage rows (BC-33 closed). Benchmark-invalidating order
+still applies: correctness/stability first, then startup/Docker hot path,
+then Rust workload, then parity.
+
+### Baseline plan (benchmarks)
+
+No benchmark of the product exists yet (BC-27 open). The scaffolding that
+landed: `velnor-bench` record integrity (T-021), Cargo env isolation (T-022),
+failed-workload cleanup (T-023), cleanup ownership + error propagation
+(T-024), Cargo/Docker scratch ownership (T-025), isolated-Docker driver.
+WP-17 remains: Rust benchmark invoking Velnor vs Docker vs real jobs,
+`CommandRunner` decorator for per-job process counts and per-call latency,
+the four injection seams, the fault catalogue, soak with resource-growth
+monitors, comparison against an official `actions/runner` install.
+
+### Dependencies
+
+Pinned and gated: toolchain 1.98.1 + Renovate toolchain group; `deny.toml`
+licences (WP-21 wires the licence gate into CI); tokio feature set owned by
+T-003; mbx with `MBX_SCHEDULER_*`/`MBX_LEARNED_INCREMENTAL_MAX_SIZE`/
+`MBX_TARGET_VIEWS` pinning still to land (WP-10); mold for Rust compile
+lanes; sccache local-only 20 GiB compat scenario; renovate action v46.2.6
+admitted across the fleet (#639, #641, #642); `actions/toolkit` pinned as the
+second upstream oracle (WP-0/WP-2 contract half).
+
+### Decisions and rejected alternatives
+
+- Adopt the synthesis target with the red-team amendments; red-team §5
+  (do-not-implement-as-written) is binding on implementers.
+- Reject `bollard` adoption (report 05 §7.1 over-reach): typed sync facade
+  with per-call deadlines instead (WP-8).
+- Reject the persistent Cargo target layer: delete it (V-13), do not migrate
+  it (WP-10).
+- Reject sccache as a requirement: one local-only compat scenario; the
+  default transparent-mbx path is the primary scenario (I-27; BC-20).
+- Reject deleting either `actions/cache` implementation (S1-7): one of them
+  is a wire protocol.
+- Reject the single Docker I/O thread (S1-6): it deadlocks cancellation.
+- Reject a second masker, second path constructor, second `docker` argv
+  builder anywhere (I-20/I-22): one construction site each, enforced by
+  `clippy::disallowed_methods` where feasible.
+- Merge WP-4 with WP-12's wiring (same 771-line step loop); merge the
+  redaction half of WP-16 into WP-7. Serialize WP-2→WP-3, WP-5 before WP-3,
+  WP-6 before WP-14, WP-8 before WP-9, WP-10's deletion before WP-11's
+  restructure.
+- Workflow generation stays generic and scan-driven; repo-specific grants
+  live in each consumer's generation config, never in `velnor-workflow`.
+
+### Dependency graph (work packages)
+
+P0: WP-0 (oracle; fixture repo, parallel-safe) → feeds WP-2 contract half,
+WP-10, WP-13, WP-17; WP-1 landed; WP-2 ↔ WP-3 conflict, WP-2 first; WP-3
+consumes WP-2's `SendClaim`/`CompletionIntent`; WP-4 needs WP-3's `Running`;
+WP-5 independent, before WP-3; WP-6 independent, before WP-14; WP-7
+independent, shares the masker with WP-16. P1: WP-8 needs WP-4's token;
+WP-9 needs WP-6's `TrustClass`, conflicts WP-8; WP-10 needs WP-6 + WP-0;
+WP-11 independent, conflicts WP-10; WP-12 needs WP-4's token, conflicts
+WP-4; WP-13 needs WP-0. P2: WP-14 needs WP-6; WP-15 needs WP-5; WP-16 needs
+WP-3; WP-17 needs WP-0 + WP-16. P3: WP-18 deletions, WP-19 error taxonomy,
+WP-20 decomposition, WP-21 hygiene. Genuinely parallel now: WP-0 remainder,
+WP-13, WP-9's image-slimming half, WP-17 scaffolding, WP-19's
+`DockerCliError`, WP-21, WP-12's evaluator core (leaf; wiring serializes
+with WP-4). Fixture track: V0 (baseline binding — done, manifest v13 at
+`6e59b98d`) → V1 (Rust matrix) / V2 (live dual-lane + semantic comparison)
+→ V4 (lifecycle/cancel/fault scenarios, needs WP-3/WP-4) → V5 (Rust
+verifier completion) / V6 (bench validation) → V7 (final reviews).
+
+### P0–P3 status
+
+- P0: WP-1 landed. WP-0 partial: baseline binding + identity comparison +
+  refresh recipe + mutation tests landed (F3/F4/F7/F9 closed); collected
+  evidence + live dual-lane comparison landed in V-1 (twelve tasks complete)
+  but live dual-lane proof and deployed-image identity are still unclaimed.
+  WP-2 partial (T-019 durable half). WP-3/WP-4/WP-5/WP-6/WP-7 not started.
+- P1: WP-12 evaluator core landed (BC-11 closed); wiring, `StepResult`, and
+  command-file parity remain. WP-8–WP-11, WP-13 not started.
+- P2/P3: not started except bench scaffolding (WP-17 partial) and the
+  toolchain/licence halves of WP-21.
+
+### Tests
+
+Runner gate: full parallel library suite (~1.5k tests; two known
+timing-sensitive flakes rerun in isolation per §92 — `git_mirror`
+checkout-reader lease, action-admission concurrency); focused container
+suites (54 tests) for Docker-scope changes; mutation tests required for
+every audit/oracle check (I-25/I-26 discipline: each check must prove it
+rejects bad input). Fixture gate: `just check` = capability-audit
+(readiness, requires live export or runner source) + workflow-check
+(actionlint, python-check, python-test, readiness) + audit-workflows +
+fmt-check + rust-check + nextest workspace + l2-closure, plus
+`cargo clippy --workspace --all-targets --locked -- -D warnings`.
+Contract-only mode never substitutes for readiness.
+
+### Status
+
+Both goal branches are clean at their recreated main-tip SHAs (see §0); no
+push pending at the time of this refresh. The §93–§95 merge worktrees
+(`.rearch/velnor-merge-main-current`, checkout-hydration) predate the
+recreation: re-audit before reuse, do not assume they apply. Next bounded
+work is WP-0 remainder (live dual-lane proof), WP-2 completion durability,
+and WP-5 admission partitioning — all unclaimed; claim in §7 before writing.
+
+### Agent ownership
+
+Ownership table (§7) claims stand: T-001 (toolchain), T-002
+(protocol error contracts), T-003 (deny/tokio) with opus-lead;
+T-004/T-017/T-018/T-021–T-025 complete with codex-lead; T-019/T-020
+claimed by codex-lead. Coordination protocol (§1) is unchanged: shared
+branches, isolated worktrees, rebase-before-push, never force-push, claims
+before writes, this file append-mostly. No new claims are made by this
+refresh (read-only).
