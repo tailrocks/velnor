@@ -141,6 +141,7 @@ Claim a boundary here before writing to it. Read-only investigation needs no cla
 | `crates/velnor-bench/src/drivers/mod.rs` (failure cleanup) | codex-lead | claimed — T-023 |
 | `crates/velnor-bench/src/drivers/cargo.rs` + `drivers/docker.rs` (cleanup ownership and error propagation) | codex-lead | claimed — T-024 |
 | `crates/velnor-runner/src/trust_class.rs` + `lib.rs` module line (per-job TrustClass derivation) | codex-lead | claimed — WP-6/job-trust-class |
+| `crates/velnor-runner/src/gha_cache.rs` `prefix_scan` (restore-key rank-collision fix) | codex-lead | complete — gha-cache-prefix-max |
 
 ## 8. Discovered bug classes
 
@@ -4695,3 +4696,33 @@ failures as §97 (`action::tests::fetched_*`: host `/tmp/velnor-actions`
 exists but is empty — untouched code path). WP-6 status: derivation
 complete incl. this correction; pool-refuses-out-of-class enforcement and
 the flag-as-ceiling wiring remain unclaimed.
+
+## 99. gha-cache-prefix-max: `prefix_scan` rank-collision fix — 2026-09-12
+
+`prefix_scan` ranked restore-key candidates through a `BTreeMap` keyed by a
+`(created_ms, key_len)` rank string, so two entries sharing a timestamp and
+key length collided on one key and the later-iterated entry overwrote the
+earlier one: the restored entry depended on directory iteration order, and a
+stale loser could poison the cache hit. The enabling condition was
+structural — ranking through a lossy map key instead of comparing
+candidates.
+
+Fix in `crates/velnor-runner/src/gha_cache.rs` (boundary claimed in §7):
+`prefix_scan` now tracks the max directly, comparing each candidate by the
+`(created_ms, key_len, hash)` tuple. Equal-rank entries no longer overwrite
+each other; ties break deterministically by greater entry hash. Newest-wins
+and longest-key-second ordering are unchanged. The now-unused `BTreeMap`
+import is removed; no other call sites exist (`lookup` is the only caller).
+
+Tests in-module, 30 in the `gha_cache` filter (was 29), all passing: new
+`prefix_scan_equal_rank_breaks_ties_by_hash` commits 16 same-`created_ms`,
+same-length pairs under distinct restore prefixes and asserts each lookup
+restores the hash-greater entry. The test was verified to fail against the
+old `BTreeMap` logic (`restore pair04-` mismatch) and pass on the fix. No
+benchmark was named in the brief and `crates/velnor-runner` has no benches
+harness, so none was added.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; `gha_cache` module suite 30/30 pass.
+gha-cache-prefix-max status: complete.

@@ -34,7 +34,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::{self, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -149,7 +148,7 @@ impl CacheService {
     }
 
     fn prefix_scan(&self, key: &str, version: &str, namespace: Option<&str>) -> Option<CacheHit> {
-        let mut hits: BTreeMap<String, CacheHit> = BTreeMap::new();
+        let mut best: Option<((u64, usize, String), CacheHit)> = None;
         let entries = std::fs::read_dir(self.tenant_root(namespace).join("entries")).ok()?;
         for file in entries.flatten() {
             let path = file.path();
@@ -176,17 +175,22 @@ impl CacheService {
                 .unwrap_or_default()
                 .to_owned();
             // Newest wins; ties broken by longest key (GitHub favors the most
-            // specific restore key on equal timestamps in practice).
-            let rank = format!("{created:020}/{:04}", entry_key.len());
-            hits.insert(
-                rank,
-                CacheHit {
-                    hash,
-                    key: entry_key.to_owned(),
-                },
-            );
+            // specific restore key on equal timestamps in practice), then by
+            // hash for determinism. Track the max directly: ranking through a
+            // map keyed by a (created_ms, key_len) string let equal-rank
+            // entries overwrite each other, so an arbitrary loser could win
+            // depending on directory iteration order.
+            let rank = (created, entry_key.len(), hash.clone());
+            let hit = CacheHit {
+                hash,
+                key: entry_key.to_owned(),
+            };
+            match &best {
+                Some((best_rank, _)) if *best_rank >= rank => {}
+                _ => best = Some((rank, hit)),
+            }
         }
-        hits.into_values().next_back()
+        best.map(|(_, hit)| hit)
     }
 
     fn enforce_budget(&self, namespace: Option<&str>) -> Result<()> {
@@ -1419,6 +1423,67 @@ mod tests {
 
         // Version mismatch misses.
         assert!(svc.lookup(&["linux-rust"], "v9", None).is_none());
+    }
+
+    fn commit_blob_at(
+        service: &CacheService,
+        key: &str,
+        version: &str,
+        contents: &[u8],
+        created_ms: u64,
+    ) {
+        write_blob(service, key, version, contents);
+        let hash = entry_hash(key, version);
+        let entries = service.tenant_root(None).join("entries");
+        std::fs::create_dir_all(&entries).expect("create entries");
+        std::fs::write(
+            entries.join(format!("{hash}.json")),
+            json!({
+                "key": key,
+                "version": version,
+                "blob": hash,
+                "size": contents.len(),
+                "created_ms": created_ms,
+            })
+            .to_string(),
+        )
+        .expect("write entry");
+    }
+
+    #[test]
+    fn prefix_scan_equal_rank_breaks_ties_by_hash() {
+        // Entries sharing created_ms and key length used to collide on one
+        // rank-string map key, so the loser could overwrite the winner
+        // depending on directory iteration order. The tie-break is now the
+        // greater entry hash, independent of iteration order. Each pair shares
+        // one restore prefix, so every pair independently exercises the tie.
+        let dir = tempfile_dir();
+        let svc = test_service(dir.path());
+        let created_ms = 1_757_836_800_000;
+        let mut pairs = Vec::new();
+        for index in 0..16 {
+            let first = format!("pair{index:02}-aa");
+            let second = format!("pair{index:02}-bb");
+            commit_blob_at(&svc, &first, "v1", b"a-body", created_ms);
+            commit_blob_at(&svc, &second, "v1", b"b-body", created_ms);
+            assert_eq!(first.len(), second.len());
+            assert_ne!(entry_hash(&first, "v1"), entry_hash(&second, "v1"));
+            pairs.push((first, second));
+        }
+
+        for (first, second) in &pairs {
+            let winner = if entry_hash(first, "v1") > entry_hash(second, "v1") {
+                first
+            } else {
+                second
+            };
+            let restore = format!("{}-", &winner[..6]);
+            let primary = format!("{restore}zz");
+            let hit = svc.lookup(&[primary.as_str(), restore.as_str()], "v1", None);
+            let hit = hit.unwrap_or_else(|| panic!("restore {restore} missed"));
+            assert_eq!(hit.hash, entry_hash(winner, "v1"), "restore {restore}");
+            assert_eq!(hit.key, *winner, "restore {restore}");
+        }
     }
 
     fn test_ctx(service: CacheService) -> Ctx {
