@@ -26349,6 +26349,94 @@ bitcoin-processor-app.push=true")
         fs::remove_dir_all(temp).unwrap();
     }
 
+    /// actions/runner applies recorded PATH entries to main and post node
+    /// actions alike, and on GitHub-hosted they run on the runner host where
+    /// those directories exist. The node sidecar must mount every recorded
+    /// entry at the same path, or a post step fails with `Unable to locate
+    /// executable file: cargo` while every main step of the job resolved it.
+    #[test]
+    fn node_actions_mount_recorded_path_entries_for_main_and_post() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "toolchain".into(),
+                display_name: String::new(),
+                script: "echo /root/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "cargo-install".into(),
+                display_name: String::new(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/baptiste0928_cargo-install/dist/index.js"
+                        .into(),
+                    post_container_path: Some(
+                        "/__a/_actions/baptiste0928_cargo-install/dist/post.js".into(),
+                    ),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/baptiste0928_cargo-install".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+        ];
+        let base_env = vec![
+            ("GITHUB_REPOSITORY".into(), "acme/repo".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &base_env, &temp)
+            .unwrap();
+
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[0].ends_with(&[
+            "node:24-bookworm".into(),
+            "/__a/_actions/baptiste0928_cargo-install/dist/index.js".into()
+        ]));
+        assert!(node_calls[1].ends_with(&[
+            "node:24-bookworm".into(),
+            "/__a/_actions/baptiste0928_cargo-install/dist/post.js".into()
+        ]));
+        for call in &node_calls {
+            assert!(call
+                .windows(2)
+                .any(|pair| pair == ["-v", "/root/.cargo/bin:/root/.cargo/bin"]));
+            assert!(call.contains(
+                &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                    .into()
+            ));
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     #[test]
     fn executes_javascript_post_actions_in_reverse_order() {
         let temp = temp_dir();

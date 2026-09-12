@@ -774,27 +774,24 @@ impl JobContainerSpec {
             self.network.clone(),
             "--workdir".to_owned(),
             working_directory.to_owned(),
-            "-v".to_owned(),
-            self.mount_arg(&self.workspace_host, "/__w"),
-            "-v".to_owned(),
-            self.mount_arg(&self.workspace_host, "/github/workspace"),
-            "-v".to_owned(),
-            self.mount_arg(&self.temp_host, "/__t"),
-            "-v".to_owned(),
-            self.mount_arg(&self.temp_host, "/tmp"),
-            "-v".to_owned(),
-            self.mount_arg(&self.temp_host, "/github/runner_temp"),
-            "-v".to_owned(),
-            self.mount_arg(&self.temp_host, "/github/file_commands"),
-            "-v".to_owned(),
-            self.mount_arg(&self.home_host, "/github/home"),
-            "-v".to_owned(),
-            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
-            "-v".to_owned(),
-            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
-            "-v".to_owned(),
-            self.mount_arg(&self.tools_host, "/__tool"),
         ]);
+        let mut mounts = vec![
+            self.mount_arg(&self.workspace_host, "/__w"),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
+            self.mount_arg(&self.temp_host, "/__t"),
+            self.mount_arg(&self.temp_host, "/tmp"),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
+            self.mount_arg(&self.home_host, "/github/home"),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
+            format!("{}:ro", self.mount_arg(&self.actions_host, "/__a")),
+            self.mount_arg(&self.tools_host, "/__tool"),
+        ];
+        mounts.extend(self.node_action_path_mounts(path_prepend, &mounts));
+        for mount in mounts {
+            args.flag("-v");
+            args.flag(mount);
+        }
         args.env("HOME", "/github/home");
         args.env("RUNNER_TOOL_CACHE", "/__tool");
         args.env("AGENT_TOOLSDIRECTORY", "/__tool");
@@ -823,6 +820,95 @@ impl JobContainerSpec {
             .finish()?;
         audit_argv_for_secrets(prepared.args(), secret_masks)?;
         Ok(prepared)
+    }
+
+    /// Bind mounts that make job-container PATH directories resolvable inside
+    /// the Node action sidecar.
+    ///
+    /// actions/runner executes node actions — main and post — on the runner
+    /// host, so every PATH entry an earlier step recorded is inherently
+    /// visible to them. Velnor runs those actions in a sidecar that sees only
+    /// what this argv mounts, so an entry recorded inside the job container
+    /// named a directory that does not exist there: a post step failed with
+    /// `Unable to locate executable file: cargo` while every main step of the
+    /// same job resolved it. Each entry is therefore projected at the same
+    /// absolute path it has in the job container, from the daemon-host
+    /// directory that backs that container path in `start_args`; any other
+    /// absolute entry binds the host path of the same name (Docker creates a
+    /// missing host directory, exactly as it does for the job's own mounts).
+    /// Entries the sidecar already sees through one of `existing_mounts` are
+    /// dropped, so a PATH entry can never shadow the runner-owned /__w, /__t
+    /// and /github views, and identical host paths are mounted once.
+    fn node_action_path_mounts(
+        &self,
+        path_prepend: &[String],
+        existing_mounts: &[String],
+    ) -> Vec<String> {
+        let mut hosts: Vec<String> = existing_mounts
+            .iter()
+            .map(|mount| mount_host(mount).to_owned())
+            .collect();
+        let mut mounts = Vec::new();
+        for entry in path_prepend {
+            let Some(source) = self.node_action_path_source(entry, existing_mounts) else {
+                continue;
+            };
+            let mount = self.mount_arg(&source, entry);
+            let host = mount_host(&mount).to_owned();
+            if hosts.contains(&host) {
+                continue;
+            }
+            hosts.push(host);
+            mounts.push(mount);
+        }
+        mounts
+    }
+
+    /// Daemon-host directory that backs a job-container PATH entry, or `None`
+    /// when the sidecar already sees that container path.
+    fn node_action_path_source(&self, entry: &str, existing_mounts: &[String]) -> Option<PathBuf> {
+        let entry = entry.trim();
+        // Not a usable mount destination: the base PATH entries are already
+        // spelled out below, and `:`, `..` or a relative form would corrupt
+        // the `-v` argument rather than describe a job-container directory.
+        if entry.is_empty()
+            || !entry.starts_with('/')
+            || entry.contains(':')
+            || entry.split('/').any(|component| component == "..")
+            || NODE_ACTION_BASE_PATH.split(':').any(|base| base == entry)
+        {
+            return None;
+        }
+        // Container paths whose daemon-host backing directory `start_args`
+        // mounts at that same container path. The mise adapter records tool
+        // bin directories inside these stores, and no directory of that name
+        // exists on the daemon host: only the store holds the installed tools.
+        let store_backed: [(&str, PathStoreResolver); 3] = [
+            ("/opt/mise/installs", Self::mise_executable_store_host),
+            ("/opt/velnor/mise-binaries", Self::mise_binary_store_host),
+            ("/github/home/.cargo/bin", Self::cargo_executable_store_host),
+        ];
+        for (container_prefix, store) in store_backed {
+            if let Some(rest) = entry.strip_prefix(container_prefix) {
+                let rest = rest.strip_prefix('/').unwrap_or(rest);
+                let source = store(self);
+                return Some(if rest.is_empty() {
+                    source
+                } else {
+                    source.join(rest)
+                });
+            }
+        }
+        // Already visible through a mount above. Those views are load-bearing:
+        // a PATH entry landing on /__w, /__t or /github must not rebind them
+        // to a host path of its own choosing.
+        if existing_mounts
+            .iter()
+            .any(|mount| container_path_under(entry, mount_container(mount)))
+        {
+            return None;
+        }
+        Some(PathBuf::from(entry))
     }
 
     /// `docker build` for a Dockerfile action.
@@ -1270,6 +1356,33 @@ fn mount(host: &Path, container: &str) -> String {
     format!("{}:{container}", host.display())
 }
 
+/// Daemon-host store directory resolver for one job container.
+type PathStoreResolver = fn(&JobContainerSpec) -> PathBuf;
+
+/// Host side of a rendered `-v host:container[:ro]` argument. Host paths on
+/// Linux cannot contain `:`, so the first field is authoritative.
+fn mount_host(mount: &str) -> &str {
+    mount.split(':').next().unwrap_or_default()
+}
+
+/// Container side of a rendered `-v host:container[:ro]` argument.
+fn mount_container(mount: &str) -> &str {
+    mount.split(':').nth(1).unwrap_or_default()
+}
+
+/// Component-wise containment, so `/__w/repo` is under `/__w` while
+/// `/__w/repo-sibling` is not.
+fn container_path_under(path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return false;
+    }
+    prefix == "/"
+        || path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn workflow_host(temp_host: &Path) -> PathBuf {
     temp_host.join("_github_workflow")
 }
@@ -1572,6 +1685,15 @@ mod tests {
 
     fn has_read_only_mount(args: &[String], host: &Path, container: &str) -> bool {
         args.contains(&format!("{}:ro", mount(host, container)))
+    }
+
+    /// Every `-v host:container[:ro]` argument of a rendered command.
+    fn mount_args(prepared: &PreparedDockerArgs) -> Vec<String> {
+        rendered(prepared)
+            .windows(2)
+            .filter(|pair| pair[0] == "-v")
+            .map(|pair| pair[1].clone())
+            .collect()
     }
 
     fn spec() -> JobContainerSpec {
@@ -2660,6 +2782,324 @@ mod tests {
             &args[args.len() - 2..],
             ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
+    }
+
+    /// Spec whose temp root carries the production slot layout, so the
+    /// persistent mise stores resolve their slot scope like a real job.
+    fn slotted_spec(name: &str) -> JobContainerSpec {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp(name)
+            .join("slots")
+            .join("slot-1")
+            .join("job-1")
+            .join("temp");
+        spec
+    }
+
+    /// PATH entries name job-container directories, so the sidecar gets a bind
+    /// mount for each at the very same absolute path: a post step resolving
+    /// `cargo` through a PATH dir must not depend on that dir existing only in
+    /// the job container.
+    #[test]
+    fn node_action_path_entries_are_mounted_at_the_same_container_path() {
+        let spec = slotted_spec("node-path-mounts");
+        let mise_installs = spec.mise_executable_store_host();
+        let mise_binaries = spec.mise_binary_store_host();
+        let cargo_bin = spec.cargo_executable_store_host();
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[
+                    "/opt/mise/installs/node/22.18.0/bin".into(),
+                    "/opt/velnor/mise-binaries/linux-x64/25.6.0".into(),
+                    "/github/home/.cargo/bin".into(),
+                    "/root/.cargo/bin".into(),
+                ],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+
+        assert!(has_mount(
+            &args,
+            &mise_installs.join("node/22.18.0/bin"),
+            "/opt/mise/installs/node/22.18.0/bin"
+        ));
+        assert!(has_mount(
+            &args,
+            &mise_binaries.join("linux-x64/25.6.0"),
+            "/opt/velnor/mise-binaries/linux-x64/25.6.0"
+        ));
+        // Nested store mount: /github/home alone does not carry the cargo bin
+        // store, and it must not be swallowed by the broader /github/home view.
+        assert!(has_mount(&args, &cargo_bin, "/github/home/.cargo/bin"));
+        assert!(has_mount(
+            &args,
+            Path::new("/root/.cargo/bin"),
+            "/root/.cargo/bin"
+        ));
+        assert!(args.contains(&"PATH=/opt/mise/installs/node/22.18.0/bin:/opt/velnor/mise-binaries/linux-x64/25.6.0:/github/home/.cargo/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
+    }
+
+    #[test]
+    fn node_action_path_mounts_are_deduplicated() {
+        let spec = slotted_spec("node-path-dedupe");
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[
+                    "/root/.cargo/bin".into(),
+                    "/root/.cargo/bin".into(),
+                    "/opt/mise/installs/node/22.18.0/bin".into(),
+                    "/opt/mise/installs/node/22.18.0/bin".into(),
+                ],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(Path::new("/root/.cargo/bin"), "/root/.cargo/bin"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg
+                    == mount(
+                        &spec.mise_executable_store_host().join("node/22.18.0/bin"),
+                        "/opt/mise/installs/node/22.18.0/bin"
+                    ))
+                .count(),
+            1
+        );
+    }
+
+    /// A PATH entry landing on /__w, /__t or /github is already visible, and
+    /// those runner-owned views are load-bearing: the entry is dropped rather
+    /// than rebound to a host path of its own choosing.
+    #[test]
+    fn node_action_path_entries_never_shadow_runner_owned_mounts() {
+        let spec = slotted_spec("node-path-required");
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[
+                    "/__w".into(),
+                    "/__w/repo/target/debug".into(),
+                    "/__w/repo-sibling/bin".into(),
+                    "/__t".into(),
+                    "/tmp/velnor".into(),
+                    "/github/workspace/bin".into(),
+                    "/github/workflow".into(),
+                    "/github/home".into(),
+                    "/__a".into(),
+                    "/__tool".into(),
+                    "/usr/local/tools/bin".into(),
+                ],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+
+        // The required views survive, exactly once, from their own hosts.
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(&spec.workspace_host, "/__w"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(&spec.temp_host, "/__t"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(&spec.home_host, "/github/home"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(&spec.workspace_host, "/github/workspace"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(&workflow_host(&spec.temp_host), "/github/workflow"))
+                .count(),
+            1
+        );
+        assert!(has_read_only_mount(&args, &spec.actions_host, "/__a"));
+        assert!(has_mount(&args, &spec.tools_host, "/__tool"));
+        // Every mount touching a runner-owned container path is the required
+        // one, present exactly once: no PATH entry rebinds it.
+        let mounts = mount_args(&prepared);
+        let required = [
+            mount(&spec.workspace_host, "/__w"),
+            mount(&spec.workspace_host, "/github/workspace"),
+            mount(&spec.temp_host, "/__t"),
+            mount(&spec.temp_host, "/tmp"),
+            mount(&spec.temp_host, "/github/runner_temp"),
+            mount(&spec.temp_host, "/github/file_commands"),
+            mount(&spec.home_host, "/github/home"),
+            mount(&workflow_host(&spec.temp_host), "/github/workflow"),
+            format!("{}:ro", mount(&spec.actions_host, "/__a")),
+            mount(&spec.tools_host, "/__tool"),
+        ];
+        for required_mount in &required {
+            assert_eq!(
+                mounts.iter().filter(|m| *m == required_mount).count(),
+                1,
+                "{required_mount}"
+            );
+        }
+        for entry in &mounts {
+            if ["/__w", "/__t", "/tmp", "/github", "/__a", "/__tool"]
+                .iter()
+                .any(|owned| container_path_under(mount_container(entry), owned))
+            {
+                assert!(
+                    required.contains(entry),
+                    "runner-owned path rebound: {entry}"
+                );
+            }
+        }
+        // A PATH entry outside the runner-owned views still gets its mount.
+        assert!(has_mount(
+            &args,
+            Path::new("/usr/local/tools/bin"),
+            "/usr/local/tools/bin"
+        ));
+    }
+
+    #[test]
+    fn node_action_run_without_path_entries_adds_no_path_env_or_mounts() {
+        let spec = slotted_spec("node-path-empty");
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+
+        assert!(!args.iter().any(|arg| arg.starts_with("PATH=")));
+        let mut containers: Vec<String> = mount_args(&prepared)
+            .into_iter()
+            .map(|entry| mount_container(&entry).to_owned())
+            .collect();
+        containers.sort_unstable();
+        assert_eq!(
+            containers,
+            [
+                "/__a",
+                "/__t",
+                "/__tool",
+                "/__w",
+                "/github/file_commands",
+                "/github/home",
+                "/github/runner_temp",
+                "/github/workflow",
+                "/github/workspace",
+                "/tmp",
+                "/var/cache/mbx",
+                "/var/run/docker.sock",
+            ]
+        );
+    }
+
+    /// Main and post node actions are prepared by the same call with the same
+    /// recorded PATH, so both must carry the identical mount set.
+    #[test]
+    fn node_action_post_steps_receive_the_same_path_mounts() {
+        let spec = slotted_spec("node-path-post");
+        let path_prepend = [
+            "/opt/mise/installs/node/22.18.0/bin".to_owned(),
+            "/root/.cargo/bin".to_owned(),
+        ];
+        let main = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &path_prepend,
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let post = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &path_prepend,
+                "node:20-bookworm",
+                "/__a/action/dist/save.js",
+            )
+            .unwrap();
+        let mounts = |prepared: &PreparedDockerArgs| {
+            mount_args(prepared)
+                .into_iter()
+                .filter(|entry| {
+                    ["/opt/mise/installs", "/root/.cargo"]
+                        .iter()
+                        .any(|prefix| mount_container(entry).starts_with(prefix))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(mounts(&main), mounts(&post));
+        assert_eq!(mounts(&post).len(), 2);
+    }
+
+    #[test]
+    fn relative_and_base_path_entries_mount_nothing() {
+        let spec = slotted_spec("node-path-junk");
+        let prepared = spec
+            .prepare_run_node_action_args(
+                "/__w",
+                &[],
+                &[],
+                &[
+                    String::new(),
+                    "bin/tools".into(),
+                    "/opt/mise/shims/../..".into(),
+                    "/usr/local/bin:/opt/mise/bin".into(),
+                    "/opt/mise/bin".into(),
+                ],
+                "node:20-bookworm",
+                "/__a/action/dist/index.js",
+            )
+            .unwrap();
+        let args = rendered(&prepared);
+
+        // Only the plain absolute entry mounts; unusable entries are skipped
+        // while the recorded PATH itself stays verbatim.
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == mount(Path::new("/opt/mise/bin"), "/opt/mise/bin"))
+                .count(),
+            1
+        );
+        assert!(args.contains(&"PATH=:bin/tools:/opt/mise/shims/../..:/usr/local/bin:/opt/mise/bin:/opt/mise/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
     }
 
     #[test]
