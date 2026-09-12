@@ -7,6 +7,32 @@ use crate::{
     ReleaseSpec, RunnerMode, Unit, UnitKind,
 };
 
+// TODO(rearch): consumer holla still on legacy table.
+// TODO(rearch): consumer holla-apt still on legacy table.
+// TODO(rearch): consumer jackin still on legacy table.
+// TODO(rearch): consumer jackin-the-architect still on legacy table.
+// TODO(rearch): consumer jackin-role-action still on legacy table.
+// TODO(rearch): consumer jackin-agent-smith still on legacy table.
+// TODO(rearch): consumer jackin-agent-brown still on legacy table.
+// TODO(rearch): consumer jackin-sentinel still on legacy table.
+// TODO(rearch): consumer jackin-dev still on legacy table.
+// TODO(rearch): consumer jackin-marketplace still on legacy table.
+// TODO(rearch): consumer jackin-github-terraform still on legacy table.
+// TODO(rearch): consumer homebrew-tap still on legacy table.
+// TODO(rearch): consumer homebrew-holla still on legacy table.
+// TODO(rearch): consumer homebrew-parallax still on legacy table.
+// TODO(rearch): consumer homebrew-ruxel still on legacy table.
+// TODO(rearch): consumer homebrew-tablerock still on legacy table.
+// TODO(rearch): consumer termrock still on legacy table.
+// TODO(rearch): consumer parallax still on legacy table.
+// TODO(rearch): consumer parallax-telemetry-playground still on legacy table.
+// TODO(rearch): consumer ruxel still on legacy table.
+// TODO(rearch): consumer tablerock still on legacy table.
+// TODO(rearch): consumer schemalane still on legacy table.
+// TODO(rearch): consumer ChainArgos/blockchain-nodes still on legacy table.
+// TODO(rearch): consumer ChainArgos/github-terraform still on legacy table.
+// TODO(rearch): consumer ChainArgos/java-monorepo still on legacy table.
+//
 /// The runner group the apt surfaces select their trust-gated self-hosted
 /// lane by. The repo-owned generation config declares its own group; this
 /// catalog value covers the apt repositories that have no config yet.
