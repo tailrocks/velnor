@@ -1,0 +1,598 @@
+name: Preview release
+
+# Rolling preview lane for tailrocks/velnor: every push to main publishes one
+# prerelease that always names the current main tip, so a consumer can install
+# "what main builds right now" without waiting for a tag.
+#
+# Deliberately NOT the stable coherence chain. A preview run emits no OCI image,
+# no release-record.json, and no release-record digest chain; its artifacts are
+# admitted by identity (version + source commit) plus GitHub artifact
+# attestation produced by the shared ci-release-package-signer callable with
+# source-ref refs/heads/main. Consumer-side verification enforces the rest.
+#
+# Version contract: `<crate_version>~preview.<run_number>+<7-hex-short-sha>`
+# (for example 0.1.274~preview.42+abc1234). `~` is required: dpkg sorts `~`
+# before the release itself, so every preview of 0.1.274 is strictly older than
+# the eventual 0.1.274 stable release and can never win an upgrade race.
+#
+# The rolling `preview` release is replaced atomically: delete-then-create under
+# a serialized concurrency group, never edited in place, so a reader can never
+# observe a half-replaced asset set.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  identity:
+    name: Resolve preview identity
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      crate_version: ${{ steps.identity.outputs.crate_version }}
+      name: ${{ steps.identity.outputs.name }}
+      commit: ${{ steps.identity.outputs.commit }}
+      short_commit: ${{ steps.identity.outputs.short_commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve the preview version from the crate manifest
+        id: identity
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # The preview binds exactly the commit that triggered this run; it is
+          # never re-resolved from the moving branch tip.
+          commit="$(git rev-parse HEAD)"
+          case "$commit" in
+            *[!0-9a-f]*|'') echo "::error::HEAD did not resolve to lowercase hex" >&2; exit 1 ;;
+          esac
+          [ "${#commit}" -eq 40 ] || { echo "::error::HEAD is not a 40-hex commit" >&2; exit 1; }
+          [ "$commit" = "$EVENT_SHA" ] || { echo "::error::checkout $commit != event commit $EVENT_SHA" >&2; exit 1; }
+          case "$RUN_NUMBER" in
+            ''|*[!0-9]*) echo "::error::invalid workflow run number $RUN_NUMBER" >&2; exit 1 ;;
+          esac
+          [ "$RUN_NUMBER" -gt 0 ] || { echo "::error::run number must be positive" >&2; exit 1; }
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/velnor-runner/Cargo.toml | head -n1)"
+          case "$crate" in
+            ''|*[!0-9.]*) echo "::error::crate version $crate is not an X.Y.Z version" >&2; exit 1 ;;
+          esac
+          [[ "$crate" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::crate version $crate is not an X.Y.Z version" >&2; exit 1; }
+          short_commit="${commit:0:7}"
+          version="${crate}~preview.${RUN_NUMBER}+${short_commit}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+~preview\.[0-9]+\+[0-9a-f]{7}$ ]] \
+            || { echo "::error::preview version $version violates the preview contract" >&2; exit 1; }
+          {
+            echo "version=$version"
+            echo "crate_version=$crate"
+            echo "name=Preview $version"
+            echo "commit=$commit"
+            echo "short_commit=$short_commit"
+          } >> "$GITHUB_OUTPUT"
+
+  guest-payload:
+    needs: identity
+    name: Build ${{ matrix.arch }} guest payload for the deb
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            deb_arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - arch: arm64
+            deb_arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CACHE_LANE: Preview
+      CARGO_INCREMENTAL: "0"
+      GUEST_ARCH: ${{ matrix.arch }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Normalize immutable preview checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: "rust"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+          version: 1.8.3
+
+      - name: Add guest-agent target
+        run: rustup target add "$TARGET"
+
+      - name: Install kernel and rootfs build packages
+        run: |
+          set -euo pipefail
+          # velnor-sudo-exception: GitHub-hosted preview build installs required OS packages.
+          sudo apt-get update
+          # velnor-sudo-exception: GitHub-hosted preview build installs required OS packages.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
+            mmdebstrap debootstrap arch-test
+          if [ "$GUEST_ARCH" = "x86_64" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              qemu-user-static binfmt-support
+            sudo update-binfmts --enable qemu-aarch64
+            test -x /usr/bin/qemu-aarch64-static
+          else
+            # Build the ARM kernel with the same cross-GCC identity on every
+            # runner; native ARM GCC changes the pinned vmlinux bytes.
+            sudo apt-get install -y --no-install-recommends \
+              gcc-aarch64-linux-gnu
+          fi
+          arch-test arm64
+
+      - name: Download pinned kernel tarball
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
+
+      - name: Build guest agent for rootfs
+        run: |
+          set -euo pipefail
+          agent="target/$TARGET/release/velnor-guest-agent"
+          mbx build -p velnor-runner --bin velnor-guest-agent \
+            --locked --release --features release-build --target "$TARGET"
+          test -x "$agent"
+          case "$TARGET" in
+            aarch64-unknown-linux-gnu)
+              readelf -h "$agent" | grep -Eq 'Machine:[[:space:]]+AArch64'
+              ;;
+            x86_64-unknown-linux-gnu)
+              readelf -h "$agent" | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
+              ;;
+            *)
+              echo "::error::unsupported guest-agent target $TARGET" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Build guest vmlinux and rootfs.ext4
+        run: |
+          set -euo pipefail
+          mkdir -p dist/microvm
+          agent="target/$TARGET/release/velnor-guest-agent"
+          mbx run -p velnor-runner --bin velnor-guest-image --locked --release -- \
+            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz \
+            --guest-agent "$agent"
+          test -s dist/microvm/vmlinux
+          test -s dist/microvm/rootfs.ext4
+          test -s "$agent"
+          test -x "$agent"
+          # shellcheck disable=SC2209
+          stat_output="$(DEBUGFS_PAGER=cat debugfs -R 'stat /usr/bin/velnor-guest-agent' dist/microvm/rootfs.ext4 2>&1)"
+          printf '%s\n' "$stat_output" | grep -Eq 'Type: regular[[:space:]]+Mode:[[:space:]]+0755([[:space:]]|$)' \
+            || { echo "::error::rootfs guest agent must be a regular file with mode 0755" >&2; exit 1; }
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" dist/microvm/rootfs.ext4 >/dev/null
+          cmp -- "$agent_dump" "$agent"
+          sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: guest-payload-${{ matrix.deb_arch }}
+          path: |
+            dist/microvm/vmlinux
+            dist/microvm/rootfs.ext4
+            dist/microvm/rootfs.sha256
+            dist/microvm/velnor-guest-agent
+            dist/microvm/guest-agent.sha256
+          if-no-files-found: error
+
+  build:
+    needs: [identity, guest-payload]
+    name: Build ${{ matrix.arch }} preview deb
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ubuntu-24.04
+    env:
+      CACHE_LANE: Preview
+      VERSION: ${{ needs.identity.outputs.version }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # Stable release build environment plus the preview source binding: the
+      # release-build identity gate embeds this exact commit instead of
+      # demanding a v* tag, which an untagged main commit cannot have.
+      VELNOR_RELEASE_BUILD: "1"
+      VELNOR_PREVIEW_SOURCE_SHA: ${{ needs.identity.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Normalize immutable preview checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+          version: 1.8.3
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-deb (verified prebuilt only)
+        env:
+          # cargo-binstall performs GitHub API discovery independently of mise.
+          # Authenticate parallel preview jobs so they do not share the tiny
+          # anonymous rate limit and fail nondeterministically with HTTP 403.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
+            --disable-strategies compile --no-confirm --force
+          cargo-deb --version
+
+      - name: Build preview binaries (runner + every deb asset)
+        run: |
+          set -euo pipefail
+          # The stable release build verbatim: release-build identity is ON, and
+          # build.rs binds VELNOR_PREVIEW_SOURCE_SHA (validated against the
+          # checked-out HEAD) instead of demanding a v* tag, which an untagged
+          # main commit cannot have. The deb ships the identity files this exact
+          # binary exports below, so postinst's offline identity check holds.
+          # Keep the Rust builds inside Mr. Boxington while disabling only its
+          # C/C++ build-script shim. The shim's cross-link overlay cannot
+          # resolve the glibc ISO C23 symbols emitted by aws-lc-sys.
+          MBX_CC=0 mbx zigbuild -p velnor-runner \
+            --bin velnor-runner \
+            --release --locked --features release-build --target "${{ matrix.target }}"
+          MBX_CC=0 mbx zigbuild -p velnorctl \
+            --release --locked --features release-build --target "${{ matrix.target }}"
+          mbx zigbuild -p velnor-tools \
+            --release --locked --target "${{ matrix.target }}"
+          mbx zigbuild -p velnor-workflow \
+            --release --locked --target "${{ matrix.target }}"
+
+      - name: Stage acyclic identity files packaged into the deb
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # The deb asset manifest requires both files, and postinst re-checks
+          # them against the installed binary, so they are exported from exactly
+          # the binary this job just built (acyclic: source-derived, no digest).
+          mkdir -p crates/velnor-runner/release
+          runner="target/$TARGET/release/velnor-runner"
+          test -x "$runner"
+          "$runner" release export > crates/velnor-runner/release/build-identity.json
+          "$runner" capabilities export > crates/velnor-runner/release/manifest.json
+          jq -e '.source_sha and .crate_version' crates/velnor-runner/release/build-identity.json >/dev/null
+          jq -e 'type == "object"' crates/velnor-runner/release/manifest.json >/dev/null
+
+      - name: Download guest payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: guest-payload-${{ matrix.arch }}
+          path: guest-payload
+
+      - name: Stage pinned Firecracker, jailer, and guest agent
+        env:
+          TARGET: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$DEB_ARCH" in
+            amd64) pin_arch=x86_64 ;;
+            arm64) pin_arch=aarch64 ;;
+            *) echo "::error::unsupported arch $DEB_ARCH" >&2; exit 1 ;;
+          esac
+          url="$(jq -er --arg a "$pin_arch" '.tarballs[$a].url' microvm/pins.json)"
+          sha="$(jq -er --arg a "$pin_arch" '.tarballs[$a].sha256' microvm/pins.json)"
+          fc_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_member' microvm/pins.json)"
+          jailer_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_member' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o firecracker.tgz "$url"
+          echo "$sha  firecracker.tgz" | sha256sum -c -
+          mkdir -p extracted crates/velnor-runner/release/microvm
+          tar -xzf firecracker.tgz -C extracted
+          cp "extracted/${fc_member}" crates/velnor-runner/release/microvm/firecracker
+          cp "extracted/${jailer_member}" crates/velnor-runner/release/microvm/jailer
+          test -s guest-payload/velnor-guest-agent || { echo "::error::guest payload missing guest-agent" >&2; exit 1; }
+          test -s guest-payload/guest-agent.sha256 || { echo "::error::guest payload missing guest-agent checksum" >&2; exit 1; }
+          guest_agent_sha256="$(awk '{print $1}' guest-payload/guest-agent.sha256)"
+          [ "${#guest_agent_sha256}" -eq 64 ] || { echo "::error::guest-agent digest has invalid length" >&2; exit 1; }
+          actual_guest_agent_sha256="$(sha256sum guest-payload/velnor-guest-agent | awk '{print $1}')"
+          [ "$actual_guest_agent_sha256" = "$guest_agent_sha256" ] || { echo "::error::downloaded guest-agent digest mismatch" >&2; exit 1; }
+          install -Dm0755 guest-payload/velnor-guest-agent "target/${TARGET}/release/velnor-guest-agent"
+          cmp -- "target/${TARGET}/release/velnor-guest-agent" guest-payload/velnor-guest-agent
+          cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
+          test -s guest-payload/vmlinux || { echo "::error::guest payload missing vmlinux" >&2; exit 1; }
+          test -s guest-payload/rootfs.ext4 || { echo "::error::guest payload missing rootfs.ext4" >&2; exit 1; }
+          test -s guest-payload/rootfs.sha256 || { echo "::error::guest payload missing rootfs.sha256" >&2; exit 1; }
+          rootfs_sha256="$(awk '{print $1}' guest-payload/rootfs.sha256)"
+          [ "${#rootfs_sha256}" -eq 64 ] || { echo "::error::guest rootfs digest has invalid length" >&2; exit 1; }
+          actual_rootfs_sha256="$(sha256sum guest-payload/rootfs.ext4 | awk '{print $1}')"
+          [ "$actual_rootfs_sha256" = "$rootfs_sha256" ] || { echo "::error::downloaded guest rootfs digest mismatch" >&2; exit 1; }
+          cp guest-payload/vmlinux crates/velnor-runner/release/microvm/vmlinux
+          cp guest-payload/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
+          chmod 0755 \
+            crates/velnor-runner/release/microvm/firecracker \
+            crates/velnor-runner/release/microvm/jailer \
+            crates/velnor-runner/release/microvm/velnor-guest-agent
+          fc_sha="$(sha256sum crates/velnor-runner/release/microvm/firecracker | awk '{print $1}')"
+          jailer_sha="$(sha256sum crates/velnor-runner/release/microvm/jailer | awk '{print $1}')"
+          expected_fc="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_sha256' microvm/pins.json)"
+          expected_jailer="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_sha256' microvm/pins.json)"
+          [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
+          [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
+          mbx run -p velnor-runner --bin velnor-guest-image --locked --release -- \
+            stage --root crates/velnor-runner/release/microvm --arch "$pin_arch" \
+            --rootfs-sha256 "$rootfs_sha256" \
+            --guest-agent-sha256 "$guest_agent_sha256"
+          kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
+          rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
+          case "$kernel$rootfs" in
+            *UNSET*) echo "::error::staged kernel/rootfs checksum is still UNSET" >&2; exit 1 ;;
+          esac
+          [ "${#kernel}" -eq 64 ] || { echo "::error::kernel sha256 length ${#kernel}" >&2; exit 1; }
+          [ "${#rootfs}" -eq 64 ] || { echo "::error::rootfs sha256 length ${#rootfs}" >&2; exit 1; }
+
+      - name: Build .deb (version pinned to the preview identity)
+        run: |
+          set -euo pipefail
+          mbx deb -p velnor-runner --target ${{ matrix.target }} --no-build --no-strip --deb-version "$VERSION"
+
+      - name: Stage .deb with the empty-deb-incident guards
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=("target/${{ matrix.target }}/debian/velnor-runner_${VERSION}_"*.deb)
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected exactly one ${VERSION} deb, found ${#debs[@]}" >&2; exit 1; }
+          src="${debs[0]}"
+          case "${{ matrix.arch }}" in
+            amd64) expected_arch=amd64 ;;
+            arm64) expected_arch=arm64 ;;
+            *) echo "::error::unsupported arch" >&2; exit 1 ;;
+          esac
+          [ "$(dpkg-deb -f "$src" Version)" = "$VERSION" ] || { echo "::error::deb version != preview version" >&2; exit 1; }
+          [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
+          manifest="$(mktemp)"
+          dpkg-deb -c "$src" > "$manifest"
+          awk '$NF == "./usr/bin/velnor-runner" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest" \
+            || { echo "::error::deb must contain exactly one regular usr/bin/velnor-runner" >&2; exit 1; }
+          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
+          grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
+          grep -q "usr/bin/velnor-tools" "$manifest" || { echo "::error::deb missing usr/bin/velnor-tools" >&2; exit 1; }
+          grep -q "usr/bin/velnor-workflow" "$manifest" || { echo "::error::deb missing usr/bin/velnor-workflow" >&2; exit 1; }
+          grep -q "usr/bin/velnor-guest-agent" "$manifest" || { echo "::error::deb missing usr/bin/velnor-guest-agent" >&2; exit 1; }
+          grep -q "lib/systemd/system/velnor-fleet-policy-audit.service" "$manifest" || { echo "::error::deb missing fleet-policy audit service" >&2; exit 1; }
+          grep -q "lib/systemd/system/velnor-fleet-policy-audit.timer" "$manifest" || { echo "::error::deb missing fleet-policy audit timer" >&2; exit 1; }
+          grep -q "usr/share/velnor/fleet/release-refs.toml" "$manifest" || { echo "::error::deb missing authoritative fleet release-ref ledger" >&2; exit 1; }
+          grep -q "usr/lib/tmpfiles.d/velnor-runner.conf" "$manifest" || { echo "::error::deb missing tmpfiles.d transaction-lock path entry" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/firecracker" "$manifest" || { echo "::error::deb missing firecracker" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/jailer" "$manifest" || { echo "::error::deb missing jailer" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/velnor-guest-agent" "$manifest" || { echo "::error::deb missing packaged guest-agent" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/vmlinux" "$manifest" || { echo "::error::deb missing guest kernel" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/rootfs.ext4" "$manifest" || { echo "::error::deb missing guest rootfs" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/manifest.json" "$manifest" || { echo "::error::deb missing microvm manifest" >&2; exit 1; }
+          grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
+          grep -q "usr/share/velnor/build-identity.json" "$manifest" || { echo "::error::deb missing build identity" >&2; exit 1; }
+          grep -q "usr/share/velnor/manifest.json" "$manifest" || { echo "::error::deb missing compiled manifest" >&2; exit 1; }
+          [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          # dpkg sorts `~` before the release, so this deb can never satisfy an
+          # upgrade to the future <crate_version> stable release.
+          dpkg --compare-versions "$VERSION" lt "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/velnor-runner/Cargo.toml | head -n1)" \
+            || { echo "::error::preview version $VERSION must compare older than its crate version" >&2; exit 1; }
+          dst="velnor-runner-preview-${VERSION}-${{ matrix.arch }}.deb"
+          cp "$src" "$dst"
+          sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: preview-deb-${{ matrix.arch }}
+          path: |
+            velnor-runner-preview-*.deb
+            velnor-runner-preview-*.deb.sha256
+          if-no-files-found: error
+
+  attest:
+    needs: [identity, build]
+    name: Attest ${{ matrix.arch }} preview deb
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/ci-release-package-signer.yml
+    with:
+      artifact-name: preview-deb-${{ matrix.arch }}
+      subject-path: velnor-runner-preview-${{ needs.identity.outputs.version }}-${{ matrix.arch }}.deb
+      source-ref: refs/heads/main
+
+  publish:
+    needs: [identity, build, attest]
+    name: Replace the rolling preview release
+    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.identity.outputs.version }}
+      NAME: ${{ needs.identity.outputs.name }}
+      COMMIT: ${{ needs.identity.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: preview-deb-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Assemble the consumer release manifest and independent checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          subjects=(artifacts/velnor-runner-preview-*.deb)
+          test "${#subjects[@]}" -eq 2
+          : > SHA256SUMS
+          : > assets.jsonl
+          for subject in "${subjects[@]}"; do
+            name=$(basename "$subject")
+            digest=$(sha256sum "$subject" | awk '{print $1}')
+            sidecar="$(awk 'NF {print $1; exit}' "${subject}.sha256")"
+            [[ "$digest" =~ ^[0-9a-f]{64}$ && "$sidecar" = "$digest" ]] \
+              || { echo "::error::$name sidecar does not match its payload" >&2; exit 1; }
+            printf '%s  %s\n' "$digest" "$name" >> SHA256SUMS
+            jq -cn --arg name "$name" --arg sha256 "$digest" '{name:$name,sha256:$sha256}' >> assets.jsonl
+          done
+          test "$(wc -l < SHA256SUMS | tr -d ' ')" -eq 2
+          jq -S -n \
+            --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_ref "refs/heads/main" \
+            --arg source_commit "$COMMIT" \
+            --arg version "$VERSION" \
+            --slurpfile assets assets.jsonl \
+            '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
+            > release-manifest.json
+          # SHA256SUMS binds artifact basenames. Verify from the downloaded
+          # artifact corpus before anything is published.
+          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)
+          for arch in amd64 arm64; do
+            deb="artifacts/velnor-runner-preview-${VERSION}-${arch}.deb"
+            [ -f "$deb" ] || { echo "::error::missing preview deb for $arch" >&2; exit 1; }
+            [ "$(dpkg-deb -f "$deb" Version)" = "$VERSION" ] \
+              || { echo "::error::published deb version != preview identity ($arch)" >&2; exit 1; }
+            [ "$(dpkg-deb -f "$deb" Architecture)" = "$arch" ] \
+              || { echo "::error::published deb arch mismatch ($arch)" >&2; exit 1; }
+          done
+
+      - name: Replace the rolling preview release atomically
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Serialized by the workflow concurrency group, so this delete can
+          # never race another run's create and a reader never sees a torn
+          # release. `preview` is a moving tag by contract: the only mutable
+          # ref this repository publishes.
+          gh release delete preview --cleanup-tag --yes || true
+          # shellcheck disable=SC2086 # The unquoted globs are the asset list.
+          gh release create preview --target "$COMMIT" --prerelease --title "$NAME" \
+            SHA256SUMS release-manifest.json \
+            artifacts/velnor-runner-preview-*-${VERSION}-amd64.deb \
+            artifacts/velnor-runner-preview-*-${VERSION}-amd64.deb.sha256 \
+            artifacts/velnor-runner-preview-*-${VERSION}-arm64.deb \
+            artifacts/velnor-runner-preview-*-${VERSION}-arm64.deb.sha256
+
+      - name: Verify the published rolling preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/preview" > published.json
+          jq -e \
+            --arg name "$NAME" --arg commit "$COMMIT" --arg version "$VERSION" '
+              (.draft | not) and .prerelease == true and
+              .tag_name == "preview" and .name == $name and
+              .target_commitish == $commit and
+              ([.assets[].name] | sort) ==
+              ([
+                "SHA256SUMS",
+                "release-manifest.json",
+                ("velnor-runner-preview-" + $version + "-amd64.deb"),
+                ("velnor-runner-preview-" + $version + "-amd64.deb.sha256"),
+                ("velnor-runner-preview-" + $version + "-arm64.deb"),
+                ("velnor-runner-preview-" + $version + "-arm64.deb.sha256")
+              ] | sort)
+            ' published.json >/dev/null
+          jq -e --arg version "$VERSION" \
+            '.version == $version and .source_ref == "refs/heads/main" and
+             (.assets | length) == 2' release-manifest.json >/dev/null
