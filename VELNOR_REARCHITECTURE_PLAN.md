@@ -227,6 +227,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | F-V1 derived job trust before admission persistence and recorded the trust class + effective scope on the admission row and telemetry (`65b1630d`, §103). |
 | 2026-09-12 | F-V1 correction bound admission trust via `AdmittedTrust::narrow` so a `fork-pr`/`trusted` pair is inexpressible, and fixed the `summary_corpus` fixture to the `untrusted` scope (`d37ad166`, §103). |
 | 2026-09-12 | F-V1 second correction folded the derive+narrow pair into the single tested production binding `AdmittedTrust::admit`, which `handle_job_request` and its conformance tests now both call (§103). |
+| 2026-09-12 | Line convergence: one `perf/docker-rust-mbx` head now contains the perf trust line, the fix cache half, and `origin/main` — merges `02c2e9db` + `0f2b02f5`, full SHA record in §104. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5224,4 +5225,93 @@ runner/model/control pass; targeted ops/trust/admission/blocking 93/93;
 runner lib 1710 passed with the same 3 pre-existing environmental
 `action::tests::fetched_*` failures (re-verified on the untouched base);
 `trust_scope_single_source` 2/2.
+
+## 104. Line-convergence record: one perf/docker-rust-mbx head — 2026-09-12
+
+Evidence basis: the two merge commits below, built and gated in an
+isolated worktree (`/tmp/velnor-conv-a13`, branch `conv/a13-perf`) and
+pushed to `origin/perf/docker-rust-mbx` with pull-before-push discipline
+(no force-push, no rebase of the shared branch). Ancestry verified live
+with `git merge-base --is-ancestor` for every SHA listed.
+
+Merged lines (all SHAs are ancestors of the converged head):
+
+- (a) Perf trust line `origin/perf/docker-rust-mbx@e851b8c2`
+  (`e851b8c2f42c9ee3359f4a4baaaa83886e22bad3`), i.e. `0b5448ae` plus the
+  F-V1 fix (`65b1630d` derive-before-persist, `d37ad166` narrow binding,
+  second correction through `AdmittedTrust::admit`), on top of
+  `ee95c5d4` (TrustClass admission enforcement).
+- (b) Cache half `origin/fix/runner-acquisition-intent-recovery@801e37eb`
+  (`801e37eba310777dca2139b71c54034bf7c44725`): `aeb1f257`
+  (repo-namespace), `abe0a07b` + `3cabdce7` (fork isolation + fmt
+  correction), `843b9f06` (regression tests); plan-only `801e37eb` kept
+  as history, not reverted.
+- (c) `origin/main@8d493196`
+  (`8d493196ba424c6356017cdb995ae0d955a31d3d`): `7e594ce1` (#663 fleet
+  callees + scope-spelling + cache registry), `097bc05d` (#665
+  acquisition recovery), `5408a98a` (#664 outcome reports),
+  `1dd665bc` (#662 release primitives), `8d493196` (#666 name purge).
+
+Merge commits:
+
+- `02c2e9db` — merge 1/2: fix-cache-half onto perf head (true merge,
+  `--no-ff`). Conflicts: `trust_class.rs` add/add kept the perf
+  version (fix content + `AdmittedTrust`, 65-line delta verified);
+  `gha_cache.rs` kept perf's `commit_blob_at` helper and dropped the
+  byte-identical duplicate from the `843b9f06` port (verified
+  identical); plan kept both status-row sets and both end sections
+  with a bridge note.
+- `0f2b02f5` — merge 2/2: `origin/main` onto the merge-1 result (true
+  merge, `--no-ff`). Mechanism choices, all keeping both lines' intent
+  with main canonical for the store-scope migration and perf/fix
+  canonical for trust/cache enforcement:
+  - Store paths (`container.rs`, `executor.rs`, `cache.rs`,
+    `github_adapter.rs`, `runner.rs` seed site): main's scope-string
+    mechanism (`store_trust_scope`, `normalize_scope`); the
+    `StoreTrustClass` enum and its mapping helpers are deleted (same
+    refactor both lines, canonical scope source; AGENTS.md no-legacy
+    rule).
+  - Admission (`runner.rs`): perf's `AdmittedTrust::admit` binding
+    kept; main's `job admitted` forensics line and `job_trust`
+    telemetry field ported onto it; main's RAII cache-session block
+    dropped (the durable file registry binds at the existing
+    slot-process hook).
+  - `gha_cache.rs`: the accepted wave package's durable file-session
+    design kept (repo/fork chains, base read-through, cross-process
+    file registry); main's in-memory registry alternative dropped
+    (`CacheIdentity::{Shared,Isolated}`, token registry, RAII guard,
+    `namespace_for_token`, strict-ref-equality, its tests). #666
+    domain renames applied to the kept separators
+    (`velnor-runner-cache-{tenant,repo,fork}`); `cache_namespace` kept
+    under its name with the renamed domain; main's byte-identical
+    `commit_blob_at` copy dropped.
+  - `trust_class.rs` add/add again resolved to the perf version.
+  - Plan: shared §§97/98/100 take main's #666 `/tmp` rephrasing; both
+    §101s kept with perf's F-V1 record renumbered to §103 (status-log
+    cites updated); §7 keeps both claim rows with a mechanism note.
+
+Gates observed on the converged tree in the merge worktree:
+`cargo check --workspace --all-targets` clean (zero warnings);
+`cargo fmt --all -- --check` clean; `cargo clippy -p velnor-runner
+--all-targets --features test-support --locked -- -D warnings` clean;
+clippy clean on model/control; full serial runner lib 1750 passed, 0
+failed, 1 ignored (the 3 formerly environmental
+`action::tests::fetched_*` failures are gone via #666's `/tmp` rename);
+targeted trust 95/cache 149/admission 56/store 38/container 78;
+`telemetry_integration` 5/5; model 129+4+6+4; control 237+8+18+7;
+workflow 193+2+2+8 (one parallel-run flake in
+`a_declared_config_reproduces_the_default_surface` passed on 3
+consecutive reruns — main's untouched test code, not merge-caused);
+velnorctl incl. `trust_scope_single_source` 2/2; release-boundary
+script 9/9, boundary check exit 0.
+
+Consequences for earlier records: the finalize anchor's "lines have NOT
+converged" branch state is now history — the single head above contains
+every accepted package (`ee95c5d4`, `aeb1f257`, `abe0a07b`, `843b9f06`,
+`097bc05d`, F-V1). The cache-trust-regression escalated item
+(trusted-pool admission) is unblocked by construction: the converged
+tree admits trusted-pool jobs through `AdmittedTrust` and the
+`admission_conformance_*` tests assert the narrowed pair production
+persists. Main's §102 registry record stands as landed history for #663;
+the operational mechanism is §13's file-session design.
 
