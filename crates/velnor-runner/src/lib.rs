@@ -58,6 +58,7 @@ mod slot_log;
 mod storage;
 mod store_catalog;
 mod telemetry;
+pub mod trust_class;
 pub mod trust_scope;
 mod workflow_command;
 

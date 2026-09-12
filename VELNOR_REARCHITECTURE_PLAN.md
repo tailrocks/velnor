@@ -4558,6 +4558,54 @@ with WP-4). Fixture track: V0 (baseline binding — done, manifest v13 at
 → V4 (lifecycle/cancel/fault scenarios, needs WP-3/WP-4) → V5 (Rust
 verifier completion) / V6 (bench validation) → V7 (final reviews).
 
+## 97. WP-6/job-trust-class derivation landed — 2026-09-12
+
+Bounded package: the per-job `TrustClass` derivation only (no pool-refusal
+wiring; that is the WP-6 remainder). New `pub mod trust_class`
+(`crates/velnor-runner/src/trust_class.rs`, one `lib.rs` module line):
+`TrustClass::{Trusted, ForkPR, Unknown}` with the single derivation-only
+constructor `TrustClass::derive(&AgentJobRequestMessage)`, non-`Default` per
+I-13, pure (no I/O, no ambient state).
+
+Signals, in derivation order: `github.event_name` (variables, else the raw
+`github` context value so pre-hydration messages classify identically;
+ASCII `[A-Za-z0-9_]` else unparseable), plan `scopeIdentifier` present and
+non-blank as the structural-completeness signal, base `github.repository`
+full-name shape, then for `pull_request*` events (case-insensitive prefix)
+the head full name from `github.event.pull_request.head.repo.full_name`
+(object, JSON string, or V2 compact `{"d"}` form at any level) compared
+case-insensitively against the base, with contradictory
+`head.repo.id`/`base.repo.id` numerics refusing trust; finally the self
+(first) repository resource's `name` and `cloneUrl` property must agree
+with the base (read exactly as `checkout.rs` reads them) or the derivation
+fails closed. Missing or unparseable signals yield `Unknown`, and only
+`Trusted` reports `is_trusted`. A fork `pull_request_target` is `ForkPR`:
+base-repo code over fork-controlled inputs. Unknown non-`pull_request*`
+event names derive `Trusted` (GitHub reserves that prefix for PR-scoped
+events; all other events execute base-repo code). Deliberate scope cut:
+the event-level `repository.full_name` is not used as base corroboration;
+the resource block already covers base identity from an independent block.
+
+Tests in-module, 31 total, all passing: 14 `trust_class_conformance_*`
+(GitHub event semantics incl. compact-context and string-event forms),
+16 `trust_class_regression_*` (each mutates exactly one signal of a
+trusted baseline or fork-PR job and proves `Unknown`), and
+`trust_class_benchmark_derivation_throughput` (40k derivations under a 5s
+bound — the benchmark, in the repo's timing-gated-test style; no
+criterion/divan harness exists in this workspace to extend). The
+`trust_class` filter run shows 32 because it also matches one pre-existing
+`store_trust_class` mapping test.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` pass;
+`cargo clippy -p velnor-runner --all-targets --features test-support
+--locked -- -D warnings` pass; module suite 32/32 pass; full serial
+`cargo test -p velnor-runner --lib --features test-support --locked --
+--test-threads=1` 1679 passed with 3 pre-existing environmental failures
+(`action::tests::fetched_*`: host `/tmp/velnor-actions` exists but is
+empty, 0 files — untouched code path, fails identically without this
+package). WP-6 status: derivation complete; pool-refuses-out-of-class
+enforcement and the flag-as-ceiling wiring remain unclaimed.
+
 ### P0–P3 status
 
 - P0: WP-1 landed. WP-0 partial: baseline binding + identity comparison +
