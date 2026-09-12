@@ -13,15 +13,15 @@ use std::fmt::Write as _;
 
 use super::{
     cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note, Args,
-    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, POLICY_PROVIDER,
-    PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE,
+    RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
     velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
     ProjectConfig, ReleaseKind, ReleaseSpec, RunnerMode, GENERATED_HEADER,
-    VELNOR_POLICY_PROVIDER_TEMPLATE, VELNOR_PREVIEW_WORKFLOW_TEMPLATE,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE, VELNOR_RELEASE_WORKFLOW_TEMPLATE,
+    VELNOR_PREVIEW_WORKFLOW_TEMPLATE, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    VELNOR_RELEASE_WORKFLOW_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -32,7 +32,6 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
     ("preview.yml", PREVIEW),
     ("maintenance.yml", MAINTENANCE),
     ("ci-release-package-signer.yml", RELEASE_SIGNER),
-    ("velnor-workflow-policy.yml", POLICY_PROVIDER),
 ];
 
 /// The canonical file a declared release-side family renders, when the family
@@ -82,15 +81,6 @@ pub(crate) fn maintenance_content(config: &ProjectConfig) -> String {
 /// The `ci-release-package-signer.yml` content.
 pub(crate) fn release_signer_content() -> String {
     crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
-}
-
-/// The `velnor-workflow-policy.yml` content for a config.
-pub(crate) fn policy_provider_content(config: &ProjectConfig) -> String {
-    let template = VELNOR_POLICY_PROVIDER_TEMPLATE.replace(
-        "__VELNOR_GITHUB_RUNNER__",
-        &yaml_scalar(&config.github_runner),
-    );
-    crate::render_static_template(&template)
 }
 
 /// A reviewed workflow body, declared verbatim, rendered through the static
@@ -230,27 +220,6 @@ impl Primitive for ReleaseSigner {
             ctx,
             "ci-release-package-signer.yml",
             release_signer_content(),
-        )
-    }
-}
-
-/// The declared pinned policy provider workflow.
-pub(crate) struct PolicyProvider;
-
-impl Primitive for PolicyProvider {
-    fn id(&self) -> &'static str {
-        POLICY_PROVIDER
-    }
-
-    fn schema(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        render_file(
-            ctx,
-            "velnor-workflow-policy.yml",
-            policy_provider_content(ctx.config),
         )
     }
 }
@@ -1253,10 +1222,6 @@ mod tests {
                 "ci-release-package-signer.yml",
                 "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
             ),
-            (
-                "velnor-workflow-policy.yml",
-                "78a1fe789a20bc3568587ec831aea85d7fd18c04885ee632219b0180b454e72b",
-            ),
         ];
         let root = scanned_root("default");
         let files = PINNED.iter().map(|(file, _)| *file).collect::<Vec<_>>();
@@ -1280,7 +1245,6 @@ mod tests {
             ("preview.yml", "Preview"),
             ("maintenance.yml", "cache"),
             ("ci-release-package-signer.yml", "attest"),
-            ("velnor-workflow-policy.yml", "velnor-workflow"),
         ] {
             let rendered = rendered(&surface, file);
             assert!(
