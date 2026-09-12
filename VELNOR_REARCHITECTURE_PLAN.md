@@ -189,6 +189,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-04 | T-018 narrowed Mr Boxington backend admission to the action's accepted `github`/`server` values and added a rejection proof for `local` (`8434d05`). |
 | 2026-09-04 | T-017 removed ambient storage-layout coupling from cache reclamation; the full 1,474-test runner suite now passes in parallel (`dd93963`). |
 | 2026-09-12 | gha-cache-repo-namespace landed: repo/ref-scoped hosted cache with isolated fallback (`aeb1f257`); BC-22 cache-namespacing half resolved, `pub mod gha_cache` narrowed to `pub(crate)`. |
+| 2026-09-12 | gha-cache-fork-isolation landed: trust-headed cache chains — ForkPR/Unknown jobs write an isolated `fork-` namespace and read through base scopes, trusted jobs never resolve fork namespaces; closes the repo-namespace save-gating follow-up. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -1321,6 +1322,32 @@ Recorded deviations and follow-ups (deliberately out of this package, not oversi
   event. That is cache-poisoning hardening, a separate package.
 - The native `actions/cache` path in `executor.rs` (BC-21) is a different implementation and
   still has no ref scoping; this package covers the hosted `gha_cache` service only.
+
+## 13. Completed work packages (continued, gha-cache-fork-isolation)
+
+| ID | Scope | Outcome |
+| --- | --- | --- |
+| gha-cache-fork-isolation | Hosted GHA cache: fork-PR read/write isolation (closes the save-gating follow-up recorded under gha-cache-repo-namespace) | `CacheIdentity` carries the job's `TrustClass` (derived once at registration from the job message) and the durable session persists its label. ForkPR/Unknown jobs resolve a fork-headed chain — isolated `fork-<sha256>` namespace first, then the base ref/base namespaces for read-through — while trusted jobs resolve the base namespaces only. Every write path already lands in the chain head, so v1 reserve/upload and v2 reserve/upload/finalize are isolated with no route change: an untrusted run cannot write a base scope even when its ref *is* a base branch (the `workflow_run`-from-a-fork shape), and a trusted chain can never name — hence never restore or download — a fork entry. Sessions without a trust label (pre-trust bindings) or with an unusable one fail closed to the isolated per-token namespace like corrupt sessions. `reserve_v2`/`finalize_v2` generalized over the request body type (no behavior change) so the v2 write path is covered by tests. Gates: fmt clean, clippy workspace `-D warnings` clean, focused gha_cache/trust_class/runtime_env 100/100. |
+
+Classification arrives as a byte-identical port of the accepted `job-trust-class` package
+(`crates/velnor-runner/src/trust_class.rs` at `perf/docker-rust-mbx`, plus its one `lib.rs`
+module line): this branch carries the repo-namespace work that package's branch lacks, so
+the derivation is reused verbatim rather than re-derived. `job_cache_session` is the only
+production wiring — `TrustClass::derive` at registration, carried in the identity — and
+`runner.rs` is untouched (it passes the identity through unchanged).
+
+Recorded deviations and follow-ups (deliberately out of this package, not oversights):
+
+- Fork namespaces are per-(repository, ref), not per-fork: two different forks' runs on the
+  same non-merge ref (e.g. two `workflow_run` runs on `main`) share one fork namespace.
+  Trusted jobs are unaffected — no trusted chain names a fork namespace — but fork-vs-fork
+  cache poisoning within that namespace is possible. Per-head-repository fork namespaces
+  are the follow-up. Merge-ref fork PRs are already per-PR unique via the ref.
+- The native `actions/cache` path in `executor.rs` is still unscoped (same exclusion as
+  the repo-namespace package); this package covers the hosted `gha_cache` service only.
+- The `gha-cache-prefix-max` tie-break fix is accepted on `perf/docker-rust-mbx` but lives
+  on the other side of the branch split; it is not ported here and this package does not
+  touch `prefix_scan`.
 
 ### Correction to BC-16 — the admission gate was self-poisoning, not merely contended
 
