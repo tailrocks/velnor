@@ -2258,7 +2258,20 @@ where
                         stdout: String::new(),
                         stderr: message,
                     };
-                    if reports {
+                    if let Some(frame) = composite_frame.as_mut() {
+                        // An unevaluable inner condition still fails the
+                        // composite: without the absorb the umbrella would
+                        // render exit 0 while the job fails.
+                        if step.reports_timeline_start() {
+                            frame.append_inner(
+                                &display_name,
+                                &step_log_prelude(step, &step_state),
+                                &result,
+                            );
+                        } else {
+                            frame.absorb(&result);
+                        }
+                    } else if reports {
                         let log = step_log_with_name(
                             &step_backend_id,
                             &display_name,
@@ -2351,7 +2364,20 @@ where
                     stdout: String::new(),
                     stderr: message,
                 };
-                if reports {
+                if let Some(frame) = composite_frame.as_mut() {
+                    // An unevaluable inner pre-condition still fails the
+                    // composite: without the absorb the umbrella would
+                    // render exit 0 while the job fails.
+                    if step.reports_timeline_start() {
+                        frame.append_inner(
+                            &display_name,
+                            &step_log_prelude(step, &step_state),
+                            &result,
+                        );
+                    } else {
+                        frame.absorb(&result);
+                    }
+                } else if reports {
                     let log = step_log_with_name(
                         &step_backend_id,
                         &display_name,
@@ -2424,7 +2450,9 @@ where
                             skipped: false,
                             failure_ignored: false,
                             stdout: String::new(),
-                            stderr: format!("Step '{display_name}' pre step was cancelled"),
+                            stderr: format!(
+                                "Step '{display_name}' pre step was cancelled: {error:#}"
+                            ),
                         }
                     }
                     Err(error) => return Err(error),
@@ -23329,7 +23357,9 @@ fi"#
             "contains('a')",
             "github.ref ==",
             // The live dual-lane pin evaluates `fromJSON` over a runtime
-            // output holding invalid JSON; upstream throws out of
+            // output holding invalid JSON, behind an `always() &&` guard so
+            // the implicit `success() &&` prefix cannot short-circuit it to
+            // a skip after the designed failure; upstream throws out of
             // `JToken.ReadFrom` (`FromJson.cs`) exactly like the serde
             // failure below, so both runners fail the step.
             "fromJSON('not json')",
@@ -23339,6 +23369,35 @@ fi"#
                 "{condition} must fail the step rather than run it"
             );
         }
+        // Failed-state trap the live pin must avoid: after the designed
+        // failure the implicit `success() &&` prefix short-circuits a bare
+        // `fromJSON(...)` condition to a skip on both runners (GitHub docs;
+        // `evaluate_condition_expression`), so the pin would assert nothing.
+        // The `always() &&` guard forces evaluation of the RHS instead.
+        let mut failed = JobExecutionState::default();
+        failed.apply(
+            "real-failure",
+            &StepExecutionResult {
+                exit_code: 1,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert!(
+            !failed
+                .evaluate_condition(Some("fromJSON('not json')"))
+                .unwrap(),
+            "bare fromJSON skips after a failure — the live pin must not use this shape"
+        );
+        assert!(
+            failed
+                .evaluate_condition(Some("always() && fromJSON('not json') == ''"))
+                .is_err(),
+            "the live-pin shape must fail the step, not skip it"
+        );
         // A failed condition is not "provably false" either: the planner must
         // not prune the step on it.
         assert!(!condition_is_statically_false(
@@ -23811,6 +23870,272 @@ fi"#
             elapsed < Duration::from_secs(10),
             "180k status-function evaluations took {elapsed:?}",
         );
+    }
+
+    /// An unevaluable inner main condition fails the composite umbrella,
+    /// not just the job: without the absorb the umbrella would render exit
+    /// 0 while the job fails.
+    #[test]
+    fn unevaluable_condition_inside_composite_fails_umbrella() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+            },
+            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: Vec::new(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("could not be evaluated"),
+            "failed step reports the condition error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert_eq!(summary.step_logs.len(), 1);
+        assert_eq!(summary.step_logs[0].display_name, "Run local composite");
+        assert_eq!(
+            summary.step_logs[0].exit_code, 1,
+            "umbrella must render failed, not exit 0"
+        );
+        assert!(
+            summary.step_logs[0]
+                .lines
+                .iter()
+                .any(|line| line.starts_with("##[group]")),
+            "failed inner step leaves a section in the umbrella log: {:?}",
+            summary.step_logs[0].lines
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An unevaluable `runs.pre-if` inside a composite fails the umbrella
+    /// without running main or registering post.
+    #[test]
+    fn unevaluable_pre_condition_inside_composite_fails_umbrella() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                    pre_condition: Some("noSuchFunction('a')".into()),
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("always()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert_eq!(summary.step_logs.len(), 1);
+        assert_eq!(
+            summary.step_logs[0].exit_code, 1,
+            "umbrella must render failed, not exit 0"
+        );
+        for (_, args) in &executor.runner().calls {
+            for arg in args {
+                assert!(
+                    !arg.contains("main.js") && !arg.contains("post.js"),
+                    "unevaluable pre must dispatch nothing: {arg:?}"
+                );
+            }
+        }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Node-action analogue of [`CancelDuringExecRunner`]: the first
+    /// `run_timeout_with_env` call (the JavaScript pre entrypoint) fires the
+    /// job token and throws like the ladder-killed child, so the pre lands
+    /// in the cancel-salvage arm; later calls succeed so cleanup still runs.
+    struct CancelDuringNodeRunner {
+        calls: Vec<(String, Vec<String>)>,
+        token: crate::execution::cancel::JobCancellation,
+        fired: bool,
+    }
+
+    impl CommandRunner for CancelDuringNodeRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let args: &[String] = &crate::execution::expand_env_file_args(args);
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if !self.fired {
+                self.fired = true;
+                self.token
+                    .request(crate::execution::cancel::CancelReason::ServerRequested);
+                anyhow::bail!("process terminated by signal");
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming_timeout_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            _env: &[(String, String)],
+            _timeout: Duration,
+            _on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// A JavaScript pre killed by cancellation salvages a failed result that
+    /// keeps the execution error, like the main-step cancel arm — and the
+    /// `always()` cleanup plus the registered post still run.
+    #[test]
+    fn cancelled_pre_step_keeps_execution_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "guarded".into(),
+                display_name: "Run guarded-action".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    pre_container_path: Some("/__a/_actions/guarded/dist/pre.js".into()),
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
+                    post_condition: Some("always()".into()),
+                    action_container_path: "/__a/_actions/guarded".into(),
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            },
+            script_step("cleanup", "echo cleanup", Some("always()")),
+        ];
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let mut executor = DockerJobEngine::new(
+            CancelDuringNodeRunner {
+                calls: Vec::new(),
+                token: token.clone(),
+                fired: false,
+            },
+            token,
+        );
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // Killed pre, cleanup, and the post that stayed registered.
+        assert_eq!(summary.step_results.len(), 3);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(!summary.step_results[0].skipped);
+        assert!(
+            summary.step_results[0]
+                .stderr
+                .contains("process terminated by signal"),
+            "cancelled pre keeps the execution error: {:?}",
+            summary.step_results[0].stderr
+        );
+        assert!(!summary.step_results[1].skipped);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

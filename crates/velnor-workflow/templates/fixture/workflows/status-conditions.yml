@@ -63,8 +63,12 @@ jobs:
         name: Fail on unevaluable condition
         # Deliberately invalid JSON that only exists at RUNTIME (statically
         # opaque, so the actionlint gate stays green): both runners must fail
-        # this step, never run or skip it.
-        if: fromJSON(steps.real-failure.outputs.payload) == ''
+        # this step, never run or skip it. The `always() &&` guard is
+        # load-bearing: after `real-failure` the implicit `success() &&`
+        # prefix would short-circuit a bare `fromJSON(...)` condition to a
+        # skip on both runners, so the bad-JSON RHS must sit behind a status
+        # function that actually evaluates it.
+        if: always() && fromJSON(steps.real-failure.outputs.payload) == ''
         run: echo "unevaluable branch ran (must not happen)"
       - name: Assert status-function branches
         if: ${{ always() }}
