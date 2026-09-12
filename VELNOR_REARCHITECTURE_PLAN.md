@@ -235,6 +235,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-12 | R1-post merged the native + JavaScript post-action lists into one LIFO stack per upstream `PostJobSteps`, keeping per-entry post conditions; the mixed-order conformance test matches upstream LIFO (§106). |
 | 2026-09-12 | R1-cond gave the step loop cancel re-evaluation (a killed step records failure and remaining conditions re-evaluate fresh instead of breaking), failed pre/post records on unevaluable conditions instead of silent skips, and a `status-conditions` dual-lane workflow pinning all four status functions plus the fail-closed unevaluable step for R2-v2v4's live run (§107). |
 | 2026-09-12 | R1-cond correction fixed the vacuous bad-if pin (an `always() &&` guard so the unevaluable RHS evaluates instead of short-circuiting to a skip), kept the execution error in the cancelled pre-step record, and absorbed unevaluable inner conditions into the composite umbrella so it renders failed (§107). |
+| 2026-09-12 | R1-cmd finished the command surface: warn-and-honor `set-output`/`save-state` with the name-required error (correcting the env-files-only premise against hosted behavior), loud `add-matcher`/`remove-matcher` rejection, job-env unsecure opt-ins, a real `hashFiles --follow-symbolic-links` mode, and a `command-surface` dual-lane pin for R2-v2v4's live run (§108). |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -5627,3 +5628,119 @@ velnor-workflow 197+2+2+8; actionlint on the reworked template
 reports only the pre-existing `ubuntu-26.04` runner-label note the
 fixture gate config allowlists — no diagnostics on the changed
 lines.
+
+## 108. R1-cmd: command surface + hashFiles parity — 2026-09-12
+
+Re-verified against `actions/runner` `main` for this package
+(`ActionCommandManager.cs` set-output/save-state/set-env/add-path/
+add-matcher/remove-matcher extensions, `ValidateStopToken`,
+`Constants.cs` `UnsupportedCommandMessage`, `Expressions/
+HashFilesFunction.cs` including the node `hashFiles` delegation with
+the `followSymbolicLinks` flag). Four red-team semantic-parity items
+closed, one of them against the report's own premise:
+
+- `set-output`/`save-state`: warn and honor, not env-files-only. The
+  report claimed GitHub's contract is env-files-only, but the enforced
+  runtime is warn-and-honor: GitHub postponed the removal (2023-07-24
+  changelog, "will continue to work as expected"), the runner still
+  stores outputs/state with a deprecation warning, and hosted logs as
+  recent as 2026-07 show the warning with no error. Disabling the
+  stdout commands in Velnor would have been anti-parity — a dual-lane
+  pin asserting empty outputs would fail on the GitHub lane — so
+  Velnor now matches upstream exactly: the output/state is stored, the
+  exact `UnsupportedCommandMessage` warning fires on every use, the
+  `DeprecatedCommand` telemetry stays once per parse, and a missing
+  or empty `name` throws the upstream `Required field 'name' is
+  missing` pair instead of being silently dropped. Upstream gates the
+  warning on the server variable
+  `DistributedTask.DeprecateStepOutputCommands`, which Velnor has no
+  channel for; the flag is on for github.com, so warning
+  unconditionally is hosted parity. The env-file half
+  (`GITHUB_OUTPUT`/`GITHUB_STATE`) already worked and is pinned live
+  beside the stdout channel.
+- `add-matcher`/`remove-matcher`: admission-rejected, loudly.
+  Honoring matchers needs a log-scanning regex engine the runner does
+  not have — a redesign-scale feature, deliberately not built here —
+  but the old `_ => {}` arm dropped a registered command with nothing
+  in the log. Both commands now fail in the same two-error shape as
+  every other refused command
+  (`Unable to process command ...` + `... not supported by this
+  runner: problem matchers are not implemented.`). Not live-pinned:
+  GitHub honors matchers, so no identical-outcome pin exists; Rust
+  regression tests pin the rejection.
+- Unsecure opt-ins read job env. `CommandPolicy` took only the
+  process half (a self-admitted gap); it now takes the step's
+  effective environment as the `env`-context half with the exact
+  upstream order — process first, job env only when the process did
+  not opt in — exact-name match (upstream reads the context through
+  `CaseSensitiveDictionaryContextData` off Windows) and last-wins
+  duplicates. All five executor call sites (three full parses, two
+  streaming mask closures) pass their in-scope `env`, so the live
+  mask set and the final state agree on stop-token policy.
+- `hashFiles --follow-symbolic-links` is a real mode. The flag was
+  parsed and dropped; it now flows into `hash_files`. Follow mode
+  resolves links the way the bundled @actions/glob does with
+  `followSymbolicLinks`: a file link hashes its target's content
+  under the link's lexical path, a directory link is traversed, a
+  broken link is skipped, and traversed directories are
+  canonicalized into a per-search-root visited set so cycles
+  terminate (a second lexical spelling of an already-visited
+  directory still hashes under the other root, as the generator
+  yields both). No-follow mode is unchanged and now also exact: a
+  search root that is itself a link resolves to nothing, where the
+  old `root.is_file()` check followed it.
+
+Tests, 12 new (6 command, 6 hash/executor), all passing: per-use
+deprecation warnings with exact upstream text; nameless
+set-output/save-state errors in warn-then-throw order; matcher
+rejection for the path, owner, and file forms; job-env opt-ins for
+commands and stop tokens plus exact-name/last-wins edges; symlink
+skip/follow/cycle hashes; end-to-end flag flow through expression
+evaluation including the invalid-option error; and executor-level
+proof the job env reaches step parsing. Two brief benchmarks in the
+repo's timing-gated style: 2k parses of a 1k-line mixed output
+(bound 10 s, observed 1.8 s) and 50 follow-mode hashes of a 200-file
+symlinked tree (bound 60 s, observed 0.3 s).
+
+Dual-lane pins. New `command-surface` workflow (generator template +
+regen wiring; standalone so the legacy commands cannot redden
+`ci.yml`): stdout `set-output` and `GITHUB_OUTPUT` values asserted
+from `steps`, follow-vs-plain hash equalities that compare hashes to
+each other (never to a literal), and a job-level
+`ACTIONS_ALLOW_UNSECURE_COMMANDS` opt-in proving `::set-env::` works
+from job env — all on both lanes, with `steps.json` evidence
+compared by its own `compare-commands` job. The legacy command names
+are assembled at runtime (`::$legacy ...`): actionlint statically
+rejects the deprecated `::set-output`/`::set-env` literals, and the
+fixture gate runs bare actionlint, so the literals cannot appear —
+the same statically-opaque trick as the status-conditions bad-if
+shape. Regen verified in a scratch fixture worktree: exactly the new
+workflow pair (this pin plus R1-cond's still-pending
+status-conditions) with the `project.toml` file list and generator
+state, byte-stable otherwise, idempotent, actionlint clean under the
+fixture config, surface audit and `test_audits.py` green. The
+coverage audit flags both new dispatch workflows as unclassified in
+the hand-maintained `fixture-coverage.json` manifest (21 further
+errors are pure inventory drift against this branch) — that
+classification rides the regen commit, which with the live run
+belongs to R2-v2v4.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets` zero warnings; strict clippy
+clean workspace-wide (with `test-support`, `-D warnings`); serial
+runner lib 1790 passed, 0 failed, 1 ignored (1778 base + 12 new);
+full runner package all targets green; focused command 23/23 and
+hash 10/10; model 129+4+6+4; control 237+8+18+7; velnorctl all
+green; velnor-workflow 197+2+2+8. One transient two-test failure
+appeared in a full-package workflow run (synthetic-surface tests
+unrelated to this change) and passed standalone and on full rerun;
+same documented-flake class as R1-post's.
+
+R1-cmd status: complete. Known deltas, kept explicit: command errors
+do not fail the step (upstream fails via `CommandResult`, Velnor
+derives outcome from exit code only — lifecycle package); the
+`echo`/`debug`/`group`/`notice` arms are untouched (the `notice`
+server gate and echo state are separate items); save-state has no
+live pin because intra-action state is only observable through post
+`STATE_` env and fixture actions are single-file composites — a
+multi-file node post-probe is a separate package.
