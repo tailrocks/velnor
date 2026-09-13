@@ -7,7 +7,7 @@ generator	12
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	008c1d47f05105b9
-.github/ci/project.toml	e514c765857f5183
+.github/ci/project.toml	974f02019caf600a
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-main.yml	4d92d7bc47c7bc46
 .github/workflows/ci-policy.yml	588e3a57e32deb23

@@ -1235,6 +1235,7 @@ mod tests {
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Both,
             github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
             release_enabled: release.is_some(),
             release_reason: String::new(),

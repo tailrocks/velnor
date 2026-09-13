@@ -121,6 +121,10 @@ struct GeneratorSection {
 struct WorkflowSection {
     /// GitHub-hosted runner label for hosted lanes.
     github_runner: Option<String>,
+    /// GitHub-hosted runner label for Apple (Swift/Xcode) lanes. Absent keeps
+    /// the generator's `macos-15` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    macos_runner: Option<String>,
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
@@ -475,6 +479,11 @@ impl RepoGenerationConfig {
         self.workflow.github_runner.as_deref()
     }
 
+    /// The Apple-lane runner label, when the config declares one.
+    pub(crate) fn macos_runner(&self) -> Option<&str> {
+        self.workflow.macos_runner.as_deref()
+    }
+
     /// The declared generated runner lanes, if any.
     pub(crate) fn runners(&self) -> Option<&str> {
         self.workflow.runners.as_deref()
@@ -721,6 +730,11 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
         return Err(GeneratorError::usage(
             "[workflow] github_runner must not be empty",
+        ));
+    }
+    if workflow.macos_runner.as_deref().is_some_and(str::is_empty) {
+        return Err(GeneratorError::usage(
+            "[workflow] macos_runner must not be empty",
         ));
     }
     if let Some(runners) = workflow.runners.as_deref()
@@ -1240,6 +1254,42 @@ mod tests {
                 "unexpected error for {runners}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn workflow_macos_runner_is_optional_without_changing_canonical_shape() {
+        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.macos_runner(), None);
+        let canonical = must(
+            config.canonical_json(),
+            "canonicalize default workflow config",
+        );
+        assert!(!canonical.contains("\"macos_runner\""), "{canonical}");
+        let declared = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"macos-26\"\n",
+        );
+        assert_eq!(declared.macos_runner(), Some("macos-26"));
+        must(
+            declared.validate(&[], &[]),
+            "validate declared macos runner",
+        );
+    }
+
+    #[test]
+    fn workflow_macos_runner_rejects_empty_labels() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"\"\n",
+        );
+        let error = must_fail(
+            config.validate(&[], &[]),
+            "empty macos_runner must fail validation",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] macos_runner must not be empty"),
+            "{error}"
+        );
     }
 
     #[test]

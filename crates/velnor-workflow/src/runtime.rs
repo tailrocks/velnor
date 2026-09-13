@@ -67,10 +67,16 @@ struct Analysis {
     limitations: Vec<String>,
 }
 
+#[expect(
+    dead_code,
+    reason = "runtime preserves the complete generated workflow contract while execution consumes selected fields"
+)]
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Workflow {
     github_runner: String,
+    #[serde(default)]
+    macos_runner: String,
     velnor_labels: Vec<String>,
     files: Vec<String>,
     notes: Vec<String>,
@@ -2116,10 +2122,14 @@ fn has_manual_velnor_dispatch_gate(value: &str) -> bool {
 
 fn normalize_gate_expression(value: &str) -> String {
     let value = value.trim();
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; the gate shape the policy matchers
+    // below recognize is identical, so canonicalize the spelling first.
+    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
     let value = value
         .strip_prefix("${{")
         .and_then(|value| value.strip_suffix("}}"))
-        .map_or(value, str::trim)
+        .map_or(value.as_str(), str::trim)
         .split_whitespace()
         .collect::<String>();
     let value = value.strip_prefix("always()&&").unwrap_or(&value);
@@ -3177,6 +3187,38 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_the_both_mode_lanes_dispatch_gate() -> Result<(), Box<dyn Error>> {
+        // Both-mode aggregates name the manual lane selector `lanes`; the
+        // gate shape is the generated one, only the input spelling differs.
+        let workflow = r"
+name: Velnor lanes reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-reusable", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor lanes dispatch
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both') }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
         assert!(run_policy(root)?);
         Ok(())
     }
