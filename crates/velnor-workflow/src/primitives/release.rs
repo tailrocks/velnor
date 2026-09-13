@@ -18,9 +18,9 @@ use super::{
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
-    velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
-    ProjectConfig, ReleaseSpec, RunnerMode, GENERATED_HEADER,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    velnor_runner_group, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
+    yaml_scalar, ActionPin, GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode,
+    GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -991,10 +991,10 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           # variant class, and the protected classes (toolchain seeds, Cargo
           # source bundles, the Docker seed baseline) reserved before rolling
           # compiler snapshots are touched. An access timestamp is not a
-          # lease: entries younger than the producer window are out of reach,
-          # because a producer may have published them seconds ago or be about
-          # to publish their successor, and creation is the only producer
-          # signal the cache API carries.
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \
@@ -1083,7 +1083,10 @@ fn render_maintenance(config: &ProjectConfig) -> String {
         "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
     };
     let setup = if cache_lane == RunnerMode::Github {
-        workflow_runtime_setup(RunnerMode::Github)
+        workflow_runtime_setup_with_install_rev(
+            RunnerMode::Github,
+            &github_expression("github.sha"),
+        )
     } else {
         String::new()
     };
@@ -1173,6 +1176,22 @@ mod tests {
         assert!(
             workflow.contains("setup-velnor-workflow"),
             "maintenance must install the hosted workflow runtime: {workflow}"
+        );
+        assert!(
+            workflow.contains(&format!(
+                "uses: {}@{}",
+                crate::VELNOR_WORKFLOW_SETUP_ACTION,
+                crate::VELNOR_WORKFLOW_SOURCE_REV
+            )),
+            "maintenance action pin stays SOURCE_REV: {workflow}"
+        );
+        assert!(
+            workflow.contains("rev: ${{ github.sha }}"),
+            "maintenance cache-plan must install HEAD: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!("rev: {}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
+            "maintenance must not pin cache-plan to SOURCE_REV: {workflow}"
         );
         assert!(
             !workflow.contains("[self-hosted,"),
@@ -1415,7 +1434,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "4b0e986f2b63fd619c6908b868c451603b1d3bfa758fab1e8ca070bb75c71bc4",
+                "f604040e5ea80a0c971678cadd0d459090118b3f337082cb96bf50ae9d372f77",
             ),
             (
                 "ci-release-package-signer.yml",
