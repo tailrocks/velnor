@@ -1072,12 +1072,7 @@ pub(crate) fn container_rm_args_with_claimed_ids(
     ids: &[String],
 ) -> Vec<String> {
     let mut claimed = vec![args.first.clone()];
-    claimed.extend(
-        args.rest
-            .iter()
-            .filter(|arg| arg.starts_with('-'))
-            .cloned(),
-    );
+    claimed.extend(args.rest.iter().filter(|arg| arg.starts_with('-')).cloned());
     claimed.extend(ids.iter().cloned());
     claimed
 }

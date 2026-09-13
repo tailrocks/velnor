@@ -882,9 +882,7 @@ impl CommandRunner for ProcessCommandRunner {
             .map(|claim| {
                 crate::docker::client::NonEmptyDockerArgs::new(args)
                     .map(|args| {
-                        crate::docker::client::container_rm_args_with_claimed_ids(
-                            args, &claim.ids,
-                        )
+                        crate::docker::client::container_rm_args_with_claimed_ids(args, &claim.ids)
                     })
                     .ok_or_else(|| anyhow::anyhow!("docker rm claim requires non-empty arguments"))
             })

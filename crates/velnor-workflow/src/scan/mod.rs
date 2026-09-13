@@ -174,6 +174,7 @@ pub(crate) fn unit(
         tool_version: None,
         mise_tools: Vec::new(),
         toolchain: None,
+        services: Vec::new(),
     }
 }
 
