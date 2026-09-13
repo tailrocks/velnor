@@ -814,7 +814,7 @@ mod tests {
             )],
         );
         let mut log = Vec::new();
-        let error = crate::checkout::execute_checkout(&mut runner, &plan, &mut log)
+        let error = crate::checkout::execute_checkout(&mut runner, &plan, &mut log, &destination)
             .expect_err("an injected fetch failure must fail checkout");
         assert!(
             error.to_string().contains("128"),
@@ -861,7 +861,7 @@ mod tests {
             )],
         );
         let mut log = Vec::new();
-        let error = crate::checkout::execute_checkout(&mut runner, &plan, &mut log)
+        let error = crate::checkout::execute_checkout(&mut runner, &plan, &mut log, &destination)
             .expect_err("an unreachable remote must fail checkout");
         assert!(
             error.to_string().contains("git-remote-unreachable"),
@@ -887,7 +887,7 @@ mod tests {
             )],
         );
         let mut log = Vec::new();
-        crate::checkout::execute_checkout(&mut runner, &plan, &mut log)
+        crate::checkout::execute_checkout(&mut runner, &plan, &mut log, &destination)
             .expect("checkout with no matching rule must succeed");
         assert_eq!(runner.faulted_count(), 0);
         assert!(
