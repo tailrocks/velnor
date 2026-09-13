@@ -249,7 +249,7 @@ channel. The class fix is the missing manager, not just the bump.
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
-`ActorPhase` (`crates/velnor-model/src/node.rs:313`) is a real generation-fenced machine.
+`SlotPhase2`/`JobPhase2` (`crates/velnor-model/src/node.rs`) are real generation-fenced machines.
 `SlotPhase` (`node/phase.rs:33`) and `JobState` (`node/lifecycle.rs:167`) are write-only
 projections — `SlotPhase::{Acquiring,Running,Finalizing,WaitingForCapacity,…}` are never
 emitted, so `is_busy()` is structurally always false and the durable projection can never

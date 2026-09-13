@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use velnor_control::journal::{Event, Journal};
-use velnor_model::{ActorPhase, Generation, SlotId};
+use velnor_model::{Generation, SlotId, SlotPhase2};
 
 use super::health::HealthServer;
 use super::prove;
@@ -60,7 +60,7 @@ fn supervise_once(
         .unwrap_or(0);
     let state = journal.materialized_state()?;
     for slot in &state.slots {
-        if slot.phase == ActorPhase::Fenced {
+        if slot.phase == SlotPhase2::Fenced {
             continue;
         }
         let pid_dead = slot.pid.is_some_and(|pid| {

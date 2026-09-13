@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::Args;
 use velnor_control::journal::{Event, FleetState, Journal};
-use velnor_model::{ActorPhase, Generation, JobId, SlotId};
+use velnor_model::{Generation, JobId, SlotId, SlotPhase2};
 
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
@@ -65,7 +65,7 @@ fn validate_slot_identity(
     }
 
     if is_waiter(job_id) {
-        if slot.phase != ActorPhase::Ready {
+        if slot.phase != SlotPhase2::Ready {
             anyhow::bail!(
                 "waiter {} rejected for slot {} phase {} (expected ready)",
                 job_id.0,
@@ -97,7 +97,7 @@ fn validate_slot_identity(
             slot_id.0
         );
     }
-    if slot.phase != ActorPhase::Assigned {
+    if slot.phase != SlotPhase2::Assigned {
         anyhow::bail!(
             "job {} rejected for slot {} phase {} (expected assigned)",
             job_id.0,
@@ -202,6 +202,7 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
 )]
 mod tests {
     use super::*;
+    use velnor_model::JobPhase2;
 
     fn state_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -284,7 +285,7 @@ mod tests {
             .load_state()
             .unwrap();
         assert!(state.jobs.is_empty());
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -351,7 +352,7 @@ mod tests {
             .unwrap()
             .load_state()
             .unwrap();
-        assert_eq!(state.jobs[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.jobs[0].phase, JobPhase2::Assigned);
         std::fs::remove_dir_all(dir).ok();
     }
 }

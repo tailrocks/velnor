@@ -1214,7 +1214,7 @@ pub(crate) async fn replay_recorded_completion(
                     record.job_id
                 )
             })?;
-        if job.phase != velnor_model::ActorPhase::Completing {
+        if job.phase != velnor_model::JobPhase2::Completing {
             bail!(
                 "recorded completion job {} is in journal phase {:?}",
                 record.job_id,

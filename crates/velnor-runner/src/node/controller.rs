@@ -16,7 +16,7 @@ use anyhow::Context;
 use clap::Args;
 use serde_json::json;
 use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
-use velnor_model::{ActorPhase, FleetHealthState, Generation, JobId, SlotId};
+use velnor_model::{FleetHealthState, Generation, JobId, JobPhase2, SlotId, SlotPhase2};
 
 use crate::config;
 use crate::protocol::{GitHubScope, RegistrationClient};
@@ -573,12 +573,7 @@ async fn drain_children(
         .materialized_state()?
         .jobs
         .into_iter()
-        .filter(|job| {
-            matches!(
-                job.phase,
-                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
-            )
-        })
+        .filter(|job| job.phase.occupies_slot())
         .map(|job| job.job_id.0)
         .collect();
     for (job_id, child) in jobs.iter() {
@@ -680,7 +675,7 @@ async fn reconcile_once(
         let generation = slot
             .map(|slot| slot.generation)
             .unwrap_or(Generation::INITIAL);
-        let fenced = slot.is_some_and(|slot| slot.phase == ActorPhase::Fenced);
+        let fenced = slot.is_some_and(|slot| slot.phase == SlotPhase2::Fenced);
         let admission_blocked = slot_has_admission_block(&state, &id, generation);
         let heartbeat_fresh = prove::slot_heartbeat_is_fresh(
             &args.state_dir,
@@ -1509,16 +1504,14 @@ fn spawn_ready_waiters(
     }
     let state = journal.materialized_state()?;
     for slot in &state.slots {
-        if slot.phase != ActorPhase::Ready {
+        if slot.phase != SlotPhase2::Ready {
             continue;
         }
-        if state.jobs.iter().any(|job| {
-            job.slot_id == slot.slot_id
-                && matches!(
-                    job.phase,
-                    ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
-                )
-        }) {
+        if state
+            .jobs
+            .iter()
+            .any(|job| job.slot_id == slot.slot_id && job.phase.occupies_slot())
+        {
             continue;
         }
         let waiter_id = format!("wait-{}", slot.slot_id.0);
@@ -1550,12 +1543,7 @@ async fn reclaim_orphaned_jobs(
     let orphan_jobs: Vec<_> = state
         .jobs
         .iter()
-        .filter(|job| {
-            matches!(
-                job.phase,
-                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
-            )
-        })
+        .filter(|job| job.phase.occupies_slot())
         // A ready-slot waiter is spawned before GitHub assigns a job, so its
         // durable ownership marker is keyed by the waiter identity rather
         // than the later journal job id. Check both markers independently:
@@ -1582,7 +1570,7 @@ async fn reclaim_orphaned_jobs(
         Err(error)
             if orphan_jobs.is_empty()
                 || orphan_jobs.iter().all(|job| {
-                    job.phase == ActorPhase::Completing
+                    job.phase == JobPhase2::Completing
                         && state.outbox.iter().any(|row| {
                             row.job_id == job.job_id
                                 && row.generation == job.generation
@@ -1609,7 +1597,7 @@ async fn reclaim_orphaned_jobs(
     for job in orphan_jobs {
         let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &job.slot_id)?;
         let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
-        let pending_completion = job.phase == ActorPhase::Completing
+        let pending_completion = job.phase == JobPhase2::Completing
             && state.outbox.iter().any(|row| {
                 row.job_id == job.job_id
                     && row.generation == job.generation
@@ -1625,7 +1613,7 @@ async fn reclaim_orphaned_jobs(
                 job.job_id.0
             ));
         }
-        if job.phase == ActorPhase::Completing
+        if job.phase == JobPhase2::Completing
             && !pending_completion
             // A job whose terminal result is durable but whose payload is not
             // is the crash window between the two writes, not a lost payload.
@@ -2236,7 +2224,7 @@ fn fenced_slot_recovery_generation(
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
 ) -> Option<Generation> {
-    let slot = slot.filter(|slot| slot.phase == ActorPhase::Fenced)?;
+    let slot = slot.filter(|slot| slot.phase == SlotPhase2::Fenced)?;
     if slot_has_admission_block(state, &slot.slot_id, slot.generation)
         || child_owns_slot(state, jobs, &slot.slot_id)
     {
@@ -2250,16 +2238,14 @@ fn slot_has_admission_block(
     slot_id: &SlotId,
     generation: Generation,
 ) -> bool {
-    state.jobs.iter().any(|job| {
-        job.slot_id == *slot_id
-            && matches!(
-                job.phase,
-                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
-            )
-    }) || state
-        .outbox
+    state
+        .jobs
         .iter()
-        .any(|row| row.is_pending() && row.slot_id == *slot_id && row.generation == generation)
+        .any(|job| job.slot_id == *slot_id && job.phase.occupies_slot())
+        || state
+            .outbox
+            .iter()
+            .any(|row| row.is_pending() && row.slot_id == *slot_id && row.generation == generation)
 }
 
 fn child_owns_slot(
@@ -2419,7 +2405,7 @@ async fn fence_stale_slot_actor(
         .slots
         .into_iter()
         .find(|slot| {
-            slot.slot_id == *id && slot.generation == generation && slot.phase == ActorPhase::Fenced
+            slot.slot_id == *id && slot.generation == generation && slot.phase == SlotPhase2::Fenced
         })
         .ok_or_else(|| anyhow::anyhow!("stale slot {id:?} was not fenced"))?;
     terminate_fenced_slot_actor(args, slots, id, &slot).await
@@ -2835,7 +2821,7 @@ mod tests {
         let state = journal.materialized_state().unwrap();
         assert!(state.jobs.is_empty());
         assert!(state.outbox.is_empty());
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         assert!(!journal
             .has_remote_terminal_ack(&job_id, generation)
             .unwrap());
@@ -3138,7 +3124,7 @@ mod tests {
         SlotRecord {
             slot_id: SlotId("velnor-1".to_owned()),
             generation: Generation::INITIAL,
-            phase: ActorPhase::Provisioning,
+            phase: SlotPhase2::Provisioning,
             permit_held: true,
             routing_valid: false,
             session_live: false,
@@ -3224,7 +3210,7 @@ mod tests {
             None
         );
 
-        slot.phase = ActorPhase::Fenced;
+        slot.phase = SlotPhase2::Fenced;
         assert_eq!(
             fenced_slot_recovery_generation(Some(&slot), &state, &children),
             Some(Generation(slot.generation.0 + 1))
@@ -3382,7 +3368,7 @@ mod tests {
             .iter()
             .find(|job| job.job_id == JobId("job-1".to_owned()))
             .unwrap();
-        assert_eq!(job.phase, ActorPhase::Running);
+        assert_eq!(job.phase, JobPhase2::Running);
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -3711,7 +3697,7 @@ mod tests {
         assert!(!slot.registered);
         assert!(!slot.permit_held);
         assert!(!slot.session_live);
-        assert_eq!(slot.phase, ActorPhase::Fenced);
+        assert_eq!(slot.phase, SlotPhase2::Fenced);
         let state = journal.load_state().unwrap();
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.jobs[0].job_id, JobId("job-1".to_owned()));
@@ -3823,7 +3809,7 @@ mod tests {
         assert!(!slot.registered);
         assert!(!slot.permit_held);
         assert!(!slot.session_live);
-        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert_eq!(slot.phase, SlotPhase2::Provisioning);
     }
 
     /// A slot that holds a remote registration is what makes reconciliation

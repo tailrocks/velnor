@@ -307,29 +307,27 @@ pub struct SlotId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JobId(pub String);
 
-/// Formal actor lifecycle. Exceptional states are first-class, not flags.
+/// Formal slot lifecycle. Exceptional states are first-class, not flags.
+/// A slot can never be `Running` or `Completing`: those are job states, and
+/// the type system — not a runtime check — enforces the separation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ActorPhase {
+pub enum SlotPhase2 {
     Absent,
     Provisioning,
     Registered,
     Ready,
     Assigned,
-    Running,
-    Completing,
     Fenced,
 }
 
-impl ActorPhase {
-    pub const ALL: [Self; 8] = [
+impl SlotPhase2 {
+    pub const ALL: [Self; 6] = [
         Self::Absent,
         Self::Provisioning,
         Self::Registered,
         Self::Ready,
         Self::Assigned,
-        Self::Running,
-        Self::Completing,
         Self::Fenced,
     ];
 
@@ -341,8 +339,6 @@ impl ActorPhase {
             Self::Registered => "registered",
             Self::Ready => "ready",
             Self::Assigned => "assigned",
-            Self::Running => "running",
-            Self::Completing => "completing",
             Self::Fenced => "fenced",
         }
     }
@@ -353,7 +349,38 @@ impl ActorPhase {
     }
 }
 
-/// Why a slot cannot enter [`ActorPhase::Ready`].
+/// Formal job lifecycle. Every variant occupies its slot: a live job row is
+/// occupancy by construction, so [`JobPhase2::occupies_slot`] is total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobPhase2 {
+    Assigned,
+    Running,
+    Completing,
+}
+
+impl JobPhase2 {
+    pub const ALL: [Self; 3] = [Self::Assigned, Self::Running, Self::Completing];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Assigned => "assigned",
+            Self::Running => "running",
+            Self::Completing => "completing",
+        }
+    }
+
+    /// Whether a job in this phase occupies its slot. Always true: the enum
+    /// has no non-occupying variant, so occupancy is a property of the type.
+    /// Written as an exhaustive match so a future variant forces a decision.
+    #[must_use]
+    pub fn occupies_slot(self) -> bool {
+        matches!(self, Self::Assigned | Self::Running | Self::Completing)
+    }
+}
+
+/// Why a slot cannot enter [`SlotPhase2::Ready`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotReady {
     pub missing_permit: bool,
