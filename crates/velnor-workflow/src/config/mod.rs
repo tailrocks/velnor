@@ -1037,6 +1037,13 @@ mod tests {
             ),
             "write fixture manifest",
         );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write fixture toolchain pin",
+        );
         root
     }
 

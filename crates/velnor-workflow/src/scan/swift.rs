@@ -158,6 +158,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 mbx_output_cache_justification: None,
             }),
             tool_version: None,
+            toolchain: None,
         };
         unit.watch.sort();
         unit.watch.dedup();

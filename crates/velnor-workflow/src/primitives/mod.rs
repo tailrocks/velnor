@@ -31,8 +31,8 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note,
-    WorkflowIr, WorkflowKind,
+    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, WorkflowIr, WorkflowKind,
 };
 
 /// Default `timeout-minutes` for a unit verification job.
@@ -149,7 +149,11 @@ impl CacheBackend {
         match self {
             Self::Detected => match unit.cache.as_ref().map(|cache| cache.purpose) {
                 None => false,
-                Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
+                // A toolchain cache is generator-internal, never a unit's
+                // declared contract, so it never arrives through this match.
+                Some(
+                    CachePurpose::CargoSources | CachePurpose::Toolchains | CachePurpose::Generic,
+                ) => true,
                 Some(CachePurpose::Outputs) => {
                     !ir.uses_mr_boxington(unit)
                         || unit

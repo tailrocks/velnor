@@ -415,6 +415,7 @@ pub(crate) fn catalog_unit(
         depends_on: Vec::new(),
         cache,
         tool_version: None,
+        toolchain: None,
     }
 }
 

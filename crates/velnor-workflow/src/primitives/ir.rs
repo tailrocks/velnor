@@ -15,7 +15,7 @@ use crate::{
     unit_job_id, unit_needs, velnor_runner, velnor_runner_group, workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
     workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
-    RunnerMode, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
+    RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
     MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
     VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
 };
@@ -194,14 +194,120 @@ fn cargo_network_is_restricted(unit: &Unit) -> bool {
     !commands.any(|command| command_resolves_its_own_inputs(command))
 }
 
-/// The `CARGO_NET_OFFLINE` env entry for the run-checks step, or nothing for
-/// units that must resolve their own inputs.
-pub(crate) fn cargo_offline_env(unit: &Unit) -> String {
+/// Env for the steps that run Cargo and repository commands, on both lanes:
+/// the `CARGO_NET_OFFLINE` restriction for lockfile-pinned units, and the
+/// suppression of every mise auto-install path. Verification must consume only
+/// what the provision steps put in place; a task runner that silently installs
+/// a missing tool would widen each job's dependency surface and re-introduce
+/// the whole-configured-toolset materialisation a minimal provision list
+/// exists to prevent.
+pub(crate) fn checks_env(unit: &Unit) -> String {
+    let mut env = String::new();
     if cargo_network_is_restricted(unit) {
-        "\n          CARGO_NET_OFFLINE: \"true\"".to_owned()
-    } else {
-        String::new()
+        env.push_str("\n          CARGO_NET_OFFLINE: \"true\"");
     }
+    env.push_str("\n          MISE_AUTO_INSTALL: \"false\"");
+    env.push_str("\n          MISE_EXEC_AUTO_INSTALL: \"false\"");
+    env.push_str("\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\"");
+    env
+}
+
+/// Every command the unit runs, on either lane.
+fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
+    unit.pr_commands.iter().chain(&unit.full_commands)
+}
+
+/// Whether any of the unit's commands drive the test runner through Cargo or
+/// Mr. Boxington. One predicate feeds both the `ToolRequirement` selection and
+/// the mise install list, so the two can never disagree about what a unit
+/// needs.
+fn needs_nextest(unit: &Unit) -> bool {
+    unit_commands(unit)
+        .any(|command| command.contains("cargo nextest") || command.contains("mbx nextest"))
+}
+
+/// The restore/provision/save steps every hosted Rust job needs before it may
+/// run a Cargo command: restore the cached `~/.rustup` keyed by the
+/// repository's pin, install exactly that pin, and — when `save_gate` carries
+/// the step's `if:` body — save the result for the next run. Every rendering
+/// path (unit lanes, the release publisher, the rolling preview) funnels
+/// through here, so no Rust job can skip the toolchain contract.
+pub(crate) fn render_pinned_toolchain_steps(
+    output: &mut String,
+    cache_restore: &str,
+    cache_save: &str,
+    toolchain: &RustToolchain,
+    save_gate: Option<&str>,
+) {
+    let (paths, key_files) = rendered_cache_values(&CacheSpec {
+        key_files: vec![
+            "rust-toolchain.toml".to_owned(),
+            "rust-toolchain".to_owned(),
+        ],
+        paths: vec!["~/.rustup".to_owned()],
+        purpose: CachePurpose::Toolchains,
+        mbx_output_cache_justification: None,
+    });
+    let key = format!(
+        "velnor-rustup-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Restore Rust toolchain\n        id: rustup-toolchain\n        uses: {cache_restore}\n        with:\n          path: |\n{paths}\n          key: {key}"
+    );
+    // The channel is not passed explicitly: the checkout put the
+    // repository's toolchain file at the workspace root, and a file-driven
+    // install also applies the components and targets the file declares,
+    // which an explicitly named channel would not.
+    let install = match &toolchain.profile {
+        Some(profile) => format!("rustup toolchain install --profile {profile}"),
+        None => "rustup toolchain install".to_owned(),
+    };
+    let _ = writeln!(
+        output,
+        "      - name: Provision Rust toolchain\n        shell: bash\n        run: |\n          set -euo pipefail\n          {install}"
+    );
+    if !toolchain.targets.is_empty() {
+        let targets = toolchain
+            .targets
+            .iter()
+            .map(|target| crate::shell_quote(target))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let _ = writeln!(output, "          rustup target add {targets}");
+    }
+    if let Some(save_gate) = save_gate {
+        let _ = writeln!(
+            output,
+            "      - name: Save Rust toolchain\n        if: {save_gate}\n        uses: {cache_save}\n        with:\n          path: |\n{paths}\n          key: {key}"
+        );
+    }
+}
+
+/// The mise tool ids a unit's own commands require. The language toolchain is
+/// deliberately absent — rustup provisions it from the repository's pin — and
+/// so is every tool a policy step installs through its own action. Each
+/// additional id widens the supply chain of every job that runs it, so a unit
+/// that invokes none of these gets nothing.
+pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<&'static str> {
+    let mut tools = Vec::new();
+    if needs_nextest(unit) {
+        tools.push("aqua:nextest-rs/nextest/cargo-nextest");
+    }
+    tools
+}
+
+/// Whether the unit's commands hand work to the mise task runner itself, which
+/// needs the mise binary on `PATH` even when no tool is installed through it.
+pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
+    unit.pr_commands
+        .iter()
+        .chain(&unit.full_commands)
+        .any(|command| {
+            command
+                .split_whitespace()
+                .any(|token| token == "mise" || token.starts_with("mise:"))
+        })
 }
 
 /// Fetch every declared Cargo source up front, after the cache restore and
@@ -215,7 +321,11 @@ pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) 
     let change_dir = crate::shell_change_dir(&unit.root);
     let _ = writeln!(
         output,
-        "      - name: Prepare Cargo sources\n        run: |\n          set -euo pipefail\n          {change_dir}cargo fetch --locked"
+        "      - name: Prepare Cargo sources\n        env:{}
+        run: |
+          set -euo pipefail
+          {change_dir}cargo fetch --locked",
+        checks_env(unit)
     );
 }
 
@@ -252,7 +362,10 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
-    pub(crate) mise_rust: bool,
+    /// The repository drives its Rust units through mise. Naming matters: mise
+    /// never provides the Rust toolchain (rustup owns that), it only
+    /// contributes the task runner and the tools units declare.
+    pub(crate) mise_present: bool,
     pub(crate) mr_boxington: bool,
     pub(crate) units: Vec<Unit>,
     pub(crate) pins: Pins,
@@ -322,12 +435,15 @@ impl WorkflowIr {
             }
             tools.insert(ToolRequirement::Mold);
         }
-        let mise_rust = config
+        // The detection fact only says mise is configured; the mise surface
+        // matters here only where Rust units exist to run through it.
+        let mise_present = config
             .analysis
             .detected
             .iter()
-            .any(|item| item == "mise-rust-toolchain");
-        if mise_rust {
+            .any(|item| item == "mise-present")
+            && config.units.iter().any(|unit| unit.kind == UnitKind::Rust);
+        if mise_present {
             tools.insert(ToolRequirement::Mise);
         }
         if config
@@ -345,7 +461,7 @@ impl WorkflowIr {
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
             runners: config.runners,
             tools,
-            mise_rust,
+            mise_present,
             mr_boxington,
             units: config.units.clone(),
             pins: Pins::resolved(),
@@ -388,7 +504,7 @@ impl WorkflowIr {
         );
         if self.tools.contains(&ToolRequirement::Sccache)
             || self.tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_rust
+            || self.mise_present
         {
             output.push_str("env:\n");
             if self.tools.contains(&ToolRequirement::Sccache) {
@@ -396,7 +512,7 @@ impl WorkflowIr {
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_rust {
+            if self.mise_present {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if self.tools.contains(&ToolRequirement::OpenTofu) {
@@ -742,10 +858,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
-        let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
+        let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_rust
+            || self.mise_present
         {
             output.push_str("\nenv:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -753,7 +869,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_rust {
+            if self.mise_present {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
@@ -821,7 +937,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
             yaml_scalar(&unit.id),
-            cargo_offline_env(unit),
+            checks_env(unit),
             yaml_scalar(&unit.id)
         );
         render_phase_report_step(
@@ -1043,7 +1159,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
                 verify_name,
                 yaml_scalar(&unit.id),
-                cargo_offline_env(unit),
+                checks_env(unit),
                 yaml_scalar(&unit.id),
             );
             render_phase_report_step(
@@ -1089,7 +1205,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn tools_for_unit(
         unit: &Unit,
-        mise_rust: bool,
+        mise_present: bool,
         mr_boxington: bool,
     ) -> BTreeSet<ToolRequirement> {
         let mut tools = BTreeSet::new();
@@ -1110,7 +1226,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 tools.insert(ToolRequirement::Gradle);
             }
             UnitKind::Rust => {
-                if mise_rust {
+                if mise_present {
                     tools.insert(ToolRequirement::Mise);
                 }
                 if mr_boxington {
@@ -1119,24 +1235,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     tools.insert(ToolRequirement::Sccache);
                 }
                 tools.insert(ToolRequirement::Mold);
-                let commands = unit.pr_commands.iter().chain(&unit.full_commands);
-                if commands.clone().any(|command| {
-                    command.contains("cargo nextest") || command.contains("mbx nextest")
-                }) {
+                if needs_nextest(unit) {
                     tools.insert(ToolRequirement::Nextest);
                 }
-                if unit
-                    .pr_commands
-                    .iter()
-                    .chain(&unit.full_commands)
+                if unit_commands(unit)
                     .any(|command| command.contains("cargo deny") || command.contains("mbx deny"))
                 {
                     tools.insert(ToolRequirement::CargoDeny);
                 }
-                if unit
-                    .pr_commands
-                    .iter()
-                    .chain(&unit.full_commands)
+                if unit_commands(unit)
                     .any(|command| command.contains("cargo audit") || command.contains("mbx audit"))
                 {
                     tools.insert(ToolRequirement::CargoAudit);
@@ -1148,6 +1255,41 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             UnitKind::Swift | UnitKind::Docs => {}
         }
         tools
+    }
+
+    /// Render the hosted-lane Rust toolchain contract: restore the cached
+    /// `~/.rustup` state, provision exactly the toolchain the repository pins,
+    /// and save the result on trusted events. Provisioning always runs — on an
+    /// exact cache hit `rustup toolchain install` is a fast no-op, so the hit
+    /// and miss paths converge on the same installed state without the
+    /// renderer having to model rustup's resolution rules in an `if:`.
+    ///
+    /// The repository's `rust-toolchain.toml` is the single source of the
+    /// channel, components, and targets; the cache key hashes it, so a pin
+    /// change mints a new entry instead of silently reusing the old toolchain.
+    fn render_rust_toolchain_steps(
+        &self,
+        output: &mut String,
+        toolchain: &RustToolchain,
+        cache_save: bool,
+    ) {
+        // Unit lanes run on push, schedule, and workflow_dispatch, so the
+        // trusted gate is the full default-branch set. Surfaces with a
+        // narrower trigger set pass their own gate.
+        let trusted_cache = format!(
+            "(github.event_name == 'push' && github.ref == 'refs/heads/{}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}')",
+            self.default_branch, self.default_branch
+        );
+        let save_gate = cache_save.then(|| {
+            format!("({trusted_cache}) && steps.rustup-toolchain.outputs.cache-hit != 'true'")
+        });
+        render_pinned_toolchain_steps(
+            output,
+            self.pins.cache_restore,
+            self.pins.cache_save,
+            toolchain,
+            save_gate.as_deref(),
+        );
     }
 
     pub(crate) fn render_tool_provisioning(
@@ -1163,13 +1305,35 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // transport/setup actions lane-specific instead of rendering one
         // action surface and hoping the runner can ignore the other lane.
         let github_lane = lane == RunnerMode::Github;
-        let tools = Self::tools_for_unit(unit, self.mise_rust, self.mr_boxington);
+        let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        if github_lane && let Some(toolchain) = &unit.toolchain {
+            self.render_rust_toolchain_steps(output, toolchain, cache_save);
+        }
         if github_lane && tools.contains(&ToolRequirement::Mise) {
-            let _ = writeln!(
-                output,
-                "      - name: Set up Mise Rust toolchain\n        uses: {}\n        with:\n          install_args: rust aqua:nextest-rs/nextest/cargo-nextest\n          cache: true",
-                self.pins.mise
-            );
+            // The Rust toolchain is never a mise tool: the scan refuses a
+            // Rust repository without a pin, and rustup provisions exactly
+            // that pin in the steps above. Mise contributes only the tools
+            // the unit's own commands name.
+            let mise_tools = mise_tool_ids(unit);
+            let invokes_mise = commands_invoke_mise(unit);
+            if !mise_tools.is_empty() {
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mise tools\n        uses: {}\n        with:\n          install_args: {}\n          cache: true",
+                    self.pins.mise,
+                    mise_tools.join(" ")
+                );
+            } else if invokes_mise {
+                // The unit runs repository tasks through the mise task
+                // runner. It gets the runner binary and nothing else: the
+                // tools those tasks need are provisioned by the steps above,
+                // and auto-install is switched off on the checks steps.
+                let _ = writeln!(
+                    output,
+                    "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
+                    self.pins.mise
+                );
+            }
         }
         if tools.contains(&ToolRequirement::MrBoxington) {
             if lane == RunnerMode::Github {
@@ -1263,7 +1427,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 self.pins.node
             );
         }
-        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_rust {
+        if github_lane && tools.contains(&ToolRequirement::Nextest) && !self.mise_present {
             let _ = writeln!(
                 output,
                 "      - name: Set up cargo-nextest\n        uses: {}\n        with:\n          tool: nextest\n          fallback: none",

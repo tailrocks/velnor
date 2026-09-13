@@ -147,19 +147,38 @@ jobs:
           git checkout --detach "$SOURCE_COMMIT"
           [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          install_args: "rust"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
 
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
           version: 1.8.3
-
-      - name: Add guest-agent target
-        run: rustup target add "$TARGET"
 
       - name: Install kernel and rootfs build packages
         run: |
@@ -290,10 +309,32 @@ jobs:
       - name: Install mold linker
         uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          install_args: "rust"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
 
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
@@ -393,9 +434,40 @@ jobs:
       - name: Install mold linker
         uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
+          # Zig (linker toolchain) and cargo-binstall (fetcher for cargo-deb).
+          # The Rust toolchain is never a mise tool: rustup provisions it from
+          # rust-toolchain.toml above, and mise's cargo backend would demand a
+          # second, mise-managed rust for every cargo:* install.
+          install_args: "zig cargo-binstall aqua:rust-cross/cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Mr. Boxington
@@ -415,19 +487,15 @@ jobs:
           key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
-
       - name: Install cargo-deb (verified prebuilt only)
         env:
-          # cargo-binstall performs GitHub API discovery independently of mise.
-          # Authenticate parallel preview jobs so they do not share the tiny
-          # anonymous rate limit and fail nondeterministically with HTTP 403.
+          # cargo-binstall performs GitHub API discovery. Authenticate the
+          # parallel deb jobs so they do not share the tiny anonymous rate
+          # limit and fail nondeterministically with HTTP 403.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
-            --disable-strategies compile --no-confirm --force
+          cargo-binstall -y cargo-deb@3.7.0 --disable-strategies compile
           cargo-deb --version
 
       - name: Build preview binaries (runner + every deb asset)
