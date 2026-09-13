@@ -1,3 +1,11 @@
+# Mutable-cache seed context. The CI host restores the previous trusted
+# build's exported state into a directory and overrides this stage with
+# `--build-context velnor-cache-seed=<dir>`; the build copies out of it into
+# the cache mounts above only when a mount is empty, so a retained builder
+# keeps its warm state and a fresh builder starts from the restored one.
+# Declared empty: a build without the override keeps its exact shape.
+FROM scratch AS velnor-cache-seed
+
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b AS build
 
 RUN apt-get update \
@@ -43,13 +51,6 @@ RUN mkdir -p /opt/mise/bin \
     && mise exec -- mbx --version | grep -F '1.8.3'
 
 WORKDIR /src
-# Mutable-cache seed context. The CI host restores the previous trusted
-# build's exported state into a directory and overrides this stage with
-# `--build-context velnor-cache-seed=<dir>`; the build copies out of it into
-# the cache mounts below only when a mount is empty, so a retained builder
-# keeps its warm state and a fresh builder starts from the restored one.
-# Declared empty: a build without the override keeps its exact shape.
-FROM scratch AS velnor-cache-seed
 COPY Cargo.toml Cargo.lock ./
 COPY crates/velnor-model/Cargo.toml ./crates/velnor-model/Cargo.toml
 COPY crates/velnor-control/Cargo.toml ./crates/velnor-control/Cargo.toml
