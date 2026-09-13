@@ -744,7 +744,7 @@ fn aggregate_triggers(
             "CI",
             "CI / PR",
             format!(
-                "on:\n  pull_request:\n{}",
+                "on:\n  pull_request:\n  merge_group:\n{}",
                 workflow_dispatch_inputs("affected", default_branch, "")
             ),
             "true",
@@ -1592,7 +1592,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             if lane == RunnerMode::Velnor {
                 self.velnor_lane_event_expression(dispatch)
             } else {
-                format!("{} || ({dispatch})", self.automatic_event_expression())
+                // Merge-queue validation runs the GitHub lane only, mirroring
+                // the pull_request gate; the Velnor lane keeps its trusted
+                // push/schedule/dispatch gate and skips merge_group runs.
+                format!(
+                    "{} || github.event_name == 'merge_group' || ({dispatch})",
+                    self.automatic_event_expression()
+                )
             }
         } else {
             dispatch.to_owned()

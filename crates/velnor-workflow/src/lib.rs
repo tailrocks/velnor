@@ -8121,7 +8121,7 @@ channel = "stable"
         let main = generator.render(WorkflowKind::Main);
         assert!(pr.contains("name: CI\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
-        assert!(!pr.contains("merge_group:"));
+        assert!(pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
         assert!(pr.contains("  ci-required:\n    name: ci-required"));
@@ -8163,6 +8163,92 @@ channel = "stable"
             Some("affected")
         );
         assert!(runtime::scope_for_event_values("push", Some("affected")).is_err());
+    }
+
+    #[test]
+    fn generated_pr_workflow_validates_merge_group_on_the_github_lane() {
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
+            let config = scanned_fixture(runners);
+            let generator = WorkflowIr::from_config(&config);
+            let pr = generator.render(WorkflowKind::PullRequest);
+            assert!(
+                pr.contains("on:\n  pull_request:\n  merge_group:\n"),
+                "PR triggers must carry merge_group beside pull_request: {pr}"
+            );
+            let nested =
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator));
+            assert!(
+                nested.contains("on:\n  pull_request:\n  merge_group:\n"),
+                "the nested PR render must carry the same triggers: {nested}"
+            );
+            for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
+                let other = generator.render(kind);
+                assert!(
+                    !other.contains("merge_group:\n"),
+                    "the merge_group trigger belongs to the PR workflow only: {other}"
+                );
+            }
+            let index = must_some(
+                config
+                    .units
+                    .iter()
+                    .position(|unit| unit.kind == UnitKind::Rust),
+                "Rust unit",
+            );
+            let surface =
+                generator.render_nested_unit(&config.units[index], WorkflowKind::PullRequest);
+            assert!(
+                surface.contains("github.event_name == 'merge_group'"),
+                "the github lane gate must admit merge_group runs: {surface}"
+            );
+            let gate = velnor_lane_gate(&surface);
+            assert!(
+                !gate.is_empty() && !gate.contains("merge_group"),
+                "the velnor lane keeps its trusted gate and skips merge_group: {surface}"
+            );
+        }
+
+        let config = scanned_fixture(RunnerMode::Velnor);
+        let generator = WorkflowIr::from_config(&config);
+        let velnor_pr = generator.render(WorkflowKind::PullRequest);
+        assert!(velnor_pr.contains("merge_group:\n"));
+        let index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "Rust unit",
+        );
+        let surface = generator.render_nested_unit(&config.units[index], WorkflowKind::PullRequest);
+        assert!(
+            !surface.contains("github.event_name == 'merge_group'"),
+            "a velnor-only surface admits merge_group nowhere: {surface}"
+        );
+        assert_eq!(
+            must(
+                runtime::scope_for_event_values("merge_group", None),
+                "resolve merge-group scope",
+            )
+            .as_deref(),
+            Some("full")
+        );
+    }
+
+    /// The `if:` gate of the first velnor lane job in a rendered unit
+    /// surface, located by job header so the github gate beside it cannot
+    /// leak into the assertion.
+    fn velnor_lane_gate(surface: &str) -> String {
+        let mut in_velnor = false;
+        for line in surface.lines() {
+            if line.starts_with("  ") && !line.starts_with("   ") {
+                in_velnor = line.starts_with("  velnor:") || line.starts_with("  velnor-");
+                continue;
+            }
+            if in_velnor && line.trim_start().starts_with("if: ") {
+                return line.to_owned();
+            }
+        }
+        String::new()
     }
 
     #[test]
@@ -10436,7 +10522,7 @@ channel = "stable"
         let nightly = workflow.render(WorkflowKind::Nightly);
 
         assert!(pr.contains("pull_request:"));
-        assert!(!pr.contains("merge_group:"));
+        assert!(pr.contains("merge_group:"));
         assert!(pr.contains("runs-on: ubuntu-24.04"));
         assert!(pr.contains(&fixture_lane_selector()));
         assert!(pr.contains("  github-"));

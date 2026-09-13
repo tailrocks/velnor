@@ -645,6 +645,8 @@ pub(crate) fn scope_for_event_values(
             .map(ToOwned::to_owned)
             .or_else(|| Some("affected".to_owned()))),
         "" => Ok(override_scope.map(ToOwned::to_owned)),
+        // Merge-queue validation (`merge_group`) always runs full scope:
+        // the ephemeral merge ref has no pull_request base to diff against.
         _ => Ok(Some("full".to_owned())),
     }
 }
