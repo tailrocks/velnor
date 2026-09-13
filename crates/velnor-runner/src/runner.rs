@@ -10992,14 +10992,20 @@ fn ordered_executable_steps(
                     // every inner condition re-evaluated it in the
                     // composite scope, where `failure()`/`success()` read
                     // the wrong status.
+                    //
+                    // Likewise the step's own `continue-on-error` belongs
+                    // to the umbrella alone: upstream applies it to the
+                    // composite step's conclusion
+                    // (`ApplyContinueOnError`), never ORed into the inner
+                    // steps' flags.
                     let umbrella_condition = step.condition.as_deref();
-                    let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
                     ordered.push(ExecutableStep::CompositeStart {
                         step_id: plan.step_id.clone(),
                         display_name: action_step_display_name(step),
                         inputs: plan.inputs.clone(),
                         env: crate::script_step::step_environment(step)?,
                         condition: umbrella_condition.map(ToOwned::to_owned),
+                        continue_on_error: crate::script_step::step_continue_on_error(step),
                     });
                     let Some(metadata) = metadata else {
                         ordered.push(ExecutableStep::CompositeEnd {
@@ -11011,8 +11017,7 @@ fn ordered_executable_steps(
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
                         match invocation {
-                            CompositeActionInvocation::Script(mut script) => {
-                                script.continue_on_error |= parent_continue_on_error;
+                            CompositeActionInvocation::Script(script) => {
                                 ordered.push(ExecutableStep::Script(script));
                             }
                             CompositeActionInvocation::Repository(plan) => {
@@ -11021,7 +11026,6 @@ fn ordered_executable_steps(
                                     &plan,
                                     job,
                                     workspace_host,
-                                    parent_continue_on_error,
                                     "",
                                 )? {
                                     continue;
@@ -11042,7 +11046,6 @@ fn ordered_executable_steps(
                                     job,
                                     workspace_host,
                                     actions_host,
-                                    parent_continue_on_error,
                                     "",
                                 )?;
                             }
@@ -11091,7 +11094,6 @@ fn ordered_executable_steps(
                     plan,
                     job,
                     workspace_host,
-                    false,
                     &step_display_name,
                 )? {
                     continue;
@@ -11113,7 +11115,6 @@ fn ordered_executable_steps(
                     job,
                     workspace_host,
                     actions_host,
-                    false,
                     &step_display_name,
                 )?;
             }
@@ -11131,7 +11132,6 @@ fn append_resolved_action_steps(
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
-    parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<()> {
     // Planning consumes the admission graph and never re-resolves identity here:
@@ -11139,7 +11139,12 @@ fn append_resolved_action_steps(
     // and `execute_script_job_inner` cross-checked every materialized action
     // against the graph. An unknown action that still reaches this point is a
     // hard failure below, not a permissive fallback.
-    let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
+    //
+    // Each step carries its OWN `continue-on-error` only: a composite
+    // umbrella's flag converts the umbrella conclusion in the executor
+    // (upstream `ApplyContinueOnError`) and is never ORed into inner
+    // steps here.
+    let continue_on_error = action.plan.continue_on_error;
     let Some(adapter) =
         crate::manifest::find(&action.plan.repository).map(|capability| capability.adapter)
     else {
@@ -11193,9 +11198,11 @@ fn append_resolved_action_steps(
             timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionAdapter::Composite => {
-            // The nested umbrella carries its own `if` only; the executor
-            // evaluates it in the parent composite scope and the verdict
-            // gates the nested inner steps (see the local-action arm).
+            // The nested umbrella carries its own `if` and its own
+            // `continue-on-error` only; the executor evaluates the `if` in
+            // the parent composite scope and the verdict gates the nested
+            // inner steps (see the local-action arm), while the flag
+            // converts the nested umbrella conclusion only.
             let action_condition = action.plan.condition.clone();
             let composite_display = if display_name.is_empty() {
                 format!("Run {}@{}", action.plan.repository, action.plan.git_ref)
@@ -11208,11 +11215,11 @@ fn append_resolved_action_steps(
                 inputs: action.plan.inputs.clone(),
                 env: action.plan.env.clone(),
                 condition: action_condition.clone(),
+                continue_on_error,
             });
             for invocation in action.composite_invocations("/__w", actions_host)? {
                 match invocation {
-                    CompositeActionInvocation::Script(mut script) => {
-                        script.continue_on_error |= continue_on_error;
+                    CompositeActionInvocation::Script(script) => {
                         ordered.push(ExecutableStep::Script(script));
                     }
                     CompositeActionInvocation::Repository(plan) => {
@@ -11221,7 +11228,6 @@ fn append_resolved_action_steps(
                             &plan,
                             job,
                             workspace_host,
-                            continue_on_error,
                             "",
                         )? {
                             continue;
@@ -11242,7 +11248,6 @@ fn append_resolved_action_steps(
                             job,
                             workspace_host,
                             actions_host,
-                            continue_on_error,
                             "",
                         )?;
                     }
@@ -11271,7 +11276,6 @@ fn append_native_action_step_from_plan(
     plan: &RepositoryActionPlan,
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
-    parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<bool> {
     let Some(invocation) = native_invocation_from_plan(plan)? else {
@@ -11286,9 +11290,7 @@ fn append_native_action_step_from_plan(
             display_name_token: None,
             enabled: true,
             condition: plan.condition.clone(),
-            continue_on_error: Some(Value::Bool(
-                parent_continue_on_error || plan.continue_on_error,
-            )),
+            continue_on_error: Some(Value::Bool(plan.continue_on_error)),
             timeout_in_minutes: plan.timeout_minutes.map(Value::from),
             context_name: Some(plan.step_id.clone()),
             reference: Some(ActionStepDefinitionReference {
@@ -11315,7 +11317,7 @@ fn append_native_action_step_from_plan(
         display_name: display_name.to_string(),
         invocation,
         condition: plan.condition.clone(),
-        continue_on_error: parent_continue_on_error || plan.continue_on_error,
+        continue_on_error: plan.continue_on_error,
         timeout_minutes: plan.timeout_minutes,
     });
     Ok(true)
@@ -20194,10 +20196,19 @@ runs:
 
         assert_eq!(ordered.len(), 4);
         assert!(matches!(ordered[0], ExecutableStep::Script(_)));
-        assert!(matches!(
-            &ordered[1],
-            ExecutableStep::CompositeStart { step_id, .. } if step_id == "aggregate"
-        ));
+        let ExecutableStep::CompositeStart {
+            step_id,
+            continue_on_error: umbrella_continue_on_error,
+            ..
+        } = &ordered[1]
+        else {
+            panic!("local composite should open with an umbrella step")
+        };
+        assert_eq!(step_id, "aggregate");
+        // The umbrella carries the step's own `continue-on-error`; inner
+        // steps keep their own flags (upstream applies the parent flag to
+        // the umbrella conclusion only, never ORed into inners).
+        assert!(*umbrella_continue_on_error);
         let ExecutableStep::Script(step) = &ordered[2] else {
             panic!("local composite should expand to script step")
         };
@@ -20210,7 +20221,7 @@ runs:
             step.condition.as_deref(),
             Some("github.event_name != 'schedule'")
         );
-        assert!(step.continue_on_error);
+        assert!(!step.continue_on_error);
         assert!(matches!(
             &ordered[3],
             ExecutableStep::CompositeEnd { step_id } if step_id == "aggregate"
@@ -20512,10 +20523,16 @@ runs:
         .unwrap();
 
         assert_eq!(ordered.len(), 3);
-        assert!(matches!(
-            &ordered[0],
-            ExecutableStep::CompositeStart { step_id, .. } if step_id == "docs"
-        ));
+        let ExecutableStep::CompositeStart {
+            step_id: umbrella_id,
+            continue_on_error: umbrella_continue_on_error,
+            ..
+        } = &ordered[0]
+        else {
+            panic!("local composite should open with an umbrella step")
+        };
+        assert_eq!(umbrella_id, "docs");
+        assert!(*umbrella_continue_on_error);
         let ExecutableStep::Native {
             step_id,
             invocation,
@@ -20533,7 +20550,9 @@ runs:
         // umbrella's `github.event_name == 'push'` gates it in the
         // executor instead of being re-tested in the composite scope.
         assert_eq!(condition.as_deref(), None);
-        assert!(*continue_on_error);
+        // The parent flag converts the umbrella conclusion only — it is
+        // never ORed into the inner native step's own flag.
+        assert!(!*continue_on_error);
         assert!(matches!(
             &ordered[2],
             ExecutableStep::CompositeEnd { step_id } if step_id == "docs"

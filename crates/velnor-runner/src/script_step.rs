@@ -866,6 +866,7 @@ impl CommandFileSet {
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
+            command_failed: false,
         };
         self.collect_env(&temp_dir, &mut state)?;
         self.collect_summary(&temp_dir, &mut state)?;
@@ -1074,6 +1075,12 @@ pub struct StepCommandState {
     pub error_count: i32,
     pub warning_count: i32,
     pub notice_count: i32,
+    /// Upstream `IExecutionContext.CommandResult`: true once any workflow
+    /// command failed to process (`ActionCommandManager.TryProcessCommand`
+    /// catch). The executor merges it into the step result exactly like
+    /// upstream's `RunStepAsync` merge — a failed command fails the step
+    /// even when the process itself exited 0.
+    pub command_failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1117,6 +1124,7 @@ impl StepCommandState {
         self.error_count += other.error_count;
         self.warning_count += other.warning_count;
         self.notice_count += other.notice_count;
+        self.command_failed |= other.command_failed;
         if !other.summary.is_empty() {
             self.summary.push_str(&other.summary);
         }
