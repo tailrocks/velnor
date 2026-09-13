@@ -1444,7 +1444,11 @@ impl CompositeFrame {
         if result.exit_code != 0 && !result.failure_ignored && self.exit_code == 0 {
             self.exit_code = result.exit_code;
         }
-        self.failure_ignored |= result.failure_ignored;
+        // The timeline row flag is NOT ORed from inner ignored flags: it
+        // derives from the umbrella conversion alone (set at End). ORing
+        // here marked an umbrella that still fails (no own
+        // `continue-on-error`) as ignored whenever any inner step was
+        // ignored, reporting conclusion success on a failed step.
     }
 
     /// The umbrella's own step result (F6): the exit code aggregated
@@ -1455,15 +1459,19 @@ impl CompositeFrame {
     /// failure was ignored the exit code is already 0 (outcome success),
     /// and when any failure stands the umbrella conclusion stays failure
     /// even if some other inner step was ignored. The umbrella's own
-    /// condition failure never converts (see `condition_failed`).
-    fn umbrella_result(&self) -> StepExecutionResult {
+    /// condition failure never converts (see `condition_failed`), and
+    /// conversion is gated on not-cancelled: upstream completes a killed
+    /// step `Canceled`, and `ApplyContinueOnError` converts `Failed`
+    /// only, so a cancelled umbrella never converts.
+    fn umbrella_result(&self, cancelled: bool) -> StepExecutionResult {
         StepExecutionResult {
             exit_code: self.exit_code,
             state: StepCommandState::default(),
             skipped: self.skipped,
             failure_ignored: self.exit_code != 0
                 && self.continue_on_error
-                && !self.condition_failed,
+                && !self.condition_failed
+                && !cancelled,
             stdout: String::new(),
             stderr: String::new(),
         }
@@ -1492,7 +1500,9 @@ impl CompositeFrame {
         if nested.exit_code != 0 && !nested_result.failure_ignored && self.exit_code == 0 {
             self.exit_code = nested.exit_code;
         }
-        self.failure_ignored |= nested.failure_ignored;
+        // No flag OR here either: the merged nested region is log only,
+        // and this frame's row flag derives from its own umbrella
+        // conversion at End (see `absorb`).
     }
 
     fn into_step_log(self, completed_at: &str) -> StepLog {
@@ -2524,7 +2534,7 @@ where
                     }
                     skip_depth = None;
                     break_depth = None;
-                    state.pop_composite(step_id);
+                    let inner_ids = state.pop_composite(step_id);
                     // F6: the umbrella records its own outcome/conclusion
                     // under its step id, so later steps read
                     // `steps.<umbrella>.outcome|conclusion` instead of
@@ -2534,8 +2544,11 @@ where
                     // scope and the merged exit fails the parent when the
                     // nested umbrella failed.
                     if let Some(mut frame) = composite_frames.pop() {
-                        let umbrella = frame.umbrella_result();
-                        frame.failure_ignored |= umbrella.failure_ignored;
+                        let umbrella = frame.umbrella_result(state.is_cancelled());
+                        // The timeline row flag derives from the umbrella
+                        // conversion only — never ORed from inner ignored
+                        // flags (see `absorb`).
+                        frame.failure_ignored = umbrella.failure_ignored;
                         state.apply(step_id, &umbrella);
                         // An ignored umbrella conclusion converts the
                         // composite's own step results with it: without
@@ -2544,8 +2557,13 @@ where
                         // would fail a job upstream passes. Inner
                         // `steps.<id>` conclusions applied earlier stay
                         // failure — upstream converts the composite
-                        // conclusion only.
+                        // conclusion only — but the converted inner ids
+                        // must stop counting in the job-scope status
+                        // scans: upstream `job.status` derives from
+                        // top-level step results only, so after an ignored
+                        // umbrella a later `failure()` step must not run.
                         if umbrella.failure_ignored {
+                            state.convert_conclusions(inner_ids);
                             for result in results.iter_mut().skip(frame.results_start) {
                                 result.failure_ignored = true;
                             }
@@ -3417,7 +3435,7 @@ where
         // step from the UI, and still record the umbrella.
         while composite_frames.len() > 1 {
             let nested = composite_frames.pop().expect("nested frame");
-            let nested_result = nested.umbrella_result();
+            let nested_result = nested.umbrella_result(state.is_cancelled());
             if let Some(parent) = composite_frames.last_mut() {
                 parent.merge_nested(nested, &nested_result);
             }
@@ -3426,11 +3444,12 @@ where
             if frame.exit_code == 0 {
                 frame.exit_code = 1;
             }
-            let umbrella = frame.umbrella_result();
-            frame.failure_ignored |= umbrella.failure_ignored;
+            let umbrella = frame.umbrella_result(state.is_cancelled());
+            frame.failure_ignored = umbrella.failure_ignored;
             let umbrella_id = frame.step_id.clone();
             state.apply(&umbrella_id, &umbrella);
             if umbrella.failure_ignored {
+                state.convert_open_composite_scopes();
                 for result in results.iter_mut().skip(frame.results_start) {
                     result.failure_ignored = true;
                 }
@@ -12251,6 +12270,12 @@ pub(crate) struct JobExecutionState {
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     conclusions: BTreeMap<String, StepOutcome>,
+    /// Inner step ids converted by an ignored umbrella conclusion. Inner
+    /// `Failure` entries stay in `conclusions` (raw `steps.<id>` reads),
+    /// but the job-scope status scans skip these ids: upstream
+    /// `job.status` derives from top-level step results only, so after an
+    /// ignored umbrella a later `failure()` step must not run.
+    converted_conclusions: BTreeSet<String>,
     path: Vec<String>,
     masks: Vec<String>,
     composite_stack: Vec<String>,
@@ -12364,6 +12389,7 @@ impl JobExecutionState {
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             conclusions: BTreeMap::new(),
+            converted_conclusions: BTreeSet::new(),
             path: Vec::new(),
             masks: Vec::new(),
             composite_stack: Vec::new(),
@@ -12419,6 +12445,7 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
+            converted_conclusions: self.converted_conclusions.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
@@ -12450,6 +12477,7 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
+            converted_conclusions: self.converted_conclusions.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
@@ -12474,7 +12502,10 @@ impl JobExecutionState {
             });
     }
 
-    fn pop_composite(&mut self, step_id: &str) {
+    /// Pop a composite scope, returning the inner step ids recorded in
+    /// it. An ignored umbrella conclusion converts these ids (see
+    /// `convert_conclusions`); a standing one leaves them raw.
+    fn pop_composite(&mut self, step_id: &str) -> Vec<String> {
         if self
             .composite_stack
             .last()
@@ -12487,8 +12518,34 @@ impl JobExecutionState {
             .last()
             .is_some_and(|frame| frame.step_id == step_id)
         {
-            self.composite_conclusion_stack.pop();
+            self.composite_conclusion_stack
+                .pop()
+                .map(|frame| frame.conclusions.into_keys().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         }
+    }
+
+    /// Mark inner step ids as converted by their umbrella's ignored
+    /// conclusion. Their `Failure` entries stay in `conclusions` (raw
+    /// `steps.<id>` reads), but the job-scope status scans skip them —
+    /// upstream `job.status` derives from top-level step results only.
+    fn convert_conclusions(&mut self, step_ids: Vec<String>) {
+        self.converted_conclusions.extend(step_ids);
+    }
+
+    /// Defensive-flush twin of the End path's `pop_composite` harvest: a
+    /// plan whose `CompositeEnd` never arrived leaves its scopes open, so
+    /// an ignored flush umbrella converts every still-open scope's ids.
+    /// The stacks stay untouched — only the status scans change.
+    fn convert_open_composite_scopes(&mut self) {
+        let ids: Vec<String> = self
+            .composite_conclusion_stack
+            .iter()
+            .flat_map(|frame| frame.conclusions.keys().cloned())
+            .collect();
+        self.convert_conclusions(ids);
     }
 
     pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
@@ -12767,15 +12824,15 @@ impl JobExecutionState {
     }
 
     /// `job.status` — `cancelled` once the job is cancelled, otherwise
-    /// `success` unless a step has already concluded failed.
+    /// `success` unless a step has already concluded failed. Converted
+    /// inner ids (see `convert_conclusions`) do not count: upstream
+    /// derives the status from top-level step results only.
     fn job_status(&self) -> &'static str {
         if self.is_cancelled() {
             "cancelled"
-        } else if self
-            .conclusions
-            .values()
-            .any(|outcome| *outcome == StepOutcome::Failure)
-        {
+        } else if self.conclusions.iter().any(|(id, outcome)| {
+            *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
+        }) {
             "failure"
         } else {
             "success"
@@ -12797,14 +12854,13 @@ impl JobExecutionState {
 
     fn status_scope_has_failure(&self) -> bool {
         if let Some(frame) = self.composite_conclusion_stack.last() {
-            frame
-                .conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure)
+            frame.conclusions.iter().any(|(id, outcome)| {
+                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
+            })
         } else {
-            self.conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure)
+            self.conclusions.iter().any(|(id, outcome)| {
+                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
+            })
         }
     }
 
@@ -22311,6 +22367,166 @@ fi"#
         assert_eq!(summary.step_logs[0].display_name, "Run comp");
         assert_eq!(summary.step_logs[0].exit_code, 1);
         assert!(summary.step_logs[0].failure_ignored);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// An ignored umbrella converts job-scope status: the inner `Failure`
+    /// entries stay raw in `steps.*`, but later `failure()`/`success()`
+    /// readers and `job.status` must not see them (upstream `job.status`
+    /// derives from top-level step results only). The sibling test above
+    /// covers the `always()` reader only — without conversion a later
+    /// `failure()` step wrongly runs.
+    #[test]
+    fn ignored_umbrella_does_not_poison_job_status() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "comp".into(),
+                display_name: "Run comp".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+            },
+            script_step("boom", "exit 1", None),
+            ExecutableStep::CompositeEnd {
+                step_id: "comp".into(),
+            },
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step("on-success", "echo success", Some("success()")),
+            script_step(
+                "reader",
+                "echo boom=${{ steps.boom.conclusion }} status=${{ job.status }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        // Guard against a vacuous pass: the inner step really failed.
+        assert!(
+            summary
+                .step_results
+                .iter()
+                .any(|result| result.exit_code == 1),
+            "boom must fail for this test to mean anything: {:?}",
+            summary.step_results
+        );
+        assert!(
+            !temp.join("on-failure.sh").exists(),
+            "failure() must not run after an ignored umbrella"
+        );
+        assert!(
+            temp.join("on-success.sh").exists(),
+            "success() must run after an ignored umbrella"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo boom=failure status=success\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// `ApplyContinueOnError` converts `Failed` only: under cancellation
+    /// the umbrella completes cancelled, never converted.
+    #[test]
+    fn umbrella_conversion_is_gated_on_not_cancelled() {
+        let frame = CompositeFrame {
+            exit_code: 1,
+            continue_on_error: true,
+            ..CompositeFrame::default()
+        };
+        assert!(frame.umbrella_result(false).failure_ignored);
+        assert!(!frame.umbrella_result(true).failure_ignored);
+    }
+
+    /// The umbrella timeline row flag derives from the umbrella conversion
+    /// only: an inner step ignored via its own `continue-on-error` must not
+    /// mark a still-failing umbrella as ignored (that reported conclusion
+    /// success on a failed step).
+    #[test]
+    fn umbrella_row_flag_ignores_inner_ignored_flags() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let ignored_inner = ExecutableStep::Script(ScriptStep {
+            id: "ignored-inner".into(),
+            display_name: String::new(),
+            script: "exit 1".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: true,
+            timeout_minutes: None,
+        });
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "comp".into(),
+                display_name: "Run comp".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            ignored_inner,
+            script_step("standing-inner", "exit 1", None),
+            ExecutableStep::CompositeEnd {
+                step_id: "comp".into(),
+            },
+            script_step(
+                "reader",
+                "echo ignored=${{ steps.ignored-inner.outcome }}-${{ steps.ignored-inner.conclusion }} comp=${{ steps.comp.conclusion }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 1, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            temp.join("standing-inner.sh").exists(),
+            "ignored inner conclusion keeps success() true for the next inner"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo ignored=failure-success comp=failure\n"
+        );
+        assert_eq!(summary.step_logs[0].display_name, "Run comp");
+        assert_eq!(summary.step_logs[0].exit_code, 1);
+        assert!(
+            !summary.step_logs[0].failure_ignored,
+            "a still-failing umbrella must not inherit inner ignored flags"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
