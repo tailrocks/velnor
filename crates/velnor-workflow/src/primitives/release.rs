@@ -1551,7 +1551,7 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(
-            error.contains("`ci-rust-other.yml`, which the `rust-crate-pipeline` family renders for unit `rust-other`"),
+            error.contains("`ci-unit-rust.yml`, not `ci-rust-example.yml`"),
             "the error must name the colliding path and its renderer: {error}"
         );
         let _ = fs::remove_dir_all(root);

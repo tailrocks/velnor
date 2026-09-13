@@ -6,6 +6,30 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Execution backend
+        required: true
+        default: velnor
+        type: choice
+        options:
+          - velnor
+          - github
+          - both
+      scope:
+        description: Verification scope
+        required: true
+        default: full
+        type: choice
+        options:
+          - affected
+          - full
+      base_sha:
+        description: Git ref or SHA used as the affected-selection base
+        required: false
+        default: refs/heads/main
+        type: string
+
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,29 +42,29 @@ permissions:
 jobs:
   plan:
     name: Planning
-    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, velnor-target-mvp]
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       units: ${{ steps.plan.outputs.units }}
       full_units: ${{ steps.plan.outputs.full_units }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+      bun_matrix: ${{ steps.plan.outputs.bun_matrix }}
+      opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
+      docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
+      docs_matrix: ${{ steps.plan.outputs.docs_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@984396e67ef674189cf15f4e5bff3c8785aa3180
-        with:
-          rev: 984396e67ef674189cf15f4e5bff3c8785aa3180
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=984396e67ef674189cf15f4e5bff3c8785aa3180" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
           VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
         run: velnor-workflow plan --config .github/ci/project.toml
@@ -73,7 +97,8 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 10
     permissions:
       contents: read
@@ -84,17 +109,13 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: policy-checkout
-          sparse-checkout: |
-            .github/workflows
-          sparse-checkout-cone-mode: true
           fetch-depth: 1
           persist-credentials: false
-          # Static policy validation only; fork head checkout is intentional.
-          allow-unsafe-pr-checkout: true
+          # Velnor's native checkout uses its supported full-repository fetch.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: github
+          backend: local
           version: 1.8.3
           cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-984396e67ef674189cf15f4e5bff3c8785aa3180
           restore-keys: |
@@ -125,147 +146,76 @@ jobs:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
           VELNOR_WORKFLOW_POLICY_REVISION: 984396e67ef674189cf15f4e5bff3c8785aa3180
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
-  group-unit-bun-velnor:
-    name: "Bun · Bun package (velnor)"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') }}
+  group-bun:
+    name: ${{ matrix.label }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.bun_matrix != '[]' }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-bun-velnor.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.bun_matrix) }}
+    uses: ./.github/workflows/ci-unit-bun.yml
     with:
+      unit: ${{ matrix.unit }}
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
-  group-unit-docker:
-    name: "Docker · Docker"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docker,') }}
+  group-docker:
+    name: ${{ matrix.label }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docker_matrix != '[]' }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-docker-docker.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.docker_matrix) }}
+    uses: ./.github/workflows/ci-unit-docker.yml
     with:
+      unit: ${{ matrix.unit }}
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
-  group-unit-docs:
-    name: "Documentation · Documentation"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',docs,') }}
+  group-docs:
+    name: ${{ matrix.label }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.docs_matrix != '[]' }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-docs-docs.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.docs_matrix) }}
+    uses: ./.github/workflows/ci-unit-docs.yml
     with:
+      unit: ${{ matrix.unit }}
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
-  group-unit-opentofu:
-    name: "OpenTofu · OpenTofu"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',opentofu,') }}
+  group-opentofu:
+    name: ${{ matrix.label }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.opentofu_matrix != '[]' }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-opentofu-opentofu.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.opentofu_matrix) }}
+    uses: ./.github/workflows/ci-unit-opentofu.yml
     with:
+      unit: ${{ matrix.unit }}
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
-  group-unit-rust-policy:
-    name: "Rust · Rust dependency policy"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-policy,') }}
+  group-rust:
+    name: ${{ matrix.label }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && needs.plan.outputs.rust_matrix != '[]' }}
     needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-policy.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.rust_matrix) }}
+    uses: ./.github/workflows/ci-unit-rust.yml
     with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-unit-collector:
-    name: "Rust · unit-collector"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-unit-collector,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-unit-collector.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-bench:
-    name: "Rust · velnor-bench"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-bench,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-bench.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-client:
-    name: "Rust · velnor-client"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-client,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-client.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-control:
-    name: "Rust · velnor-control"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-control,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-control.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-model:
-    name: "Rust · velnor-model"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-model,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-model.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-render:
-    name: "Rust · velnor-render"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-render,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-render.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-runner:
-    name: "Rust · velnor-runner"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-runner,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-runner.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-tools:
-    name: "Rust · velnor-tools"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-tools,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-tools.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-workflow:
-    name: "Rust · velnor-workflow"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-workflow.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnor-workflow-contract:
-    name: "Rust · velnor-workflow-contract"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnor-workflow-contract.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-velnorctl:
-    name: "Rust · velnorctl"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-velnorctl.yml
-    with:
-      scope: ${{ needs.plan.outputs.scope }}
-      selection-artifact: velnor-ci-selection
-  group-unit-rust-production-topology:
-    name: "Rust · Rust production topology"
-    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-production-topology,') }}
-    needs: [plan, policy]
-    uses: ./.github/workflows/ci-rust-production-topology.yml
-    with:
+      unit: ${{ matrix.unit }}
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() }}
-    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnor-workflow-contract, group-unit-rust-velnorctl, group-unit-rust-production-topology]
-    runs-on: ubuntu-24.04
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
+    needs: [plan, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results
@@ -290,221 +240,221 @@ jobs:
           fi
           selected=",$SELECTED_UNITS,"
           if [[ "$selected" == *",bun-velnor,"* ]]; then
-            result="$(result_for_job group-unit-bun-velnor)"
+            result="$(result_for_job group-bun)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit bun-velnor did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-bun-velnor)"
+            result="$(result_for_job group-bun)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",docker,"* ]]; then
-            result="$(result_for_job group-unit-docker)"
+            result="$(result_for_job group-docker)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit docker did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-docker)"
+            result="$(result_for_job group-docker)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit docker failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",docs,"* ]]; then
-            result="$(result_for_job group-unit-docs)"
+            result="$(result_for_job group-docs)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit docs did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-docs)"
+            result="$(result_for_job group-docs)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit docs failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
-            result="$(result_for_job group-unit-opentofu)"
+            result="$(result_for_job group-opentofu)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit opentofu did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-opentofu)"
+            result="$(result_for_job group-opentofu)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then
-            result="$(result_for_job group-unit-rust-policy)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-policy did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-policy)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-policy failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-unit-collector,"* ]]; then
-            result="$(result_for_job group-unit-rust-unit-collector)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-unit-collector did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-unit-collector)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-bench,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-bench)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-bench did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-bench)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-client,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-client)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-client did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-client)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-control,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-control)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-control did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-control)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-model,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-model)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-model did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-model)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-render,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-render)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-render did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-render)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-runner,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-runner)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-runner did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-runner)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-tools,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-tools)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-tools did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-tools)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-workflow,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-workflow)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-workflow)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnor-workflow-contract)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnor-workflow-contract)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then
-            result="$(result_for_job group-unit-rust-velnorctl)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-velnorctl did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-velnorctl)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-production-topology,"* ]]; then
-            result="$(result_for_job group-unit-rust-production-topology)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success) ;;
               *) echo "selected CI unit rust-production-topology did not pass: $result" >&2; exit 1 ;;
             esac
           else
-            result="$(result_for_job group-unit-rust-production-topology)"
+            result="$(result_for_job group-rust)"
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
