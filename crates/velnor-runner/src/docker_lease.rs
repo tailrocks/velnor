@@ -72,6 +72,11 @@ struct DockerLeasePolicy {
 #[derive(Default)]
 struct OwnedDockerResources {
     containers: BTreeSet<String>,
+    /// Names this job successfully created containers with (Docker's
+    /// `?name=` create query). Docker clients routinely address containers
+    /// by name (`buildx_buildkit_<builder><node>`) and by ID in the same
+    /// session.
+    container_names: BTreeSet<String>,
     networks: BTreeSet<String>,
     volumes: BTreeSet<String>,
     execs: BTreeSet<String>,
@@ -91,7 +96,46 @@ enum AuthorizedDockerRoute {
     Create(DockerResourceKind),
     Owned(DockerResourceKind),
     Hijack(DockerResourceKind),
+    /// Daemon-scoped BuildKit tunnel (`/grpc`, `/session`). No object is
+    /// addressed, so there is nothing to label or reclaim; dockerd's own
+    /// BuildKit state for these streams is build-scoped and short-lived.
+    DaemonTunnel,
 }
+
+/// An authorization denial that must reach the guest as a Docker-shaped HTTP
+/// response instead of a torn-down connection. Docker clients branch on
+/// status: buildx treats a 404 container inspect as "builder absent" and
+/// falls back to the daemon's builtin BuildKit, while a transport EOF is a
+/// hard failure for every driver.
+#[derive(Debug)]
+struct LeaseDeny {
+    status: u16,
+    message: String,
+}
+
+impl LeaseDeny {
+    fn forbidden(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            status: 403,
+            message: message.into(),
+        })
+    }
+
+    fn not_found(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            status: 404,
+            message: message.into(),
+        })
+    }
+}
+
+impl fmt::Display for LeaseDeny {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LeaseDeny {}
 
 impl DockerLeasePolicy {
     fn new(job_container: &str) -> Result<Self> {
@@ -101,7 +145,10 @@ impl DockerLeasePolicy {
         Ok(Self {
             resources: Arc::new(Mutex::new(OwnedDockerResources {
                 containers,
-                ..OwnedDockerResources::default()
+                container_names: BTreeSet::new(),
+                networks: BTreeSet::new(),
+                volumes: BTreeSet::new(),
+                execs: BTreeSet::new(),
             })),
         })
     }
@@ -117,6 +164,13 @@ impl DockerLeasePolicy {
             && matches!(method.as_str(), "GET" | "HEAD")
         {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        // BuildKit's daemon tunnels: the docker driver solves builds over
+        // `/grpc`, and the buildkit session (local context upload) attaches
+        // over `/session`. Without them every `docker buildx build` on the
+        // default builder dies at the tunnel, however permissive reads are.
+        if matches!(segments.as_slice(), ["grpc"] | ["session"]) && method == "POST" {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonTunnel, upgrade);
         }
         if segments.as_slice() == ["build"] && method == "POST" {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
@@ -244,7 +298,9 @@ impl DockerLeasePolicy {
             _ => {}
         }
 
-        bail!("Docker lease denied {method} {path}: route is not an owned capability")
+        Err(LeaseDeny::forbidden(format!(
+            "Docker lease denied {method} {path}: route is not an owned capability"
+        )))
     }
 
     fn require_owned(&self, kind: DockerResourceKind, id: &str) -> Result<()> {
@@ -254,7 +310,12 @@ impl DockerLeasePolicy {
             .lock()
             .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
         let owned = match kind {
-            DockerResourceKind::Container => resources.containers.contains(&id),
+            // Buildx addresses builder containers by NAME for bootstrap
+            // probes and by ID for lifecycle calls, both within one job; the
+            // registry learns the name when the job creates the container.
+            DockerResourceKind::Container => {
+                resources.containers.contains(&id) || resources.container_names.contains(&id)
+            }
             DockerResourceKind::Network => resources.networks.contains(&id),
             DockerResourceKind::Volume => resources.volumes.contains(&id),
             DockerResourceKind::Exec => resources.execs.contains(&id),
@@ -262,7 +323,13 @@ impl DockerLeasePolicy {
         if owned {
             Ok(())
         } else {
-            bail!("Docker lease denied foreign {kind:?} resource {id:?}")
+            // A foreign object is invisible to this job, not forbidden:
+            // answer docker's own "no such object" status so clients take
+            // their absent-object branches instead of dying on a transport
+            // error.
+            Err(LeaseDeny::not_found(format!(
+                "Docker lease denied foreign {kind:?} resource {id:?}"
+            )))
         }
     }
 
@@ -274,6 +341,20 @@ impl DockerLeasePolicy {
             .and_then(Value::as_str)
             .context("Docker network request must name a container")?;
         self.require_owned(DockerResourceKind::Container, id)
+    }
+
+    /// Learn a created container's name once its create succeeded.
+    fn note_container_name(&self, name: &str, status: u16) -> Result<()> {
+        if !(200..300).contains(&status) {
+            return Ok(());
+        }
+        let name = validate_owned_resource_id(name, "Docker resource")?;
+        let mut resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        resources.container_names.insert(name);
+        Ok(())
     }
 
     fn record_create_response(
@@ -333,10 +414,43 @@ fn authorize_docker_route(
     route: AuthorizedDockerRoute,
     upgrade: bool,
 ) -> Result<AuthorizedDockerRoute> {
-    if upgrade && !matches!(route, AuthorizedDockerRoute::Hijack(_)) {
-        bail!("Docker lease denied unowned upgrade/tunnel route");
+    if upgrade
+        && !matches!(
+            route,
+            AuthorizedDockerRoute::Hijack(_) | AuthorizedDockerRoute::DaemonTunnel
+        )
+    {
+        return Err(LeaseDeny::forbidden(
+            "Docker lease denied unowned upgrade/tunnel route",
+        ));
     }
     Ok(route)
+}
+
+/// Docker's `POST /containers/create?name=<name>` query. Names are plain
+/// Docker name characters; anything percent-escaped beyond the basics is
+/// rejected by falling back to `None` (the create still works, only the
+/// by-name alias is not learned).
+fn containers_create_query_name(request: &[u8]) -> Option<String> {
+    let (_, target) = docker_request_line(request).ok()?;
+    let query = target.split_once('?')?.1;
+    let mut name = None;
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("name=") {
+            name = Some(value.to_owned());
+        }
+    }
+    let name = name?;
+    if name.is_empty() || name.len() > MAX_OWNED_DOCKER_RESOURCE_ID {
+        return None;
+    }
+    if name
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b'/')
+    {
+        return None;
+    }
+    validate_owned_resource_id(&name, "Docker resource").ok()
 }
 
 fn owned_resource_count(resources: &OwnedDockerResources) -> usize {
@@ -2703,13 +2817,24 @@ fn handle_client_with(
             remainder,
             mut budget,
         } = request;
-        let authorization = policy.authorize(&bytes)?;
+        let authorization = match policy.authorize(&bytes) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                if let Some(deny) = error.downcast_ref::<LeaseDeny>() {
+                    write_deny_response(&mut client, deny.status, &deny.message)?;
+                }
+                return Err(error);
+            }
+        };
         let request_method = http_request_method(&bytes)?.to_owned();
         let request_wants_close = http_request_wants_close(&bytes);
         let upgrade = request_is_upgrade(&bytes);
-        if upgrade && !matches!(authorization, AuthorizedDockerRoute::Hijack(_)) {
-            bail!("Docker lease denied unowned upgrade/tunnel route");
-        }
+        let create_container_name = match authorization {
+            AuthorizedDockerRoute::Create(DockerResourceKind::Container) => {
+                containers_create_query_name(&bytes)
+            }
+            _ => None,
+        };
         let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
             rewrite_docker_api_request(request, job_id, daemon_id)
         })?;
@@ -2760,6 +2885,9 @@ fn handle_client_with(
                     if let Some(kind) = create_kind {
                         policy.record_create_response(kind, status, body)?;
                     }
+                    if let Some(name) = create_container_name.as_deref() {
+                        policy.note_container_name(name, status)?;
+                    }
                     Ok(())
                 },
             ) {
@@ -2778,6 +2906,43 @@ fn handle_client_with(
             return Ok(());
         }
     }
+}
+
+#[cfg(unix)]
+fn write_deny_response(
+    client: &mut std::os::unix::net::UnixStream,
+    status: u16,
+    message: &str,
+) -> Result<()> {
+    let reason = match status {
+        403 => "Forbidden",
+        404 => "Not Found",
+        _ => "Error",
+    };
+    let mut body = String::with_capacity(message.len() + 16);
+    body.push_str("{\"message\":\"");
+    for ch in message.chars() {
+        match ch {
+            '"' => body.push_str("\\\""),
+            '\\' => body.push_str("\\\\"),
+            '\n' => body.push_str("\\n"),
+            '\r' => body.push_str("\\r"),
+            '\t' => body.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => body.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => body.push(ch),
+        }
+    }
+    body.push_str("\"}");
+    let response = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        reason,
+        body.len(),
+        body
+    );
+    client
+        .write_all(response.as_bytes())
+        .context("write Docker lease denial response")
 }
 
 #[cfg(unix)]
