@@ -794,9 +794,9 @@ include(":real")
             root.join("domain/build.gradle.kts"),
             r#"
 plugins { alias(libs.plugins.jooq.codegen) }
-val datasourceUsername = "chainargos"
-val datasourcePassword = "chainargos"
-val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+val datasourceUsername = "exampledb"
+val datasourcePassword = "exampledb"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
 jooqCodegen(libs.postgresql)
 "#,
         )
@@ -828,23 +828,24 @@ jooqCodegen(libs.postgresql)
     #[test]
     fn jdbc_databases_collects_every_named_catalog() {
         let source = r#"
-val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
 val legacyUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
 val monitorUrl = "jdbc:postgresql://127.0.0.1:40000/transfer_monitor"
 "#;
         let databases = jdbc_databases(source);
-        assert!(databases.contains("chainargos"));
+        assert!(databases.contains("exampledb"));
         assert!(databases.contains("legacy"));
         assert!(databases.contains("transfer_monitor"));
     }
 
     #[test]
+    #[expect(clippy::expect_used, reason = "fixture setup fails the test")]
     fn postgres_service_health_creates_workspace_jdbc_databases() {
         let domain = r#"
 plugins { alias(libs.plugins.jooq.codegen) }
-val datasourceUsername = "chainargos"
-val datasourcePassword = "chainargos"
-val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+val datasourceUsername = "exampledb"
+val datasourcePassword = "exampledb"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
 jooqCodegen(libs.postgresql)
 "#;
         let flyway = r#"
@@ -860,10 +861,10 @@ flyway { url = datasourceUrl }
                 .iter()
                 .find(|(name, _)| name == "POSTGRES_DB")
                 .map(|(_, value)| value.as_str()),
-            Some("chainargos")
+            Some("exampledb")
         );
         assert!(
-            service.options.contains("createdb -U chainargos $db"),
+            service.options.contains("createdb -U exampledb $db"),
             "unqualified flywayMigrate needs every JDBC catalog: {}",
             service.options
         );
@@ -873,7 +874,7 @@ flyway { url = datasourceUrl }
             service.options
         );
         assert!(
-            postgres_health_cmd("chainargos", "chainargos", &jdbc_databases(&workspace))
+            postgres_health_cmd("exampledb", "exampledb", &jdbc_databases(&workspace))
                 .contains("legacy")
         );
     }
@@ -905,9 +906,9 @@ flyway { url = datasourceUrl }
             root.join("domain/build.gradle.kts"),
             r#"
 plugins { alias(libs.plugins.jooq.codegen) }
-val datasourceUsername = "chainargos"
-val datasourcePassword = "chainargos"
-val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+val datasourceUsername = "exampledb"
+val datasourcePassword = "exampledb"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
 jooqCodegen(libs.postgresql)
 "#,
         )

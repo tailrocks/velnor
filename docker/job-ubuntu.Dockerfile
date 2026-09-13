@@ -178,9 +178,8 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 # Job-runtime packages: everything a *workflow* may need but the toolchain
 # install does not. This is the volatile half of the package set, so it sits
 # after the toolchain layers — editing it no longer reinstalls Rust, Node and
-# Python. clang/LLVM is absent on purpose: no crate in Cargo.lock uses bindgen,
-# and the mold adapter deliberately links through gcc's -fuse-ld=mold rather
-# than requiring clang.
+# Python. libclang is required for bindgen (pg_query and other -sys crates).
+# The mold adapter still links through gcc's -fuse-ld=mold, not clang-as-ld.
 #
 # The X11/GTK shared libraries and the font set are Playwright's system
 # dependencies. Velnor persists the *browser* payload host-side
@@ -190,6 +189,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
+        clang \
         file \
         fonts-freefont-ttf \
         fonts-ipafont-gothic \
@@ -211,6 +211,7 @@ RUN apt-get update \
         libdrm2 \
         libfontconfig1 \
         libfreetype6 \
+        libclang-dev \
         libgbm1 \
         libglib2.0-0t64 \
         libnspr4 \
@@ -224,6 +225,7 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
+        llvm \
         openssh-client \
         sudo \
         util-linux \
@@ -233,6 +235,11 @@ RUN apt-get update \
         zip \
     && gpg --version \
     && gpgv --version \
+    && clang --version \
+    && conf="$(command -v llvm-config-18 || command -v llvm-config)" \
+    && test -n "$conf" \
+    && ln -sf "$conf" /usr/local/bin/llvm-config \
+    && test -e "$(llvm-config --libdir)/libclang.so" \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker client only. `docker version` and `docker buildx version` are what

@@ -67,6 +67,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
           HEAD_SHA: ${{ github.sha }}
           VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
+          VELNOR_RUNNER: ${{ github.event.inputs.runner || '' }}
         run: |
           set -euo pipefail
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
@@ -101,7 +102,7 @@ jobs:
         with:
           backend: local
           version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-172845cf0307d99b2af1e29f58d4880519c6fb31
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-6017727759da543800c90be401c60c7f0d42092b
           restore-keys: |
             velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -120,7 +121,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 172845cf0307d99b2af1e29f58d4880519c6fb31 \
+            --rev 6017727759da543800c90be401c60c7f0d42092b \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -128,7 +129,7 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-          VELNOR_WORKFLOW_POLICY_REVISION: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          VELNOR_WORKFLOW_POLICY_REVISION: 6017727759da543800c90be401c60c7f0d42092b
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   group-bun:
     name: ${{ matrix.label }}
