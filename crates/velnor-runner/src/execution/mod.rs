@@ -22,6 +22,7 @@ mod net;
 mod post_drain;
 mod snapshot;
 mod step_conditions;
+mod step_outcome;
 mod unix_api;
 
 pub use artifacts::{
