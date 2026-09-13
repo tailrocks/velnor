@@ -5231,7 +5231,7 @@ mod tests {
         assert!(action.contains(
             "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
         ));
-        let expected_source = format!("SOURCE_REPOSITORY: {}", VELNOR_WORKFLOW_INSTALL_GIT_URL);
+        let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
         assert!(action.contains(&expected_source));
         assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
