@@ -505,6 +505,22 @@ pub struct Unit {
     /// for hand-built configs and non-Rust units.
     #[serde(skip_serializing)]
     pub(crate) toolchain: Option<RustToolchain>,
+    /// GitHub Actions `services:` the unit job needs. Generator-only: omitted
+    /// from runtime `project.toml` because packaged `velnor-workflow plan`
+    /// deny_unknown_fields-rejects unknown unit keys. The runner starts these
+    /// before steps; commands consume them at the scanned host/port.
+    #[serde(skip_serializing)]
+    pub(crate) services: Vec<UnitService>,
+}
+
+/// A GitHub Actions service container one unit job starts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnitService {
+    pub(crate) name: String,
+    pub(crate) image: String,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) ports: Vec<String>,
+    pub(crate) options: String,
 }
 
 /// The Rust toolchain a repository pins, parsed from `rust-toolchain.toml` (or
@@ -1573,6 +1589,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             tool_version: row.tool_version().map(str::to_owned),
             mise_tools: row.mise_tools().unwrap_or_default().to_vec(),
             toolchain: None,
+            services: Vec::new(),
         });
         return;
     };
@@ -6336,6 +6353,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
+            services: Vec::new(),
         });
         config.units.push(Unit {
             id: "rust-declared-base".to_owned(),
@@ -6355,6 +6373,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
+            services: Vec::new(),
         });
         config.units.push(Unit {
             id: "rust-declared-mise-free".to_owned(),
@@ -6374,6 +6393,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: Some(toolchain),
+            services: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
         let step = |unit: &str| {
@@ -8234,6 +8254,7 @@ channel = "stable"
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain: None,
+            services: Vec::new(),
         };
         let config = ProjectConfig {
             repository: String::new(),
@@ -9311,6 +9332,7 @@ channel = "stable"
             tool_version: None,
             mise_tools: Vec::new(),
             toolchain,
+            services: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(

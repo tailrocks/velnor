@@ -1416,13 +1416,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
         if input_unit.is_some() {
-            self.render_job_env(output, unit);
+            self.render_job_env(output, lane, unit);
         }
-        let _ = writeln!(
-            output,
-            "    timeout-minutes: {}\n    steps:",
-            contract.timeout_minutes
-        );
+        let _ = writeln!(output, "    timeout-minutes: {}", contract.timeout_minutes);
+        Self::render_job_services(output, unit);
+        output.push_str("    steps:\n");
         let _ = writeln!(
             output,
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
@@ -1493,11 +1491,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push('\n');
     }
 
-    fn render_job_env(&self, output: &mut String, unit: &Unit) {
+    fn render_job_env(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        let postgres = unit
+            .services
+            .iter()
+            .find(|service| service.name == "postgres");
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
             || self.mise_present
+            || postgres.is_some()
         {
             output.push_str("    env:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -1510,6 +1513,49 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
                 output.push_str("      TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache\n");
+            }
+            if lane == RunnerMode::Velnor
+                && let Some(service) = postgres
+            {
+                output.push_str("      POSTGRESQL_DB_HOST: postgres\n");
+                let container_port = service
+                    .ports
+                    .first()
+                    .and_then(|mapping| mapping.split_once(':'))
+                    .map(|(_, container)| container)
+                    .filter(|port| !port.is_empty())
+                    .unwrap_or("5432");
+                let _ = writeln!(
+                    output,
+                    "      POSTGRESQL_DB_PORT: {}",
+                    yaml_scalar(container_port)
+                );
+            }
+        }
+    }
+
+    fn render_job_services(output: &mut String, unit: &Unit) {
+        if unit.services.is_empty() {
+            return;
+        }
+        output.push_str("    services:\n");
+        for service in &unit.services {
+            let _ = writeln!(output, "      {}:", service.name);
+            let _ = writeln!(output, "        image: {}", yaml_scalar(&service.image));
+            if !service.env.is_empty() {
+                output.push_str("        env:\n");
+                for (name, value) in &service.env {
+                    let _ = writeln!(output, "          {name}: {}", yaml_scalar(value));
+                }
+            }
+            if !service.ports.is_empty() {
+                output.push_str("        ports:\n");
+                for port in &service.ports {
+                    let _ = writeln!(output, "          - {}", yaml_scalar(port));
+                }
+            }
+            if !service.options.is_empty() {
+                let _ = writeln!(output, "        options: {}", yaml_scalar(&service.options));
             }
         }
     }
