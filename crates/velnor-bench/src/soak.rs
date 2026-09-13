@@ -194,10 +194,30 @@ fn median(mut values: Vec<u64>) -> Option<f64> {
     }
 }
 
-fn verdict(rounds: &[SoakRound]) -> SoakVerdict {
+/// Owned objects `prepare` established before round zero. Persistent-host
+/// warmups retain state the rounds must not be blamed for; the verdict
+/// counts only what the rounds added on top of this.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OwnedBaseline {
+    containers: u64,
+    networks: u64,
+    images: u64,
+}
+
+impl OwnedBaseline {
+    fn total(self) -> u64 {
+        self.containers + self.networks + self.images
+    }
+}
+
+fn verdict(rounds: &[SoakRound], baseline: OwnedBaseline) -> SoakVerdict {
     let max_residue = rounds
         .iter()
-        .map(|round| round.owned_containers + round.owned_networks + round.owned_images)
+        .map(|round| {
+            round.owned_containers.saturating_sub(baseline.containers)
+                + round.owned_networks.saturating_sub(baseline.networks)
+                + round.owned_images.saturating_sub(baseline.images)
+        })
         .max()
         .unwrap_or(0);
     let bytes: Vec<u64> = rounds.iter().map(|round| round.work_root_bytes).collect();
@@ -241,16 +261,27 @@ pub fn run(
     let sample_docker = driver != Driver::CargoDirect;
     let outcome = (|| {
         workload.prepare(context)?;
+        // Baseline after prepare, before round zero: retained warmup state
+        // is the rounds' starting point, not their residue.
+        let baseline = if sample_docker {
+            OwnedBaseline {
+                containers: count_owned(context, "containers", &["container", "ls", "--all"])?,
+                networks: count_owned(context, "networks", &["network", "ls"])?,
+                images: count_owned(context, "images", &["image", "ls"])?,
+            }
+        } else {
+            OwnedBaseline::default()
+        };
         let mut sampled = Vec::with_capacity(rounds);
         for round in 0..rounds {
             let observation = workload.iterate(context)?;
             sampled.push(sample_round(context, round, &observation, sample_docker)?);
         }
-        Ok::<Vec<SoakRound>, anyhow::Error>(sampled)
+        Ok::<(Vec<SoakRound>, OwnedBaseline), anyhow::Error>((sampled, baseline))
     })();
     let teardown = workload.teardown(context);
-    let sampled = match (outcome, teardown) {
-        (Ok(rounds), Ok(())) => rounds,
+    let (sampled, baseline) = match (outcome, teardown) {
+        (Ok(sampled), Ok(())) => sampled,
         (Err(error), Ok(())) => return Err(error),
         (Ok(_), Err(error)) => return Err(error),
         (Err(error), Err(teardown_error)) => {
@@ -258,7 +289,13 @@ pub fn run(
         }
     };
     let mut notes = workload.notes();
-    let report_verdict = verdict(&sampled);
+    if baseline.total() > 0 {
+        notes.push(format!(
+            "soak baseline: prepare retained {} owned object(s); the verdict counts only what the rounds added",
+            baseline.total()
+        ));
+    }
+    let report_verdict = verdict(&sampled, baseline);
     if report_verdict.passed {
         notes.push(format!(
             "soak passed: {} rounds, no owned-object residue",
@@ -358,7 +395,7 @@ mod tests {
                 work_root_bytes: 1000 + round as u64 * 100,
             })
             .collect();
-        let result = verdict(&rounds);
+        let result = verdict(&rounds, OwnedBaseline::default());
         assert!(result.passed);
         assert_eq!(result.max_residue, 0);
         assert!((result.work_root_bytes_per_round - 100.0).abs() < 1e-9);
@@ -381,7 +418,7 @@ mod tests {
                 work_root_bytes: 500,
             })
             .collect();
-        let result = verdict(&rounds);
+        let result = verdict(&rounds, OwnedBaseline::default());
         assert!(!result.passed);
         assert_eq!(result.max_residue, 1);
         assert_eq!(result.work_root_bytes_per_round, 0.0);
@@ -403,9 +440,41 @@ mod tests {
                 work_root_bytes: 500,
             })
             .collect();
-        let result = verdict(&rounds);
+        let result = verdict(&rounds, OwnedBaseline::default());
         assert!(!result.passed);
         assert_eq!(result.max_residue, 3);
+    }
+
+    #[test]
+    fn prepare_retained_baseline_is_not_round_residue() {
+        // 99 warmup-retained containers across every round: the rounds
+        // added nothing, so the verdict passes with zero residue.
+        let rounds: Vec<SoakRound> = [10, 10, 10]
+            .into_iter()
+            .enumerate()
+            .map(|(round, total_ms)| SoakRound {
+                round,
+                total_ms,
+                owned_containers: 99,
+                owned_networks: 0,
+                owned_images: 0,
+                work_root_bytes: 500,
+            })
+            .collect();
+        let baseline = OwnedBaseline {
+            containers: 99,
+            networks: 0,
+            images: 0,
+        };
+        let result = verdict(&rounds, baseline);
+        assert!(result.passed);
+        assert_eq!(result.max_residue, 0);
+        // One round above the baseline still fails with exactly the excess.
+        let mut leaked = rounds;
+        leaked[1].owned_containers = 100;
+        let result = verdict(&leaked, baseline);
+        assert!(!result.passed);
+        assert_eq!(result.max_residue, 1);
     }
 
     #[test]
