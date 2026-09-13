@@ -8,6 +8,7 @@ mod artifacts;
 mod backend;
 mod cache_transport;
 pub mod cancel;
+mod command_output;
 mod composite_scopes;
 mod docker;
 mod firecracker;
@@ -35,6 +36,10 @@ pub use cancel::{
     forced_kill_delay, terminate, CancelLevel, CancelReason, ContainerRole, JobCancellation,
     TargetRegistration, TerminationLadder, TerminationOutcome, TerminationSignal,
     TerminationTarget,
+};
+pub(crate) use command_output::{
+    apply_command_result, parse_workflow_commands_from_output,
+    rewrite_command_file_env_for_action_container, skipped_step_log_lines, step_log_lines,
 };
 pub(crate) use composite_scopes::{CompositeConclusionScopes, StepOutcome};
 pub(crate) use docker::verify_docker_job_cgroup_boundary;
