@@ -20,6 +20,16 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
         ("AGENT_TOOLSDIRECTORY".to_string(), "/__tool".to_string()),
         ("RUNNER_WORKSPACE".to_string(), "/__w".to_string()),
+        // Build identity: the release commit and manifest schema the job runs
+        // under. Runner-owned; see `is_protected_default_env`.
+        (
+            "VELNOR_SOURCE_SHA".to_string(),
+            env!("VELNOR_SOURCE_SHA").to_string(),
+        ),
+        (
+            "VELNOR_MANIFEST_VERSION".to_string(),
+            crate::manifest::MANIFEST_VERSION.to_string(),
+        ),
         ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
     ];
 
@@ -342,6 +352,9 @@ fn is_protected_default_env(name: &str) -> bool {
             name,
             "MISE_LOCKFILE" | "MISE_LOCKED" | "MISE_LOCKED_VERIFY_PROVENANCE"
         )
+        // Exact matches only: jobs legitimately carry VELNOR_APP_ID and
+        // VELNOR_APP_PRIVATE_KEY, so no VELNOR_ prefix rule here.
+        || matches!(name, "VELNOR_SOURCE_SHA" | "VELNOR_MANIFEST_VERSION")
         || (upper.starts_with("MBX_") && upper != "MBX_DISABLE")
 }
 
@@ -691,6 +704,38 @@ mod tests {
         assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
         assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
+    }
+
+    #[test]
+    fn build_identity_env_is_runner_owned() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "environmentVariables": [{
+                "VELNOR_SOURCE_SHA": "spoofed",
+                "VELNOR_MANIFEST_VERSION": "spoofed",
+                "VELNOR_APP_ID": "12345",
+                "VELNOR_APP_PRIVATE_KEY": "secret",
+            }],
+        }))
+        .unwrap();
+
+        let env = job_runtime_env(&job);
+
+        assert!(env.contains(&("VELNOR_SOURCE_SHA".into(), env!("VELNOR_SOURCE_SHA").into())));
+        assert!(env.contains(&(
+            "VELNOR_MANIFEST_VERSION".into(),
+            crate::manifest::MANIFEST_VERSION.to_string()
+        )));
+        assert!(!env.contains(&("VELNOR_SOURCE_SHA".into(), "spoofed".into())));
+        assert!(!env.contains(&("VELNOR_MANIFEST_VERSION".into(), "spoofed".into())));
+        // No VELNOR_ prefix rule: legitimate job-carried vars pass through.
+        assert!(env.contains(&("VELNOR_APP_ID".into(), "12345".into())));
+        assert!(env.contains(&("VELNOR_APP_PRIVATE_KEY".into(), "secret".into())));
     }
 
     #[test]
