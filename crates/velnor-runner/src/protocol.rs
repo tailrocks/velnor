@@ -7655,11 +7655,12 @@ mod tests {
                 requests.push(String::from_utf8_lossy(&request).to_string());
                 let (status, body): (&str, String) = match index {
                     0 => ("200 OK", listing.clone()),
-                    // Always answer 101: deleting the redelivered attempt's row
-                    // would make the client fail with an ID mismatch.
+                    // Answer 102, the only row this job owns. Deleting the
+                    // redelivered attempt's row (101) would fail the client
+                    // with an ID mismatch.
                     1 => (
                         "200 OK",
-                        serde_json::json!({"ok": true, "artifact_id": "101"}).to_string(),
+                        serde_json::json!({"ok": true, "artifact_id": "102"}).to_string(),
                     ),
                     2 => (
                         "200 OK",
