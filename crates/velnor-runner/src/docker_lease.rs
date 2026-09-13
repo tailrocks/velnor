@@ -1489,14 +1489,16 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             },
             "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
             | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
-            | "publishallports" | "containeridfile" | "restartpolicy" => {
-                is_strict_value_present(value)
-            }
-            // Live API 1.55 CLI sends an empty GPU request object
-            // (`Driver:""`, `Count:0`, empty IDs/caps). That is not host
-            // control. A populated request (e.g. nvidia) stays denied.
-            "devicerequests" => !is_empty_default(value),
-            "binds" | "mounts" => contains_host_bind(value)? || is_strict_value_present(value),
+            | "publishallports" | "containeridfile" => is_strict_value_present(value),
+            // Live API 1.55: `{"Name":"no","MaximumRetryCount":0}` is the
+            // default (no restart). `always` / `on-failure` stay denied.
+            "restartpolicy" => !is_default_restart_policy(value),
+            // Empty GPU request objects and nvidia `Count:-1` +
+            // `Capabilities:[["gpu"]]` (buildx on an nvidia host). Other
+            // device requests stay denied.
+            "devicerequests" => !is_guest_device_requests(value),
+            // Named volumes are guest objects. Host binds stay denied.
+            "binds" | "mounts" => !is_guest_or_empty_mounts(value)?,
             // Docker's zero value means "unset" for this known field. Do
             // not generalize that exception to future numeric fields.
             "blkioweight" => !is_zero_number(value),
@@ -1555,6 +1557,132 @@ fn is_zero_number(value: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_guest_or_empty_mounts(value: &Value) -> Result<bool> {
+    match value {
+        Value::Null => return Ok(true),
+        Value::Array(items) if items.is_empty() => return Ok(true),
+        Value::Object(object) if object.is_empty() => return Ok(true),
+        _ => {}
+    }
+    if contains_host_bind(value)? {
+        return Ok(false);
+    }
+    match value {
+        Value::Array(items) => Ok(items.iter().all(is_named_volume_mount)),
+        Value::Object(_) => Ok(is_named_volume_mount(value)),
+        _ => Ok(false),
+    }
+}
+
+fn is_named_volume_mount(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return false;
+    };
+    let mount_type = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("type"))
+        .and_then(|(_, value)| value.as_str())
+        .unwrap_or("");
+    let source = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("source"))
+        .and_then(|(_, value)| value.as_str())
+        .unwrap_or("");
+    mount_type.eq_ignore_ascii_case("volume") && !is_host_bind_source(source)
+}
+
+fn is_default_restart_policy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Object(object) => {
+            let name = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("name"))
+                .and_then(|(_, value)| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let retries = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("maximumretrycount"))
+                .map(|(_, value)| value)
+                .unwrap_or(&Value::Null);
+            (name.is_empty()
+                || name.eq_ignore_ascii_case("no")
+                || name.eq_ignore_ascii_case("none"))
+                && is_empty_default(retries)
+        }
+        _ => false,
+    }
+}
+
+fn is_guest_device_requests(value: &Value) -> bool {
+    if is_empty_default(value) {
+        return true;
+    }
+    let Value::Array(items) = value else {
+        return false;
+    };
+    !items.is_empty() && items.iter().all(is_gpu_device_request)
+}
+
+fn is_gpu_device_request(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return false;
+    };
+    let driver = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("driver"))
+        .and_then(|(_, value)| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if !(driver.is_empty()
+        || driver.eq_ignore_ascii_case("nvidia")
+        || driver.eq_ignore_ascii_case("gpu"))
+    {
+        return false;
+    }
+    let ids = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("deviceids"))
+        .map(|(_, value)| value)
+        .unwrap_or(&Value::Null);
+    let options = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("options"))
+        .map(|(_, value)| value)
+        .unwrap_or(&Value::Null);
+    if !is_empty_default(ids) || !is_empty_default(options) {
+        return false;
+    }
+    let Some(capabilities) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("capabilities"))
+        .map(|(_, value)| value)
+    else {
+        return is_empty_default(value);
+    };
+    gpu_capabilities_only(capabilities)
+}
+
+fn gpu_capabilities_only(value: &Value) -> bool {
+    let Value::Array(groups) = value else {
+        return false;
+    };
+    !groups.is_empty()
+        && groups.iter().all(|group| {
+            let Value::Array(names) = group else {
+                return false;
+            };
+            !names.is_empty()
+                && names.iter().all(|name| {
+                    name.as_str().is_some_and(|capability| {
+                        capability.eq_ignore_ascii_case("gpu")
+                            || capability.eq_ignore_ascii_case("nvidia")
+                    })
+                })
+        })
 }
 
 fn is_default_console_size(value: &Value) -> bool {
@@ -3667,6 +3795,50 @@ mod tests {
         assert_eq!(deny.status, 403);
         assert!(deny.message.contains("DeviceRequests"));
         assert!(deny.message.contains("nvidia"));
+    }
+
+    #[test]
+    fn container_create_live_cli_restart_policy_no_is_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"MaximumRetryCount":0,"Name":"no"}}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"Name":"always"}}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("RestartPolicy always is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":3}}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("RestartPolicy on-failure is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
+    }
+
+    #[test]
+    fn container_create_live_buildx_gpu_and_volume_mounts_are_guest() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
     }
 
     #[test]
