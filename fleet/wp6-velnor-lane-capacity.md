@@ -247,6 +247,28 @@ That is evidence the 5-slot pool saturates: six jobs ran, eleven sat with
 empty `runner_name` for hours. This report does not diagnose why assignment
 stopped after the first wave.
 
+## Sentry / fleet install path
+
+The sentry host (`sentry.tailrocks.internal`, labels `hetzner-sentry-ci` /
+`velnor-target-mvp`) installs and upgrades Velnor **only** through the
+official Debian apt repository published by
+[tailrocks/velnor-apt](https://github.com/tailrocks/velnor-apt):
+
+```text
+https://velnor-apt.tailrocks.com/
+```
+
+```bash
+sudo apt-get update
+apt-cache policy velnor-runner
+sudo apt-get install velnor-runner
+```
+
+Do not sideload a `.deb`, `cargo install`, or replace
+`/usr/bin/velnor-runner` on sentry. The v0.1.274 job-log protocol block
+clears only after a coherent tagged `velnor-runner` is published to that
+apt repo and installed this way.
+
 ## Non-goals
 
 - No release capability-gate bypass. Release stays GitHub-only until the
