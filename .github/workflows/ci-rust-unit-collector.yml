@@ -70,9 +70,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.toml', 'tools/unit-collector/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          cache-key: velnor-mbx-v3-8d401e6942b8-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', 'tools/unit-collector/Cargo.toml') }}-${{ hashFiles('crates/velnor-workflow/src/runtime.rs', 'mise.lock', 'tools/unit-collector/**/*.rs', 'tools/unit-collector/benches/**', 'tools/unit-collector/examples/**', 'tools/unit-collector/src/**', 'tools/unit-collector/tests/**', 'tools/unit-collector/tests/fixtures/dependency-bump.jsonl', 'tools/unit-collector/tests/fixtures/fresh.jsonl', 'tools/unit-collector/tests/fixtures/touched-source.jsonl') }}
           restore-keys: |
-            velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-
+            velnor-mbx-v3-8d401e6942b8-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml', 'tools/unit-collector/Cargo.toml') }}-
+            velnor-mbx-v3-8d401e6942b8-${{ runner.os }}-${{ runner.arch }}-rust-unit-collector-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache

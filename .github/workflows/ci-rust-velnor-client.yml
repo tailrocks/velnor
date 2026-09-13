@@ -70,9 +70,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.toml', 'crates/velnor-client/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          cache-key: velnor-mbx-v3-0866f2f9ce05-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-client/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-client/**/*.rs', 'crates/velnor-client/benches/**', 'crates/velnor-client/examples/**', 'crates/velnor-client/src/**', 'crates/velnor-client/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-workflow/src/runtime.rs', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json') }}
           restore-keys: |
-            velnor-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-
+            velnor-mbx-v3-0866f2f9ce05-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-client/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-0866f2f9ce05-${{ runner.os }}-${{ runner.arch }}-rust-velnor-client-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache

@@ -8,19 +8,207 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use super::snapshot::{
+    freshness_expression, snapshot_class_prefix, snapshot_key, snapshot_restore_keys,
+    CompatibilityFacts, SNAPSHOT_SCHEMA,
+};
 use super::{
     CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::{
-    github_expression, hosted_mold_setup, lane_supports_unit, nested_unit_workflow_file,
-    rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_id, unit_needs, velnor_runner, velnor_runner_group, workflow_runtime_artifact_upload,
-    workflow_runtime_download, workflow_runtime_setup, workflow_selection_artifact_download,
-    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
-    RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
-    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    config_rust_toolchain, github_expression, hosted_mold_setup, lane_supports_unit,
+    nested_unit_workflow_file, rendered_cache_values, sidebar_group_name, stack_group_job_id,
+    unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
+    workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
+    workflow_selection_artifact_download, workflow_selection_artifact_upload, yaml_scalar,
+    CachePurpose, CacheSpec, ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind,
+    GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
+
+/// The snapshot namespace the unit-lane compiler snapshots live in.
+const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
+/// The snapshot namespace the Docker mutable-mount seed bundle lives in. Kept
+/// out of the `-mbx-` namespace so retention classifies it as the protected
+/// baseline it is, never as a rolling compiler snapshot.
+const DOCKER_SEED_SNAPSHOT_NAMESPACE: &str = "velnor-docker-seed";
+
+/// Dependency-closure inputs a unit snapshot hashes at restore time: the Cargo
+/// configuration, manifests, and lockfiles of the unit and of every workspace
+/// unit it depends on. A change to any of them mints a new dependency segment,
+/// so the previous snapshot stays reachable as a fallback instead of a stale
+/// exact hit.
+fn snapshot_dependency_inputs<'a>(members: &[&'a Unit]) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for member in members {
+        patterns.extend(member.cache.as_ref().map_or_else(
+            || {
+                vec![
+                    "Cargo.lock".to_owned(),
+                    "rust-toolchain.toml".to_owned(),
+                    "rust-toolchain".to_owned(),
+                    "mise.toml".to_owned(),
+                    "mise.lock".to_owned(),
+                ]
+            },
+            |cache| cache.key_files.clone(),
+        ));
+    }
+    patterns.sort();
+    patterns.dedup();
+    patterns
+}
+
+/// The units a snapshot-carrying unit compiles: the unit itself plus the
+/// transitive workspace dependency closure its `depends_on` names.
+fn closure_members<'a>(unit: &'a Unit, units: &'a [Unit]) -> Vec<&'a Unit> {
+    let mut members = vec![unit];
+    let mut cursor = 0;
+    while cursor < members.len() {
+        let current = members[cursor];
+        cursor += 1;
+        for dependency in &current.depends_on {
+            if members.iter().any(|member| member.id == *dependency) {
+                continue;
+            }
+            if let Some(member) = units.iter().find(|candidate| candidate.id == *dependency) {
+                members.push(member);
+            }
+        }
+    }
+    members
+}
+
+/// Source-state inputs a unit snapshot hashes into its freshness segment: the
+/// compiled sources of the dependency closure plus every watched file a build
+/// embeds or copies (a Rust unit's `include_str!` data, a Docker unit's build
+/// context). Manifests, lockfiles, toolchain pins, and Cargo configuration are
+/// dependency inputs and ride the other segment; hashing them again here would
+/// cold-restart the closure on a metadata-only edit without advancing state.
+fn snapshot_state_files<'a>(members: &[&'a Unit], unit: &'a Unit) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for member in members {
+        if member.kind == UnitKind::Rust {
+            files.push(format!("{}/**/*.rs", member.root));
+        }
+        for watched in &member.watch {
+            let compiled_source = watched.ends_with("*.rs");
+            let dependency_input = watched.ends_with(".toml")
+                || watched == "Cargo.lock"
+                || watched == "rust-toolchain"
+                || watched == ".cargo/**";
+            if !compiled_source && !dependency_input {
+                files.push(watched.clone());
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        // A unit with no derivable source input must still hash something:
+        // a freshness segment that hashes nothing would freeze the class at
+        // its first save, which is the defect this grammar exists to remove.
+        files.push(format!("{}/**", unit.root));
+    }
+    files
+}
+
+/// The snapshot identity a static template consumes: the compatibility token
+/// (`<schema>-<digest>`) a template renders into its keys and restore
+/// prefixes, and the freshness expression it appends to its primary keys.
+///
+/// Static templates own their dependency hashFiles and their per-job variant
+/// names — those are lane-specific facts a repo contract states explicitly —
+/// so the marker covers only the two halves the generator owns: who may
+/// import, and what counts as new state.
+pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, String) {
+    let rust_units: Vec<&Unit> = config
+        .units
+        .iter()
+        .filter(|unit| unit.kind == UnitKind::Rust)
+        .collect();
+    let mise_present = config
+        .analysis
+        .detected
+        .iter()
+        .any(|item| item == "mise-present")
+        && !rust_units.is_empty();
+    let facts = CompatibilityFacts {
+        schema: SNAPSHOT_SCHEMA,
+        payload: "mbx",
+        mbx_version: MR_BOXINGTON_VERSION.to_owned(),
+        toolchain: config_rust_toolchain(config),
+        host_image: config.github_runner.clone(),
+        linker: "mold".to_owned(),
+        rustflags: mise_present
+            .then(|| "-C link-arg=-fuse-ld=mold".to_owned())
+            .unwrap_or_default(),
+        cargo_inputs: Vec::new(),
+        recipe: Vec::new(),
+    };
+    let mut state_files: Vec<String> = Vec::new();
+    for unit in &rust_units {
+        let members = closure_members(unit, &config.units);
+        state_files.extend(snapshot_state_files(&members, unit));
+    }
+    state_files.sort();
+    state_files.dedup();
+    (
+        format!("{}-{}", SNAPSHOT_SCHEMA, facts.digest()),
+        freshness_expression(&state_files),
+    )
+}
+
+/// The compatibility identity of a unit snapshot: every fact that decides
+/// whether a saved snapshot may be imported at all. Freshness is deliberately
+/// absent here — it is the second, source-state half of the key.
+fn snapshot_compatibility(
+    ir: &WorkflowIr,
+    unit: &Unit,
+    dependency_inputs: &[String],
+) -> CompatibilityFacts {
+    CompatibilityFacts {
+        schema: SNAPSHOT_SCHEMA,
+        payload: if unit.kind == UnitKind::Docker {
+            "docker-seed"
+        } else {
+            "mbx"
+        },
+        mbx_version: MR_BOXINGTON_VERSION.to_owned(),
+        toolchain: unit.toolchain.clone(),
+        host_image: ir.github_runner.clone(),
+        linker: ir
+            .tools
+            .contains(&ToolRequirement::Mold)
+            .then(|| "mold".to_owned())
+            .unwrap_or_default(),
+        rustflags: ir
+            .mise_present
+            .then(|| "-C link-arg=-fuse-ld=mold".to_owned())
+            .unwrap_or_default(),
+        cargo_inputs: dependency_inputs.to_vec(),
+        recipe: unit_commands(unit).cloned().collect(),
+    }
+}
+
+/// A rendered snapshot key and its restore prefixes for one unit on one
+/// namespace. The key carries the compatibility digest, the runtime segments,
+/// the dependency inputs GitHub hashes at restore time, and the freshness
+/// segment that lets a state-advancing run save; the restore prefixes stay
+/// prefixes, so the most recently saved compatible generation wins and an
+/// exact old generation can never shadow it.
+fn unit_snapshot(ir: &WorkflowIr, unit: &Unit, namespace: &str) -> (String, String) {
+    let members = closure_members(unit, &ir.units);
+    let dependency_inputs = snapshot_dependency_inputs(&members);
+    let dependency = freshness_expression(&dependency_inputs);
+    let facts = snapshot_compatibility(ir, unit, &dependency_inputs);
+    let class_prefix = snapshot_class_prefix(namespace, &facts.digest());
+    let state = freshness_expression(&snapshot_state_files(&members, unit));
+    (
+        snapshot_key(&class_prefix, &unit.id, &dependency, &state),
+        snapshot_restore_keys(&class_prefix, &unit.id, &dependency),
+    )
+}
 
 /// Shell body of the post-checks report step.
 ///
@@ -372,13 +560,11 @@ fn render_mutable_mount_seed_restore(output: &mut String, ir: &WorkflowIr, unit:
     let Some(cache) = unit.cache.as_ref() else {
         return;
     };
-    let (paths, key_files) = rendered_cache_values(cache);
-    let key = format!(
-        "velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
-    );
+    let (paths, _) = rendered_cache_values(cache);
+    let (key, restore_keys) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
     let _ = writeln!(
         output,
-        "      - name: Restore Docker build seed\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-",
+        "      - name: Restore Docker build seed\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            {restore_keys}",
         ir.pins.cache_restore
     );
     let _ = writeln!(
@@ -444,11 +630,9 @@ fn render_mutable_mount_seed_collection(
         checks_env(unit),
         MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
     );
-    if cache_save && let Some(cache) = unit.cache.as_ref() {
-        let (paths, key_files) = rendered_cache_values(cache);
-        let key = format!(
-            "velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
-        );
+    if cache_save && unit.cache.is_some() {
+        let (paths, _) = rendered_cache_values(unit.cache.as_ref().expect("checked above"));
+        let (key, _) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
         let _ = writeln!(
             output,
             "      - name: Save Docker build seed\n        if: ({trusted_cache}) && steps.cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
@@ -1518,44 +1702,20 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
         if tools.contains(&ToolRequirement::MrBoxington) {
             if lane == RunnerMode::Github {
-                let (_, key_files) = unit.cache.as_ref().map_or_else(
-                    || {
-                        rendered_cache_values(&CacheSpec {
-                            key_files: vec![
-                                "Cargo.lock".to_owned(),
-                                "rust-toolchain.toml".to_owned(),
-                                "rust-toolchain".to_owned(),
-                                "mise.toml".to_owned(),
-                                "mise.lock".to_owned(),
-                            ],
-                            paths: Vec::new(),
-                            purpose: CachePurpose::Generic,
-                            mbx_output_cache_justification: None,
-                            mutable_mount_seed: false,
-                        })
-                    },
-                    rendered_cache_values,
-                );
-                // Stable per-unit key: exact hits reuse the cache on every run
-                // with unchanged dependency inputs, and a new immutable entry
-                // is saved only when those inputs change. A per-commit suffix
-                // would mint one entry per unit per push, flood the 10 GiB
-                // GitHub cache, evict warm entries, and force cold
-                // `Downloading crates` / `Compiling` builds.
-                let cache_key = format!(
-                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-${{{{ hashFiles({key_files}) }}}}",
-                    unit.id,
-                );
-                // Unit-level prefix (no dependency hash): after a lockfile or
-                // toolchain bump the previous tree still warms unchanged
-                // dependencies instead of rebuilding the world cold.
-                let restore_key = format!(
-                    "velnor-mbx-{MR_BOXINGTON_CACHE_GENERATION}-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{}-",
-                    unit.id,
-                );
+                // Snapshot identity is two different facts, and the key
+                // names both: the compatibility digest (toolchain pin, hosted
+                // image, linker recipe, `RUSTFLAGS`, Cargo inputs, recipe)
+                // decides whether a snapshot may be imported at all, and the
+                // freshness segment (the closure's compiled sources plus
+                // embedded data) decides whether the run holds state worth
+                // saving. A source change mints a new key, so the run that
+                // produced the new state is never refused a save by an
+                // immutable exact hit — and an exact hit (same sources,
+                // snapshot already saved) writes nothing.
+                let (cache_key, restore_keys) = unit_snapshot(self, unit, UNIT_SNAPSHOT_NAMESPACE);
                 let _ = writeln!(
                     output,
-                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_key}\n          save-on-workflow-dispatch: true",
+                    "      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: {cache_key}\n          restore-keys: |\n            {restore_keys}\n          save-on-workflow-dispatch: true",
                     self.pins.mr_boxington
                 );
             } else {

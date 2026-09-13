@@ -18,6 +18,7 @@ mod pipeline;
 mod plan;
 mod regen;
 pub(crate) mod release;
+pub(crate) mod snapshot;
 pub(crate) mod watch;
 
 use std::collections::BTreeMap;
@@ -31,8 +32,8 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, WorkflowIr, WorkflowKind,
+    checks_env, config_snapshot_identity, render_cargo_source_preparation,
+    render_pinned_toolchain_steps, render_retained_output_cache_note, WorkflowIr, WorkflowKind,
 };
 
 /// Default `timeout-minutes` for a unit verification job.
