@@ -17,7 +17,6 @@ use crate::{
     workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
     RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_CACHE_GENERATION,
     MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
-    VELNOR_WORKFLOW_SETUP_ACTION, VELNOR_WORKFLOW_SOURCE_REV,
 };
 
 /// Shell body of the post-checks report step.
@@ -1022,14 +1021,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             runners
         };
         let gate = self.trusted_runner_gate(runners, trusted || runners == RunnerMode::Velnor);
+        let runtime_setup = if runners == RunnerMode::Velnor {
+            String::new()
+        } else {
+            workflow_runtime_setup(RunnerMode::Github)
+        };
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n      full_units: ${{{{ steps.plan.outputs.full_units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {}@{}\n        with:\n          rev: {}\n      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n      full_units: ${{{{ steps.plan.outputs.full_units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             self.pins.checkout,
-            VELNOR_WORKFLOW_SETUP_ACTION,
-            VELNOR_WORKFLOW_SOURCE_REV,
-            VELNOR_WORKFLOW_SOURCE_REV,
         );
         output.push_str(&workflow_runtime_artifact_upload());
         output.push_str(&workflow_selection_artifact_upload());
