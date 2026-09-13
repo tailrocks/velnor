@@ -7078,6 +7078,99 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
+    fn required_checks_bulk_load_needs_without_per_job_expressions() {
+        const GITHUB_EXPRESSION_LIMIT: usize = 21_000;
+
+        let config = scanned_fixture(RunnerMode::Both);
+        let generator = WorkflowIr::from_config(&config);
+        let workflows = [
+            generator.render(WorkflowKind::Main),
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+        ];
+
+        for workflow in &workflows {
+            assert_eq!(
+                workflow.matches("NEEDS_JSON: ${{ toJSON(needs) }}").count(),
+                1,
+                "required check must use one bulk needs expression"
+            );
+            assert_eq!(
+                workflow
+                    .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
+                    .count(),
+                1,
+                "required check must preserve the plan selection output"
+            );
+            assert!(!workflow.contains("needs['"));
+            assert!(workflow.contains(
+                "result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty'"
+            ));
+            assert!(workflow.contains("result=\"$(result_for_job plan)\""));
+            assert!(workflow.contains("result=\"$(result_for_job policy)\""));
+            assert!(workflow.contains("result=\"$(result_for_job "));
+            assert!(workflow.contains("selected=\",$SELECTED_UNITS,\""));
+            assert!(workflow.contains("success|skipped"));
+        }
+
+        assert!(workflows[2].contains("SIMULATE_FAILURE: ${{ inputs.simulate_failure }}"));
+
+        // Keep the regression larger than the observed GitHub 21k expression
+        // ceiling. The required script may grow with the graph, but the
+        // expression-bearing part must stay constant by bulk-loading needs.
+        let mut large_config = scanned_fixture(RunnerMode::Both);
+        let template = must_some(large_config.units.first(), "large fixture unit").clone();
+        for index in 0..160 {
+            let mut unit = template.clone();
+            unit.id = format!("rust-expression-limit-{index:03}");
+            unit.label = format!("Rust expression limit {index:03}");
+            large_config.units.push(unit);
+        }
+        let large_generator = WorkflowIr::from_config(&large_config);
+        let large_workflow =
+            large_generator.render_nested(WorkflowKind::Main, &legacy_plan(&large_generator));
+        let required_block = must_some(
+            large_workflow
+                .split_once("  ci-required:\n")
+                .map(|(_, block)| block),
+            "large required-check block",
+        );
+        let required_script = must_some(
+            required_block
+                .split_once("        run: |\n")
+                .map(|(_, script)| script),
+            "large required-check script",
+        );
+        assert!(
+            required_script.len() > GITHUB_EXPRESSION_LIMIT,
+            "fixture must exercise the 21k ceiling: {} bytes",
+            required_script.len()
+        );
+        let expression_payload_length = required_script
+            .split("${{")
+            .skip(1)
+            .map(|expression| expression.find("}}").unwrap_or(GITHUB_EXPRESSION_LIMIT + 1))
+            .sum::<usize>();
+        assert_eq!(expression_payload_length, 0);
+        assert!(!required_script.contains("${{"));
+        assert_eq!(
+            required_block
+                .matches("NEEDS_JSON: ${{ toJSON(needs) }}")
+                .count(),
+            1
+        );
+        assert_eq!(
+            required_block
+                .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
+                .count(),
+            1
+        );
+        assert!(required_block.contains("result=\"$(result_for_job plan)\""));
+        assert!(required_block.contains("result=\"$(result_for_job policy)\""));
+        assert!(required_block.contains("selected=\",$SELECTED_UNITS,\""));
+    }
+
+    #[test]
     fn generated_output_uses_binary_runtime_without_shell_helpers() {
         let config = must(
             scan_repository(&fixture_root(), RunnerMode::Github),
