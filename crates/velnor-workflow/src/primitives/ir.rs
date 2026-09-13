@@ -1490,10 +1490,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
         let dispatch = match lane {
             RunnerMode::Velnor => {
-                "github.event_name == 'workflow_dispatch' && (inputs.runner == 'velnor' || inputs.runner == 'both')"
+                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
             }
             RunnerMode::Github => {
-                "github.event_name == 'workflow_dispatch' && (inputs.runner == 'github' || inputs.runner == 'both')"
+                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
             }
             RunnerMode::Both => {
                 "github.event_name == 'workflow_dispatch'"

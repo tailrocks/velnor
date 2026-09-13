@@ -133,12 +133,12 @@ fn automatic_pr_does_not_schedule_github_hosted_unit_jobs() {
     assert!(unit.contains("runs-on: [self-hosted, example-runner]"));
     assert!(unit.contains("runs-on: ubuntu-24.04"));
     assert!(
-        unit.contains("inputs.runner == 'github'"),
+        unit.contains("github.event.inputs.runner == 'github'"),
         "GitHub-hosted jobs exist only for manual dispatch"
     );
     let github_if = unit
         .lines()
-        .find(|line| line.contains("inputs.runner == 'github'"))
+        .find(|line| line.contains("github.event.inputs.runner == 'github'"))
         .unwrap();
     assert!(
         github_if.contains("workflow_dispatch"),

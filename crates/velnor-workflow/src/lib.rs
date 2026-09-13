@@ -7200,8 +7200,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
         assert!(crate_workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
         assert!(crate_workflow.contains("inputs:\n      unit:"));
-        assert!(crate_workflow.contains("inputs.runner == 'velnor'"));
-        assert!(crate_workflow.contains("inputs.runner == 'github'"));
+        assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
+        assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
     }
 
     #[test]

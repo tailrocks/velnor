@@ -2100,7 +2100,7 @@ fn has_untrusted_pull_request_gate(value: &str) -> bool {
     {
         return true;
     }
-    let dispatch = "||(github.event_name=='workflow_dispatch'&&(inputs.runner=='velnor'||inputs.runner=='both'))";
+    let dispatch = "||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
     value
         .strip_prefix("github.event_name=='pull_request'||(")
         .and_then(|rest| rest.strip_suffix(dispatch))
@@ -2110,7 +2110,7 @@ fn has_untrusted_pull_request_gate(value: &str) -> bool {
 
 fn has_manual_velnor_dispatch_gate(value: &str) -> bool {
     let value = normalize_gate_expression(value);
-    value == "github.event_name=='workflow_dispatch'&&(inputs.runner=='velnor'||inputs.runner=='both')"
+    value == "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
         || has_untrusted_pull_request_gate(&value)
 }
 
