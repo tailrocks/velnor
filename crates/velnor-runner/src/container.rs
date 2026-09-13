@@ -381,14 +381,13 @@ impl JobContainerSpec {
                 ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
             ]);
         } else if let Some(host) = &self.sccache_store_host {
-            command.pair("-v", self.mount_arg(host, "/var/cache/sccache"));
-            command.envs([
-                ("MBX_DISABLE", "1"),
-                ("RUSTC_WRAPPER", "sccache"),
-                ("SCCACHE_DIR", "/var/cache/sccache"),
-                ("SCCACHE_CACHE_SIZE", "20G"),
-                ("SCCACHE_GHA_ENABLED", "false"),
-            ]);
+            // Explicit sccache compatibility mode: mount and env owned by the
+            // compat module; the default mbx branch above is untouched.
+            command.pair(
+                "-v",
+                self.mount_arg(host, crate::sccache_compat::CONTAINER_DIR),
+            );
+            command.envs(crate::sccache_compat::container_env());
         }
     }
 
@@ -1459,18 +1458,8 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-/// Host-persistent sccache compiler store, namespaced by the job's admitted
-/// scope like every other trust-partitioned store.
-pub(crate) fn sccache_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "compiler/sccache",
-        "_velnor_sccache",
-    )
-}
-
-/// Host-persistent Cargo download/index store, daemon-shared like sccache.
+/// Host-persistent Cargo download/index store, daemon-shared like the
+/// compiler stores.
 /// Extracted registry sources and git checkouts remain job-local because they
 /// are mutable during materialization and are unsafe to share across slots.
 ///
@@ -1861,6 +1850,12 @@ mod tests {
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
+        // Default path carries no sccache presence at all: no wrapper, no
+        // sccache env, no provisioned binary on PATH.
+        assert!(!args.iter().any(|arg| arg.contains("RUSTC_WRAPPER")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.to_ascii_lowercase().contains("sccache")));
     }
 
     #[test]
@@ -2235,25 +2230,6 @@ mod tests {
         assert_eq!(
             mise_store_host(temp, "trusted").join("cache"),
             PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
-        );
-    }
-
-    #[test]
-    fn sccache_host_is_shared_across_daemon_slots() {
-        // slot-N work roots collapse to one daemon-level sccache dir.
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
-        );
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
     }
 
