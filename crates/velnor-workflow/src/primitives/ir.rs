@@ -1449,7 +1449,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             runners
         };
-        let gate = self.trusted_runner_gate(runners, trusted || runners == RunnerMode::Velnor);
+        let gate = if runners == RunnerMode::Velnor {
+            format!("    if: ${{{{ {} }}}}\n", self.aggregate_event_expression())
+        } else {
+            self.trusted_runner_gate(runners, trusted)
+        };
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
@@ -1503,7 +1507,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
-            format!("    if: ${{{{ {} }}}}\n", self.aggregate_event_expression())
+            format!("    if: ${{{{ {} }}}}\n", self.trusted_event_expression())
         } else {
             String::new()
         }
@@ -1603,7 +1607,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
-        let gate = self.trusted_runner_gate(self.runners, self.runners == RunnerMode::Velnor);
+        let gate = if self.runners == RunnerMode::Velnor {
+            format!("    if: ${{{{ {} }}}}\n", self.aggregate_event_expression())
+        } else {
+            String::new()
+        };
         let kinds = self
             .units
             .iter()

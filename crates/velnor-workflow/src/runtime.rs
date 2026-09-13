@@ -1640,32 +1640,10 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
 }
 
-fn is_static_velnor_runner(job: &Mapping) -> bool {
-    let Some(runs_on) = mapping_value(job, "runs-on") else {
-        return false;
-    };
-    let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(runs_on, None, &mut resolving);
-    analysis.self_hosted
-        && !analysis.dynamic
-        && !analysis.invalid
-        && contains_velnor_runner_label(runs_on)
-}
-
-fn contains_velnor_runner_label(value: &Value) -> bool {
-    match value {
-        Value::String(value) => value.to_ascii_lowercase().contains("velnor"),
-        Value::Mapping(mapping) => mapping.values().any(contains_velnor_runner_label),
-        Value::Sequence(sequence) => sequence.iter().any(contains_velnor_runner_label),
-        Value::Tagged(tagged) => contains_velnor_runner_label(tagged.value()),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
 fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
     has_trusted_runner_gate(condition)
-        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
-        || (has_manual_velnor_dispatch_gate(condition) && is_static_velnor_runner(job))
+        || (has_untrusted_pull_request_gate(condition) && is_static_self_hosted_runner(job))
+        || (has_manual_velnor_dispatch_gate(condition) && is_static_self_hosted_runner(job))
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -2106,9 +2084,9 @@ fn has_untrusted_pull_request_gate(value: &str) -> bool {
     let value = strip_reusable_unit_selector(&value)
         .map(str::to_owned)
         .unwrap_or(value);
-    if value == "github.event_name=='pull_request'" {
-        return true;
-    }
+    // Bare pull_request is not a Velnor lane contract. The generated
+    // automatic lane is always PR combined with a default-branch
+    // push/schedule gate (and optional velnor|both dispatch).
     if value
         .strip_prefix("github.event_name=='pull_request'||(")
         .and_then(|value| value.strip_suffix(')'))
@@ -3163,12 +3141,12 @@ on:
 jobs:
   verify:
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Velnor PR aggregate
@@ -3176,7 +3154,7 @@ on: push
 jobs:
   verify:
     if: ${{ always() && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
@@ -3189,7 +3167,7 @@ on: workflow_call
 jobs:
   verify:
     if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
-    runs-on: [self-hosted, example-velnor]
+    runs-on: [self-hosted, example-runner]
     steps:
       - run: true
 ";
