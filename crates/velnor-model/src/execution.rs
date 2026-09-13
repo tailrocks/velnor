@@ -171,6 +171,12 @@ impl ExecutionConfigError {
             detail: format!("missing execution.toml at {path}"),
         }
     }
+
+    /// True when the file itself was absent, as opposed to present-but-invalid.
+    #[must_use]
+    pub fn is_missing_file(&self) -> bool {
+        self.detail.starts_with("missing execution.toml at ")
+    }
 }
 
 impl From<ExecutionBackendRejected> for ExecutionConfigError {
