@@ -1371,7 +1371,7 @@ mod tests {
         );
         assert_eq!(
             crate::VELNOR_WORKFLOW_SOURCE_REV,
-            "172845cf0307d99b2af1e29f58d4880519c6fb31"
+            "215f02f150d5041edac3eccb8a91310013387dc5"
         );
         let uses_line = must_some(
             workflow.lines().find(|line| {
@@ -1380,7 +1380,7 @@ mod tests {
             "setup-velnor-workflow uses line",
         );
         assert!(
-            uses_line.contains("@172845cf0307d99b2af1e29f58d4880519c6fb31"),
+            uses_line.contains("@215f02f150d5041edac3eccb8a91310013387dc5"),
             "uses: must pin SOURCE_REV: {uses_line}"
         );
         assert!(
@@ -1597,15 +1597,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "2912ae5a02086b8d0f892ab87adc2fed4f19e7d0904743b10e37bec48d5d02f1",
+                "d486cc1d09476de165cdf5dc6e5a230d64e641e3d172761c5c6cccc463cd8cf1",
             ),
             (
                 "preview.yml",
-                "a0ab79fff849c4b9ef76f3d362d33a53625fb52d94b92974d52618dc790f99c8",
+                "a718b11f13306b36b08b81ca667c039588f55b090b3e66dc7cd3fa2762f75335",
             ),
             (
                 "maintenance.yml",
-                "ee336d15bffe519c307b4b6c38bed1c35a1912b684eafffcbc97ca990c0dd626",
+                "d6950f87dd2c2769fa72dbe42f0fb084d9354d900d9b0eaedffe528fd282ed71",
             ),
             (
                 "ci-release-package-signer.yml",

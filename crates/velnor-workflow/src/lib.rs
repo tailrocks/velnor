@@ -69,14 +69,14 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "172845cf0307d99b2af1e29f58d4880519c6fb31";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "215f02f150d5041edac3eccb8a91310013387dc5";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
 // #758 (`172845cf`) carries #742 CONTROLLED_BOOTSTRAP for default-branch
 // `workflow_dispatch`; 8c84b39d left that gate false (job 34771893905). Bump
 // after publishing a Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "172845cf0307d99b2af1e29f58d4880519c6fb31";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "215f02f150d5041edac3eccb8a91310013387dc5";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
@@ -5224,11 +5224,11 @@ mod tests {
     fn hosted_runtime_setup_uses_the_versioned_setup_action() {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "172845cf0307d99b2af1e29f58d4880519c6fb31"
+            "215f02f150d5041edac3eccb8a91310013387dc5"
         );
         assert_eq!(
             VELNOR_POLICY_WORKFLOW_REV,
-            "172845cf0307d99b2af1e29f58d4880519c6fb31"
+            "215f02f150d5041edac3eccb8a91310013387dc5"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -5276,13 +5276,13 @@ mod tests {
     fn github_sha_install_rev_keeps_literal_uses_pin() {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "172845cf0307d99b2af1e29f58d4880519c6fb31"
+            "215f02f150d5041edac3eccb8a91310013387dc5"
         );
         let head_rev = github_expression("github.sha");
         let maintenance = workflow_runtime_setup_with_install_rev(RunnerMode::Github, &head_rev);
         let uses_line = setup_action_uses_line(&maintenance);
         assert!(
-            uses_line.contains("@172845cf0307d99b2af1e29f58d4880519c6fb31"),
+            uses_line.contains("@215f02f150d5041edac3eccb8a91310013387dc5"),
             "uses: is always SOURCE_REV: {uses_line}"
         );
         assert!(
@@ -7736,11 +7736,11 @@ channel = "stable"
     fn assert_maintenance_setup_uses_literal_source_rev(workflow: &str) {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "172845cf0307d99b2af1e29f58d4880519c6fb31"
+            "215f02f150d5041edac3eccb8a91310013387dc5"
         );
         let uses_line = setup_action_uses_line(workflow);
         assert!(
-            uses_line.contains("@172845cf0307d99b2af1e29f58d4880519c6fb31"),
+            uses_line.contains("@215f02f150d5041edac3eccb8a91310013387dc5"),
             "uses: must pin SOURCE_REV: {uses_line}"
         );
         assert!(
