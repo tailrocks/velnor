@@ -156,9 +156,11 @@ fn every_unit_kind_renders_exactly_one_reusable_workflow() {
         );
     }
     // One reusable per kind, plus the two static families this fixture
-    // triggers (ci-policy.yml, maintenance.yml) and the four aggregates
-    // (ci-pull-request.yml, ci-pr.yml, ci-main.yml, nightly.yml).
-    assert_eq!(generated.workflow_files().len(), kinds.len() + 4 + 2);
+    // triggers (ci-policy.yml, maintenance.yml) and the three aggregates
+    // (ci-pr.yml, ci-main.yml, nightly.yml).
+    assert_eq!(generated.workflow_files().len(), kinds.len() + 3 + 2);
+    assert!(generated.workflow("ci-pr.yml").contains("on:\n  pull_request:"));
+    assert!(!generated.workflow_files().iter().any(|file| file == "ci-pull-request.yml"));
 }
 
 #[test]

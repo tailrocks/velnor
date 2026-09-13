@@ -114,6 +114,10 @@ fn pull_request_plan_and_required_are_not_main_only() {
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
+    assert!(!generated
+        .output
+        .join(".github/workflows/ci-pull-request.yml")
+        .exists());
     assert!(pr.contains("github.event_name == 'pull_request'"));
     assert!(
         !pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"),

@@ -680,7 +680,6 @@ pub(crate) struct StaticFile {
 
 fn default_workflow_files() -> Vec<String> {
     vec![
-        "ci-pull-request.yml".to_owned(),
         "ci-pr.yml".to_owned(),
         "ci-policy.yml".to_owned(),
         "ci-main.yml".to_owned(),

@@ -894,7 +894,7 @@ fn rows_for(
     // The plan job, then the aggregate workflows that compose it: the plan
     // contributes its node before any aggregate renders.
     let mut aggregates = Vec::new();
-    for file in ["ci-pull-request.yml", "ci-pr.yml", "ci-main.yml", "nightly.yml"] {
+    for file in ["ci-pr.yml", "ci-main.yml", "nightly.yml"] {
         if !config.workflow_files.iter().any(|owned| owned == file) {
             continue;
         }
