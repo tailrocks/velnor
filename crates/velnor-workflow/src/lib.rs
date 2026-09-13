@@ -1382,6 +1382,9 @@ fn apply_generation_config(
     if let Some(group) = generation.velnor_runner_group() {
         config.velnor_runner_group = Some(group.to_owned());
     }
+    if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
+        config.pull_request_on_velnor = pull_request_on_velnor;
+    }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
     }

@@ -247,18 +247,24 @@ fn dispatch_defaults_to_github_and_omitted_runner_selects_github() {
 }
 
 #[test]
-fn pull_request_on_velnor_is_rejected() {
+fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     let root = unique_dir("pr-on-velnor");
     write_rust_fixture(&root, 2);
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
-        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
     )
     .unwrap();
-    let error = generate_fail(&root, &[]);
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
-        error.contains("pull_request_on_velnor"),
-        "untrusted Velnor PR opt-in must fail closed: {error}"
+        unit.contains("github.event_name == 'pull_request'"),
+        "opt-in Velnor lane must admit pull_request: {unit}"
+    );
+    let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
+    assert!(
+        !project.contains("automatic ="),
+        "pinned plan binaries reject unknown field automatic: {project}"
     );
 }
 

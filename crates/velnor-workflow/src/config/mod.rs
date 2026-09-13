@@ -161,6 +161,10 @@ struct WorkflowSection {
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
+    /// When true, automatic `pull_request` runs on the Velnor lane. Default
+    /// false: self-hosted jobs stay on the trusted default-branch gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_request_on_velnor: Option<bool>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -510,6 +514,11 @@ impl RepoGenerationConfig {
     /// The declared automatic lanes, if any.
     pub(crate) fn automatic(&self) -> Option<&str> {
         self.workflow.automatic.as_deref()
+    }
+
+    /// When true, automatic `pull_request` runs on the Velnor lane.
+    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
+        self.workflow.pull_request_on_velnor
     }
 
     /// The declared self-hosted runner labels.
