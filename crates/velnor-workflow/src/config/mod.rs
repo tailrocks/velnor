@@ -156,10 +156,6 @@ struct WorkflowSection {
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
-    /// When true, automatic `pull_request` runs on the Velnor lane. Default
-    /// false: self-hosted jobs stay on the trusted default-branch gate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pull_request_on_velnor: Option<bool>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -508,10 +504,6 @@ impl RepoGenerationConfig {
         self.workflow.velnor_runner_group.as_deref()
     }
 
-    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
-        self.workflow.pull_request_on_velnor
-    }
-
     /// The declared profile label.
     pub(crate) fn profile(&self) -> Option<&str> {
         self.workflow.profile.as_deref()
@@ -776,11 +768,6 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if workflow.templates.is_some() {
         return Err(GeneratorError::usage(
             "[workflow] templates is not supported; imported workflow bodies are not a generation input",
-        ));
-    }
-    if workflow.pull_request_on_velnor == Some(true) {
-        return Err(GeneratorError::usage(
-            "[workflow] pull_request_on_velnor is not supported; untrusted pull_request code never runs on Velnor",
         ));
     }
     Ok(())

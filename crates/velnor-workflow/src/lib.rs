@@ -1343,9 +1343,6 @@ fn apply_generation_config(
     if let Some(group) = generation.velnor_runner_group() {
         config.velnor_runner_group = Some(group.to_owned());
     }
-    if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
-        config.pull_request_on_velnor = pull_request_on_velnor;
-    }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
     }
@@ -1572,27 +1569,33 @@ fn materialize_capability_commands(
                 primitives::MUTABLE_MOUNT_SEED_CONTEXT,
                 primitives::MUTABLE_MOUNT_HOST_DIR
             );
-            unit.pr_commands = vec![format!(
-                "docker buildx build --load --target ci --file {file} --tag local-ci:dockerfile {ctx}"
-            )];
-            unit.full_commands = vec![format!(
-                "docker buildx build --load --file {file} --tag local-ci:dockerfile {ctx}"
-            )];
-            unit.github_pr_commands = Some(vec![format!(
-                "docker buildx build --load --cache-from type=gha,scope={scope} --target ci --file {file} --tag local-ci:dockerfile {ctx}"
-            )]);
-            unit.github_full_commands = Some(vec![
-                format!(
-                    "docker buildx build --load --cache-from type=gha,scope={scope} --cache-to type=gha,mode=max,scope={scope} --file {file} --tag local-ci:dockerfile {seed} {ctx}"
-                ),
-                format!(
+            let already_seeded = unit
+                .full_commands
+                .iter()
+                .chain(unit.github_full_commands.iter().flatten())
+                .any(|command| command.contains(&seed));
+            if !already_seeded {
+                let mut github_full = if unit.full_commands.is_empty() {
+                    vec![format!(
+                        "docker buildx build --load --file {file} --tag local-ci:dockerfile {ctx}"
+                    )]
+                } else {
+                    unit.full_commands.clone()
+                };
+                for command in &mut github_full {
+                    if command.contains("docker") && !command.contains(&seed) {
+                        command.push(' ');
+                        command.push_str(&seed);
+                    }
+                }
+                github_full.push(format!(
                     "docker buildx build --target {} --output type=local,dest={}/export {seed} --file {file} {ctx}",
                     primitives::MUTABLE_MOUNT_EXPORT_TARGET,
                     primitives::MUTABLE_MOUNT_HOST_DIR
-                ),
-            ]);
-            unit.velnor_pr_commands = unit.pr_commands.clone().into();
-            unit.velnor_full_commands = unit.full_commands.clone().into();
+                ));
+                unit.github_full_commands = Some(github_full);
+            }
+            let _ = (scope, file, ctx);
         }
         for command in unit.pr_commands.iter().chain(unit.full_commands.iter()) {
             if let Some(task) = command.strip_prefix("mise run ") {
@@ -3505,10 +3508,9 @@ fn plan_generated_write_with_options(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Every recognized workflow is emitted by this generator. Refuse an
-    // unrecognized workflow before `--force` can archive or remove an active
-    // publisher; add its fixed renderer/template first.
-    if !legacy.is_empty() {
+    // Unowned workflows are never imported. `--force` deletes them so the
+    // generated surface can take over; without `--force` generation stops.
+    if !legacy.is_empty() && !adopt {
         return Err(GeneratorError::usage(format!(
             "existing workflows are outside the Velnor workflow generator and will not be imported: {}; rerun with --force to replace unowned workflow files with generated output (bodies are never adopted)",
             display_paths(legacy.iter()),
@@ -3537,6 +3539,16 @@ fn plan_generated_write_with_options(
         })
         .collect::<Vec<_>>();
     planned_files.extend(stale_files);
+    if adopt {
+        for path in legacy {
+            let preimage = capture_file_preimage(&root.join(&path), &path)?;
+            planned_files.push(PlannedFile {
+                path,
+                action: PlannedAction::Delete,
+                preimage,
+            });
+        }
+    }
     let ownership_action = if ownership.is_none() {
         PlannedAction::Create
     } else if ownership_needs_refresh || !changed.is_empty() || !stale.is_empty() {
