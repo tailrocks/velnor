@@ -319,22 +319,7 @@ impl Store {
             "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
              FROM instances WHERE instance_slug = ?1",
             [instance_slug],
-            |row| {
-                let version = row.get::<_, i64>(3)?;
-                Ok(LifecycleInstanceRow {
-                    instance_slug: row.get(0)?,
-                    desired_state: row.get(1)?,
-                    observed_state: row.get(2)?,
-                    resource_version: version
-                        .try_into()
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
-                    desired_slots: row
-                        .get::<_, Option<i64>>(4)?
-                        .map(|slots| slots.try_into())
-                        .transpose()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
-            },
+            lifecycle_instance_row,
         )
         .optional()
         .map_err(Into::into)
@@ -468,6 +453,66 @@ impl Store {
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
                 created_at: accepted_at,
+            },
+            true,
+        ))
+    }
+
+    /// Record one observed lifecycle projection write with optimistic
+    /// concurrency against `expected_version`.
+    ///
+    /// Returns the committed row with `true` for a fresh write, or the
+    /// current row with `false` when the caller's version is stale. A stale
+    /// version is convergence, not an error: another writer already advanced
+    /// the projection past this observation, so the caller adopts the
+    /// re-read row and performs no retry loop. Observed writes share the
+    /// instance's monotonic version with desired writes, so neither writer
+    /// can silently clobber the other.
+    pub fn record_lifecycle_observed(
+        &self,
+        instance_slug: &str,
+        observed_state: &str,
+        expected_version: u64,
+    ) -> StoreResult<(LifecycleInstanceRow, bool)> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<LifecycleInstanceRow> = transaction
+            .query_row(
+                "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
+                 FROM instances WHERE instance_slug = ?1",
+                [instance_slug],
+                lifecycle_instance_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::new(
+                ExitClass::Usage,
+                "store.lifecycle.instance.unknown",
+            ));
+        };
+        if current.resource_version != expected_version {
+            transaction.commit()?;
+            return Ok((current, false));
+        }
+        let next_version = current.resource_version.saturating_add(1);
+        transaction.execute(
+            "UPDATE instances SET observed_state = ?1, resource_version = ?2, updated_at = ?3
+             WHERE instance_slug = ?4",
+            params![
+                observed_state,
+                next_version as i64,
+                rfc3339(Timestamp::now()),
+                instance_slug,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((
+            LifecycleInstanceRow {
+                instance_slug: current.instance_slug,
+                desired_state: current.desired_state,
+                observed_state: observed_state.to_owned(),
+                resource_version: next_version,
+                desired_slots: current.desired_slots,
             },
             true,
         ))
@@ -1976,6 +2021,23 @@ fn lifecycle_operation_query(
         .map_err(Into::into)
 }
 
+fn lifecycle_instance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LifecycleInstanceRow> {
+    let version = row.get::<_, i64>(3)?;
+    Ok(LifecycleInstanceRow {
+        instance_slug: row.get(0)?,
+        desired_state: row.get(1)?,
+        observed_state: row.get(2)?,
+        resource_version: version
+            .try_into()
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
+        desired_slots: row
+            .get::<_, Option<i64>>(4)?
+            .map(|slots| slots.try_into())
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
+}
+
 fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> StoreResult<()> {
     let Some(run_id) = summary.run_id() else {
         return Err(unidentified_summary());
@@ -3035,6 +3097,75 @@ mod lifecycle_tests {
                 .expect("secondary has independent quota")
                 .1
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    fn open_observed_store(label: &str) -> (std::path::PathBuf, Store) {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-{label}-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        (directory, store)
+    }
+
+    fn seed_instance(store: &Store, slug: &str) {
+        store
+            .upsert_instance(&InstanceRow {
+                instance_slug: slug.to_owned(),
+                host: "test-host".to_owned(),
+                daemon_version: "test".to_owned(),
+                slots_configured: 1,
+                slots_busy: 0,
+                updated_at: Timestamp::UNIX_EPOCH,
+            })
+            .expect("seed instance");
+    }
+
+    #[test]
+    fn observed_write_advances_and_stale_version_converges_without_retry() {
+        let (directory, store) = open_observed_store("observed");
+        seed_instance(&store, "primary");
+
+        let (written, fresh) = store
+            .record_lifecycle_observed("primary", "draining", 1)
+            .expect("observed write");
+        assert!(fresh);
+        assert_eq!(written.observed_state, "draining");
+        assert_eq!(written.desired_state, "ready");
+        assert_eq!(written.resource_version, 2);
+
+        // Stale version: convergence, not an error. The caller adopts the
+        // re-read row and performs no retry loop.
+        let (converged, updated) = store
+            .record_lifecycle_observed("primary", "ready", 1)
+            .expect("stale observed converges");
+        assert!(!updated);
+        assert_eq!(converged.observed_state, "draining");
+        assert_eq!(converged.resource_version, 2);
+
+        let (rewritten, fresh) = store
+            .record_lifecycle_observed("primary", "ready", 2)
+            .expect("fresh observed write");
+        assert!(fresh);
+        assert_eq!(rewritten.observed_state, "ready");
+        assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn observed_write_for_unknown_instance_fails_closed() {
+        let (directory, store) = open_observed_store("observed-unknown");
+        let error = store
+            .record_lifecycle_observed("ghost", "draining", 1)
+            .expect_err("unknown instance must fail");
+        assert_eq!(error.envelope.reason, "store.lifecycle.instance.unknown");
         let _ = std::fs::remove_dir_all(directory);
     }
 
