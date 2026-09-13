@@ -216,6 +216,7 @@ impl From<RepositoryShape> for ProjectConfig {
             ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
+            pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
         }

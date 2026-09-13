@@ -660,6 +660,8 @@ pub struct ProjectConfig {
     /// The group the self-hosted lane selects by, as the generation config
     /// declares it.
     pub(crate) velnor_runner_group: Option<String>,
+    /// Automatic `pull_request` executes on the Velnor lane. Default false.
+    pub(crate) pull_request_on_velnor: bool,
     /// Repository-local files the generated output owns verbatim, read from
     /// the declared sources at scan time.
     pub(crate) static_files: Vec<StaticFile>,
@@ -1405,6 +1407,9 @@ fn apply_generation_config(
     }
     if let Some(group) = generation.velnor_runner_group() {
         config.velnor_runner_group = Some(group.to_owned());
+    }
+    if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
+        config.pull_request_on_velnor = pull_request_on_velnor;
     }
     if let Some(profile) = generation.profile() {
         profile.clone_into(&mut config.profile);
@@ -7399,6 +7404,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             ci_required: true,
             package_update_channels: None,
             velnor_runner_group: None,
+            pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
         };
