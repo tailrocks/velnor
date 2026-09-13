@@ -42,7 +42,10 @@ pub fn github_job_container_spec(
     if paths.execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
         crate::manifest::validate_microvm_compiler_cache(job)?;
     }
-    let explicit_sccache = crate::manifest::declares_sccache(job);
+    // Single decision point for the explicit-sccache compatibility mode:
+    // on, the job gets the sccache store and no mbx; off, sccache is absent
+    // from the whole spec (no store, mount, env, or PATH entry).
+    let explicit_sccache = crate::sccache_compat::is_explicit(job);
     // The persistent Cargo target layer was deleted with wall-clock checkout
     // (BC-14): wall-clock sources made its mtime-based reuse always dirty,
     // and pinned mtimes made it accept stale artifacts as fresh. An operator
@@ -81,6 +84,7 @@ pub fn github_job_container_spec(
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: None,
         docker_cli_plugin_host_dir: None,
+        packaged_workflow_cli_host: Some(PathBuf::from("/usr/bin/velnor-workflow")),
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
         daemon_id,
@@ -88,10 +92,10 @@ pub fn github_job_container_spec(
         store_trust_scope: crate::trust_scope::normalize_scope(trust_scope).to_owned(),
         sccache_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
             && explicit_sccache)
-            .then(|| github_sccache_store_host(job, &paths.temp_host, trust_scope)),
+            .then(|| crate::sccache_compat::store_host(job, &paths.temp_host, trust_scope)),
         mbx_store_host: (paths.execution_backend == velnor_model::ExecutionBackendKind::Docker
-            && { !crate::manifest::declares_sccache(job) })
-        .then(|| github_mbx_store_host(job, &paths.temp_host, trust_scope)),
+            && !explicit_sccache)
+            .then(|| github_mbx_store_host(job, &paths.temp_host, trust_scope)),
     })
 }
 
@@ -103,15 +107,12 @@ pub(crate) fn github_mbx_store_host(
     github_rust_store_host(job, temp_host, trust_scope, "mbx")
 }
 
-fn github_sccache_store_host(
-    job: &AgentJobRequestMessage,
-    temp_host: &std::path::Path,
-    trust_scope: &str,
-) -> PathBuf {
-    github_rust_store_host(job, temp_host, trust_scope, "sccache")
-}
-
-fn github_rust_store_host(
+/// Shared layout for the two compiler-acceleration stores (mbx and the
+/// explicit-sccache mode): repository-namespaced under the admitted scope,
+/// ephemeral without a valid repository id. Which store a job gets is decided
+/// once in [`github_job_container_spec`]; the sccache side resolves through
+/// `crate::sccache_compat::store_host`.
+pub(crate) fn github_rust_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
     trust_scope: &str,
@@ -1031,6 +1032,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
@@ -1577,12 +1579,12 @@ mod tests {
             std::path::Path::new("/var/lib/velnor/work/_velnor_mbx/trusted/41")
         );
         assert_eq!(
-            github_sccache_store_host(&job(42), temp, "trusted"),
+            crate::sccache_compat::store_host(&job(42), temp, "trusted"),
             std::path::Path::new("/var/lib/velnor/work/_velnor_sccache/trusted/42")
         );
         assert_ne!(
-            github_sccache_store_host(&job(41), temp, "trusted"),
-            github_sccache_store_host(&job(42), temp, "trusted")
+            crate::sccache_compat::store_host(&job(41), temp, "trusted"),
+            crate::sccache_compat::store_host(&job(42), temp, "trusted")
         );
     }
 
@@ -1596,7 +1598,7 @@ mod tests {
             temp.join("_velnor/ephemeral/mbx/job")
         );
         assert_eq!(
-            github_sccache_store_host(&job, temp, "trusted"),
+            crate::sccache_compat::store_host(&job, temp, "trusted"),
             temp.join("_velnor/ephemeral/sccache/job")
         );
     }
@@ -1691,6 +1693,58 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("does not support explicit"));
+    }
+
+    #[test]
+    fn docker_swaps_mbx_for_sccache_only_on_explicit_request() {
+        let paths = || GitHubJobContainerPaths {
+            workspace_host: "/tmp/workspace".into(),
+            temp_host: "/tmp/temp".into(),
+            home_host: "/tmp/home".into(),
+            actions_host: "/tmp/actions".into(),
+            tools_host: "/tmp/tools".into(),
+            docker_host_work_dir: None,
+            execution_backend: velnor_model::ExecutionBackendKind::Docker,
+        };
+        // Default: mbx store, no sccache presence anywhere in the spec.
+        let default = github_job_container_spec(
+            &microvm_job(),
+            paths(),
+            "ubuntu:24.04",
+            Vec::new(),
+            NonZeroU32::MIN,
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+        assert!(default.mbx_store_host.is_some());
+        assert!(default.sccache_store_host.is_none());
+
+        // Explicit request: sccache store instead of mbx, never both.
+        let mut job = microvm_job();
+        job.steps = vec![serde_json::from_value(serde_json::json!({
+            "type": "Action",
+            "reference": {
+                "type": "Repository",
+                "name": "mozilla-actions/sccache-action",
+                "ref": "9e7fa8a12102821edf02ca5dbea1acd0f89a2696"
+            }
+        }))
+        .unwrap()];
+        let explicit = github_job_container_spec(
+            &job,
+            paths(),
+            "ubuntu:24.04",
+            Vec::new(),
+            NonZeroU32::MIN,
+            "",
+            "daemon".into(),
+            "trusted",
+        )
+        .unwrap();
+        assert!(explicit.mbx_store_host.is_none());
+        assert!(explicit.sccache_store_host.is_some());
     }
 
     #[test]

@@ -4240,7 +4240,7 @@ where
                 let result = self.native_shell(
                     container,
                     state,
-                    "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
+                    crate::sccache_compat::post_script(),
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -4540,8 +4540,32 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
-        Ok(native_command_result(result, StepCommandState::default()))
+        let mut result = self.native_shell(
+            container,
+            state,
+            &crate::sccache_compat::setup_script(),
+            timeout,
+        )?;
+        // The setup script installs outside the default PATH only on the
+        // non-root fallback; mirror a fallback install dir onto later steps'
+        // PATH the same way the cosign adapter does.
+        let mut path = Vec::new();
+        let mut kept = Vec::new();
+        for line in result.stdout.lines() {
+            if let Some(dir) = line.strip_prefix(crate::sccache_compat::PATH_MARKER) {
+                path.push(dir.to_string());
+            } else {
+                kept.push(line.to_string());
+            }
+        }
+        result.stdout = kept.join("\n");
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path,
+                ..StepCommandState::default()
+            },
+        ))
     }
 
     fn native_setup_mold(
@@ -6455,43 +6479,6 @@ fn parse_mise_environment(
     Ok((env, masks))
 }
 
-fn sccache_setup_script() -> String {
-    // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
-    // (download the release if the job image doesn't ship it), then start the
-    // server. Velnor selects RUSTC_WRAPPER=sccache only when this explicit
-    // action is present, so the binary MUST exist on PATH or every invocation fails with
-    // "could not execute process `sccache ...`: No such file or directory".
-    // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
-    // Velnor injects let sccache use the GitHub Actions cache backend.
-    r#"set -e
-command -v sccache >/dev/null 2>&1 || { echo 'sccache v0.16.0 must be preinstalled in the job image' >&2; exit 1; }
-sccache --version | grep -F 'sccache 0.16.0'
-# Velnor provides a fast, host-shared sccache cache bind-mounted at
-# /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
-# service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
-# would make the server fail ("cache url for ghac not found") and every
-# RUSTC_WRAPPER=sccache compile would error. Export the override via GITHUB_ENV so
-# subsequent compile steps (clippy/test) pick it up, and disable the GHA backend.
-SCCACHE_LOCAL_DIR=/var/cache/sccache
-mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-  echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
-  echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-fi
-export RUSTC_WRAPPER=sccache
-export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
-export SCCACHE_GHA_ENABLED=false
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE" >> "$GITHUB_ENV"
-fi
-# Best-effort: cargo will auto-start the server on first use anyway.
-sccache --start-server 2>/dev/null || true
-"#
-    .to_string()
-}
-
 /// Inputs of `hadolint/hadolint-action`, defaults matching its action.yml.
 struct HadolintInputs {
     dockerfile: String,
@@ -7657,7 +7644,7 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path_or_child(path, "/opt/mise")
         || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, crate::sccache_compat::CONTAINER_DIR)
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -16494,6 +16481,7 @@ esac
             node_action_image: String::new(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
