@@ -1301,9 +1301,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        // Mold is Linux-only: Apple jobs run on macOS, where the link arg
+        // fails every cargo build in the job.
+        let mold = self.mise_present && unit.kind != UnitKind::Swift;
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
+            || mold
         {
             output.push_str("\nenv:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -1311,7 +1314,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if mold {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
@@ -1442,9 +1445,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn render_job_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        // Mold is Linux-only: Apple jobs run on macOS, where the link arg
+        // fails every cargo build in the job.
+        let mold = self.mise_present && unit.kind != UnitKind::Swift;
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
+            || mold
         {
             output.push_str("    env:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -1452,7 +1458,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "      CARGO_INCREMENTAL: \"0\"\n      RUSTC_WRAPPER: sccache\n      SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if mold {
                 output.push_str("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
