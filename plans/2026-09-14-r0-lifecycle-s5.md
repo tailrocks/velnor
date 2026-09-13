@@ -37,8 +37,9 @@ projections; the tables stay as materialized views on those paths
   covers new admissions and refreshes (an update cannot NULL out a
   healthy row's identity). No backfill sweep for pre-existing rows: a
   sweep is unsafe — their external identity cannot be invented
-  (fabricated values risk colliding under the partial unique run/attempt
-  index and bricking the open), and deleting them would destroy
+  (invented values corrupt external (GitHub) correlation, and
+  colliding triples yield store.job.summary.ambiguous in
+  fetch_summary), and deleting them would destroy
   legitimate records that remain readable and drivable.
 
 NOT attempted (step 6, separate work): drain unification.
