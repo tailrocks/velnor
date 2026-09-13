@@ -108,7 +108,6 @@ jobs:
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \
-            --now "$epoch" \
             > "$RUNNER_TEMP/cache-retention/plan.json"
           if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
             {

@@ -998,7 +998,6 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \
-            --now "$epoch" \
             > "$RUNNER_TEMP/cache-retention/plan.json"
           if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
             {
@@ -1308,7 +1307,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "d4764ce3555611fbd9f10ac569eaae843aff3fb9d0fc6aa2e6720015c1c3740c",
+                "bdd64a6fc3029e7152fb90346e0d95d1a440ab2f1a6fcacaf240d02b824ab993",
             ),
             (
                 "preview.yml",
@@ -1316,7 +1315,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "f5e1ce68e629d830bf6a9865fbd0e40350f9cefc6de9cc39cf764cf2be3e5497",
+                "5d7c8e503bd6570c0b54b327b06958f754f1df9c0570bfef33737b21e14928e7",
             ),
             (
                 "ci-release-package-signer.yml",
