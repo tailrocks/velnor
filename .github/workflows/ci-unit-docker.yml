@@ -16,7 +16,7 @@ on:
 jobs:
   github-docker:
     name: "GitHub / docker"
-    if: ${{ inputs.unit == 'docker' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ inputs.unit == 'docker' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -63,10 +63,10 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-f33f2775c972-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-1ccbff8485b0-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
           restore-keys: |
-            velnor-docker-seed-v3-f33f2775c972-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
-            velnor-docker-seed-v3-f33f2775c972-${{ runner.os }}-${{ runner.arch }}-docker-
+            velnor-docker-seed-v3-1ccbff8485b0-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-
+            velnor-docker-seed-v3-1ccbff8485b0-${{ runner.os }}-${{ runner.arch }}-docker-
       - name: Prepare Docker build seed context
         env:
           MISE_AUTO_INSTALL: "false"
@@ -238,11 +238,11 @@ jobs:
         with:
           path: |
             .velnor-docker-cache
-          key: velnor-docker-seed-v3-f33f2775c972-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
+          key: velnor-docker-seed-v3-1ccbff8485b0-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('.dockerignore', 'Dockerfile', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnorctl/**', 'docker/**', 'docker/build-mise.lock', 'microvm/**', 'mise.lock', 'tools/unit-collector/**') }}
 
   velnor-docker:
     name: "Velnor / docker"
-    if: ${{ inputs.unit == 'docker' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ inputs.unit == 'docker' && (github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

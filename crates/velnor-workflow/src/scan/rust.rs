@@ -399,11 +399,11 @@ fn analyze_rust_manifests(
         };
         let test_command = if has_nextest {
             format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector}"
+                "{command_prefix}cargo nextest run {cargo_lock_flag} {package_selector}"
             )
         } else {
             format!(
-                "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
+                "{command_prefix}cargo test {cargo_lock_flag} {package_selector}"
             )
         };
         let commands = vec![
@@ -412,7 +412,7 @@ fn analyze_rust_manifests(
                 shell_quote("Cargo.toml")
             ),
             format!(
-                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets --all-features {package_selector} -- -D warnings"
+                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets {package_selector} -- -D warnings"
             ),
             test_command,
         ];

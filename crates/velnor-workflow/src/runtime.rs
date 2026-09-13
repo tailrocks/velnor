@@ -1381,11 +1381,9 @@ pub(crate) fn test_crates(
                 Path::new("cargo")
             };
         let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
-        command
-            .arg(if nextest { "nextest" } else { "test" })
-            .arg(if nextest { "run" } else { "--all-features" });
+        command.arg(if nextest { "nextest" } else { "test" });
         if nextest {
-            command.arg("--all-features");
+            command.arg("run");
         }
         if locked {
             command.arg("--locked");

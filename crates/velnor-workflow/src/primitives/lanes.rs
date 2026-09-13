@@ -50,7 +50,7 @@ pub(crate) fn resolve(
     rows: &[super::ResolvedRow],
 ) -> Result<ResolvedLanes, GeneratorError> {
     let ir = super::WorkflowIr::from_config(config);
-    let default = super::WorkflowIr::default_lane_jobs(true);
+    let default = super::WorkflowIr::default_lane_jobs(config.runners, true);
     let mut jobs = default.clone();
     for row in rows.iter().filter(|row| row.primitive == LANE_MATRIX) {
         if let Some(names) = Args(&row.args).strings("jobs")? {
@@ -79,6 +79,11 @@ pub(crate) fn resolve(
     if jobs.is_empty() {
         return Err(GeneratorError::usage(
             "the lane matrix resolved to no lane job; at least one verification lane is required",
+        ));
+    }
+    if !jobs.iter().any(|job| job.lane == RunnerMode::Github) {
+        return Err(GeneratorError::usage(
+            "the lane matrix must include the github lane; GitHub-hosted execution is the automatic default and cannot be omitted",
         ));
     }
     // The self-hosted lane is emitted after the hosted lane, the order the

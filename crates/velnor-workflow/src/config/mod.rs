@@ -220,6 +220,12 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// Workspace-wide `cargo check`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_check: Option<bool>,
+    /// Named mise tasks that exist in `mise.toml`. Not a shell-command array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ci_tasks: Option<Vec<String>>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -383,6 +389,14 @@ impl UnitSection {
 
     pub(crate) fn tool_version(&self) -> Option<&str> {
         self.tool_version.as_deref()
+    }
+
+    pub(crate) fn workspace_check(&self) -> bool {
+        self.workspace_check == Some(true)
+    }
+
+    pub(crate) fn ci_tasks(&self) -> &[String] {
+        self.ci_tasks.as_deref().unwrap_or(&[])
     }
 }
 
@@ -759,6 +773,16 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             "[workflow] velnor_runner_group must not be empty",
         ));
     }
+    if workflow.templates.is_some() {
+        return Err(GeneratorError::usage(
+            "[workflow] templates is not supported; imported workflow bodies are not a generation input",
+        ));
+    }
+    if workflow.pull_request_on_velnor == Some(true) {
+        return Err(GeneratorError::usage(
+            "[workflow] pull_request_on_velnor is not supported; untrusted pull_request code never runs on Velnor",
+        ));
+    }
     Ok(())
 }
 
@@ -860,6 +884,17 @@ fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
                     "[[unit]] {id} declares kind `{kind}`, which the generator does not implement; implemented kinds: {}",
                     UNIT_KIND_PREFIXES.join(", ")
                 )));
+        }
+        if row.pr_commands.is_some()
+            || row.full_commands.is_some()
+            || row.github_pr_commands.is_some()
+            || row.github_full_commands.is_some()
+            || row.velnor_pr_commands.is_some()
+            || row.velnor_full_commands.is_some()
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[unit]] {id} declares command arrays; generation config is not a workflow programming language. Detected work uses typed capabilities; remove pr_commands, full_commands, and lane-specific command overrides"
+            )));
         }
         if let Some(cache) = &row.cache
             && (cache.key_files.as_ref().is_none_or(std::vec::Vec::is_empty)

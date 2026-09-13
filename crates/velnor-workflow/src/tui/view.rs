@@ -685,7 +685,6 @@ mod tests {
                 dry_run: false,
                 check: false,
                 force: false,
-                adopt: false,
                 plain: false,
             },
             receiver,

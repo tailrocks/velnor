@@ -6,7 +6,7 @@ repository = "tailrocks/velnor"
 # Runner placement: the hosted image the GitHub lane pins, and the self-hosted
 # labels the trust-gated Velnor lane selects by.
 [workflow]
-runners = "velnor"
+runners = "both"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
@@ -3159,10 +3159,8 @@ label = "Rust production topology"
 kind = "rust"
 root = "."
 watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "crates/**", "crates/velnor-workflow/src/runtime.rs", "docker/**", "microvm/**", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml", "tools/**"]
-github_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-github_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_pr_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
-velnor_full_commands = ["mbx check --workspace --all-targets --locked", "mise run test-release-feature-boundary", "mise run test-release-boundary-script"]
+workspace_check = true
+ci_tasks = ["test-release-feature-boundary", "test-release-boundary-script"]
 pinned_lockfile = true
 
 [units.cache]
@@ -3179,13 +3177,6 @@ paths = ["~/.cargo/registry", "~/.cargo/git"]
 
 [[units]]
 id = "docker"
-github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-github_full_commands = [
-  "docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'",
-  "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --build-context velnor-cache-seed='.velnor-docker-cache/seed' --file 'Dockerfile' '.'",
-]
-velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 
 # The mutable mount seed: the compatibility identity of the state the image's
 # cache mounts hold (Cargo sources, the locked mise toolset, the build recipe)
