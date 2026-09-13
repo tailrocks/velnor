@@ -764,7 +764,7 @@ async fn resolve_provisional_acquisitions_at_startup(
 }
 
 /// Promote the retargeted row to ownership. The run-service acquire path
-/// reaches ownership only through the intent, so it never calls `accept_job`.
+/// reaches ownership only through the intent (intend, resolve, confirm).
 fn accept_run_service_job_in_journal(
     journal_dir: &Path,
     config_dir: &Path,
@@ -790,6 +790,50 @@ fn accept_run_service_job_in_journal(
             anyhow::anyhow!("no acquisition row exists for GitHub job {github_job_id}")
         })?;
     crate::node::complete::confirm_acquisition(&mut journal, &job_id, &slot_id, generation)
+}
+
+/// Mark the owned job Running in the slot journal once execution begins.
+///
+/// Called right after the store `JobStarted` transition. Deliberately not
+/// fatal: the store transition is the execution record, and failing a job
+/// whose reservations are already acquired because a journal hint could not
+/// be written would trade the observation for the outcome it describes.
+fn mark_run_service_job_started_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    github_job_id: &str,
+) {
+    let outcome = (|| -> Result<()> {
+        let Some((mut journal, _slot_id)) = open_slot_journal(
+            journal_dir,
+            config_dir,
+            &format!("mark GitHub job {github_job_id} started"),
+        )?
+        else {
+            return Ok(());
+        };
+        let job_id = velnor_model::JobId(github_job_id.to_owned());
+        let generation = journal
+            .materialized_state()
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+            .jobs
+            .iter()
+            .find(|job| job.job_id == job_id)
+            .map(|job| job.generation)
+            .ok_or_else(|| {
+                anyhow::anyhow!("no acquisition row exists for GitHub job {github_job_id}")
+            })?;
+        crate::node::complete::record_job_started(&mut journal, &job_id, generation)?;
+        Ok(())
+    })();
+    if let Err(error) = outcome {
+        eprintln!("Could not mark job {github_job_id} started in the journal: {error:#}");
+        tracing::warn!(
+            target: "velnor.lifecycle",
+            job_id = github_job_id,
+            "job start not recorded in journal; phase stays assigned"
+        );
+    }
 }
 
 fn persist_in_flight_job(
@@ -3652,17 +3696,60 @@ impl DurableSlotLifecycle {
             );
             return false;
         };
-        crate::ops::global().is_some_and(|sink| {
-            sink.transition_slot(
-                &self.slot_id,
-                self.slot_index,
-                self.generation,
-                &request_key,
-                target,
-                Some(message.into()),
-            )
-        })
+        let Some(sink) = crate::ops::global() else {
+            return false;
+        };
+        let applied = sink.transition_slot(
+            &self.slot_id,
+            self.slot_index,
+            self.generation,
+            &request_key,
+            target,
+            Some(message.into()),
+        );
+        if !applied {
+            // Best-effort observation, never a job outcome: a stale
+            // generation, an illegal edge, or a replayed request key leaves
+            // control state behind instead of failing work. The line exists
+            // to measure how often that happens.
+            eprintln!(
+                "forensics.ops event=slot-transition-not-applied slot={} generation={} phase={} request_key={request_key}",
+                self.slot_id.0,
+                self.generation.0,
+                target.as_str()
+            );
+        }
+        applied
     }
+}
+
+/// Best-effort job transition with a forensics line when the store refuses
+/// the edge. Returns whether the transition applied; callers treat a
+/// refusal as degraded control state, never as a job failure.
+fn record_job_transition(
+    sink: &crate::ops::OpsSink,
+    job_uid: &str,
+    token: &str,
+    reason: velnor_model::EventReason,
+    message: Option<String>,
+    conclusion: Option<String>,
+    infrastructure_category: Option<String>,
+) -> bool {
+    let applied = sink.transition(
+        job_uid,
+        token,
+        reason,
+        message,
+        conclusion,
+        infrastructure_category,
+    );
+    if !applied {
+        eprintln!(
+            "forensics.lifecycle event=job-transition-rejected job={job_uid} token={token} reason={}",
+            reason.as_str()
+        );
+    }
+    applied
 }
 
 fn recover_following_request_key(
@@ -6774,7 +6861,8 @@ async fn handle_job_request(
             // The machine path is acquired→waiting→started even when no
             // capacity wait happened; emit the intermediate edge first so
             // the started transition is always legal.
-            sink.transition(
+            record_job_transition(
+                sink,
                 uid,
                 &format!("t-waiting-{uid}"),
                 velnor_model::EventReason::JobWaiting,
@@ -6782,7 +6870,8 @@ async fn handle_job_request(
                 None,
                 None,
             );
-            sink.transition(
+            record_job_transition(
+                sink,
                 uid,
                 &format!("t-started-{uid}"),
                 velnor_model::EventReason::JobStarted,
@@ -6791,6 +6880,14 @@ async fn handle_job_request(
                 None,
             );
         }
+        // The journal phase tracks the execution the store just recorded.
+        // Independent of the ops sink: Running must be real even when no
+        // operational store is configured.
+        mark_run_service_job_started_in_journal(
+            &run_service_job.journal_dir,
+            config_dir,
+            &job.job_id,
+        );
         let (step_start_tx, step_start_receiver) =
             tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let step_start_sender = BoundedStepSender::new(step_start_tx);
@@ -7124,7 +7221,8 @@ async fn handle_job_request(
     } else if args.complete_noop {
         if let Some(sink) = crate::ops::global() {
             let uid = job.job_id.clone();
-            sink.transition(
+            record_job_transition(
+                sink,
                 &uid,
                 &format!("t-waiting-{uid}"),
                 velnor_model::EventReason::JobWaiting,
@@ -7132,7 +7230,8 @@ async fn handle_job_request(
                 None,
                 None,
             );
-            sink.transition(
+            record_job_transition(
+                sink,
                 &uid,
                 &format!("t-started-{uid}"),
                 velnor_model::EventReason::JobStarted,
@@ -12309,7 +12408,8 @@ async fn complete_run_service_job(
                 }
                 crate::protocol::TaskResult::Skipped => "skipped",
             };
-            sink.transition(
+            record_job_transition(
+                sink,
                 &uid,
                 &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                 reason,
@@ -13096,7 +13196,8 @@ async fn complete_acquired_job_outcome(
                 crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
                 _ => velnor_model::EventReason::JobRejected,
             };
-            sink.transition(
+            record_job_transition(
+                sink,
                 &uid,
                 &format!("t-terminal-{}-{}", reason.as_str(), job.job_id),
                 reason,
@@ -18841,7 +18942,26 @@ jobs:
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        crate::node::complete::accept_job(&mut journal, &job_id, &slot).unwrap();
+        let owned_generation = crate::node::complete::intend_acquisition(
+            &mut journal,
+            &job_id,
+            &slot,
+            "msg-1",
+            "https://run.example/run",
+            1_000,
+        )
+        .unwrap();
+        crate::node::complete::resolve_acquisition(
+            &mut journal,
+            &job_id,
+            &job_id,
+            "plan-1",
+            owned_generation,
+        )
+        .unwrap();
+        crate::node::complete::confirm_acquisition(&mut journal, &job_id, &slot, owned_generation)
+            .unwrap();
+        assert_eq!(owned_generation, generation);
 
         // First attempt: durable intent plus the one send claim, then a
         // 401-style transport failure leaves the claim held and the payload
@@ -19958,6 +20078,38 @@ jobs:
         assert!(lifecycle.request_key(SlotPhase::Idle).is_none());
 
         fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn record_job_transition_reports_rejected_edges() {
+        let base = unique_temp_dir("transition-verdict");
+        fs::create_dir_all(&base).unwrap();
+        let sink =
+            crate::ops::OpsSink::open(base.join("state.db"), "test-instance".into()).unwrap();
+        assert!(sink.record_admission(&blocking_admission_test_input("job-1")));
+
+        assert!(record_job_transition(
+            &sink,
+            "job-1",
+            "t-waiting-job-1",
+            velnor_model::EventReason::JobWaiting,
+            None,
+            None,
+            None,
+        ));
+        // Waiting cannot go back to acquired: the refusal is reported, and
+        // the job row keeps its last applied state.
+        assert!(!record_job_transition(
+            &sink,
+            "job-1",
+            "t-acquired-again-job-1",
+            velnor_model::EventReason::JobAcquired,
+            None,
+            None,
+            None,
+        ));
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
