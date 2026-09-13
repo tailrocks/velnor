@@ -33,7 +33,8 @@ use crate::{
 
 pub(crate) use ir::{
     checks_env, config_snapshot_identity, render_cargo_source_preparation,
-    render_pinned_toolchain_steps, render_retained_output_cache_note, WorkflowIr, WorkflowKind,
+    render_pinned_toolchain_steps, render_retained_output_cache_note,
+    validate_nextest_tools_are_locked, WorkflowIr, WorkflowKind,
 };
 
 /// Default `timeout-minutes` for a unit verification job.

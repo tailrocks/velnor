@@ -26,6 +26,11 @@ sha2 = { workspace = true }
 termrock = { git = "https://github.com/tailrocks/termrock.git", rev = "5283c2acf9154d0cfcd37b1ffe821c00faf90ea2", features = ["crossterm"] }
 toml = { workspace = true }
 
+# Contract tests prove emitted `install_args` pass the runner's own lock gate.
+# Dev-only: the shipped generator never links the runner.
+[dev-dependencies]
+velnor-runner = { path = "../velnor-runner" }
+
 [lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
