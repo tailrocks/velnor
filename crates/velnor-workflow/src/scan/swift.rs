@@ -39,6 +39,7 @@ fn swift_package_unit(package_root: &str) -> Unit {
             paths: vec!["~/.swiftpm".to_owned()],
             purpose: CachePurpose::Generic,
             mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
         }),
     );
     result.id = format!("swift-package-{}", identifier_suffix(package_root));
@@ -156,6 +157,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 paths: vec!["~/Library/Developer/Xcode/DerivedData".to_owned()],
                 purpose: CachePurpose::Generic,
                 mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
             }),
             tool_version: None,
             toolchain: None,

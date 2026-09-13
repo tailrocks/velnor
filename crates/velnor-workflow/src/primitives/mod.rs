@@ -65,6 +65,18 @@ pub(crate) const RELEASE_SIGNER: &str = "release-signer";
 /// A reviewed workflow body declared verbatim by the repository.
 pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 
+/// The Dockerfile stage a mutable mount seed is injected through. The image
+/// declares it as an empty `FROM scratch` stage so a build without the
+/// `--build-context` override keeps its exact shape, and the host overrides it
+/// with the restored seed directory only when one exists.
+pub(crate) const MUTABLE_MOUNT_SEED_CONTEXT: &str = "velnor-cache-seed";
+/// The Dockerfile target stage that copies the build's mutable cache mounts
+/// back out, so a trusted full build can extract the state it produced.
+pub(crate) const MUTABLE_MOUNT_EXPORT_TARGET: &str = "velnor-cache-export";
+/// The workspace directory the Docker mutable mount seed lives in between the
+/// restore and the build, and where the build's export lands afterwards.
+pub(crate) const MUTABLE_MOUNT_HOST_DIR: &str = ".velnor-docker-cache";
+
 /// The pinned action references every emitted job uses.
 ///
 /// The table is resolved once per generation so a primitive never spells a
@@ -148,21 +160,36 @@ impl CacheBackend {
     /// record.
     pub(crate) fn enables_actions_cache(self, ir: &WorkflowIr, unit: &Unit) -> bool {
         match self {
-            Self::Detected => match unit.cache.as_ref().map(|cache| cache.purpose) {
-                // The Rust-toolchain cache is generator-internal:
-                // `render_pinned_toolchain_steps` emits it directly and never
-                // hangs it off a unit's declared contract, so it cannot arrive
-                // through this match. Refuse rather than silently enable it.
-                None | Some(CachePurpose::Toolchains) => false,
-                Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
-                Some(CachePurpose::Outputs) => {
-                    !ir.uses_mr_boxington(unit)
-                        || unit
-                            .cache
-                            .as_ref()
-                            .is_some_and(CacheSpec::justified_output_alongside_mr_boxington)
+            Self::Detected => {
+                // A unit that declares a Docker mutable-mount seed has swapped
+                // its retained-output transport for that seed lifecycle: the
+                // declared paths are the seed directory and the declared keys
+                // are the seed key inputs. Rendering the generic `ci-` cache
+                // beside it would restore seed state under the wrong namespace
+                // on lanes that never run the build commands.
+                if unit
+                    .cache
+                    .as_ref()
+                    .is_some_and(|cache| cache.mutable_mount_seed)
+                {
+                    return false;
                 }
-            },
+                match unit.cache.as_ref().map(|cache| cache.purpose) {
+                    // The Rust-toolchain cache is generator-internal:
+                    // `render_pinned_toolchain_steps` emits it directly and never
+                    // hangs it off a unit's declared contract, so it cannot arrive
+                    // through this match. Refuse rather than silently enable it.
+                    None | Some(CachePurpose::Toolchains) => false,
+                    Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
+                    Some(CachePurpose::Outputs) => {
+                        !ir.uses_mr_boxington(unit)
+                            || unit
+                                .cache
+                                .as_ref()
+                                .is_some_and(CacheSpec::justified_output_alongside_mr_boxington)
+                    }
+                }
+            }
             Self::Actions => true,
             Self::ObjectCache => false,
         }
@@ -178,6 +205,7 @@ impl CacheBackend {
 pub(crate) fn validate_cache_transports(ir: &WorkflowIr) -> Result<(), GeneratorError> {
     for unit in &ir.units {
         validate_cache_transports_for_unit(ir, unit)?;
+        validate_mutable_mount_seed(unit)?;
     }
     Ok(())
 }
@@ -216,6 +244,99 @@ pub(crate) fn validate_cache_transports_for_unit(
     Ok(())
 }
 
+/// Validate a unit whose cache contract is a Docker image's mutable mount
+/// seed. A declared seed that the declared builds never inject is a silent lie
+/// about persistence — exactly the cold-build state this contract exists to
+/// remove — so the declared commands must prove both directions of the
+/// lifecycle: the hosted full build consumes the seed and extracts the updated
+/// state, and no untrusted pull-request build extracts anything.
+///
+/// # Errors
+/// Returns a usage error when the seed rides a non-Docker unit, when the
+/// hosted full commands never inject the seed or never extract the export, or
+/// when a pull-request or self-hosted command references the injection
+/// context the generator never restores on that lane.
+pub(crate) fn validate_mutable_mount_seed(unit: &Unit) -> Result<(), GeneratorError> {
+    let Some(cache) = &unit.cache else {
+        return Ok(());
+    };
+    if !cache.mutable_mount_seed {
+        return Ok(());
+    }
+    if unit.kind != UnitKind::Docker {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares a mutable mount seed, but only a Docker image build owns cache \
+             mounts a seed can be injected into",
+            unit.id
+        )));
+    }
+    if cache.key_files.is_empty() || cache.paths.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares a mutable mount seed without both `key_files` and `paths`; the \
+             seed cannot be keyed or restored",
+            unit.id
+        )));
+    }
+    let injection = format!("--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=");
+    let extraction = format!("--target {MUTABLE_MOUNT_EXPORT_TARGET}");
+    let github_full = lane_commands(unit.github_full_commands.as_deref(), &unit.full_commands);
+    if !github_full
+        .iter()
+        .any(|command| command.contains(&injection))
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares a mutable mount seed, but no hosted full command injects it with \
+             `--build-context {MUTABLE_MOUNT_SEED_CONTEXT}=<dir>`; a seed the build never reads \
+             is declared persistence that does not exist",
+            unit.id
+        )));
+    }
+    if !github_full
+        .iter()
+        .any(|command| command.contains(&extraction) && command.contains("--output type=local"))
+    {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` declares a mutable mount seed, but no hosted full command extracts the \
+             updated state with `--target {MUTABLE_MOUNT_EXPORT_TARGET}` and `--output \
+             type=local`; without extraction the seed can only ever go cold",
+            unit.id
+        )));
+    }
+    for (lane, commands) in [
+        (
+            "hosted pull-request",
+            lane_commands(unit.github_pr_commands.as_deref(), &unit.pr_commands),
+        ),
+        (
+            "self-hosted",
+            lane_commands(unit.velnor_full_commands.as_deref(), &unit.full_commands),
+        ),
+        (
+            "self-hosted pull-request",
+            lane_commands(unit.velnor_pr_commands.as_deref(), &unit.pr_commands),
+        ),
+    ] {
+        if commands
+            .iter()
+            .any(|command| command.contains(&injection) || command.contains(&extraction))
+        {
+            return Err(GeneratorError::usage(format!(
+                "unit `{}` runs `{lane}` commands that reference the mutable mount seed context \
+                 or export target; the generator restores and collects the seed on the hosted \
+                 full lane only, so those commands would fail on a directory that is never there",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The commands a lane runs: the lane-specific override when declared, the
+/// base vector otherwise.
+fn lane_commands<'a>(lane_override: Option<&'a [String]>, base: &'a [String]) -> &'a [String] {
+    lane_override.unwrap_or(base)
+}
+
 /// Everything a declared unit pipeline may tune for one unit's surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UnitContract {
@@ -225,6 +346,11 @@ pub(crate) struct UnitContract {
     /// Cache entries are saved on trusted events only, which is a property of
     /// the workflow kind the aggregate owns, never of the unit.
     pub(crate) cache_save: bool,
+    /// Whether the unit's cache contract is the mutable mount seed of a Docker
+    /// image build: the hosted lane restores it before the build, the build
+    /// injects it into the image's cache mounts, and a trusted full build
+    /// extracts the updated state for the next builder.
+    pub(crate) mutable_mount_seed: bool,
 }
 
 /// What one primitive contributed to the declared surface.
