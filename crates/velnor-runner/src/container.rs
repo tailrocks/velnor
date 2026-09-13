@@ -19,6 +19,16 @@ const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
 
+/// Daemon-owned runner identity. Dropped from step env by exact match in
+/// `append_step_env` and re-asserted after it on every exec/run path, so a
+/// workflow can neither shadow these names via `env:`/`GITHUB_ENV` nor win a
+/// `-e`-over-`--env-file` precedence race with a multiline spoof.
+const AUTHORITATIVE_RUNNER_ENV: [&str; 3] = [
+    "VELNOR_EXECUTION_BACKEND",
+    "VELNOR_SOURCE_SHA",
+    "VELNOR_MANIFEST_VERSION",
+];
+
 fn is_docker_control_env(name: &str) -> bool {
     name.eq_ignore_ascii_case("DOCKER_HOST")
         || name.eq_ignore_ascii_case("DOCKER_CONTEXT")
@@ -679,9 +689,16 @@ impl JobContainerSpec {
     /// Step environment. Every entry is recorded as an environment variable,
     /// never as an argv token: the builder decides between a mode-0600
     /// `--env-file` and a bare `-e NAME` process-environment forward.
+    /// Daemon-owned identity names are dropped by exact match, so a spoof
+    /// never reaches the command builder on any path — a multiline spoof
+    /// would otherwise route to `-e` while the clean value goes to
+    /// `--env-file`, and Docker resolves `-e` over `--env-file`.
     fn append_step_env(&self, command: &mut DockerCommand, env: &[(String, String)]) {
         for (name, value) in env {
             if is_docker_control_env(name) {
+                continue;
+            }
+            if AUTHORITATIVE_RUNNER_ENV.contains(&name.as_str()) {
                 continue;
             }
             command.env(name.clone(), value.clone());
@@ -692,13 +709,10 @@ impl JobContainerSpec {
     /// and step env. The values are injected by `backend_advertising_env`; a
     /// workflow must not be able to switch a Velnor job to the GitHub command
     /// contract through `env:` or `GITHUB_ENV`, nor spoof the release it runs
-    /// under.
+    /// under. Defense in depth behind the exact-match drop in
+    /// `append_step_env`.
     fn append_authoritative_runner_env(&self, command: &mut DockerCommand) {
-        for name in [
-            "VELNOR_EXECUTION_BACKEND",
-            "VELNOR_SOURCE_SHA",
-            "VELNOR_MANIFEST_VERSION",
-        ] {
+        for name in AUTHORITATIVE_RUNNER_ENV {
             if let Some((_, value)) = self.env.iter().find(|(env_name, _)| env_name == name) {
                 command.env(name, value.clone());
             }
@@ -997,6 +1011,7 @@ impl JobContainerSpec {
             args.pair("--entrypoint", entrypoint.to_owned());
         }
         self.append_step_env(args, env);
+        self.append_authoritative_runner_env(args);
         let prepared = command
             .image(&image)
             .operands(command_args.iter().cloned())
@@ -2514,6 +2529,101 @@ mod tests {
                 crate::manifest::MANIFEST_VERSION
             ))
         );
+    }
+
+    #[test]
+    fn docker_action_sidecar_reasserts_authoritative_runner_env() {
+        let mut spec = spec();
+        spec.env
+            .push(("VELNOR_EXECUTION_BACKEND".into(), "docker".into()));
+        spec.env
+            .push(("VELNOR_SOURCE_SHA".into(), env!("VELNOR_SOURCE_SHA").into()));
+        spec.env.push((
+            "VELNOR_MANIFEST_VERSION".into(),
+            crate::manifest::MANIFEST_VERSION.to_string(),
+        ));
+        let prepared = spec
+            .prepare_run_docker_action_args(
+                "/__w",
+                &[
+                    ("VELNOR_EXECUTION_BACKEND".into(), "spoofed".into()),
+                    ("VELNOR_SOURCE_SHA".into(), "spoofed".into()),
+                    ("VELNOR_MANIFEST_VERSION".into(), "spoofed".into()),
+                ],
+                &[],
+                "alpine:3.22",
+                None,
+                &["true".into()],
+            )
+            .unwrap();
+        let effective = rendered(&prepared);
+        assert_eq!(
+            effective
+                .iter()
+                .rfind(|arg| arg.starts_with("VELNOR_EXECUTION_BACKEND=")),
+            Some(&"VELNOR_EXECUTION_BACKEND=docker".to_owned())
+        );
+        assert_eq!(
+            effective
+                .iter()
+                .rfind(|arg| arg.starts_with("VELNOR_SOURCE_SHA=")),
+            Some(&format!("VELNOR_SOURCE_SHA={}", env!("VELNOR_SOURCE_SHA")))
+        );
+        assert_eq!(
+            effective
+                .iter()
+                .rfind(|arg| arg.starts_with("VELNOR_MANIFEST_VERSION=")),
+            Some(&format!(
+                "VELNOR_MANIFEST_VERSION={}",
+                crate::manifest::MANIFEST_VERSION
+            ))
+        );
+        assert!(!effective.iter().any(|arg| arg.contains("spoofed")));
+    }
+
+    #[test]
+    fn multiline_authoritative_spoof_cannot_escape_via_process_env() {
+        let mut spec = spec();
+        spec.env
+            .push(("VELNOR_EXECUTION_BACKEND".into(), "docker".into()));
+        let spoof = &[(
+            "VELNOR_EXECUTION_BACKEND".into(),
+            "spoofed\nINJECTED=x".into(),
+        )];
+        let prepared = [
+            spec.prepare_exec_process_args("/__w", spoof, &[], &["printenv".into()])
+                .unwrap(),
+            spec.prepare_run_docker_action_args(
+                "/__w",
+                spoof,
+                &[],
+                "alpine:3.22",
+                None,
+                &["true".into()],
+            )
+            .unwrap(),
+        ];
+        for command in &prepared {
+            // A multiline value routes to `-e NAME` plus process env, which
+            // Docker resolves over `--env-file`: the spoof must be dropped
+            // before the builder, not merely out-ordered by the clean value.
+            assert!(command
+                .process_env()
+                .iter()
+                .all(|(name, _)| name != "VELNOR_EXECUTION_BACKEND"));
+            assert!(!command
+                .args()
+                .windows(2)
+                .any(|pair| pair[0] == "-e" && pair[1] == "VELNOR_EXECUTION_BACKEND"));
+            let effective = rendered(command);
+            assert_eq!(
+                effective
+                    .iter()
+                    .rfind(|arg| arg.starts_with("VELNOR_EXECUTION_BACKEND=")),
+                Some(&"VELNOR_EXECUTION_BACKEND=docker".to_owned())
+            );
+            assert!(!effective.iter().any(|arg| arg.contains("spoofed")));
+        }
     }
 
     #[test]
