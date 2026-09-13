@@ -349,6 +349,23 @@ fn delete_generated_outputs_and_regenerate_from_evidence() {
 }
 
 #[test]
+fn velnor_lane_installs_declared_mise_tools() {
+    let root = unique_dir("mise-velnor");
+    write_rust_fixture(&root, 1);
+    fs::write(root.join("mise.toml"), "[tools]\nnode = \"24.20.0\"\n").unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("Install declared Mise tools"),
+        "Velnor lane must install lockfile tools: {unit}"
+    );
+    assert!(
+        unit.contains("mise --yes install"),
+        "Velnor lane must run mise install: {unit}"
+    );
+}
+
+#[test]
 fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     let root = unique_dir("per-unit-capabilities");
     write_rust_fixture(&root, 2);

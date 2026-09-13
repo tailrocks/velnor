@@ -1858,6 +1858,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // action surface and hoping the runner can ignore the other lane.
         let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        if !github_lane && self.mise_present {
+            // Hosted mise-action is not admitted on Velnor. Auto-install is
+            // off on the checks step, so declared lockfile tools must be
+            // installed explicitly or shims fail closed.
+            output.push_str(
+                "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes install\n",
+            );
+        }
         if github_lane && let Some(toolchain) = &unit.toolchain {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
