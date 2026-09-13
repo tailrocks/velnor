@@ -2,8 +2,9 @@
 # resolves only through a platform-qualified artifact whose manifest proves the
 # producer repository, default branch, exact revision, successful run, runner
 # platform, and binary digest. A source build is controlled bootstrap only:
-# trusted default-branch pushes and same-repository PRs may bootstrap a
-# revision; forks and every other context fail closed without a product.
+# trusted default-branch push, schedule, and workflow_dispatch events and
+# same-repository PRs may bootstrap a revision; forks and every other context
+# fail closed without a product.
 name: Set up Velnor workflow runtime
 description: Install the velnor-workflow binary with cache and toolchain-env isolation
 
@@ -90,12 +91,12 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         INSTALL_REV: ${{ inputs.rev }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        CONTROLLED_BOOTSTRAP: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         SOURCE_REPOSITORY: https://github.com/tailrocks/velnor
       run: |
         set -euo pipefail
         [[ "$CONTROLLED_BOOTSTRAP" == 'true' ]] || {
-          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch-push or same-repository-PR only" >&2
+          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only" >&2
           exit 1
         }
         # Authenticate git for the install below (public repo; also covers
