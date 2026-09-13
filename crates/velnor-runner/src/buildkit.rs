@@ -52,12 +52,22 @@
 //! their own class deadlines through `host_call`.
 //!
 //! Capacity: requested names are workflow-controlled and unbounded, so each
-//! (scope, repository) pair keeps at most [`MAX_BUILDERS_PER_SCOPE_REPO`]
-//! builders; over-cap setup evicts the least-recently-used *unclaimed*
-//! builder ([`enforce_builder_cap`]). Claim files die with their builder,
-//! and [`maybe_reap_idle_builders`] runs the horizon pass periodically from
-//! the setup path so corpse-pinned and idle builders converge without an
-//! operator visit.
+//! (scope, tier, repository) group keeps at most
+//! [`MAX_BUILDERS_PER_SCOPE_TIER_REPO`] builders; over-cap setup evicts the
+//! least-recently-used *unclaimed* builder in its own group
+//! ([`enforce_builder_cap`]), and fails loud when every member is claimed —
+//! silently skipping claimed members let one job mint unbounded daemons.
+//! Claim files die with their builder, and [`maybe_reap_idle_builders`] runs
+//! the horizon pass periodically from the setup path so corpse-pinned and
+//! idle builders converge without an operator visit.
+//!
+//! Torn claim files fail closed as claimed everywhere, so a torn file pins
+//! its builder forever: never stopped, pruned, or deleted. Every torn read
+//! logs an ERROR with the file path; the operator recovery is to quiesce the
+//! daemon's jobs (or confirm via `docker ps` that no `velnor-job-*`
+//! container can hold the builder), delete the claim file, and let the next
+//! claim recreate it — the horizon pass then converges the daemon. Doctor
+//! surfaces horizon-pass unreadable claim files as actionable errors.
 //!
 //! Legacy slot-scoped builders (`velnor-builder-<requested>-<slot>`, from
 //! before persistence) keep their destroy-at-teardown path: teardown matches
@@ -95,12 +105,13 @@ pub(crate) const IDLE_DELETE_AFTER: Duration = Duration::from_secs(7 * 24 * 3600
 /// instead of parking setup, post, teardown, and maintenance forever.
 pub(crate) const CLAIM_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Builders kept per (trust scope, repository) pair. Requested names are
-/// workflow-controlled, so without a cap one workflow mints unbounded
+/// Builders kept per (trust scope, tier, repository) group. Requested names
+/// are workflow-controlled, so without a cap one workflow mints unbounded
 /// daemons, volumes, and claim files. Over-cap setup evicts the
-/// least-recently-used unclaimed builder; claimed builders are never
-/// evicted no matter how far over cap.
-pub(crate) const MAX_BUILDERS_PER_SCOPE_REPO: usize = 8;
+/// least-recently-used unclaimed builder in its own group — a branch setup
+/// must never evict a release builder — and fails loud when every member is
+/// claimed; claimed builders are never evicted no matter how far over cap.
+pub(crate) const MAX_BUILDERS_PER_SCOPE_TIER_REPO: usize = 8;
 
 /// How often the setup path runs the horizon pass. Startup and doctor run
 /// it too, but a daemon that serves jobs for weeks without either must
@@ -316,9 +327,11 @@ fn read_claims(path: &Path) -> Result<BuilderClaims> {
 }
 
 /// Atomically replace one claim file: encode, write a sibling temp file,
-/// rename over the target. Readers never observe a partial write — the
-/// target is either the old or the new document — so torn files can only
-/// come from outside this writer.
+/// fsync it, rename over the target, fsync the directory. Readers never
+/// observe a partial write — the target is either the old or the new
+/// document — and a crash can only leave a stale sibling temp, never a torn
+/// target. The temp carries a `tmp-<pid>` extension so the cap hint pass
+/// (which reads `*.json` only) never counts it.
 fn write_claims(path: &Path, claims: &BuilderClaims) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -326,15 +339,44 @@ fn write_claims(path: &Path, claims: &BuilderClaims) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(claims).context("encode builder claims")?;
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     let write_result = (|| -> Result<()> {
-        std::fs::write(&temp, &bytes).with_context(|| format!("write {}", temp.display()))?;
+        {
+            use std::io::Write as _;
+            let mut temp_file = std::fs::File::create(&temp)
+                .with_context(|| format!("write {}", temp.display()))?;
+            temp_file
+                .write_all(&bytes)
+                .with_context(|| format!("write {}", temp.display()))?;
+            temp_file
+                .sync_all()
+                .with_context(|| format!("fsync {}", temp.display()))?;
+        }
         std::fs::rename(&temp, path)
             .with_context(|| format!("rename {} to {}", temp.display(), path.display()))?;
+        if let Some(parent) = path.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
         Ok(())
     })();
     if write_result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
     write_result
+}
+
+/// Log a torn claim file at ERROR with the operator recovery step. Torn
+/// files fail closed as claimed at every read site, so without an operator
+/// visit the builder pins forever: never stopped, pruned, or deleted.
+fn log_torn_claims(builder: &str, path: &Path, error: &anyhow::Error) {
+    tracing::error!(
+        target: "velnor.buildkit",
+        builder,
+        path = %path.display(),
+        error = format!("{error:#}"),
+        "torn claim file treated as claimed; to recover: quiesce this daemon's jobs, \
+         delete the claim file, and let the next claim recreate it"
+    );
 }
 
 /// Acquire one builder's claim lock with a bounded wait, emitting the wait
@@ -395,7 +437,13 @@ pub(crate) fn claim_builder(
 ) -> Result<()> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
-    let mut claims = read_claims(&path)?;
+    let mut claims = match read_claims(&path) {
+        Ok(claims) => claims,
+        Err(error) => {
+            log_torn_claims(builder, &path, &error);
+            return Err(error);
+        }
+    };
     repair_slot_unlocked(&mut claims, slot, container);
     let now = unix_now();
     claims.holders.insert(
@@ -449,12 +497,7 @@ pub(crate) fn release_and_stop_if_last(
         let mut claims = match read_claims(&path) {
             Ok(claims) => claims,
             Err(error) => {
-                tracing::warn!(
-                    target: "velnor.buildkit",
-                    builder,
-                    error = format!("{error:#}"),
-                    "torn claim file treated as claimed; release stops nothing"
-                );
+                log_torn_claims(builder, &path, &error);
                 return Ok(ReleaseOutcome {
                     removed_last: false,
                     stopped: false,
@@ -492,7 +535,10 @@ pub(crate) fn release_and_stop_if_last(
         let _lock = lock_claims(builder, &path)?;
         match read_claims(&path) {
             Ok(claims) => !claims.holders.is_empty(),
-            Err(_) => true,
+            Err(error) => {
+                log_torn_claims(builder, &path, &error);
+                true
+            }
         }
     };
     let restarted = if raced && stopped {
@@ -501,7 +547,18 @@ pub(crate) fn release_and_stop_if_last(
             builder,
             "holders arrived during release stop; restarting daemon"
         );
-        start().unwrap_or(false)
+        match start() {
+            Ok(running) => running,
+            Err(error) => {
+                tracing::error!(
+                    target: "velnor.buildkit",
+                    builder,
+                    error = format!("{error:#}"),
+                    "release restart failed; daemon left stopped with holders"
+                );
+                false
+            }
+        }
     } else {
         false
     };
@@ -560,48 +617,64 @@ pub(crate) struct CapReport {
     pub failures: Vec<String>,
 }
 
-/// Evict least-recently-used unclaimed builders in (scope, repository) down
-/// to [`MAX_BUILDERS_PER_SCOPE_REPO`]. Selection reads claim files unlocked
-/// as a hint; every eviction rechecks emptiness under the claim lock, acts
-/// through `remove` unlocked, then deletes the claim file only when a final
-/// locked recheck still finds it empty — a holder that arrived mid-eviction
-/// keeps both its daemon and its claim. Torn files read as claimed and are
-/// never evicted; legacy files without identity metadata are skipped (the
-/// horizon path deletes them once idle). Best-effort by design: failures
-/// are reported, never raised, so setup never fails on eviction.
+/// Evict least-recently-used unclaimed builders in (scope, tier,
+/// repository) down to [`MAX_BUILDERS_PER_SCOPE_TIER_REPO`]. Selection reads
+/// `*.json` claim files unlocked as a hint — stale `tmp-<pid>` siblings and
+/// the horizon marker never count; every eviction rechecks emptiness under
+/// the claim lock, acts through `remove` unlocked, then deletes the claim
+/// file only when a final locked recheck still finds it empty — a holder
+/// that arrived mid-eviction keeps both its daemon and its claim. Torn
+/// files read as claimed and are never evicted; legacy files without
+/// identity metadata are skipped (the horizon path deletes them once idle).
+/// Best-effort per victim — failures are reported, never raised — except
+/// the group itself: when the group is still over cap with no unclaimed
+/// victim (every member claimed, so one job could otherwise mint unbounded
+/// daemons), setup fails loud with an error.
+/// Eviction never crosses tiers: a branch setup evicts only branch builders,
+/// never an unclaimed release builder.
 pub(crate) fn enforce_builder_cap(
     run_root: &Path,
     scope: &str,
+    tier: &str,
     repository: Option<&str>,
     remove: impl Fn(&str) -> Result<()>,
-) -> CapReport {
+) -> Result<CapReport> {
     let mut report = CapReport::default();
     let scope = sanitize_builder_segment(scope);
+    let tier = sanitize_builder_segment(tier);
     let repo = repo_slug(repository);
     let dir = run_root.join(CLAIMS_DIR);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
         Err(error) => {
             report.failures.push(format!(
                 "list claim files under {}: {error:#}",
                 dir.display()
             ));
-            return report;
+            return Ok(report);
         }
     };
     // Hint pass, unlocked: group members with their LRU clocks. The hint is
     // never a decision — eviction rechecks under the lock.
     let mut members: Vec<(String, u64)> = Vec::new();
     for entry in entries.flatten() {
-        let claims = match std::fs::read(entry.path())
+        let entry_path = entry.path();
+        if entry_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let claims = match std::fs::read(&entry_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<BuilderClaims>(&bytes).ok())
         {
             Some(claims) => claims,
             None => continue,
         };
-        if claims.scope != scope || claims.repo != repo || claims.builder.is_empty() {
+        if claims.scope != scope
+            || claims.tier != tier
+            || claims.repo != repo
+            || claims.builder.is_empty()
+        {
             continue;
         }
         if !is_persistent_builder_name(&claims.builder) {
@@ -610,7 +683,9 @@ pub(crate) fn enforce_builder_cap(
         members.push((claims.builder, claims.updated_unix));
     }
     members.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
-    let mut over = members.len().saturating_sub(MAX_BUILDERS_PER_SCOPE_REPO);
+    let mut over = members
+        .len()
+        .saturating_sub(MAX_BUILDERS_PER_SCOPE_TIER_REPO);
     for (builder, _) in members {
         if over == 0 {
             break;
@@ -628,7 +703,10 @@ pub(crate) fn enforce_builder_cap(
             };
             match read_claims(&path) {
                 Ok(claims) => claims.holders.is_empty(),
-                Err(_) => continue,
+                Err(error) => {
+                    log_torn_claims(&builder, &path, &error);
+                    continue;
+                }
             }
         };
         if !empty {
@@ -657,6 +735,12 @@ pub(crate) fn enforce_builder_cap(
         match read_claims(&path) {
             Ok(claims) if claims.holders.is_empty() => {
                 if let Err(error) = std::fs::remove_file(&path) {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        // A racing pass evicted this member first: the group
+                        // converged without us.
+                        over -= 1;
+                        continue;
+                    }
                     report
                         .failures
                         .push(format!("delete claims for {builder}: {error:#}"));
@@ -671,12 +755,54 @@ pub(crate) fn enforce_builder_cap(
                 );
                 continue;
             }
-            Err(_) => continue,
+            Err(error) => {
+                log_torn_claims(&builder, &path, &error);
+                continue;
+            }
         }
         report.evicted.push(builder);
         over -= 1;
     }
-    report
+    if over > 0 {
+        let claimed = members_still_over(run_root, &scope, &tier, &repo);
+        anyhow::bail!(
+            "builder cap exceeded for scope '{scope}' tier '{tier}' repo '{repo}': \
+             {over} builder(s) over the cap of {MAX_BUILDERS_PER_SCOPE_TIER_REPO} with no \
+             unclaimed victim ({claimed} claimed member(s)); a new builder name cannot be \
+             introduced until a holder releases"
+        );
+    }
+    Ok(report)
+}
+
+/// Recount of parseable claimed group members, for the over-cap-loud
+/// error. Unreadable files are skipped here as in the hint pass (each was
+/// already ERROR-logged with its recovery step during eviction).
+fn members_still_over(run_root: &Path, scope: &str, tier: &str, repo: &str) -> usize {
+    let dir = run_root.join(CLAIMS_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    let mut claimed = 0;
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if entry_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let claims = match std::fs::read(&entry_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<BuilderClaims>(&bytes).ok())
+        {
+            Some(claims) => claims,
+            None => continue,
+        };
+        if claims.scope != scope || claims.tier != tier || claims.repo != repo {
+            continue;
+        }
+        claimed += usize::from(!claims.holders.is_empty());
+    }
+    claimed
 }
 
 /// True when the periodic horizon pass is due: no marker, an unreadable
@@ -700,11 +826,21 @@ fn horizon_reap_due(marker: &Path, now: SystemTime) -> bool {
 /// an operator; failures are stamped too — a failing Engine must not make
 /// every setup pay for a pass that cannot succeed.
 pub(crate) fn maybe_reap_idle_builders(run_root: &Path, now: SystemTime) -> Option<HorizonReport> {
+    maybe_reap_idle_builders_with(run_root, now, reap_idle_builders)
+}
+
+/// [`maybe_reap_idle_builders`] with the pass injected, so tests cover the
+/// due/stamp logic without touching the Engine.
+fn maybe_reap_idle_builders_with(
+    run_root: &Path,
+    now: SystemTime,
+    reap: impl FnOnce(&Path, SystemTime) -> HorizonReport,
+) -> Option<HorizonReport> {
     let marker = run_root.join(CLAIMS_DIR).join(HORIZON_REAP_MARKER);
     if !horizon_reap_due(&marker, now) {
         return None;
     }
-    let report = reap_idle_builders(run_root, now);
+    let report = reap(run_root, now);
     if let Some(parent) = marker.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -796,9 +932,11 @@ pub(crate) fn start_builder_daemon(builder: &str) -> Result<bool> {
 /// Prune one builder's cache completely, returning the du-measured bytes
 /// freed. A missing builder (or one that vanishes mid-prune) frees nothing.
 /// A stopped daemon is started first: `buildx du` and `buildx prune` both
-/// refuse a stopped daemon (proven live). Only ever called with zero
-/// holders under the claim lock: no live job can observe the cold, and a
-/// racing setup blocks on the lock, then claims the pruned builder.
+/// refuse a stopped daemon (proven live). Called only after a locked holder
+/// check found zero holders, but the prune itself runs unlocked — a racing
+/// setup claims concurrently, then the recheck restarts the daemon for it.
+/// A racing build caught mid-prune may observe the cold; that bounded,
+/// observable race is the price of never holding the lock across Docker.
 fn prune_builder(builder: &str) -> Result<u64> {
     let mut docker = crate::docker::Docker::host();
     let before = match docker.buildx_disk_usage(builder) {
@@ -835,14 +973,33 @@ fn prune_builder(builder: &str) -> Result<u64> {
 /// file. Only ever called with zero holders past the idle horizon: the next
 /// build recreates a cold daemon from the same stable name, and the next
 /// claim recreates the claim file. The claim file dies with the builder so
-/// workflow-minted names cannot accumulate claim files forever.
+/// workflow-minted names cannot accumulate claim files forever. Mirrors the
+/// cap path: Docker work runs unlocked, then one lock covers the final
+/// recheck-plus-delete — a setup that claimed mid-delete keeps its claim
+/// (the daemon it must rebuild is cold, never wrong), instead of losing its
+/// hold to an unlocked delete.
 pub(crate) fn remove_builder_and_claims(run_root: &Path, builder: &str) -> Result<()> {
     remove_builder(builder)?;
     let path = claims_file(run_root, builder);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    let _lock = lock_claims(builder, &path)?;
+    match read_claims(&path) {
+        Ok(claims) if claims.holders.is_empty() => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        },
+        Ok(_) => {
+            tracing::warn!(
+                target: "velnor.buildkit",
+                builder,
+                "holders arrived during horizon delete; claim file kept"
+            );
+            Ok(())
+        }
+        Err(error) => {
+            log_torn_claims(builder, &path, &error);
+            Ok(())
+        }
     }
 }
 
@@ -932,8 +1089,9 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
     // Largest first: one unlocked du per builder as an ordering hint, then
     // prune in that order. Unmeasurable builders (stopped daemons refuse du)
     // sort last; the prune still measures them after starting. The hint is
-    // never a decision: the holder check and the prune below are atomic
-    // under each builder's claim lock.
+    // never a decision: the holder check below runs under each builder's
+    // claim lock, then the prune and stop run unlocked with a recheck that
+    // restarts the daemon when a setup raced.
     let mut sized: Vec<(String, Option<u64>)> = Vec::new();
     for builder in &persistent {
         match docker.buildx_disk_usage(builder) {
@@ -963,6 +1121,7 @@ pub(crate) fn pressure_prune_builders(run_root: &Path, target_bytes: u64) -> Pre
             let mut claims = match read_claims(&path) {
                 Ok(claims) => claims,
                 Err(error) => {
+                    log_torn_claims(&builder, &path, &error);
                     report
                         .failures
                         .push(format!("read claims for {builder}: {error:#}"));
@@ -1038,6 +1197,10 @@ pub(crate) struct HorizonReport {
     pub stopped: Vec<String>,
     pub deleted: Vec<String>,
     pub failures: Vec<String>,
+    /// Claim files the pass could not read (torn JSON or IO errors). Each
+    /// pins its builder as claimed until an operator deletes it; doctor
+    /// surfaces these as actionable errors.
+    pub unreadable_claims: Vec<String>,
 }
 
 /// Locked holder recheck after unlocked Docker work. A torn claim file
@@ -1047,7 +1210,10 @@ fn holders_remain(path: &Path, builder: &str) -> Result<bool> {
     let _lock = lock_claims(builder, path)?;
     match read_claims(path) {
         Ok(claims) => Ok(!claims.holders.is_empty()),
-        Err(_) => Ok(true),
+        Err(error) => {
+            log_torn_claims(builder, path, &error);
+            Ok(true)
+        }
     }
 }
 
@@ -1101,9 +1267,11 @@ pub(crate) fn reap_idle_builders(run_root: &Path, now: SystemTime) -> HorizonRep
             let mut claims = match read_claims(&path) {
                 Ok(claims) => claims,
                 Err(error) => {
+                    log_torn_claims(&builder, &path, &error);
                     report
                         .failures
                         .push(format!("read claims for {builder}: {error:#}"));
+                    report.unreadable_claims.push(path.display().to_string());
                     continue;
                 }
             };
@@ -1292,6 +1460,17 @@ mod tests {
 
     fn test_builder() -> String {
         persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o/r"))
+    }
+
+    /// Test helper: drop every hold on `builder` and set its LRU clock, so
+    /// cap tests control claimed-ness and recency without wall-clock sleeps.
+    fn abandon_claims(run_root: &Path, builder: &str, updated_unix: u64) {
+        let path = claims_file(run_root, builder);
+        let _lock = lock_claims(builder, &path).unwrap();
+        let mut claims = read_claims(&path).unwrap();
+        claims.holders.clear();
+        claims.updated_unix = updated_unix;
+        write_claims(&path, &claims).unwrap();
     }
 
     #[test]
@@ -1686,7 +1865,7 @@ mod tests {
         // One over cap: the oldest builder stays claimed (never evicted),
         // the next-oldest unclaimed builder is the victim.
         let mut builders = Vec::new();
-        for index in 0..=MAX_BUILDERS_PER_SCOPE_REPO {
+        for index in 0..=MAX_BUILDERS_PER_SCOPE_TIER_REPO {
             let builder = persistent_builder_name(
                 &format!("custom-{index}"),
                 "trusted",
@@ -1721,10 +1900,17 @@ mod tests {
         }
 
         let evicted: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
-        let report = enforce_builder_cap(&run_root, "trusted", Some("o/r"), |builder| {
-            evicted.borrow_mut().push(builder.to_string());
-            Ok(())
-        });
+        let report = enforce_builder_cap(
+            &run_root,
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("o/r"),
+            |builder| {
+                evicted.borrow_mut().push(builder.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.evicted, vec![builders[1].clone()]);
         // The victim's daemon went through `remove` and its claim file is
@@ -1771,6 +1957,199 @@ mod tests {
             read_job_builders(&temp).unwrap(),
             vec!["builder-a", "builder-b"]
         );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn builder_cap_fails_loud_when_every_member_claimed() {
+        let root = temp_root("cap-loud");
+        let run_root = root.join("run");
+        let identity = test_identity();
+        // Cap + 1 builders, every one held: no unclaimed victim exists, so
+        // silently returning would let the minting job grow the fleet forever.
+        for index in 0..=MAX_BUILDERS_PER_SCOPE_TIER_REPO {
+            let builder = persistent_builder_name(
+                &format!("held-{index}"),
+                "trusted",
+                TRUST_TIER_BRANCH,
+                Some("o/r"),
+            );
+            claim_builder(
+                &run_root,
+                &builder,
+                &identity,
+                &format!("slot-{index}"),
+                &format!("velnor-job-{index}"),
+            )
+            .unwrap();
+        }
+        let error =
+            enforce_builder_cap(&run_root, "trusted", TRUST_TIER_BRANCH, Some("o/r"), |_| {
+                panic!("must not evict a claimed builder")
+            })
+            .unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(detail.contains("builder cap exceeded"), "{detail}");
+        assert!(detail.contains("no unclaimed victim"), "{detail}");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn builder_cap_evicts_only_within_the_callers_tier() {
+        let root = temp_root("cap-tier");
+        let run_root = root.join("run");
+        let branch = test_identity();
+        let release = BuilderIdentity {
+            scope: "trusted",
+            tier: TRUST_TIER_RELEASE,
+            repository: Some("o/r"),
+        };
+        // Branch group one over cap, all unclaimed; the release builder is
+        // older than every branch LRU clock, so a scope+repo grouping would
+        // evict it instead of the branch victim.
+        let mut builders = Vec::new();
+        for index in 0..=MAX_BUILDERS_PER_SCOPE_TIER_REPO {
+            let builder = persistent_builder_name(
+                &format!("branch-{index}"),
+                "trusted",
+                TRUST_TIER_BRANCH,
+                Some("o/r"),
+            );
+            claim_builder(
+                &run_root,
+                &builder,
+                &branch,
+                &format!("slot-{index}"),
+                &format!("velnor-job-{index}"),
+            )
+            .unwrap();
+            abandon_claims(&run_root, &builder, 1_000 + index as u64);
+            builders.push(builder);
+        }
+        let release_builder =
+            persistent_builder_name("rel", "trusted", TRUST_TIER_RELEASE, Some("o/r"));
+        claim_builder(
+            &run_root,
+            &release_builder,
+            &release,
+            "slot-r",
+            "velnor-job-r",
+        )
+        .unwrap();
+        abandon_claims(&run_root, &release_builder, 1);
+
+        let evicted: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let report = enforce_builder_cap(
+            &run_root,
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("o/r"),
+            |builder| {
+                evicted.borrow_mut().push(builder.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.evicted, vec![builders[0].clone()]);
+        assert!(claims_file(&run_root, &release_builder).exists());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn builder_cap_ignores_non_json_hint_files() {
+        let root = temp_root("cap-tmp");
+        let run_root = root.join("run");
+        let identity = test_identity();
+        // Exactly at cap, all unclaimed.
+        for index in 0..MAX_BUILDERS_PER_SCOPE_TIER_REPO {
+            let builder = persistent_builder_name(
+                &format!("tmp-{index}"),
+                "trusted",
+                TRUST_TIER_BRANCH,
+                Some("o/r"),
+            );
+            claim_builder(
+                &run_root,
+                &builder,
+                &identity,
+                &format!("slot-{index}"),
+                &format!("velnor-job-{index}"),
+            )
+            .unwrap();
+            abandon_claims(&run_root, &builder, 1_000 + index as u64);
+        }
+        // A stale writer temp holding valid claims JSON for one more member:
+        // a hint pass without the `*.json` filter would count it and evict.
+        let stray = persistent_builder_name("stray", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
+        let stray_claims = BuilderClaims {
+            holders: BTreeMap::new(),
+            builder: stray,
+            scope: "trusted".to_string(),
+            tier: TRUST_TIER_BRANCH.to_string(),
+            repo: "o_r".to_string(),
+            updated_unix: 1,
+        };
+        let dir = run_root.join(CLAIMS_DIR);
+        std::fs::write(
+            dir.join("stray.tmp-12345"),
+            serde_json::to_vec(&stray_claims).unwrap(),
+        )
+        .unwrap();
+
+        let report = enforce_builder_cap(
+            &run_root,
+            "trusted",
+            TRUST_TIER_BRANCH,
+            Some("o/r"),
+            |builder| panic!("must not evict at cap: {builder}"),
+        )
+        .unwrap();
+        assert!(report.evicted.is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn horizon_reap_due_follows_marker_age() {
+        let root = temp_root("reap-due");
+        let marker = root.join("marker");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000_000);
+        // Missing marker: due.
+        assert!(horizon_reap_due(&marker, now));
+        // Fresh marker: not due.
+        std::fs::write(&marker, (10_000_000 - 60).to_string()).unwrap();
+        assert!(!horizon_reap_due(&marker, now));
+        // Stale marker: due.
+        let stale = 10_000_000 - HORIZON_REAP_INTERVAL.as_secs() - 1;
+        std::fs::write(&marker, stale.to_string()).unwrap();
+        assert!(horizon_reap_due(&marker, now));
+        // Torn marker: due.
+        std::fs::write(&marker, b"not-a-number").unwrap();
+        assert!(horizon_reap_due(&marker, now));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn maybe_reap_runs_only_when_due_and_stamps() {
+        let root = temp_root("maybe-reap");
+        let run_root = root.join("run");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(20_000_000);
+        // Due (no marker): runs the pass and stamps.
+        let report = maybe_reap_idle_builders_with(&run_root, now, |_, _| HorizonReport {
+            stopped: vec!["b".to_string()],
+            ..HorizonReport::default()
+        });
+        assert_eq!(report.unwrap().stopped, vec!["b".to_string()]);
+        let marker = run_root.join(CLAIMS_DIR).join(HORIZON_REAP_MARKER);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "20000000");
+        // Fresh stamp: skipped without running the pass.
+        let report = maybe_reap_idle_builders_with(&run_root, now, |_, _| panic!("must not reap"));
+        assert!(report.is_none());
 
         std::fs::remove_dir_all(&root).unwrap();
     }
