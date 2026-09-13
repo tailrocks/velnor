@@ -263,7 +263,10 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
     assert!(project.contains("runners = \"both\""), "{project}");
-    assert!(project.contains("automatic = \"both\""), "{project}");
+    assert!(
+        !project.contains("automatic"),
+        "packaged plan rejects unknown field automatic: {project}"
+    );
     let main = generated.workflow("ci-main.yml");
     assert!(
         main.contains("rev: ${{ github.sha }}"),

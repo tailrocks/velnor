@@ -709,7 +709,9 @@ impl ProjectConfig {
         let _ = writeln!(output, "verified = {}", self.verified);
         write_toml_string(&mut output, "default_branch", &self.default_branch);
         write_toml_string(&mut output, "runners", self.runners.as_str());
-        write_toml_string(&mut output, "automatic", self.automatic.as_str());
+        // `automatic` is generation-time only. Packaged `velnor-workflow plan`
+        // on Velnor deny_unknown_fields-rejects it. Lane choice is baked into
+        // generated `if:`.
         output.push('\n');
         output.push_str("[analysis]\n");
         write_toml_string(&mut output, "method", &self.analysis.method);
@@ -8423,7 +8425,10 @@ channel = "stable"
             "project.toml",
         );
         assert!(project.contains("runners = \"both\""), "{project}");
-        assert!(project.contains("automatic = \"both\""), "{project}");
+        assert!(
+            !project.contains("automatic"),
+            "packaged plan rejects unknown field automatic: {project}"
+        );
         let main = must_some(
             files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
             "ci-main.yml",
