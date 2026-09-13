@@ -170,7 +170,7 @@ jobs:
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
   ci-required:
-    name: Required
+    name: ci-required
     if: ${{ always() }}
     needs: [plan, group-bun, group-docker, group-docs, group-opentofu, group-rust]
     runs-on: ubuntu-24.04
@@ -413,3 +413,13 @@ jobs:
               *) echo "unselected CI unit rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
+  required:
+    name: Required
+    if: ${{ always() }}
+    needs: [ci-required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Mirror CI / Required
+        if: ${{ needs.ci-required.result != 'success' }}
+        run: exit 1

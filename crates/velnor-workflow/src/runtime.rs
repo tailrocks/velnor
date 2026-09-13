@@ -2040,10 +2040,15 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let velnor_lane_gate = format!(
         "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
+    let velnor_dispatch_only_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
         || value == velnor_lane_gate
         || value == format!("always()&&{velnor_lane_gate}")
+        || value == velnor_dispatch_only_gate
+        || value == format!("always()&&{velnor_dispatch_only_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
