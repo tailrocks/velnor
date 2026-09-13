@@ -2699,7 +2699,30 @@ pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
 }
 
 pub(crate) fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
-    !(lane == RunnerMode::Velnor && unit.kind == UnitKind::Swift)
+    lane_supports_unit_kind(lane, unit.kind)
+}
+
+/// Whether `lane` can execute a unit of `kind`. This is the canonical
+/// runner-support rule: unit-surface rendering and runner-aware planning both
+/// delegate here, so a kind the Velnor lane cannot run is skipped in
+/// rendering and excluded from a velnor-only selection by the same
+/// predicate.
+pub(crate) fn lane_supports_unit_kind(lane: RunnerMode, kind: UnitKind) -> bool {
+    !(lane == RunnerMode::Velnor && kind == UnitKind::Swift)
+}
+
+/// Whether the selected `runners` can execute a unit of `kind`: at least one
+/// selected runner must support it. A velnor-only selection drops whatever
+/// the Velnor lane cannot run; `github` and `both` keep every known kind
+/// because the GitHub lane runs them all.
+pub(crate) fn runners_support_unit_kind(runners: RunnerMode, kind: UnitKind) -> bool {
+    match runners {
+        RunnerMode::Both => {
+            lane_supports_unit_kind(RunnerMode::Github, kind)
+                || lane_supports_unit_kind(RunnerMode::Velnor, kind)
+        }
+        lane => lane_supports_unit_kind(lane, kind),
+    }
 }
 
 #[allow(dead_code)]
@@ -8178,6 +8201,64 @@ channel = "stable"
         assert!(crate_workflow.contains("inputs:\n      unit:"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
+    }
+
+    #[test]
+    fn plan_step_consumes_the_dispatch_runner_input_in_every_mode() {
+        // The dispatch `runner` input exists on every aggregate, so every
+        // mode wires it into the plan step: a velnor-only dispatch plans a
+        // velnor-only selection, while automatic events plan unfiltered.
+        let consumer = "VELNOR_RUNNER: ${{ github.event.inputs.runner || '' }}";
+        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let config = scanned_fixture(runners);
+            let generator = WorkflowIr::from_config(&config);
+            for aggregate in [
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+            ] {
+                assert!(aggregate.contains(consumer), "{runners:?}: {aggregate}");
+                // The consumer sits in the plan step.
+                let plan = must_some(aggregate.find("  plan:"), "plan job");
+                let runner_env = must_some(aggregate.find(consumer), "plan runner env");
+                assert!(plan < runner_env, "{runners:?}: {aggregate}");
+            }
+        }
+    }
+
+    #[test]
+    fn admitted_runners_support_every_kind_but_velnor_only_swift() {
+        let kinds = [
+            UnitKind::Rust,
+            UnitKind::Gradle,
+            UnitKind::Node,
+            UnitKind::Bun,
+            UnitKind::Swift,
+            UnitKind::OpenTofu,
+            UnitKind::Docker,
+            UnitKind::Homebrew,
+            UnitKind::Docs,
+        ];
+        for kind in kinds {
+            assert!(
+                runners_support_unit_kind(RunnerMode::Github, kind),
+                "{kind:?}"
+            );
+            assert!(
+                runners_support_unit_kind(RunnerMode::Both, kind),
+                "{kind:?}"
+            );
+            assert_eq!(
+                runners_support_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+            assert_eq!(
+                lane_supports_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

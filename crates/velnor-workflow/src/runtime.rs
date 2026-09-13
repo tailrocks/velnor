@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use super::primitives::snapshot::{
     plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
 };
-use super::GeneratorError;
+use super::{runners_support_unit_kind, GeneratorError, RunnerMode, UnitKind};
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const TRUSTED_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
@@ -536,7 +536,12 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
     let base = env::var("BASE_SHA").unwrap_or_default();
     let head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
+    let runners = plan_runner()?;
+    let selection = selection_for_runner(
+        &config,
+        selection_for_diff(&root, &config, scope, &base, &head)?,
+        runners,
+    );
     let units = selection
         .units
         .iter()
@@ -664,6 +669,58 @@ fn scope_name(scope: Scope) -> &'static str {
     match scope {
         Scope::Affected => "affected",
         Scope::Full => "full",
+    }
+}
+
+/// The runners selected for this plan, from the `VELNOR_RUNNER` environment
+/// the plan step sets to the dispatch `runner` input. Absent or empty means
+/// `both`: automatic events and local runs plan without runner filtering,
+/// exactly as before.
+fn plan_runner() -> Result<RunnerMode, GeneratorError> {
+    plan_runner_for_value(env::var("VELNOR_RUNNER").unwrap_or_default().as_str())
+}
+
+fn plan_runner_for_value(value: &str) -> Result<RunnerMode, GeneratorError> {
+    match value.trim() {
+        "" | "both" => Ok(RunnerMode::Both),
+        "velnor" => Ok(RunnerMode::Velnor),
+        "github" => Ok(RunnerMode::Github),
+        other => Err(GeneratorError::usage(format!(
+            "unsupported CI runner `{other}`: use velnor, github, or both"
+        ))),
+    }
+}
+
+/// Narrow a diff selection to the units the selected `runners` can execute.
+/// A velnor-only dispatch drops whatever the Velnor lane cannot run (Swift
+/// units); the required gate already tolerates `skipped` for unselected
+/// units, so the excluded callers stay green instead of failing a selection
+/// they can never satisfy. Units of an unknown kind are kept: dropping a
+/// unit the planner does not recognize would silently skip verification.
+fn selection_for_runner<'a>(
+    config: &'a CiConfig,
+    selection: UnitSelection<'a>,
+    runners: RunnerMode,
+) -> UnitSelection<'a> {
+    let kinds = config
+        .unit
+        .iter()
+        .map(|unit| (unit.id.as_str(), unit.kind.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let supported = |kind: &str| {
+        UnitKind::from_prefix(kind).is_none_or(|parsed| runners_support_unit_kind(runners, parsed))
+    };
+    UnitSelection {
+        units: selection
+            .units
+            .into_iter()
+            .filter(|unit| supported(unit.kind.as_str()))
+            .collect(),
+        full_units: selection
+            .full_units
+            .into_iter()
+            .filter(|id| kinds.get(id.as_str()).is_none_or(|kind| supported(kind)))
+            .collect(),
     }
 }
 
@@ -2909,6 +2966,164 @@ velnor_full_commands = ["cargo test --manifest-path 'crates/bench/Cargo.toml'"]
 
     fn selected_id_set(selection: &UnitSelection<'_>) -> BTreeSet<String> {
         selection.units.iter().map(|unit| unit.id.clone()).collect()
+    }
+
+    fn runner_selection_config() -> CiConfig {
+        let unit = |id: &str, kind: &str| CiUnit {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            kind: kind.to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["**".to_owned()],
+            github_pr_commands: vec!["true".to_owned()],
+            github_full_commands: vec!["true".to_owned()],
+            velnor_pr_commands: vec!["true".to_owned()],
+            velnor_full_commands: vec!["true".to_owned()],
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+        };
+        CiConfig {
+            schema: 2,
+            repository: String::new(),
+            profile: String::new(),
+            verified: true,
+            default_branch: "main".to_owned(),
+            runners: "both".to_owned(),
+            analysis: Analysis::default(),
+            workflow: Workflow::default(),
+            release: Release::default(),
+            unit: vec![
+                unit("rust-app", "rust"),
+                unit("swift-app", "swift"),
+                unit("future-app", "quantum"),
+            ],
+        }
+    }
+
+    #[test]
+    fn plan_runner_defaults_to_both_and_rejects_unknown_runners() {
+        assert_eq!(
+            must(plan_runner_for_value(""), "empty runner"),
+            RunnerMode::Both
+        );
+        assert_eq!(
+            must(plan_runner_for_value("both"), "both runners"),
+            RunnerMode::Both
+        );
+        assert_eq!(
+            must(plan_runner_for_value("velnor"), "velnor runner"),
+            RunnerMode::Velnor
+        );
+        assert_eq!(
+            must(plan_runner_for_value("github"), "github runner"),
+            RunnerMode::Github
+        );
+        let result = plan_runner_for_value("self-hosted");
+        assert!(
+            result.as_ref().is_err_and(|error| error
+                .to_string()
+                .contains("unsupported CI runner `self-hosted`")),
+            "unknown runners must fail closed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn velnor_only_selection_drops_swift_but_keeps_unknown_kinds() {
+        let config = runner_selection_config();
+        let narrowed = selection_for_runner(
+            &config,
+            must(full_selection(&config), "full selection"),
+            RunnerMode::Velnor,
+        );
+        let ids = narrowed
+            .units
+            .iter()
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["rust-app", "future-app"]);
+        assert_eq!(
+            narrowed.full_units,
+            ["future-app", "rust-app"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
+            let narrowed = selection_for_runner(
+                &config,
+                must(full_selection(&config), "full selection"),
+                runners,
+            );
+            let ids = narrowed
+                .units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec!["rust-app", "swift-app", "future-app"],
+                "{runners:?}"
+            );
+            assert_eq!(narrowed.full_units.len(), 3, "{runners:?}");
+        }
+    }
+
+    #[test]
+    fn velnor_only_selection_prunes_full_marks_of_excluded_units() {
+        let config = runner_selection_config();
+        let units = config.unit.iter().collect::<Vec<_>>();
+        let selection = UnitSelection {
+            units,
+            full_units: ["swift-app"].into_iter().map(str::to_owned).collect(),
+        };
+        let narrowed = selection_for_runner(&config, selection, RunnerMode::Velnor);
+        assert!(narrowed.full_units.is_empty());
+        assert!(narrowed.units.iter().all(|unit| unit.id != "swift-app"));
+    }
+
+    #[test]
+    fn velnor_only_plan_output_excludes_swift_and_empties_its_matrix() -> Result<(), Box<dyn Error>>
+    {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "velnor-workflow-runner-matrices-{}-{id}",
+            std::process::id()
+        ));
+        let config = runner_selection_config();
+        let narrowed = selection_for_runner(
+            &config,
+            full_selection(&config).map_err(|error| error.to_string())?,
+            RunnerMode::Velnor,
+        );
+        let units = narrowed
+            .units
+            .iter()
+            .map(|unit| unit.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(!units.contains("swift-app"), "units={units}");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        write_kind_matrices(&mut file, &config, &narrowed, &path)
+            .map_err(|error| error.to_string())?;
+        drop(file);
+        let output = std::fs::read_to_string(&path)?;
+        std::fs::remove_file(&path)?;
+        assert!(
+            output.contains("swift_matrix=[]"),
+            "swift matrix must be empty: {output}"
+        );
+        assert!(
+            output.contains("rust_matrix=[{")
+                && output.contains("rust-app")
+                && output.contains("quantum_matrix=[{"),
+            "supported kinds keep their matrices: {output}"
+        );
+        Ok(())
     }
 
     #[test]
