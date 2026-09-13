@@ -55,6 +55,11 @@ impl Generated {
 fn copy_fixture(destination: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-workspace");
     copy_tree(&source, destination);
+    fs::write(
+        destination.join(".markdownlint-cli2.yaml"),
+        "config:\n  default: true\n",
+    )
+    .unwrap();
     destination.to_path_buf()
 }
 

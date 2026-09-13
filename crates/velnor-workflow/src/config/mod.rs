@@ -14,7 +14,7 @@
 
 pub(crate) mod canonical;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -220,6 +220,10 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// Additional mise tool ids the unit's jobs install when the scanner
+    /// cannot observe a runtime-invoked tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mise_tools: Option<Vec<String>>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -383,6 +387,10 @@ impl UnitSection {
 
     pub(crate) fn tool_version(&self) -> Option<&str> {
         self.tool_version.as_deref()
+    }
+
+    pub(crate) fn mise_tools(&self) -> Option<&[String]> {
+        self.mise_tools.as_deref()
     }
 }
 
@@ -842,6 +850,28 @@ fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorErro
     Ok(())
 }
 
+/// A mise tool id renders verbatim into a job's `install_args`, so it must be a
+/// backend-qualified plain id: no versions, whitespace, traversal, or shell
+/// metacharacters.
+fn valid_mise_tool_id(value: &str) -> bool {
+    let Some((backend, path)) = value.split_once(':') else {
+        return false;
+    };
+    let path_segments = path.split('/').collect::<Vec<_>>();
+    !backend.is_empty()
+        && !path.is_empty()
+        && value.matches(':').count() == 1
+        && backend
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && path_segments
+            .iter()
+            .all(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
+        })
+}
+
 /// Unit rows either override a scanned unit by id or add one. Two rows for one
 /// id would make the effective contract depend on which one the reader trusts,
 /// so the second row is refused instead of merged.
@@ -868,6 +898,26 @@ fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
             return Err(GeneratorError::usage(format!(
                     "[[unit]] {id} declares `[unit.cache]` without both `key_files` and `paths`; a partial cache contract cannot be keyed"
                 )));
+        }
+        if let Some(tools) = row.mise_tools.as_deref() {
+            if tools.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[unit]] {id} declares an empty mise_tools; omit it or name the tools the unit needs"
+                )));
+            }
+            let mut seen = BTreeSet::new();
+            for tool in tools {
+                if !valid_mise_tool_id(tool) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[unit]] {id} declares mise tool {tool}, which is not a backend-qualified plain tool id; use ids such as github:owner/repo without versions, whitespace, traversal, or shell metacharacters"
+                    )));
+                }
+                if !seen.insert(tool) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[unit]] {id} declares mise tool {tool} more than once"
+                    )));
+                }
+            }
         }
     }
     for (index, left) in units.iter().enumerate() {
@@ -1331,6 +1381,96 @@ mod tests {
             error.contains(&format!("available units: {available}")),
             "error lists the scanned units: {error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_mise_tools_require_unique_qualified_plain_ids() {
+        let root = scanned_root("mise-tools");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let unit = unit_ids.first().cloned().unwrap_or_default();
+        let valid = format!(
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["github:open-telemetry/weaver", "aqua:nextest-rs/nextest/cargo-nextest"]
+"#
+        );
+        must(
+            config_for(&valid).validate(&unit_ids, &package_update_blocks()),
+            "qualified plain tool ids validate",
+        );
+        for rejected in [
+            "",
+            "weaver",
+            "github:open-telemetry/weaver@0.24.2",
+            "github:open-telemetry//weaver",
+            "github:../weaver",
+            "github:open-telemetry/weaver;touch",
+        ] {
+            let text = format!(
+                r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["{rejected}"]
+"#
+            );
+            let error = must_some_error(
+                config_for(&text)
+                    .validate(&unit_ids, &package_update_blocks())
+                    .err(),
+                "invalid mise tool must fail",
+            );
+            assert!(
+                error.contains("mise tool"),
+                "error names the mise tool contract: {error}"
+            );
+        }
+        let empty = format!(
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = []
+"#
+        );
+        let error = must_some_error(
+            config_for(&empty)
+                .validate(&unit_ids, &package_update_blocks())
+                .err(),
+            "empty mise_tools must fail",
+        );
+        assert!(error.contains("empty mise_tools"), "{error}");
+        let duplicate = format!(
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
+"#
+        );
+        let error = must_some_error(
+            config_for(&duplicate)
+                .validate(&unit_ids, &package_update_blocks())
+                .err(),
+            "duplicate mise_tools must fail",
+        );
+        assert!(error.contains("more than once"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 

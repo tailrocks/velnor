@@ -257,6 +257,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Run Docker checks
         env:
           CI_SCOPE: ${{ inputs.scope }}

@@ -160,6 +160,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 mutable_mount_seed: false,
             }),
             tool_version: None,
+            mise_tools: Vec::new(),
             toolchain: None,
         };
         unit.watch.sort();
