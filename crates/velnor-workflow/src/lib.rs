@@ -8344,6 +8344,54 @@ channel = "stable"
     }
 
     #[test]
+    fn both_with_automatic_velnor_plans_on_velnor_and_keeps_github_dispatch() {
+        let mut config = scanned_fixture(RunnerMode::Both);
+        config.automatic = RunnerMode::Velnor;
+        config.pull_request_on_velnor = true;
+        let pr = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
+        assert!(pr.contains("default: velnor"), "{pr}");
+        assert!(!pr.contains("default: github"), "{pr}");
+        assert!(pr.contains("  github-") || pr.contains("name: \"GitHub /"), "{pr}");
+        let plan = pr
+            .split("\n  plan:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  group-").next())
+            .unwrap_or(&pr);
+        assert!(
+            plan.contains("runs-on: [self-hosted, example-runner-label]"),
+            "automatic=velnor Planning must run on Velnor: {plan}"
+        );
+        assert!(
+            !plan.contains("runs-on: ubuntu-24.04"),
+            "automatic=velnor Planning must not use GitHub-hosted: {plan}"
+        );
+        let unit = must(
+            generated_files(&config),
+            "generate units",
+        );
+        let rust = must_some(
+            unit.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "rust unit",
+        );
+        let github_if = rust
+            .lines()
+            .find(|line| line.contains("github.event.inputs.runner == 'github'"))
+            .unwrap_or("");
+        assert!(
+            github_if.contains("workflow_dispatch"),
+            "GitHub lane stays dispatch-only when automatic=velnor: {github_if}"
+        );
+        assert!(
+            !github_if.contains("pull_request"),
+            "automatic=velnor must not auto-run GitHub on pull_request: {github_if}"
+        );
+        assert!(
+            rust.contains("setup-velnor-workflow"),
+            "GitHub units self-bootstrap when Planning is on Velnor: {rust}"
+        );
+    }
+
+    #[test]
     fn both_with_automatic_github_runs_github_on_pr_and_keeps_velnor_manual() {
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Github;

@@ -1157,8 +1157,11 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let display_name = check_name;
-        let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
@@ -1168,7 +1171,7 @@ impl WorkflowIr {
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
             needs.join(", "),
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         if simulate_failure {
             let simulate = github_expression("inputs.simulate_failure");
@@ -1201,21 +1204,24 @@ impl WorkflowIr {
             );
         }
         if check_name == "ci-required" {
-            let required_gate = if self.runners == RunnerMode::Velnor {
-                format!("always() && {}", self.velnor_control_plane_expression())
+            let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+                format!(
+                    "always() && ({})",
+                    self.velnor_control_plane_expression()
+                )
             } else {
                 "always()".to_owned()
             };
             let _ = writeln!(
                 output,
                 "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
-                self.runner_for(self.runners)
+                self.runner_for(self.control_plane_lane())
             );
         }
     }
 
     pub(crate) fn render_nightly_alert(&self, output: &mut String) {
-        let if_condition = if self.runners == RunnerMode::Velnor {
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
             format!(
                 "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
                 self.default_branch
@@ -1226,7 +1232,7 @@ impl WorkflowIr {
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
 Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
@@ -1428,7 +1434,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
         self.render_unit_runtime(output, lane, unit);
@@ -1543,23 +1549,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
-        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+        if self.control_plane_lane() != RunnerMode::Github
+            || self.runners == RunnerMode::Velnor
+            || unit.kind == UnitKind::Swift
+        {
             Self::render_workflow_runtime_setup(output, lane);
         } else {
             Self::render_workflow_runtime_download(output, lane);
         }
     }
 
+    fn control_plane_lane(&self) -> RunnerMode {
+        match self.automatic {
+            RunnerMode::Velnor => RunnerMode::Velnor,
+            RunnerMode::Github | RunnerMode::Both => RunnerMode::Github,
+        }
+    }
+
     pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
-        // Planning follows config.runners. Velnor uses the image-provided
-        // runtime. GitHub planning pins `uses:` to SOURCE_REV and installs
-        // `${{ github.sha }}` so same-repo PR / default-branch push `plan`
-        // understands generation-time fields such as `automatic`.
-        let runners = if self.runners == RunnerMode::Velnor {
-            RunnerMode::Velnor
-        } else {
-            RunnerMode::Github
-        };
+        // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
+        // the control plane off GitHub-hosted runners. `automatic = both`
+        // plans on GitHub so this repository can compare lanes. GitHub
+        // planning pins `uses:` to SOURCE_REV and installs `${{ github.sha }}`
+        // so same-repo `plan` understands generation-time fields.
+        let runners = self.control_plane_lane();
         let gate = if runners == RunnerMode::Velnor {
             format!(
                 "    if: ${{{{ {} }}}}\n",
@@ -1674,9 +1687,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                         self.automatic_event_expression()
                     )
                 } else {
-                    format!(
-                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || ({dispatch_github})"
-                    )
+                    dispatch_github.to_owned()
                 }
             }
             RunnerMode::Velnor => {
@@ -2208,8 +2219,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
             }
         }
-        let gate = if runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
@@ -2219,7 +2233,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             output,
             "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
-            self.runner_for(runners),
+            self.runner_for(self.control_plane_lane()),
         );
         for job in needs
             .iter()
@@ -2242,15 +2256,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
             );
         }
-        let required_gate = if runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
         let _ = writeln!(
             output,
             "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
-            self.runner_for(runners)
+            self.runner_for(self.control_plane_lane())
         );
     }
 }
