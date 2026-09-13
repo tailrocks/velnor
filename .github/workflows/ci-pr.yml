@@ -42,8 +42,7 @@ permissions:
 jobs:
   plan:
     name: Planning
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       units: ${{ steps.plan.outputs.units }}
@@ -59,6 +58,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        with:
+          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -146,9 +152,9 @@ jobs:
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ always() }}
     needs: [plan, group-bun, group-docker, group-docs, group-opentofu, group-rust]
-    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results

@@ -8204,6 +8204,17 @@ channel = "stable"
     }
 
     #[test]
+    fn both_runner_policy_entrypoint_stays_on_hosted_runner() {
+        let policy = generated_ci_policy(&scanned_fixture(RunnerMode::Both));
+        assert!(policy.contains("runs-on: ubuntu-24.04"));
+        assert!(policy.contains("backend: github"));
+        assert!(policy.contains("sparse-checkout: |"));
+        assert!(policy.contains("allow-unsafe-pr-checkout: true"));
+        assert!(!policy.contains("group: velnor-trusted"));
+        assert!(!policy.contains("backend: local"));
+    }
+
+    #[test]
     fn generated_workflows_keep_pr_affected_and_main_full_triggers_distinct() {
         let config = scanned_fixture(RunnerMode::Both);
         let generator = WorkflowIr::from_config(&config);
