@@ -365,6 +365,8 @@ pub(crate) struct Rendered {
     pub(crate) nodes: Vec<GraphNode>,
     /// Unit contract updates, replacing the scanned unit of the same id.
     pub(crate) units: Vec<Unit>,
+    /// Per-unit pipeline contracts carried into the shared kind reusable.
+    pub(crate) contracts: BTreeMap<String, UnitContract>,
 }
 
 /// One node of the generated CI graph.
@@ -640,6 +642,8 @@ pub(crate) struct Surface {
     pub(crate) files: BTreeMap<PathBuf, String>,
     /// Unit contracts after the unit-contract primitives ran.
     pub(crate) units: Vec<Unit>,
+    /// Per-unit pipeline contracts after the declared rows were resolved.
+    pub(crate) contracts: BTreeMap<String, UnitContract>,
     /// Workflow file names a declared row adds to the owned surface: a
     /// release-side family the scan did not own becomes owned by declaring it.
     pub(crate) added_files: Vec<String>,
@@ -656,6 +660,10 @@ pub(crate) struct Surface {
 /// Returns a usage error for a declaration that names an unknown primitive, a
 /// unit the scan did not produce, a file the surface does not own, or an
 /// argument the primitive does not accept.
+#[expect(
+    clippy::too_many_lines,
+    reason = "generation stages contract resolution, rendering, and ownership in one transaction"
+)]
 pub(crate) fn generate(
     root: &std::path::Path,
     shape: &RepositoryShape,
@@ -718,6 +726,7 @@ pub(crate) fn generate(
     // Per-unit pipelines, then the plan, then the aggregates that compose both.
     let mut files = BTreeMap::new();
     let mut nodes = Vec::new();
+    let mut contracts = BTreeMap::new();
     for row in rows.iter().filter(|row| !row.unit_contract) {
         let unit = row
             .units
@@ -749,6 +758,7 @@ pub(crate) fn generate(
             }
         }
         nodes.extend(rendered.nodes);
+        merge_pipeline_contracts(&mut contracts, rendered.contracts)?;
     }
 
     // A declared file family can add a workflow the scan did not own: a
@@ -774,8 +784,23 @@ pub(crate) fn generate(
     Ok(Surface {
         files,
         units,
+        contracts,
         added_files,
     })
+}
+
+fn merge_pipeline_contracts(
+    contracts: &mut BTreeMap<String, UnitContract>,
+    updates: BTreeMap<String, UnitContract>,
+) -> Result<(), GeneratorError> {
+    for (unit_id, contract) in updates {
+        if contracts.insert(unit_id.clone(), contract).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "two declared pipeline rows configure unit `{unit_id}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A file a non-surface renderer owns cannot be added by a declaration: the
