@@ -319,22 +319,7 @@ impl Store {
             "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
              FROM instances WHERE instance_slug = ?1",
             [instance_slug],
-            |row| {
-                let version = row.get::<_, i64>(3)?;
-                Ok(LifecycleInstanceRow {
-                    instance_slug: row.get(0)?,
-                    desired_state: row.get(1)?,
-                    observed_state: row.get(2)?,
-                    resource_version: version
-                        .try_into()
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
-                    desired_slots: row
-                        .get::<_, Option<i64>>(4)?
-                        .map(|slots| slots.try_into())
-                        .transpose()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
-            },
+            lifecycle_instance_row,
         )
         .optional()
         .map_err(Into::into)
@@ -468,6 +453,66 @@ impl Store {
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
                 created_at: accepted_at,
+            },
+            true,
+        ))
+    }
+
+    /// Record one observed lifecycle projection write with optimistic
+    /// concurrency against `expected_version`.
+    ///
+    /// Returns the committed row with `true` for a fresh write, or the
+    /// current row with `false` when the caller's version is stale. A stale
+    /// version is convergence, not an error: another writer already advanced
+    /// the projection past this observation, so the caller adopts the
+    /// re-read row and performs no retry loop. Observed writes share the
+    /// instance's monotonic version with desired writes, so neither writer
+    /// can silently clobber the other.
+    pub fn record_lifecycle_observed(
+        &self,
+        instance_slug: &str,
+        observed_state: &str,
+        expected_version: u64,
+    ) -> StoreResult<(LifecycleInstanceRow, bool)> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<LifecycleInstanceRow> = transaction
+            .query_row(
+                "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
+                 FROM instances WHERE instance_slug = ?1",
+                [instance_slug],
+                lifecycle_instance_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::new(
+                ExitClass::Usage,
+                "store.lifecycle.instance.unknown",
+            ));
+        };
+        if current.resource_version != expected_version {
+            transaction.commit()?;
+            return Ok((current, false));
+        }
+        let next_version = current.resource_version.saturating_add(1);
+        transaction.execute(
+            "UPDATE instances SET observed_state = ?1, resource_version = ?2, updated_at = ?3
+             WHERE instance_slug = ?4",
+            params![
+                observed_state,
+                next_version as i64,
+                rfc3339(Timestamp::now()),
+                instance_slug,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((
+            LifecycleInstanceRow {
+                instance_slug: current.instance_slug,
+                desired_state: current.desired_state,
+                observed_state: observed_state.to_owned(),
+                resource_version: next_version,
+                desired_slots: current.desired_slots,
             },
             true,
         ))
@@ -615,7 +660,8 @@ impl Store {
                 detail,
             ],
         )?;
-        let committed = record_slot_transition_in_transaction(&transaction, identity, &transition)?;
+        let committed =
+            record_slot_transition_in_transaction(self, &transaction, identity, &transition)?;
         if committed {
             prune_slot_transition_requests(&transaction, identity)?;
         }
@@ -623,13 +669,16 @@ impl Store {
         Ok(committed)
     }
 
-    /// Atomically advance current slot state and append its correlated event.
+    /// Atomically advance the materialized slot state and append its correlated event.
     ///
     /// Identity is immutable after first observation. A lower generation is a
     /// stale owner and fails closed. Within one generation, lower sequences
     /// are idempotent stale replays, equal sequences must reproduce the exact
-    /// token/correlation/target, and higher sequences must follow the closed
-    /// [`SlotPhase`] graph. A newer generation establishes fresh ownership.
+    /// token/correlation/target, and higher sequences project through
+    /// [`project_slot_transition`] over the closed [`SlotPhase`] graph.
+    /// Refused edges are counted (see [`Store::illegal_transition_edges`])
+    /// and fail closed; never applied, never silent. A newer generation
+    /// establishes fresh ownership.
     ///
     /// Returns `true` for a committed transition and `false` for a replay.
     ///
@@ -644,7 +693,8 @@ impl Store {
     ) -> StoreResult<bool> {
         let mut conn = self.lock_conn()?;
         let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let committed = record_slot_transition_in_transaction(&transaction, identity, transition)?;
+        let committed =
+            record_slot_transition_in_transaction(self, &transaction, identity, transition)?;
         transaction.commit()?;
         Ok(committed)
     }
@@ -737,6 +787,22 @@ impl Store {
 
     /// Insert or refresh a sanitized job summary keyed by
     /// `(instance_slug, job_uid)`.
+    ///
+    /// Admission is gated on the run/attempt identity: a row missing
+    /// either is rejected with `store.job.summary.unidentified`, and a
+    /// row carrying a negative (or an attempt above `u32::MAX`) with
+    /// `store.job.summary.range`. Such a row would stay readable via
+    /// [`Store::job_summaries`] and drivable via
+    /// [`Store::record_job_transition`]; only the `decode_summary_row`
+    /// paths (`fetch_summary*`) break on it. The gate covers new
+    /// admissions (and refreshes) only: pre-existing rows are untouched,
+    /// since no backfill can invent their external identity and deleting
+    /// them would destroy legitimate records.
+    ///
+    /// This is the out-of-band seeding seam: `phase` is written verbatim
+    /// with no edge check (pre-existing wart, preserved not introduced).
+    /// Only the transition paths project through
+    /// [`project_job_transition`].
     ///
     /// # Errors
     /// Envelope-classified persistence failures.
@@ -884,7 +950,13 @@ impl Store {
         }
         insert_summary(&transaction, summary)?;
         ensure_job_storage_reservation(&transaction, instance_slug, job_uid)?;
-        record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
+        record_job_transition_in_transaction(
+            self,
+            &transaction,
+            instance_slug,
+            job_uid,
+            transition,
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -934,7 +1006,13 @@ impl Store {
         if additional_reservation_bytes != 0 {
             insert_job_storage_reservation(&transaction, instance_slug, job_uid)?;
         }
-        record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
+        record_job_transition_in_transaction(
+            self,
+            &transaction,
+            instance_slug,
+            job_uid,
+            transition,
+        )?;
         transaction.commit()?;
         Ok(status)
     }
@@ -996,9 +1074,16 @@ impl Store {
         Ok(Some(decode_summary_row(row)?))
     }
 
-    /// Atomically apply one transition under the enforced job state machine:
+    /// Atomically apply one transition to the materialized job state:
     /// update the job's current-state row and append its event in a single
     /// transaction.
+    ///
+    /// The `jobs.phase` column is a materialized view: the write projects
+    /// the current row through [`project_job_state`], projects the
+    /// candidate edge through [`project_job_transition`], and stores the
+    /// projected target. Refused edges are counted (see
+    /// [`Store::illegal_transition_edges`]) and fail closed; never applied,
+    /// never silent.
     ///
     /// Validation order is deliberate:
     /// 1. the job must exist (`store.job.missing`, `UNAVAILABLE`);
@@ -1032,8 +1117,13 @@ impl Store {
         // the whole wait instead.
         let transaction =
             conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let applied =
-            record_job_transition_in_transaction(&transaction, instance_slug, job_uid, transition)?;
+        let applied = record_job_transition_in_transaction(
+            self,
+            &transaction,
+            instance_slug,
+            job_uid,
+            transition,
+        )?;
         transaction.commit()?;
         Ok(applied)
     }
@@ -1349,7 +1439,45 @@ impl Store {
     }
 }
 
+/// One refused slot edge: the materialized `from` phase and the rejected
+/// candidate target. The write path counts it and fails closed; an illegal
+/// edge is never applied and never silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IllegalSlotEdge {
+    pub from: SlotPhase,
+    pub target: SlotPhase,
+}
+
+/// Project the observable [`SlotPhase`] from one materialized slot row.
+///
+/// The `slots` table is a materialized view: writers persist the winning
+/// target and readers observe exactly this projection, so the stored phase
+/// and the observable phase cannot disagree.
+#[must_use]
+pub fn project_slot_phase(row: &SlotRow) -> SlotPhase {
+    row.phase
+}
+
+/// Project the next materialized slot phase for one candidate target
+/// within its generation.
+///
+/// The closed [`slot_transition_allowed`] graph asserts the edge; a
+/// missing row or a newer generation establishes fresh ownership and is
+/// projected by the caller without consulting the graph. Pure read:
+/// writes and counts nothing.
+pub fn project_slot_transition(
+    from: SlotPhase,
+    target: SlotPhase,
+) -> Result<SlotPhase, IllegalSlotEdge> {
+    if slot_transition_allowed(from, target) {
+        Ok(target)
+    } else {
+        Err(IllegalSlotEdge { from, target })
+    }
+}
+
 fn record_slot_transition_in_transaction(
+    store: &Store,
     transaction: &Transaction<'_>,
     identity: &SlotIdentity,
     transition: &SlotTransition,
@@ -1395,7 +1523,7 @@ fn record_slot_transition_in_transaction(
                         params![identity.instance_slug, identity.slot_id.0],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )?;
-                if current.phase == transition.target
+                if project_slot_phase(&current) == transition.target
                     && current.job_name == transition.job_name
                     && prior.0.as_deref() == Some(transition.token.as_str())
                     && prior.1.as_deref() == Some(transition.correlation_id.as_str())
@@ -1411,15 +1539,16 @@ fn record_slot_transition_in_transaction(
                     "reuse a slot transition sequence only with its original token, correlation, and target phase",
                 ));
             }
-            if !slot_transition_allowed(current.phase, transition.target) {
+            if let Err(edge) = project_slot_transition(current.phase, transition.target) {
+                store.note_illegal_transition_edge();
                 return Err(
                     StoreError::new(ExitClass::Conflict, "store.slot.transition.illegal")
                         .with_remediation(format!(
                             "slot {} generation {} cannot transition from {} to {}",
                             identity.slot_id.0,
                             transition.generation.0,
-                            current.phase.as_str(),
-                            transition.target.as_str()
+                            edge.from.as_str(),
+                            edge.target.as_str()
                         )),
                 );
             }
@@ -1902,6 +2031,23 @@ fn lifecycle_operation_query(
         .map_err(Into::into)
 }
 
+fn lifecycle_instance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LifecycleInstanceRow> {
+    let version = row.get::<_, i64>(3)?;
+    Ok(LifecycleInstanceRow {
+        instance_slug: row.get(0)?,
+        desired_state: row.get(1)?,
+        observed_state: row.get(2)?,
+        resource_version: version
+            .try_into()
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
+        desired_slots: row
+            .get::<_, Option<i64>>(4)?
+            .map(|slots| slots.try_into())
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
+}
+
 fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> StoreResult<()> {
     let Some(run_id) = summary.run_id() else {
         return Err(unidentified_summary());
@@ -1963,6 +2109,27 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
 }
 
 fn validate_job_row(row: &JobRow) -> StoreResult<()> {
+    // Admission gate: `decode_summary_row` requires both run_id and
+    // attempt (`u64`/`u32`), so an admitted-yet-undecodable row would
+    // break the `fetch_summary*` paths. Reject it here, like
+    // `insert_summary`. The row would stay readable via `job_summaries`
+    // and drivable via `record_job_transition`; only the decode paths
+    // break. New admissions (and refreshes) only: pre-existing rows are
+    // untouched, since no backfill can invent their external identity.
+    let Some(run_id) = row.run_id else {
+        return Err(unidentified_summary());
+    };
+    let Some(attempt) = row.attempt else {
+        return Err(unidentified_summary());
+    };
+    // run_id needs no upper bound: a non-negative i64 always fits the
+    // decode target u64.
+    if run_id < 0 {
+        return Err(summary_out_of_range("run_id"));
+    }
+    if attempt < 0 || attempt > i64::from(u32::MAX) {
+        return Err(summary_out_of_range("attempt"));
+    }
     let invalid = || {
         StoreError::new(ExitClass::Conflict, "store.job.summary.invalid")
             .with_remediation("persist summaries through the validated job-summary constructor")
@@ -2182,7 +2349,49 @@ fn query_slot_state(
     }))
 }
 
+/// One refused job edge: the materialized `from` state and the rejected
+/// reason. The write path counts it and fails closed; an illegal edge is
+/// never applied and never silently dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IllegalJobEdge {
+    pub from: JobState,
+    pub reason: EventReason,
+}
+
+/// Project the observable [`JobState`] from one materialized job row's
+/// phase cell.
+///
+/// The `jobs.phase` column is a materialized view on the transition
+/// paths: [`Store::record_job_transition`] stores exactly what
+/// [`project_job_transition`] returns for the applied edge, and every
+/// reader — including that write path's own `from` state — projects
+/// through this function, so a stored phase the closed taxonomy cannot
+/// produce fails closed instead of drifting.
+///
+/// [`Store::record_job`] is the out-of-band seeding seam: it writes
+/// `phase` verbatim with no edge check. Pre-existing wart, preserved
+/// here, not introduced.
+pub fn project_job_state(materialized_phase: &str) -> StoreResult<JobState> {
+    JobState::try_from(materialized_phase).map_err(|_| {
+        StoreError::new(ExitClass::Operation, "store.job.state.unknown")
+            .with_remediation("stored phase is not part of the closed job state taxonomy")
+    })
+}
+
+/// Project the next materialized job state for one candidate reason.
+///
+/// The closed [`transition_target`] table asserts the edge. Pure read:
+/// writes and counts nothing; the write path counts a refused edge and
+/// fails closed with `store.job.transition.illegal`.
+pub fn project_job_transition(
+    from: JobState,
+    reason: EventReason,
+) -> Result<JobState, IllegalJobEdge> {
+    transition_target(from, reason).ok_or(IllegalJobEdge { from, reason })
+}
+
 fn record_job_transition_in_transaction(
+    store: &Store,
     transaction: &Transaction<'_>,
     instance_slug: &str,
     job_uid: &str,
@@ -2224,13 +2433,11 @@ fn record_job_transition_in_transaction(
         params![instance_slug, job_uid, transition.token],
         |row| row.get(0),
     )?;
-    let from = JobState::try_from(current_phase.as_str()).map_err(|_| {
-        StoreError::new(ExitClass::Operation, "store.job.state.unknown")
-            .with_remediation("stored phase is not part of the closed job state taxonomy")
+    let from = project_job_state(&current_phase)?;
+    let target = project_job_transition(from, transition.reason).map_err(|edge| {
+        store.note_illegal_transition_edge();
+        illegal_transition_error(edge.from, edge.reason)
     })?;
-    let Some(target) = transition_target(from, transition.reason) else {
-        return Err(illegal_transition_error(from, transition.reason));
-    };
     let updated = transaction.execute(
         "UPDATE jobs SET phase = ?1, conclusion = ?2, infrastructure_category = ?3, updated_at = ?4
          WHERE instance_slug = ?5 AND job_uid = ?6",
@@ -2406,8 +2613,7 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
     let phase = match JobPhase::try_from(phase_raw.as_str()) {
         Ok(phase) => phase,
         Err(_) => {
-            let machine =
-                JobState::try_from(phase_raw.as_str()).map_err(|_| summary_decode("phase"))?;
+            let machine = project_job_state(&phase_raw).map_err(|_| summary_decode("phase"))?;
             match machine {
                 JobState::Queued => JobPhase::Queued,
                 JobState::Acquired | JobState::Waiting | JobState::Started => JobPhase::Running,
@@ -2911,6 +3117,75 @@ mod lifecycle_tests {
                 .expect("secondary has independent quota")
                 .1
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    fn open_observed_store(label: &str) -> (std::path::PathBuf, Store) {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-{label}-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        (directory, store)
+    }
+
+    fn seed_instance(store: &Store, slug: &str) {
+        store
+            .upsert_instance(&InstanceRow {
+                instance_slug: slug.to_owned(),
+                host: "test-host".to_owned(),
+                daemon_version: "test".to_owned(),
+                slots_configured: 1,
+                slots_busy: 0,
+                updated_at: Timestamp::UNIX_EPOCH,
+            })
+            .expect("seed instance");
+    }
+
+    #[test]
+    fn observed_write_advances_and_stale_version_converges_without_retry() {
+        let (directory, store) = open_observed_store("observed");
+        seed_instance(&store, "primary");
+
+        let (written, fresh) = store
+            .record_lifecycle_observed("primary", "draining", 1)
+            .expect("observed write");
+        assert!(fresh);
+        assert_eq!(written.observed_state, "draining");
+        assert_eq!(written.desired_state, "ready");
+        assert_eq!(written.resource_version, 2);
+
+        // Stale version: convergence, not an error. The caller adopts the
+        // re-read row and performs no retry loop.
+        let (converged, updated) = store
+            .record_lifecycle_observed("primary", "ready", 1)
+            .expect("stale observed converges");
+        assert!(!updated);
+        assert_eq!(converged.observed_state, "draining");
+        assert_eq!(converged.resource_version, 2);
+
+        let (rewritten, fresh) = store
+            .record_lifecycle_observed("primary", "ready", 2)
+            .expect("fresh observed write");
+        assert!(fresh);
+        assert_eq!(rewritten.observed_state, "ready");
+        assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn observed_write_for_unknown_instance_fails_closed() {
+        let (directory, store) = open_observed_store("observed-unknown");
+        let error = store
+            .record_lifecycle_observed("ghost", "draining", 1)
+            .expect_err("unknown instance must fail");
+        assert_eq!(error.envelope.reason, "store.lifecycle.instance.unknown");
         let _ = std::fs::remove_dir_all(directory);
     }
 

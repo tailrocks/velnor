@@ -927,7 +927,7 @@ fn event_loop<B: Backend>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1020,6 +1020,7 @@ mod tests {
             pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         }
     }
 

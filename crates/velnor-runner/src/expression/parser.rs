@@ -172,11 +172,16 @@ fn push_operand(context: &mut ParseContext<'_>, token: &Token) -> Result<(), Par
         TokenKind::Null | TokenKind::Boolean | TokenKind::Number | TokenKind::String => {
             Node::Literal(token.parsed_value.clone().unwrap_or(Value::Null))
         }
-        // Proof: the single caller dispatches only non-operator,
+        // The single caller dispatches only non-operator,
         // non-`Unexpected` tokens here, which are exactly the eight kinds
-        // covered above.
-        #[allow(clippy::unreachable, reason = "only operand token kinds reach here")]
-        other => unreachable!("token kind {other:?} is not an operand"),
+        // covered above — but a future `TokenKind` variant must fail closed
+        // as a parse error, never panic.
+        other => {
+            return Err(ParseError::internal(
+                context.expression,
+                &format!("token kind {other:?} is not an operand"),
+            ));
+        }
     };
 
     context.operands.push(node);
@@ -438,4 +443,55 @@ fn check_max_depth(expression: &str, node: &Node, depth: usize) -> Result<(), Pa
         check_max_depth(expression, child, depth + 1)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
+mod tests {
+    use super::*;
+
+    struct DenyAllEnv;
+
+    impl ParseEnvironment for DenyAllEnv {
+        fn is_named_value(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn function_arity(&self, _name: &str) -> Option<(usize, usize)> {
+            None
+        }
+    }
+
+    #[test]
+    fn non_operand_token_in_operand_position_fails_closed() {
+        // A non-operand kind (or a future `TokenKind` variant) reaching
+        // `push_operand` is an `Internal` parse error, never a panic: the
+        // old `unreachable!` arm aborted the parse.
+        let env = DenyAllEnv;
+        let expression = "1,";
+        let mut context = ParseContext {
+            expression,
+            lexer: LexicalAnalyzer::new(expression),
+            operands: Vec::new(),
+            operators: Vec::new(),
+            last_token: None,
+            env: &env,
+        };
+        let token = Token {
+            kind: TokenKind::Separator,
+            raw_value: ",".to_string(),
+            index: 1,
+            parsed_value: None,
+        };
+        let error = push_operand(&mut context, &token).unwrap_err();
+        assert_eq!(error.kind, ParseErrorKind::Internal);
+    }
 }

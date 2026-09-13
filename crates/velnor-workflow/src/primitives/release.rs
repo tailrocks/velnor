@@ -457,13 +457,11 @@ fn render_guest_payload_job(config: &ProjectConfig, release: &ReleaseSpec) -> Op
     ))
 }
 
-fn release_runner(target: &str) -> &'static str {
+fn release_runner(config: &ProjectConfig, target: &str) -> String {
     if target.ends_with("-apple-darwin") {
-        "macos-15"
-    } else if target.starts_with("aarch64-") {
-        "ubuntu-24.04-arm"
+        yaml_scalar(&config.macos_runner)
     } else {
-        "ubuntu-24.04"
+        yaml_scalar(&config.github_runner)
     }
 }
 
@@ -487,7 +485,7 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
 }
 
 fn release_lanes(config: &ProjectConfig, target: &str) -> Vec<(&'static str, String)> {
-    let github = || yaml_scalar(release_runner(target));
+    let github = || release_runner(config, target);
     let velnor = || configured_runner(config, RunnerMode::Velnor);
     match config.runners {
         RunnerMode::Github => vec![("github", github())],
@@ -1685,6 +1683,7 @@ mod tests {
             pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         }
     }
 
@@ -1744,11 +1743,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "8cbbf232fb8ac812fe96d6cefd7e899d36242863f3b66308a7f48d4688936ccd",
+                "edb038b53b387f9702a58b73bb1656a6a515cf68eacb7001bd3c00e81dccc867",
             ),
             (
                 "preview.yml",
-                "2bab1838bde564c65cae3ff586e1080d8b6613d6f189bbed16548eeb35046b22",
+                "c69d765692650d8da97a755e646ca79a00b2ed5a02f2d37b42d177d913be9ebe",
             ),
             (
                 "maintenance.yml",
@@ -1828,6 +1827,44 @@ mod tests {
             assert!(workflow.contains("runs-on: [self-hosted, example-runner]"));
             assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
             assert!(!workflow.contains("github-hosted"), "{workflow}");
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn release_lanes_honor_the_configured_runner_labels() {
+        let mut spec = binary_spec();
+        spec.targets.push("aarch64-apple-darwin".to_owned());
+        let mut cfg = config(&["preview.yml", "release.yml"], Some(spec));
+        cfg.runners = RunnerMode::Github;
+        cfg.github_runner = "ubuntu-custom".to_owned();
+        cfg.macos_runner = "macos-custom".to_owned();
+        let Some(release) = cfg.release.as_ref() else {
+            panic!("release fixture must carry a release contract");
+        };
+        for workflow in [
+            super::render_preview(&cfg, Some(release)),
+            super::render_release(&cfg, release),
+        ] {
+            assert!(
+                workflow.contains("runner: ubuntu-custom"),
+                "linux lanes must use the configured github runner: {workflow}"
+            );
+            assert!(
+                workflow.contains("runner: macos-custom"),
+                "apple lanes must use the configured macos runner: {workflow}"
+            );
+            assert!(
+                !workflow.contains("macos-15"),
+                "no hardcoded macos label may survive: {workflow}"
+            );
+            assert!(
+                !workflow.contains("ubuntu-24.04-arm"),
+                "no hardcoded arm label may survive: {workflow}"
+            );
         }
     }
 

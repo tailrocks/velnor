@@ -1487,7 +1487,11 @@ fn inject_job_cgroup_parent_value(
             bail!("Docker container create HostConfig must be an object, got {other}");
         }
     };
-    reject_unsafe_nested_host_controls(&host_config, owned_volume_names)?;
+    let image = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Image"))
+        .and_then(|(_, value)| value.as_str());
+    reject_unsafe_nested_host_controls(&host_config, owned_volume_names, image)?;
     if let Some(alias) = host_config
         .keys()
         .find(|key| key.as_str() != "CgroupParent" && key.eq_ignore_ascii_case("CgroupParent"))
@@ -1536,6 +1540,7 @@ fn reject_unsafe_volume_create_value(value: &Value) -> Result<()> {
 fn reject_unsafe_nested_host_controls(
     host_config: &Map<String, Value>,
     _owned_volume_names: &BTreeSet<String>,
+    image: Option<&str>,
 ) -> Result<()> {
     reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
     for (key, value) in host_config {
@@ -1544,17 +1549,21 @@ fn reject_unsafe_nested_host_controls(
             "pidmode" | "ipcmode" | "cgroupnsmode" | "usernsmode" | "utsmode" => {
                 !is_default_mode(value)
             }
+            // Live docker/build-push-action starts BuildKit with Privileged.
+            // That is nested engine bootstrap, not a general guest escape.
+            // Any other image stays denied.
             "privileged" => match value {
                 Value::Null | Value::Bool(false) => false,
-                Value::Bool(true) => true,
+                Value::Bool(true) => !is_buildkit_image(image),
                 _ => true,
             },
             "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
             | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
             | "publishallports" | "containeridfile" => is_strict_value_present(value),
             // Live API 1.55: `{"Name":"no","MaximumRetryCount":0}` is the
-            // default (no restart). `always` / `on-failure` stay denied.
-            "restartpolicy" => !is_default_restart_policy(value)?,
+            // default (no restart). BuildKit uses `unless-stopped`.
+            // `always` / `on-failure` stay denied.
+            "restartpolicy" => !is_guest_restart_policy(value, image)?,
             // BuildKit's GPU request is an exact, driverless shape. Other
             // device requests stay denied.
             "devicerequests" => !is_guest_device_requests(value)?,
@@ -1605,6 +1614,14 @@ fn is_default_mode(value: &Value) -> bool {
 
 /// Guest-isolated Docker network modes. `host` and `container:<id>` stay
 /// host-control denies. Live backend-parity uses `--network none`.
+fn is_buildkit_image(image: Option<&str>) -> bool {
+    image.is_some_and(|image| {
+        let image = image.to_ascii_lowercase();
+        let name = image.rsplit('/').next().unwrap_or(&image);
+        name.starts_with("buildkit") || image.contains("/buildkit:") || image.ends_with("/buildkit")
+    })
+}
+
 fn is_guest_network_mode(value: &Value) -> bool {
     value.as_str().is_some_and(|mode| {
         let mode = mode.trim();
@@ -1716,8 +1733,19 @@ fn is_guest_named_volume_mount(value: &Value) -> Result<bool> {
 }
 
 fn is_default_restart_policy(value: &Value) -> Result<bool> {
+    is_named_restart_policy(value, &["", "no", "none"])
+}
+
+fn is_guest_restart_policy(value: &Value, image: Option<&str>) -> Result<bool> {
+    if is_default_restart_policy(value)? {
+        return Ok(true);
+    }
+    Ok(is_buildkit_image(image) && is_named_restart_policy(value, &["unless-stopped"])?)
+}
+
+fn is_named_restart_policy(value: &Value, allowed_names: &[&str]) -> Result<bool> {
     match value {
-        Value::Null => Ok(true),
+        Value::Null => Ok(allowed_names.iter().any(|name| name.is_empty())),
         Value::Object(object) => {
             reject_case_insensitive_duplicate_keys(object, "Docker RestartPolicy")?;
             const ALLOWED_FIELDS: [&str; 2] = ["name", "maximumretrycount"];
@@ -1742,9 +1770,9 @@ fn is_default_restart_policy(value: &Value) -> Result<bool> {
                 .find(|(key, _)| key.eq_ignore_ascii_case("maximumretrycount"))
                 .map(|(_, value)| value)
                 .is_none_or(|value| value.as_i64() == Some(0) || value.as_u64() == Some(0));
-            Ok((name.is_empty()
-                || name.eq_ignore_ascii_case("no")
-                || name.eq_ignore_ascii_case("none"))
+            Ok(allowed_names
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
                 && retries)
         }
         _ => Ok(false),
@@ -4046,10 +4074,32 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"Privileged":true,"RestartPolicy":{"MaximumRetryCount":0,"Name":"unless-stopped"},"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_privileged_stays_denied_except_buildkit() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let error = policy
+            .authorize(&api_request(
+                "POST",
+                "/v1.43/containers/create?name=job-container",
+                br#"{"Image":"busybox:1.36","HostConfig":{"Privileged":true}}"#,
+            ))
+            .expect_err("privileged busybox is host control");
+        assert!(error.to_string().contains("Privileged"), "{error:#}");
+
+        let error = policy
+            .authorize(&api_request(
+                "POST",
+                "/v1.43/containers/create?name=job-container",
+                br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"MaximumRetryCount":0,"Name":"unless-stopped"}}}"#,
+            ))
+            .expect_err("unless-stopped busybox is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
     }
 
     #[test]

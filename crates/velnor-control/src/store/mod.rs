@@ -24,10 +24,11 @@ pub mod retention;
 pub use error::{StoreError, StoreResult};
 pub use migrations::LATEST_SCHEMA_VERSION;
 pub use records::{
-    EventRow, EventWindow, InstanceRow, JobRow, JobSummary, LifecycleInstanceRow,
-    LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow, RunnerRegistrationRow,
-    SlotIdentity, SlotRow, SlotTransition, SlotTransitionRequest, SlotTransitionRequestKey,
-    StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
+    project_job_state, project_job_transition, project_slot_phase, project_slot_transition,
+    EventRow, EventWindow, IllegalJobEdge, IllegalSlotEdge, InstanceRow, JobRow, JobSummary,
+    LifecycleInstanceRow, LifecycleOperationRequest, LifecycleOperationRow, ReconciliationRow,
+    RunnerRegistrationRow, SlotIdentity, SlotRow, SlotTransition, SlotTransitionRequest,
+    SlotTransitionRequestKey, StoredEvent, Transition, SLOT_TRANSITION_REQUEST_CAP,
 };
 pub use retention::{
     PhysicalBudgetStatus, PrunePhase, PruneReport, RetentionBudget, RetentionLease,
@@ -89,6 +90,11 @@ impl Default for OpenOptions {
 pub struct Store {
     conn: Mutex<Connection>,
     path: PathBuf,
+    /// Illegal lifecycle edges refused since open (job + slot). Every
+    /// refusal also fails closed with its `CONFLICT` envelope, so no
+    /// illegal edge is ever silently dropped; the counter makes refusals
+    /// countable without a log scrape.
+    illegal_transition_edges: std::sync::atomic::AtomicU64,
 }
 
 impl Store {
@@ -159,6 +165,7 @@ impl Store {
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
+            illegal_transition_edges: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -166,6 +173,22 @@ impl Store {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Illegal lifecycle edges refused since open (job + slot).
+    ///
+    /// The projections count every refused edge before returning its
+    /// `CONFLICT` envelope, so a nonzero value always pairs with a
+    /// caller-visible refusal, never a silent drop.
+    #[must_use]
+    pub fn illegal_transition_edges(&self) -> u64 {
+        self.illegal_transition_edges
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_illegal_transition_edge(&self) {
+        self.illegal_transition_edges
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(crate) fn lock_conn(&self) -> StoreResult<std::sync::MutexGuard<'_, Connection>> {
@@ -339,7 +362,10 @@ mod tests {
     use std::thread;
 
     use rusqlite::{params, Connection};
-    use velnor_model::{EventReason, Generation, SlotId, SlotKind, SlotPhase, Slug, Timestamp};
+    use velnor_model::{
+        slot_transition_allowed, transition_target, EventReason, Generation, JobState, SlotId,
+        SlotKind, SlotPhase, Slug, Timestamp,
+    };
 
     use super::migrations;
     use super::records::test_connection;
@@ -1865,5 +1891,255 @@ mod tests {
             "queued",
             "rejected attempts never moved the untouched job"
         );
+    }
+
+    #[test]
+    fn projections_match_transition_tables_exhaustively() {
+        for from in JobState::ALL {
+            for reason in EventReason::ALL {
+                match (transition_target(from, reason), project_job_transition(from, reason)) {
+                    (Some(expected), Ok(projected)) => assert_eq!(projected, expected),
+                    (None, Err(edge)) => {
+                        assert_eq!(edge.from, from);
+                        assert_eq!(edge.reason, reason);
+                    }
+                    (table, projected) => panic!(
+                        "job projection disagrees with the table for {} + {}: table={table:?} projected={projected:?}",
+                        from.as_str(),
+                        reason.as_str()
+                    ),
+                }
+            }
+            assert_eq!(
+                project_job_state(from.as_str()).unwrap(),
+                from,
+                "every closed state round-trips through the row projection"
+            );
+        }
+        for unknown in ["", "running", "Running", "queued "] {
+            let error = project_job_state(unknown).expect_err("unknown phase fails closed");
+            assert_eq!(error.envelope.reason, "store.job.state.unknown");
+        }
+        for from in SlotPhase::ALL {
+            for target in SlotPhase::ALL {
+                match (
+                    slot_transition_allowed(from, target),
+                    project_slot_transition(from, target),
+                ) {
+                    (true, Ok(projected)) => assert_eq!(projected, target),
+                    (false, Err(edge)) => {
+                        assert_eq!(edge.from, from);
+                        assert_eq!(edge.target, target);
+                    }
+                    (allowed, projected) => panic!(
+                        "slot projection disagrees with the graph for {} -> {}: allowed={allowed} projected={projected:?}",
+                        from.as_str(),
+                        target.as_str()
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn materialized_columns_equal_projections_and_illegal_edges_count() {
+        let temp = TempDb::new("projection-materialized");
+        let store = Store::open(&temp.path).unwrap();
+        assert_eq!(store.illegal_transition_edges(), 0);
+        store.upsert_instance(&instance("pm")).unwrap();
+        store.record_job(&job("pm", "j", "org/proj")).unwrap();
+
+        let expected = [
+            (EventReason::JobAcquired, JobState::Acquired),
+            (EventReason::JobWaiting, JobState::Waiting),
+            (EventReason::JobStarted, JobState::Started),
+            (EventReason::JobCompleted, JobState::Completed),
+        ];
+        for (index, (reason, state)) in expected.iter().enumerate() {
+            let token = format!("p-{index}");
+            assert!(
+                store
+                    .record_job_transition("pm", "j", &transition(&token, "corr-pm", *reason, None))
+                    .unwrap(),
+                "happy-path edge applies"
+            );
+            let materialized = &store.job_summaries("pm").unwrap()[0].phase;
+            assert_eq!(
+                project_job_state(materialized).unwrap(),
+                *state,
+                "materialized job column equals the projection after {token}"
+            );
+        }
+
+        // completed -> started is illegal: CONFLICT, nothing written, counted.
+        let error = store
+            .record_job_transition(
+                "pm",
+                "j",
+                &transition("p-illegal", "corr-pm", EventReason::JobStarted, None),
+            )
+            .expect_err("completed→started is illegal");
+        assert_eq!(error.envelope.reason, "store.job.transition.illegal");
+        assert_eq!(store.illegal_transition_edges(), 1);
+        assert_eq!(store.transition_count("pm", "j").unwrap(), 4);
+        assert_eq!(store.event_count("pm", "j").unwrap(), 4);
+        assert_eq!(store.job_summaries("pm").unwrap()[0].phase, "completed");
+
+        // Replays are not illegal: no-op success, counter untouched.
+        assert!(!store
+            .record_job_transition(
+                "pm",
+                "j",
+                &transition("p-3", "corr-pm", EventReason::JobCompleted, None),
+            )
+            .unwrap());
+        assert_eq!(store.illegal_transition_edges(), 1);
+
+        let identity = SlotIdentity {
+            instance_slug: "pm".to_owned(),
+            slot_id: SlotId("slot-0".to_owned()),
+            host: "sentry".to_owned(),
+            slot_index: 0,
+            slot_kind: SlotKind::Stable,
+        };
+        let slot_step = |sequence: u64, target: SlotPhase| {
+            let token = format!("pm-g1-s{sequence}-{}", target.as_str());
+            SlotTransition {
+                correlation_id: Slug::validate("correlation_id", &format!("corr-{token}"))
+                    .expect("valid slot correlation"),
+                token,
+                generation: Generation::INITIAL,
+                sequence,
+                target,
+                job_name: None,
+                message: None,
+                transition_time: Timestamp::now(),
+            }
+        };
+        for (sequence, target) in [
+            (1, SlotPhase::Idle),
+            (2, SlotPhase::Acquiring),
+            (3, SlotPhase::Running),
+            (4, SlotPhase::Teardown),
+            (5, SlotPhase::Recycling),
+            (6, SlotPhase::Idle),
+        ] {
+            assert!(
+                store
+                    .record_slot_transition(&identity, &slot_step(sequence, target))
+                    .unwrap(),
+                "slot edge to {} applies",
+                target.as_str()
+            );
+            let row = store.slot("pm", &identity.slot_id).unwrap().unwrap();
+            assert_eq!(
+                project_slot_phase(&row),
+                target,
+                "materialized slot column equals the projection"
+            );
+        }
+
+        // idle -> finalizing skips teardown: CONFLICT, nothing written, counted.
+        let error = store
+            .record_slot_transition(&identity, &slot_step(7, SlotPhase::Finalizing))
+            .expect_err("idle→finalizing is illegal");
+        assert_eq!(error.envelope.reason, "store.slot.transition.illegal");
+        assert_eq!(store.illegal_transition_edges(), 2);
+        let row = store.slot("pm", &identity.slot_id).unwrap().unwrap();
+        assert_eq!(row.phase, SlotPhase::Idle);
+        assert_eq!(row.transition_sequence, 6);
+    }
+
+    #[test]
+    fn admission_gate_rejects_rows_without_usable_identity() {
+        let temp = TempDb::new("admission-gate");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("ag")).unwrap();
+
+        let mut missing_run = job("ag", "no-run", "org/gate");
+        missing_run.run_id = None;
+        let error = store
+            .record_job(&missing_run)
+            .expect_err("missing run_id is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.unidentified");
+
+        let mut missing_attempt = job("ag", "no-attempt", "org/gate");
+        missing_attempt.attempt = None;
+        let error = store
+            .record_job(&missing_attempt)
+            .expect_err("missing attempt is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.unidentified");
+
+        let mut negative_run = job("ag", "neg-run", "org/gate");
+        negative_run.run_id = Some(-1);
+        let error = store
+            .record_job(&negative_run)
+            .expect_err("negative run_id is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.range");
+
+        let mut negative_attempt = job("ag", "neg-attempt", "org/gate");
+        negative_attempt.attempt = Some(-2);
+        let error = store
+            .record_job(&negative_attempt)
+            .expect_err("negative attempt is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.range");
+
+        assert!(
+            store.job_summaries("ag").unwrap().is_empty(),
+            "rejected admissions persist nothing"
+        );
+
+        // The gate also guards refreshes: an identity-less update cannot
+        // NULL out a healthy row's identity and strand it nonterminal.
+        store.record_job(&job("ag", "healthy", "org/gate")).unwrap();
+        let mut strip_identity = job("ag", "healthy", "org/gate");
+        strip_identity.run_id = None;
+        strip_identity.attempt = None;
+        let error = store
+            .record_job(&strip_identity)
+            .expect_err("identity-stripping refresh is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.unidentified");
+        let kept = &store.job_summaries("ag").unwrap()[0];
+        assert_eq!(kept.job_uid, "healthy");
+        assert_eq!(kept.run_id, Some(42));
+        assert_eq!(kept.attempt, Some(1));
+
+        // Admission rejections are not transition refusals: the illegal-edge
+        // counter only counts refused edges.
+        assert_eq!(store.illegal_transition_edges(), 0);
+    }
+
+    #[test]
+    fn admission_gate_rejects_attempt_above_u32_max() {
+        let temp = TempDb::new("admission-gate-attempt-bound");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("ab")).unwrap();
+
+        // `decode_summary_row` narrows attempt to u32, so an oversized
+        // attempt is the same admitted-yet-undecodable stuck class as a
+        // negative one.
+        let mut oversized = job("ab", "big-attempt", "org/gate");
+        oversized.attempt = Some(i64::from(u32::MAX) + 1);
+        let error = store
+            .record_job(&oversized)
+            .expect_err("oversized attempt is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.range");
+        assert!(
+            store.job_summaries("ab").unwrap().is_empty(),
+            "rejected admission persists nothing"
+        );
+
+        // The boundary itself still decodes: u32::MAX round-trips through
+        // the `fetch_summary_by_job_uid` decode path.
+        let mut boundary = job("ab", "max-attempt", "org/gate");
+        boundary.attempt = Some(i64::from(u32::MAX));
+        store.record_job(&boundary).unwrap();
+        let fetched = store
+            .fetch_summary_by_job_uid("ab", "max-attempt")
+            .unwrap()
+            .expect("boundary row decodes");
+        assert_eq!(fetched.attempt(), Some(u32::MAX));
+
+        assert_eq!(store.illegal_transition_edges(), 0);
     }
 }

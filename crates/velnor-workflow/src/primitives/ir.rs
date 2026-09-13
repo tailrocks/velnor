@@ -22,9 +22,9 @@ use crate::{
     unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_selection_artifact_download,
-    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
-    RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
-    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
+    ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER,
+    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
@@ -520,9 +520,34 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
 /// Mr. Boxington. One predicate feeds both the `ToolRequirement` selection and
 /// the mise install list, so the two can never disagree about what a unit
 /// needs.
-fn needs_nextest(unit: &Unit) -> bool {
+pub(crate) fn needs_nextest(unit: &Unit) -> bool {
     unit_commands(unit)
         .any(|command| command.contains("cargo nextest") || command.contains("mbx nextest"))
+}
+
+/// The two spellings a lock may pin the nextest runner under. Locks mix bare
+/// keys (`cargo-nextest`) and backend-qualified keys
+/// (`aqua:nextest-rs/nextest/cargo-nextest`), and `mise --locked` requires the
+/// install args to equal the lock keys byte for byte, so the scanner resolves
+/// the spelling from the lock instead of mandating one.
+pub(crate) const QUALIFIED_NEXTEST_TOOL: &str = "aqua:nextest-rs/nextest/cargo-nextest";
+pub(crate) const BARE_NEXTEST_TOOL: &str = "cargo-nextest";
+
+/// The nextest tool id to install for a unit that needs it, resolved against
+/// the root lock keys: the lock's own spelling wins, and an absent lock keeps
+/// the historical qualified id. A lock that pins neither spelling resolves to
+/// the qualified id as well; the scan refuses that state before rendering (see
+/// `validate_nextest_tools_are_locked`), so the fallback only serves
+/// hand-built configs that never passed through a scan.
+pub(crate) fn nextest_tool_id(lock_keys: &BTreeSet<String>) -> &'static str {
+    if !lock_keys.is_empty()
+        && !lock_keys.contains(QUALIFIED_NEXTEST_TOOL)
+        && lock_keys.contains(BARE_NEXTEST_TOOL)
+    {
+        BARE_NEXTEST_TOOL
+    } else {
+        QUALIFIED_NEXTEST_TOOL
+    }
 }
 
 /// The restore/provision/save steps every hosted Rust job needs before it may
@@ -589,11 +614,12 @@ pub(crate) fn render_pinned_toolchain_steps(
 /// cannot see. The language toolchain is deliberately absent — rustup
 /// provisions it from the repository's pin — and so is every tool a policy
 /// step installs through its own action. Each additional id widens the supply
-/// chain of every job that runs it.
-pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<String> {
+/// chain of every job that runs it. Detected ids resolve against the root lock
+/// keys; declared ids were already matched to the lock by validation.
+pub(crate) fn mise_tool_ids(unit: &Unit, lock_keys: &BTreeSet<String>) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
-        tools.push("aqua:nextest-rs/nextest/cargo-nextest".to_owned());
+        tools.push(nextest_tool_id(lock_keys).to_owned());
     }
     for declared in &unit.mise_tools {
         if !tools.iter().any(|tool| tool == declared) {
@@ -601,6 +627,36 @@ pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<String> {
         }
     }
     tools
+}
+
+/// Refuse a unit that needs nextest while the root lock pins neither spelling
+/// of the runner: rendering either id would emit `install_args` the runner's
+/// own lock check rejects. An absent lock (empty keys) cannot prove the gap,
+/// so it passes and rendering keeps the historical qualified id.
+///
+/// # Errors
+/// Returns a usage error naming the first unit whose nextest need the lock
+/// does not pin, with every key the lock does pin.
+pub(crate) fn validate_nextest_tools_are_locked(
+    units: &[Unit],
+    lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    if lock_keys.is_empty()
+        || lock_keys.contains(QUALIFIED_NEXTEST_TOOL)
+        || lock_keys.contains(BARE_NEXTEST_TOOL)
+    {
+        return Ok(());
+    }
+    for unit in units {
+        if needs_nextest(unit) {
+            let known = lock_keys.iter().cloned().collect::<Vec<_>>().join(", ");
+            return Err(GeneratorError::usage(format!(
+                "unit {} runs cargo-nextest but mise.lock pins neither {QUALIFIED_NEXTEST_TOOL} nor {BARE_NEXTEST_TOOL}; install one and re-lock so install_args match the lock, known keys: {known}",
+                unit.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the unit's commands hand work to the mise task runner itself, which
@@ -773,6 +829,9 @@ pub(crate) struct WorkflowIr {
     pub(crate) mr_boxington: bool,
     pub(crate) units: Vec<Unit>,
     pub(crate) pins: Pins,
+    /// Tool keys the root `mise.lock` pins. Detected `install_args` resolve
+    /// their spelling from these; empty when the scan root has no lock.
+    pub(crate) mise_lock_keys: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -896,15 +955,24 @@ fn aggregate_triggers(
     automatic: RunnerMode,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
-        WorkflowKind::PullRequest => (
-            "CI",
-            "CI / PR",
-            format!(
-                "on:\n  pull_request:\n  merge_group:\n{}",
-                workflow_dispatch_inputs("affected", default_branch, "", runners, automatic)
-            ),
-            "true",
-        ),
+        WorkflowKind::PullRequest => {
+            // Merge-queue validation runs on the GitHub lane only; a
+            // velnor-only surface has no lane that can run it.
+            let merge_group = if runners == RunnerMode::Velnor {
+                ""
+            } else {
+                "  merge_group:\n"
+            };
+            (
+                "CI",
+                "CI / PR",
+                format!(
+                    "on:\n  pull_request:\n{merge_group}{}",
+                    workflow_dispatch_inputs("affected", default_branch, "", runners, automatic)
+                ),
+                "true",
+            )
+        }
         WorkflowKind::Main => (
             "CI",
             "CI / main",
@@ -1048,6 +1116,7 @@ impl WorkflowIr {
             mr_boxington,
             units: config.units.clone(),
             pins: Pins::resolved(),
+            mise_lock_keys: config.mise_lock_keys.clone(),
         }
     }
 
@@ -2258,7 +2327,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name or the repository declares.
-            let mise_tools = mise_tool_ids(unit);
+            let mise_tools = mise_tool_ids(unit, &self.mise_lock_keys);
             let invokes_mise = commands_invoke_mise(unit);
             if !mise_tools.is_empty() {
                 let _ = writeln!(

@@ -691,7 +691,10 @@ pub(crate) fn scope_for_event_values(
     override_scope: Option<&str>,
 ) -> Result<Option<String>, GeneratorError> {
     match event {
-        "push" | "schedule" => {
+        // Merge-queue validation is a trusted event like push and schedule:
+        // the ephemeral merge ref has no pull_request base to diff against,
+        // so it always runs full scope.
+        "push" | "schedule" | "merge_group" => {
             if override_scope.is_some_and(|scope| scope != "full") {
                 return Err(GeneratorError::usage(
                     "trusted events require full CI scope",
@@ -710,7 +713,9 @@ pub(crate) fn scope_for_event_values(
             .map(ToOwned::to_owned)
             .or_else(|| Some("affected".to_owned()))),
         "" => Ok(override_scope.map(ToOwned::to_owned)),
-        _ => Ok(Some("full".to_owned())),
+        other => Err(GeneratorError::usage(format!(
+            "unsupported CI event `{other}`"
+        ))),
     }
 }
 
@@ -718,6 +723,84 @@ fn scope_name(scope: Scope) -> &'static str {
     match scope {
         Scope::Affected => "affected",
         Scope::Full => "full",
+    }
+}
+
+#[cfg(test)]
+mod scope_event_tests {
+    use super::scope_for_event_values;
+    use crate::GeneratorError;
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T>(result: Result<T, GeneratorError>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn merge_group_is_a_trusted_full_scope_event() {
+        assert_eq!(
+            must(scope_for_event_values("merge_group", None), "resolve scope").as_deref(),
+            Some("full")
+        );
+        assert_eq!(
+            must(
+                scope_for_event_values("merge_group", Some("full")),
+                "resolve explicit full scope"
+            )
+            .as_deref(),
+            Some("full")
+        );
+        let error = must_fail(
+            scope_for_event_values("merge_group", Some("affected")),
+            "merge_group must reject a narrowed scope",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("trusted events require full CI scope"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn unknown_events_are_rejected_and_empty_keeps_local_passthrough() {
+        let error = must_fail(
+            scope_for_event_values("release", None),
+            "unknown events must fail closed",
+        );
+        assert!(
+            error.to_string().contains("unsupported CI event `release`"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            must(scope_for_event_values("", None), "resolve empty scope"),
+            None
+        );
+        assert_eq!(
+            must(
+                scope_for_event_values("", Some("affected")),
+                "resolve empty override"
+            )
+            .as_deref(),
+            Some("affected")
+        );
     }
 }
 
@@ -2399,10 +2482,7 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         .map_or(value, str::trim)
         .split_whitespace()
         .collect::<String>()
-        .replace(
-            "github.event.inputs.lanes",
-            "github.event.inputs.runner",
-        );
+        .replace("github.event.inputs.lanes", "github.event.inputs.runner");
     if value == "github.event_name=='pull_request_target'"
         || value == "always()&&github.event_name=='pull_request_target'"
     {
@@ -4253,8 +4333,8 @@ jobs:
     }
 
     #[test]
-    fn policy_accepts_opt_in_from_generation_input_when_runtime_contract_predates_the_field() -> Result<(), Box<dyn Error>>
-    {
+    fn policy_accepts_opt_in_from_generation_input_when_runtime_contract_predates_the_field(
+    ) -> Result<(), Box<dyn Error>> {
         let group = crate::estate::approved_velnor_runner_group();
         let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
         let toml_labels = crate::estate::approved_velnor_runner_labels()
@@ -4345,5 +4425,4 @@ jobs:
         assert!(!run_policy(mismatched)?);
         Ok(())
     }
-
 }

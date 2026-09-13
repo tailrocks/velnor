@@ -110,6 +110,36 @@ impl LifecycleService {
             .clone())
     }
 
+    /// Read one instance state through the store, refreshing the cache.
+    ///
+    /// Unlike [`LifecycleService::get`], this never serves a stale cached
+    /// copy when a store is attached: it reads the durable row and replaces
+    /// the cached entry before returning. Drain decisions use this so a
+    /// desired state written by another process is observed promptly.
+    /// Without a store this is identical to `get`.
+    pub fn desired_fresh(&self, instance: &str) -> Result<LifecycleState, PortError> {
+        self.validate_target(instance)?;
+        let Some(store) = &self.store else {
+            return self.get(instance);
+        };
+        let fresh = store
+            .lifecycle_instance(instance)
+            .map_err(store_error)?
+            .map(|row| LifecycleState {
+                instance: row.instance_slug,
+                desired: row.desired_state,
+                observed: row.observed_state,
+                version: row.resource_version,
+                desired_slots: row.desired_slots,
+            })
+            .ok_or_else(|| PortError::Unavailable {
+                resource: format!("instance {instance}"),
+            })?;
+        let mut state = self.state.lock().map_err(|_| unavailable())?;
+        state.instances.insert(instance.to_owned(), fresh.clone());
+        Ok(fresh)
+    }
+
     /// Read one instance state.
     pub fn get(&self, instance: &str) -> Result<LifecycleState, PortError> {
         self.validate_target(instance)?;
@@ -421,6 +451,61 @@ mod tests {
         assert_eq!(first, replay);
         assert_eq!(recreated.get("primary").expect("state").desired, "draining");
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn desired_fresh_reads_through_a_stale_cache_and_updates_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-fresh-{}-{}",
+            std::process::id(),
+            velnor_model::Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("directory");
+        let path = directory.join("state.db");
+        let store = Arc::new(crate::store::Store::open(&path).expect("store"));
+        let stale = LifecycleService::with_store(Arc::clone(&store));
+        let writer = LifecycleService::with_store(Arc::clone(&store));
+        let request = MutationRequest {
+            kind: MutationKind::Cordon,
+            target: "primary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "fresh-1".to_owned(),
+            expected_version: None,
+            scale_to: None,
+        };
+        stale.mutate(request).expect("first mutation");
+        assert_eq!(stale.get("primary").expect("cached").desired, "cordoned");
+        // A second service (another process in production) advances the
+        // ledger past the first service's cached copy.
+        let drain = MutationRequest {
+            kind: MutationKind::Drain,
+            target: "primary".to_owned(),
+            reason: "maintenance".to_owned(),
+            idempotency_key: "fresh-2".to_owned(),
+            expected_version: None,
+            scale_to: None,
+        };
+        writer.mutate(drain).expect("second mutation");
+        assert_eq!(stale.get("primary").expect("stale").desired, "cordoned");
+        let fresh = stale.desired_fresh("primary").expect("fresh read");
+        assert_eq!(fresh.desired, "draining");
+        assert_eq!(fresh.version, 3);
+        // The cache now serves the fresh row too.
+        assert_eq!(stale.get("primary").expect("updated").desired, "draining");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn desired_fresh_without_store_matches_get_and_unknown_is_unavailable() {
+        let service = LifecycleService::new();
+        service.register("primary").expect("register");
+        assert_eq!(
+            service.desired_fresh("primary").expect("fresh"),
+            service.get("primary").expect("cached")
+        );
+        assert!(service.desired_fresh("ghost").is_err());
     }
 
     #[test]
