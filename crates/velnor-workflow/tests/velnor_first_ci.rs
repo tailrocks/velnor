@@ -183,6 +183,32 @@ fn dispatch_exposes_runner_and_scope_without_committed_flips() {
 }
 
 #[test]
+fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
+    let root = unique_dir("pr-on-velnor");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(
+        pr.contains("github.event_name == 'pull_request'"),
+        "opt-in automatic PR must admit pull_request: {pr}"
+    );
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("github.event_name == 'pull_request'"),
+        "opt-in Velnor lane must admit pull_request: {unit}"
+    );
+    assert!(
+        pr.contains("unset CI_SCOPE_OVERRIDE"),
+        "empty dispatch scope must not be passed as a CI scope: {pr}"
+    );
+}
+
+#[test]
 fn kind_reusable_renders_each_unit_root_in_its_own_job() {
     let root = unique_dir("per-unit-capabilities");
     write_rust_fixture(&root, 2);

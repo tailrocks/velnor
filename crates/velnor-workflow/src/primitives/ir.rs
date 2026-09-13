@@ -677,6 +677,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
+    pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
@@ -703,6 +704,12 @@ pub(crate) enum ToolRequirement {
     Mold,
     DockerBuildx,
     Mise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelnorPullRequest {
+    TrustedOnly,
+    Automatic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -838,6 +845,11 @@ impl WorkflowIr {
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
+            pull_request_on_velnor: if config.pull_request_on_velnor {
+                VelnorPullRequest::Automatic
+            } else {
+                VelnorPullRequest::TrustedOnly
+            },
             runners: config.runners,
             tools,
             mise_present,
@@ -1086,7 +1098,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && {}", self.trusted_event_expression())
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -1449,7 +1461,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             runners
         };
-        let gate = self.trusted_runner_gate(runners, trusted || runners == RunnerMode::Velnor);
+        let gate = if runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            self.trusted_runner_gate(runners, trusted)
+        };
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
@@ -1473,7 +1492,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let base_sha = self.base_sha_expression();
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
@@ -1550,7 +1569,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         if automatic {
             if lane == RunnerMode::Velnor {
-                self.velnor_lane_event_expression(&dispatch)
+                self.velnor_lane_event_expression(dispatch)
             } else {
                 format!("{} || ({dispatch})", self.automatic_event_expression())
             }
@@ -1559,11 +1578,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
+    fn velnor_control_plane_expression(&self) -> String {
+        if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
+            format!(
+                "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+                self.default_branch
+            )
+        } else {
+            self.trusted_event_expression()
+        }
+    }
+
     fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
-        format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
-            self.default_branch
-        )
+        if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
+            format!("{} || ({dispatch})", self.automatic_event_expression())
+        } else {
+            format!(
+                "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
+                self.default_branch
+            )
+        }
     }
 
     pub(crate) fn render_verify_github(
@@ -1599,7 +1633,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
-        let gate = self.trusted_runner_gate(self.runners, self.runners == RunnerMode::Velnor);
+        let gate = if self.runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            String::new()
+        };
         let kinds = self
             .units
             .iter()
@@ -2045,10 +2086,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
         }
         let gate = if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                self.default_branch
-            )
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
