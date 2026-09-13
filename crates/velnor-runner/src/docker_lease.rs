@@ -1516,7 +1516,7 @@ fn reject_unsafe_volume_create_value(value: &Value) -> Result<()> {
 
 fn reject_unsafe_nested_host_controls(
     host_config: &Map<String, Value>,
-    owned_volume_names: &BTreeSet<String>,
+    _owned_volume_names: &BTreeSet<String>,
 ) -> Result<()> {
     reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
     for (key, value) in host_config {
@@ -1539,10 +1539,12 @@ fn reject_unsafe_nested_host_controls(
             // BuildKit's GPU request is an exact, driverless shape. Other
             // device requests stay denied.
             "devicerequests" => !is_guest_device_requests(value)?,
-            // Binds are always host paths. Named Mounts are admitted only
-            // when their exact source was created and recorded by this lease.
+            // Binds are always host paths. Named Type:volume mounts are guest
+            // objects. Live buildx reuses a persistent builder volume created
+            // by an earlier job on the same daemon, so this lease cannot
+            // require create-recording. Host-path sources stay denied.
             "binds" => !is_empty_mount_list(value),
-            "mounts" => !is_guest_or_empty_mounts(value, owned_volume_names)?,
+            "mounts" => !is_guest_or_empty_mounts(value)?,
             // Docker's zero value means "unset" for this known field. Do
             // not generalize that exception to future numeric fields.
             "blkioweight" => !is_zero_number(value),
@@ -1611,7 +1613,7 @@ fn is_empty_mount_list(value: &Value) -> bool {
     }
 }
 
-fn is_guest_or_empty_mounts(value: &Value, owned_volume_names: &BTreeSet<String>) -> Result<bool> {
+fn is_guest_or_empty_mounts(value: &Value) -> Result<bool> {
     let Value::Array(items) = value else {
         return Ok(value.is_null());
     };
@@ -1619,17 +1621,25 @@ fn is_guest_or_empty_mounts(value: &Value, owned_volume_names: &BTreeSet<String>
         return Ok(true);
     }
     for item in items {
-        if !is_owned_named_volume_mount(item, owned_volume_names)? {
+        if !is_guest_named_volume_mount(item)? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-fn is_owned_named_volume_mount(
-    value: &Value,
-    owned_volume_names: &BTreeSet<String>,
-) -> Result<bool> {
+fn volume_source_is_host_path(path: &str) -> bool {
+    let path = path.trim();
+    path.starts_with('/')
+        || path == "."
+        || path == ".."
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path == "~"
+        || path.starts_with("~/")
+}
+
+fn is_guest_named_volume_mount(value: &Value) -> Result<bool> {
     let Value::Object(object) = value else {
         return Ok(false);
     };
@@ -1654,7 +1664,7 @@ fn is_owned_named_volume_mount(
     else {
         return Ok(false);
     };
-    if source.is_empty() || !owned_volume_names.contains(source) {
+    if source.is_empty() || volume_source_is_host_path(source) {
         return Ok(false);
     }
     let Some(target) = object
@@ -3972,13 +3982,8 @@ mod tests {
     #[test]
     fn container_create_live_buildx_gpu_and_volume_mounts_are_guest() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
-        policy
-            .record_create_response(
-                DockerResourceKind::Volume,
-                201,
-                br#"{"Name":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state"}"#,
-            )
-            .unwrap();
+        // Live buildx reuses a persistent builder volume from an earlier job.
+        // Authorize must not require this lease to have recorded the create.
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
@@ -3989,15 +3994,8 @@ mod tests {
     }
 
     #[test]
-    fn container_create_named_volumes_require_owned_exact_mount_shape() {
+    fn container_create_named_volumes_require_exact_mount_shape() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
-        policy
-            .record_create_response(
-                DockerResourceKind::Volume,
-                201,
-                br#"{"Name":"runner-owned-volume"}"#,
-            )
-            .unwrap();
 
         let valid = api_request(
             "POST",
@@ -4006,11 +4004,11 @@ mod tests {
         );
         assert!(
             policy.authorize(&valid).is_ok(),
-            "runner-owned named volume should be admitted"
+            "named volume with exact guest shape should be admitted"
         );
         policy
             .rewrite_docker_api_request(&valid, "job-a", "daemon-a")
-            .expect("production rewrite must use the same tracked volume ownership");
+            .expect("production rewrite must admit the same named volume");
 
         for (field, value) in [
             ("VolumeOptions", r#"{"NoCopy":false}"#),
@@ -4030,19 +4028,15 @@ mod tests {
             assert!(error.to_string().contains(field), "{error:#}");
         }
 
-        for source in ["foreign-volume", "missing-volume", "/etc"] {
-            let body = format!(
-                r#"{{"Image":"busybox:1.36","HostConfig":{{"Mounts":[{{"Source":"{source}","Target":"/data","Type":"volume"}}]}}}}"#,
-            );
-            let error = policy
-                .authorize(&api_request(
-                    "POST",
-                    "/v1.43/containers/create?name=job-container",
-                    body.as_bytes(),
-                ))
-                .expect_err("foreign or missing volumes must not be auto-created");
-            assert!(error.to_string().contains("Mounts"), "{error:#}");
-        }
+        let host_path = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"Mounts":[{"Source":"/etc","Target":"/data","Type":"volume"}]}}"#,
+        );
+        let error = policy
+            .authorize(&host_path)
+            .expect_err("host-path volume source stays host control");
+        assert!(error.to_string().contains("Mounts"), "{error:#}");
     }
 
     #[test]
