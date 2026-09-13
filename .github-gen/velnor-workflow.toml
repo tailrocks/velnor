@@ -1110,17 +1110,14 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
 
       # Guest products are tiny immutable payloads, not compilation state.
       # Their identity is the complete guest recipe/source closure; github.sha
-      # is deliberately absent. A prefix restores the newest compatible seed,
-      # and an exact miss mints the matching immutable generation after its
-      # digest and embedded agent have been revalidated.
+      # is deliberately absent. Restore is exact-only: a new recipe key must
+      # never reuse a same-arch seed from an older recipe generation.
       - name: Restore guest seed
         id: guest-seed
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
           key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            velnor-guest-seed-${{ matrix.arch }}-
 
       - name: Build guest agent for rootfs
         run: |
@@ -1151,7 +1148,7 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # A prefix restore of an older generation must rebuild, not fail the job.
+          # Exact-only restore means a stale recipe cannot reach this verifier.
           if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
             || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
             echo "restored=false" >> "$GITHUB_OUTPUT"
@@ -2255,17 +2252,14 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 
       # Guest products are tiny immutable payloads, not compilation state.
       # Their identity is the complete guest recipe/source closure; github.sha
-      # is deliberately absent. A prefix restores the newest compatible seed,
-      # and an exact miss mints the matching immutable generation after its
-      # digest and embedded agent have been revalidated.
+      # is deliberately absent. Restore is exact-only: a new recipe key must
+      # never reuse a same-arch seed from an older recipe generation.
       - name: Restore guest seed
         id: guest-seed
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
           key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            velnor-guest-seed-${{ matrix.arch }}-
 
       - name: Build guest agent for rootfs
         run: |
@@ -2296,7 +2290,7 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # A prefix restore of an older generation must rebuild, not fail the job.
+          # Exact-only restore means a stale recipe cannot reach this verifier.
           if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
             || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
             echo "restored=false" >> "$GITHUB_OUTPUT"

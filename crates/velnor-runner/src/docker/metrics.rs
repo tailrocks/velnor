@@ -4,9 +4,10 @@
 //! `CommandRunner` in `crate::executor`, which is the single seam where this is
 //! recorded — there are no counters at call sites. A minimal job is expected to
 //! spawn on the order of a dozen host `docker` processes and a representative
-//! one 50-70; this counter is how the pending Engine-API client migration will
-//! be shown to have removed them, so it has to exist before that migration
-//! rather than after it.
+//! one 50-70; this counter is how the Engine-API client migration is shown to
+//! have removed them: a query served by the `engine` module records
+//! [`observe_api`] and spawns no process, so `invocations` falls while
+//! `api_calls` rises for the same workload.
 //!
 //! Every runner slot is its own process and runs one job at a time, so process
 //! globals are exactly job scope. [`begin_job`] asserts that scope explicitly
@@ -34,6 +35,10 @@ static TIMEOUTS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 static CLASS_COUNT: [AtomicU64; CLASSES] = [ZERO; CLASSES];
 static CLASS_MICROS: [AtomicU64; CLASSES] = [ZERO; CLASSES];
+static API_CALLS: AtomicU64 = AtomicU64::new(0);
+static API_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static API_CLASS_COUNT: [AtomicU64; CLASSES] = [ZERO; CLASSES];
+static API_CLASS_MICROS: [AtomicU64; CLASSES] = [ZERO; CLASSES];
 
 /// Record one completed host `docker` invocation.
 pub fn observe(op: DockerOp, elapsed: Duration, exit_code: i32, timed_out: bool) {
@@ -58,6 +63,41 @@ pub fn observe(op: DockerOp, elapsed: Duration, exit_code: i32, timed_out: bool)
     );
 }
 
+/// Record one query served by the Engine API: no process was spawned, so
+/// `invocations` is untouched and this is the counter that rises instead.
+/// The per-class API latency is the migrated-calls comparison against the
+/// CLI histogram above; only successful servings land here, so the number
+/// is the fast-path cost, not a mix with degraded attempts.
+pub fn observe_api(op: DockerOp, elapsed: Duration) {
+    let sequence = API_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    API_CLASS_COUNT[op.index()].fetch_add(1, Ordering::Relaxed);
+    API_CLASS_MICROS[op.index()].fetch_add(micros, Ordering::Relaxed);
+    tracing::debug!(
+        target: "velnor.docker",
+        docker_op = op.label(),
+        docker_transport = "api",
+        docker_latency_ms = micros / 1_000,
+        docker_api_call = sequence,
+        "engine api query served"
+    );
+}
+
+/// Record one Engine API attempt that fell back to the CLI. The CLI call
+/// that follows records its own [`observe`], so a fallback costs exactly one
+/// subprocess — the same as before the migration. The caller logs the reason
+/// (a [`super::engine::EngineError` carries no body bytes) at `warn`.
+pub fn observe_api_fallback(op: DockerOp) {
+    let sequence = API_FALLBACKS.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::debug!(
+        target: "velnor.docker",
+        docker_op = op.label(),
+        docker_transport = "cli-fallback",
+        docker_api_fallback = sequence,
+        "engine api fell back to docker cli"
+    );
+}
+
 /// Reset the counters and return the guard that reports them.
 ///
 /// Called once per job. Dropping the guard emits the totals, so an early return
@@ -67,9 +107,13 @@ pub fn begin_job(job_id: &str) -> JobDockerScope {
     INVOCATIONS.store(0, Ordering::Relaxed);
     TIMEOUTS.store(0, Ordering::Relaxed);
     FAILURES.store(0, Ordering::Relaxed);
+    API_CALLS.store(0, Ordering::Relaxed);
+    API_FALLBACKS.store(0, Ordering::Relaxed);
     for index in 0..CLASSES {
         CLASS_COUNT[index].store(0, Ordering::Relaxed);
         CLASS_MICROS[index].store(0, Ordering::Relaxed);
+        API_CLASS_COUNT[index].store(0, Ordering::Relaxed);
+        API_CLASS_MICROS[index].store(0, Ordering::Relaxed);
     }
     JobDockerScope {
         job_id: job_id.to_string(),
@@ -103,30 +147,45 @@ pub struct Snapshot {
     pub failures: u64,
     /// One entry per class that occurred, in [`DockerOp::ALL`] order.
     pub classes: Vec<ClassTotal>,
+    /// Queries served by the Engine API without spawning a process.
+    pub api_calls: u64,
+    /// API attempts that fell back to the CLI (each cost one subprocess,
+    /// counted in `invocations` by the CLI call that follows).
+    pub api_fallbacks: u64,
+    /// Per-class API servings, in [`DockerOp::ALL`] order: the migrated-calls
+    /// latency comparison against `classes`.
+    pub api_classes: Vec<ClassTotal>,
 }
 
 /// Read the current counters without resetting them.
 #[must_use]
 pub fn snapshot() -> Snapshot {
-    let mut classes = Vec::new();
-    for op in DockerOp::ALL {
-        let count = CLASS_COUNT[op.index()].load(Ordering::Relaxed);
-        if count == 0 {
-            continue;
-        }
-        let micros = CLASS_MICROS[op.index()].load(Ordering::Relaxed);
-        classes.push(ClassTotal {
-            label: op.label(),
-            count,
-            latency_ms: micros / 1_000,
-        });
-    }
     Snapshot {
         invocations: INVOCATIONS.load(Ordering::Relaxed),
         timeouts: TIMEOUTS.load(Ordering::Relaxed),
         failures: FAILURES.load(Ordering::Relaxed),
-        classes,
+        classes: class_totals(&CLASS_COUNT, &CLASS_MICROS),
+        api_calls: API_CALLS.load(Ordering::Relaxed),
+        api_fallbacks: API_FALLBACKS.load(Ordering::Relaxed),
+        api_classes: class_totals(&API_CLASS_COUNT, &API_CLASS_MICROS),
     }
+}
+
+fn class_totals(counts: &[AtomicU64], micros: &[AtomicU64]) -> Vec<ClassTotal> {
+    let mut classes = Vec::new();
+    for op in DockerOp::ALL {
+        let count = counts[op.index()].load(Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        let latency = micros[op.index()].load(Ordering::Relaxed);
+        classes.push(ClassTotal {
+            label: op.label(),
+            count,
+            latency_ms: latency / 1_000,
+        });
+    }
+    classes
 }
 
 impl JobDockerScope {
@@ -146,6 +205,25 @@ impl JobDockerScope {
     #[must_use]
     pub fn per_class_latency_ms(&self) -> String {
         join_class_fields(&CLASS_MICROS, 1_000)
+    }
+
+    /// Queries served by the Engine API so far in this job.
+    #[must_use]
+    pub fn api_calls(&self) -> u64 {
+        API_CALLS.load(Ordering::Relaxed)
+    }
+
+    /// API attempts that fell back to the CLI so far in this job.
+    #[must_use]
+    pub fn api_fallbacks(&self) -> u64 {
+        API_FALLBACKS.load(Ordering::Relaxed)
+    }
+
+    /// `class=milliseconds` of API servings, for the migrated-calls latency
+    /// comparison against [`Self::per_class_latency_ms`].
+    #[must_use]
+    pub fn per_class_api_latency_ms(&self) -> String {
+        join_class_fields(&API_CLASS_MICROS, 1_000)
     }
 }
 
@@ -181,23 +259,37 @@ impl Drop for JobDockerScope {
             docker_wall_ms = total_micros / 1_000,
             docker_timeouts = TIMEOUTS.load(Ordering::Relaxed),
             docker_failures = FAILURES.load(Ordering::Relaxed),
+            docker_api_calls = self.api_calls(),
+            docker_api_fallbacks = self.api_fallbacks(),
+            docker_api_latency_ms_by_class = self.per_class_api_latency_ms().as_str(),
             "host docker invocations for job"
         );
     }
+}
+
+// The counters are process globals, which is exactly job scope in
+// production (one job per slot process) but shared across tests in one
+// binary. Counter assertions therefore run under one lock, shared with the
+// facade routing tests in `super::client` through
+// [`lock_serial_for_test`].
+#[cfg(test)]
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold while asserting counter values in tests, here or in the facade
+/// routing tests: without one shared lock a parallel test's `begin_job`
+/// resets the counters mid-assertion and the suite flakes.
+#[cfg(test)]
+pub(crate) fn lock_serial_for_test() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The counters are process globals, which is exactly job scope in
-    // production (one job per slot process) but shared across tests in one
-    // binary. These two assertions therefore run under one lock.
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn a_job_scope_counts_every_class_it_sees() {
-        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let _serial = lock_serial_for_test();
         let scope = begin_job("job-1");
         observe(DockerOp::Query, Duration::from_millis(5), 0, false);
         observe(DockerOp::Query, Duration::from_millis(7), 0, false);
@@ -211,7 +303,7 @@ mod tests {
 
     #[test]
     fn a_new_job_scope_starts_from_zero() {
-        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let _serial = lock_serial_for_test();
         let first = begin_job("job-1");
         observe(DockerOp::Payload, Duration::from_millis(1), 0, false);
         assert_eq!(first.invocations(), 1);
@@ -222,8 +314,46 @@ mod tests {
     }
 
     #[test]
+    fn api_servings_rise_without_touching_invocations() {
+        let _serial = lock_serial_for_test();
+        let scope = begin_job("job-api");
+        observe_api(DockerOp::Query, Duration::from_micros(400));
+        observe_api(DockerOp::Query, Duration::from_micros(600));
+        observe_api(DockerOp::DaemonQuery, Duration::from_millis(1));
+        observe_api_fallback(DockerOp::Query);
+        assert_eq!(scope.invocations(), 0);
+        assert_eq!(scope.api_calls(), 3);
+        assert_eq!(scope.api_fallbacks(), 1);
+        assert_eq!(scope.per_class_api_latency_ms(), "daemon-query=1,query=1");
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 3);
+        assert_eq!(counts.api_fallbacks, 1);
+        assert_eq!(
+            counts.api_classes,
+            vec![
+                ClassTotal {
+                    label: "daemon-query",
+                    count: 1,
+                    latency_ms: 1,
+                },
+                ClassTotal {
+                    label: "query",
+                    count: 2,
+                    latency_ms: 1,
+                },
+            ]
+        );
+        assert!(counts.classes.is_empty());
+        drop(scope);
+        let second = begin_job("job-api-reset");
+        assert_eq!(second.api_calls(), 0);
+        assert_eq!(second.api_fallbacks(), 0);
+        assert_eq!(snapshot().api_classes, Vec::new());
+    }
+
+    #[test]
     fn a_snapshot_reads_the_same_counters_as_the_forensics_fields() {
-        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let _serial = lock_serial_for_test();
         let scope = begin_job("job-snapshot");
         observe(DockerOp::Query, Duration::from_millis(5), 0, false);
         observe(DockerOp::Query, Duration::from_millis(7), 0, false);
@@ -262,7 +392,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_of_an_idle_scope_is_empty_but_valid() {
-        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let _serial = lock_serial_for_test();
         let _scope = begin_job("job-idle");
         assert_eq!(snapshot(), Snapshot::default());
     }

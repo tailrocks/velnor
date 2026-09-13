@@ -569,10 +569,7 @@ async fn drain_children(
         .filter(|job| {
             matches!(
                 job.phase,
-                ActorPhase::Assigned
-                    | ActorPhase::Starting
-                    | ActorPhase::Running
-                    | ActorPhase::Completing
+                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
             )
         })
         .map(|job| job.job_id.0)
@@ -725,7 +722,6 @@ async fn reconcile_once(
             args,
             journal,
             slots,
-            jobs,
             startup_deadlines,
             &mut *pacing,
             remote_deadline,
@@ -816,7 +812,6 @@ async fn reconcile_once(
                     args,
                     journal,
                     slots,
-                    jobs,
                     startup_deadlines,
                     &mut *pacing,
                     remote_deadline,
@@ -903,7 +898,6 @@ async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
     slots: &mut HashMap<String, Child>,
-    jobs: &mut HashMap<String, Child>,
     startup_deadlines: &mut HashMap<String, Instant>,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
@@ -925,9 +919,6 @@ async fn execute_effect(
             slot_id,
             generation,
         } => register_runner(args, journal, pacing, slot_id, generation, remote_deadline).await,
-        SideEffect::StartJob { job_id, generation } => {
-            maybe_spawn_job(args, journal, jobs, &job_id.0, generation.0, None)
-        }
         SideEffect::AdvertiseCapacity { permits } => {
             std::fs::write(
                 args.state_dir.join("advertised-capacity"),
@@ -1495,9 +1486,9 @@ fn probe_configured(args: &ControllerArgs) -> bool {
     exec.url.is_some() && exec.pat.is_some()
 }
 
-/// GitHub session waiters for Ready slots. Do not apply Assigned: REST
-/// queued ids are not broker job ids, and Ready must stay Ready until
-/// `accept_job` on the broker GUID.
+/// GitHub session waiters for Ready slots. Do not intend an acquisition:
+/// REST queued ids are not broker job ids, and Ready must stay Ready until
+/// the run-service acquire path owns the broker GUID.
 fn spawn_ready_waiters(
     args: &ControllerArgs,
     journal: &Journal,
@@ -1515,10 +1506,7 @@ fn spawn_ready_waiters(
             job.slot_id == slot.slot_id
                 && matches!(
                     job.phase,
-                    ActorPhase::Assigned
-                        | ActorPhase::Starting
-                        | ActorPhase::Running
-                        | ActorPhase::Completing
+                    ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
                 )
         }) {
             continue;
@@ -1555,10 +1543,7 @@ async fn reclaim_orphaned_jobs(
         .filter(|job| {
             matches!(
                 job.phase,
-                ActorPhase::Assigned
-                    | ActorPhase::Starting
-                    | ActorPhase::Running
-                    | ActorPhase::Completing
+                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
             )
         })
         // A ready-slot waiter is spawned before GitHub assigns a job, so its
@@ -2259,10 +2244,7 @@ fn slot_has_admission_block(
         job.slot_id == *slot_id
             && matches!(
                 job.phase,
-                ActorPhase::Assigned
-                    | ActorPhase::Starting
-                    | ActorPhase::Running
-                    | ActorPhase::Completing
+                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
             )
     }) || state
         .outbox
@@ -2760,10 +2742,13 @@ mod tests {
                 slot_id: slot_id.clone(),
                 generation,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: slot_id.clone(),
                 job_id: job_id.clone(),
                 generation,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: job_id.clone(),
@@ -3020,10 +3005,13 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: SlotId("velnor-1".to_owned()),
                 job_id: JobId("job-1".to_owned()),
                 generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: JobId("job-1".to_owned()),
@@ -3291,10 +3279,13 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: SlotId("velnor-1".to_owned()),
                 job_id: JobId("job-1".to_owned()),
                 generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: JobId("job-1".to_owned()),
@@ -3622,10 +3613,13 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: SlotId("velnor-1".to_owned()),
                 job_id: JobId("job-1".to_owned()),
                 generation: Generation::INITIAL,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: JobId("job-1".to_owned()),

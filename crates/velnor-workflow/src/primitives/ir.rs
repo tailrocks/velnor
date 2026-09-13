@@ -508,11 +508,10 @@ pub(crate) fn render_pinned_toolchain_steps(
 
 /// The mise tool ids a unit's jobs install: what the scan detects from the
 /// unit's own commands, plus what the repository declares for tools the scan
-/// cannot see (a code generator its tests shell out to at runtime). The
-/// language toolchain is deliberately absent — rustup provisions it from the
-/// repository's pin — and so is every tool a policy step installs through its
-/// own action. Each additional id widens the supply chain of every job that
-/// runs it, so a unit that invokes none of these gets nothing.
+/// cannot see. The language toolchain is deliberately absent — rustup
+/// provisions it from the repository's pin — and so is every tool a policy
+/// step installs through its own action. Each additional id widens the supply
+/// chain of every job that runs it.
 pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
@@ -685,6 +684,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
+    pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) runners: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
@@ -711,6 +711,12 @@ pub(crate) enum ToolRequirement {
     Mold,
     DockerBuildx,
     Mise,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelnorPullRequest {
+    TrustedOnly,
+    Automatic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -859,6 +865,11 @@ impl WorkflowIr {
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
+            pull_request_on_velnor: if config.pull_request_on_velnor {
+                VelnorPullRequest::Automatic
+            } else {
+                VelnorPullRequest::TrustedOnly
+            },
             runners: config.runners,
             tools,
             mise_present,
@@ -898,13 +909,10 @@ impl WorkflowIr {
         if self.runners == RunnerMode::Both {
             self.render_lane_admission(&mut output);
         }
-        // Runner mode is global; only trusted-event jobs receive the extra
-        // default-branch gate needed for Velnor execution.
+        // Runner mode is global; every self-hosted job receives the
+        // default-branch trusted-event gate needed for Velnor execution.
         let trusted_event = kind != WorkflowKind::PullRequest;
         let runners = self.runners;
-        // Velnor-only control-plane jobs admit pull requests through the
-        // untrusted Velnor path. GitHub/Both retain their hosted PR behavior
-        // and trusted-only Velnor lane.
         self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
@@ -1116,7 +1124,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_event_expression())
+            format!("always() && {}", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -1206,8 +1214,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     /// The lane jobs a nested unit workflow emits: the hosted lane saves the
-    /// cache and is untrusted. Velnor-only pull requests use the untrusted
-    /// Velnor path; trusted event gates still guard persistent cache writes.
+    /// cache and is untrusted. Velnor jobs are trusted-event-only because they
+    /// execute on the self-hosted runner pool.
     pub(crate) fn default_lane_jobs(cache_save: bool) -> Vec<LaneJob> {
         vec![
             LaneJob {
@@ -1370,15 +1378,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             self.pins.checkout
         );
-        if lane == RunnerMode::Github && unit.kind == UnitKind::Swift {
-            // Apple jobs run on macOS, where the Linux-built plan artifact
-            // has no product: install the runtime through the setup action
-            // (cache, then a pinned source build) instead of downloading
-            // the plan artifact.
-            Self::render_workflow_runtime_setup(output, lane);
-        } else {
-            Self::render_workflow_runtime_download(output, lane);
-        }
+        self.render_unit_runtime(output, lane, unit);
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
@@ -1503,16 +1503,36 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
     }
 
+    fn render_unit_runtime(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
+        if lane != RunnerMode::Github {
+            return;
+        }
+        // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
+        // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
+        // cannot consume a Linux-built plan artifact even when Planning is hosted.
+        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+            Self::render_workflow_runtime_setup(output, lane);
+        } else {
+            Self::render_workflow_runtime_download(output, lane);
+        }
+    }
+
     pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
-        // The affected-plan primitive still supplies its historical hosted
-        // argument. The resolved project lane owns the final control-plane
-        // placement so a Velnor-only surface cannot leak a hosted plan job.
+        // Planning follows the configured lane. Velnor uses the image-provided
+        // runtime, while an explicit GitHub lane bootstraps the pinned runtime.
         let runners = if self.runners == RunnerMode::Velnor {
             RunnerMode::Velnor
         } else {
             runners
         };
-        let gate = self.trusted_runner_gate(runners, trusted || runners == RunnerMode::Velnor);
+        let gate = if runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            self.trusted_runner_gate(runners, trusted)
+        };
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
@@ -1544,13 +1564,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         };
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
             base_sha = base_sha,
         );
-        output.push_str(&workflow_runtime_artifact_upload());
+        if runners != RunnerMode::Velnor {
+            output.push_str(&workflow_runtime_artifact_upload());
+        }
         output.push_str(&workflow_selection_artifact_upload());
     }
 
@@ -1574,14 +1596,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "    if: ${{{{ {} }}}}\n",
-                if self.runners == RunnerMode::Velnor {
-                    self.velnor_event_expression()
-                } else {
-                    self.trusted_event_expression()
-                }
-            )
+            format!("    if: ${{{{ {} }}}}\n", self.trusted_event_expression())
         } else {
             String::new()
         }
@@ -1601,22 +1616,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         )
     }
 
-    fn aggregate_event_expression(&self) -> String {
-        format!(
-            "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
-            self.default_branch
-        )
-    }
-
     fn base_sha_expression(&self) -> String {
         format!(
             "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
-    }
-
-    fn velnor_event_expression(&self) -> String {
-        self.aggregate_event_expression()
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
@@ -1644,9 +1648,35 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 | (RunnerMode::Both, RunnerMode::Velnor | RunnerMode::Github)
         );
         if automatic {
-            format!("{} || ({dispatch})", self.automatic_event_expression())
+            if lane == RunnerMode::Velnor {
+                self.velnor_lane_event_expression(&dispatch)
+            } else {
+                format!("{} || ({dispatch})", self.automatic_event_expression())
+            }
         } else {
             dispatch
+        }
+    }
+
+    fn velnor_control_plane_expression(&self) -> String {
+        if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
+            format!(
+                "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+                self.default_branch
+            )
+        } else {
+            self.trusted_event_expression()
+        }
+    }
+
+    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
+        if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
+            format!("{} || ({dispatch})", self.automatic_event_expression())
+        } else {
+            format!(
+                "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
+                self.default_branch
+            )
         }
     }
 
@@ -1672,11 +1702,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(if self.runners == RunnerMode::Velnor {
-            self.velnor_event_expression()
-        } else {
-            self.trusted_event_expression()
-        });
+        let condition = Some(self.trusted_event_expression());
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,
@@ -1687,7 +1713,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
-        let gate = self.trusted_runner_gate(self.runners, self.runners == RunnerMode::Velnor);
+        let gate = if self.runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            String::new()
+        };
         let kinds = self
             .units
             .iter()
@@ -1764,14 +1797,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 self.pins.checkout,
             );
-            if lane == RunnerMode::Github && unit.kind == UnitKind::Swift {
-                // Apple jobs run on macOS, where the Linux-built plan
-                // artifact has no product: install the runtime through the
-                // setup action instead of downloading the plan artifact.
-                Self::render_workflow_runtime_setup(output, lane);
-            } else {
-                Self::render_workflow_runtime_download(output, lane);
-            }
+            self.render_unit_runtime(output, lane, unit);
             output.push_str(&workflow_selection_artifact_download(None));
             self.render_tool_provisioning(output, lane, unit, cache_save);
             if CacheBackend::Detected.enables_actions_cache(self, unit)
@@ -1953,6 +1979,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // action surface and hoping the runner can ignore the other lane.
         let github_lane = lane == RunnerMode::Github;
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        if !github_lane && self.mise_present {
+            // Hosted mise-action is not admitted on Velnor. Auto-install is
+            // off on the checks step, so declared lockfile tools must be
+            // installed explicitly or shims fail closed.
+            output.push_str(
+                "      - name: Install declared Mise tools\n        run: |\n          set -euo pipefail\n          mise --yes install\n",
+            );
+        }
         if github_lane && let Some(toolchain) = &unit.toolchain {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
@@ -1960,7 +1994,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             // The Rust toolchain is never a mise tool: the scan refuses a
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
-            // the unit's own commands name.
+            // the unit's own commands name or the repository declares.
             let mise_tools = mise_tool_ids(unit);
             let invokes_mise = commands_invoke_mise(unit);
             if !mise_tools.is_empty() {
@@ -2147,10 +2181,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
         }
         let gate = if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                self.default_branch
-            )
+            format!("always() && {}", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };

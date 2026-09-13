@@ -638,8 +638,16 @@ backend = "aqua:protocolbuffers/protobuf/protoc"
         assert!(dockerfile.contains("mbx doctor"));
         assert!(!dockerfile.contains("RUSTC_WRAPPER="));
         assert!(!dockerfile.contains("SCCACHE_DIR="));
-        assert!(dockerfile.contains("mise exec -- sccache --version"));
+        // The default image carries no sccache: the explicit compat mode
+        // provisions the pinned release itself, and the build fails if the
+        // binary is present for any reason.
+        assert!(dockerfile.contains("! command -v sccache"));
+        assert!(!dockerfile.contains("mise exec -- sccache --version"));
         assert!(!dockerfile.contains("mise exec -- kache"));
+        let tools = include_str!("../../../docker/job-mise.toml");
+        assert!(!tools.to_lowercase().contains("sccache"));
+        let lock = include_str!("../../../docker/job-mise.lock");
+        assert!(!lock.to_lowercase().contains("sccache"));
     }
 
     #[test]

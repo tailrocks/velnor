@@ -14,7 +14,7 @@
 
 pub(crate) mod canonical;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -160,6 +160,10 @@ struct WorkflowSection {
     package_update_channels: Option<BTreeMap<String, Vec<String>>>,
     /// Overrides the resolved default branch used for branch gates.
     default_branch: Option<String>,
+    /// When true, automatic `pull_request` runs on the Velnor lane. Default
+    /// false: self-hosted jobs stay on the trusted default-branch gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_request_on_velnor: Option<bool>,
 }
 
 /// The release contract a repository declares for itself. `kind` names the
@@ -220,10 +224,8 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
-    /// Additional mise tool ids the unit's jobs install (for example a code
-    /// generator its tests shell out to). The scan cannot see tools a test
-    /// invokes at runtime, so the repository declares them; they render into
-    /// the job's mise `install_args` beside the detected ids.
+    /// Additional mise tool ids the unit's jobs install when the scanner
+    /// cannot observe a runtime-invoked tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mise_tools: Option<Vec<String>>,
 }
@@ -507,6 +509,10 @@ impl RepoGenerationConfig {
     /// The declared self-hosted runner group.
     pub(crate) fn velnor_runner_group(&self) -> Option<&str> {
         self.workflow.velnor_runner_group.as_deref()
+    }
+
+    pub(crate) fn pull_request_on_velnor(&self) -> Option<bool> {
+        self.workflow.pull_request_on_velnor
     }
 
     /// The declared profile label.
@@ -858,13 +864,23 @@ fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorErro
     Ok(())
 }
 
-/// A mise tool id renders verbatim into a job's `install_args`, so it must be
-/// a plain id: backend qualifiers, paths, and versions, but no whitespace
-/// or shell metacharacters that could escape the argument.
+/// A mise tool id renders verbatim into a job's `install_args`, so it must be a
+/// backend-qualified plain id: no versions, whitespace, traversal, or shell
+/// metacharacters.
 fn valid_mise_tool_id(value: &str) -> bool {
-    // No `@version`: versions resolve from the repository's mise manifest,
-    // never from an ad-hoc install argument.
-    !value.is_empty()
+    let Some((backend, path)) = value.split_once(':') else {
+        return false;
+    };
+    let path_segments = path.split('/').collect::<Vec<_>>();
+    !backend.is_empty()
+        && !path.is_empty()
+        && value.matches(':').count() == 1
+        && backend
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && path_segments
+            .iter()
+            .all(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
         })
@@ -898,10 +914,21 @@ fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
                 )));
         }
         if let Some(tools) = row.mise_tools.as_deref() {
+            if tools.is_empty() {
+                return Err(GeneratorError::usage(format!(
+                    "[[unit]] {id} declares an empty mise_tools; omit it or name the tools the unit needs"
+                )));
+            }
+            let mut seen = BTreeSet::new();
             for tool in tools {
                 if !valid_mise_tool_id(tool) {
                     return Err(GeneratorError::usage(format!(
-                        "[[unit]] {id} declares mise tool `{tool}`, which is not a plain tool id; use backend-qualified ids such as `github:owner/repo` without whitespace or shell metacharacters"
+                        "[[unit]] {id} declares mise tool {tool}, which is not a backend-qualified plain tool id; use ids such as github:owner/repo without versions, whitespace, traversal, or shell metacharacters"
+                    )));
+                }
+                if !seen.insert(tool) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[unit]] {id} declares mise tool {tool} more than once"
                     )));
                 }
             }
@@ -1408,37 +1435,92 @@ mod tests {
     }
 
     #[test]
-    fn unit_mise_tools_rejects_shell_metacharacters() {
+    fn declared_mise_tools_require_unique_qualified_plain_ids() {
         let root = scanned_root("mise-tools");
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let unit = unit_ids.first().cloned().unwrap_or_default();
         let valid = format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [\"github:open-telemetry/weaver\"]\n"
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["github:open-telemetry/weaver", "aqua:nextest-rs/nextest/cargo-nextest"]
+"#
         );
         must(
             config_for(&valid).validate(&unit_ids, &package_update_blocks()),
-            "plain tool ids validate",
+            "qualified plain tool ids validate",
         );
         for rejected in [
-            "weaver; touch pwned",
-            "github:open-telemetry/weaver@0.24.2",
             "",
+            "weaver",
+            "github:open-telemetry/weaver@0.24.2",
+            "github:open-telemetry//weaver",
+            "github:../weaver",
+            "github:open-telemetry/weaver;touch",
         ] {
             let text = format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [\"{rejected}\"]\n"
+                r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["{rejected}"]
+"#
             );
             let error = must_some_error(
                 config_for(&text)
                     .validate(&unit_ids, &package_update_blocks())
                     .err(),
-                "metacharacters must fail",
+                "invalid mise tool must fail",
             );
             assert!(
                 error.contains("mise tool"),
-                "error names the tool contract: {error}"
+                "error names the mise tool contract: {error}"
             );
         }
+        let empty = format!(
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = []
+"#
+        );
+        let error = must_some_error(
+            config_for(&empty)
+                .validate(&unit_ids, &package_update_blocks())
+                .err(),
+            "empty mise_tools must fail",
+        );
+        assert!(error.contains("empty mise_tools"), "{error}");
+        let duplicate = format!(
+            r#"schema = 1
+
+[generator]
+repository = "example/fixture"
+
+[[units]]
+id = "{unit}"
+mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
+"#
+        );
+        let error = must_some_error(
+            config_for(&duplicate)
+                .validate(&unit_ids, &package_update_blocks())
+                .err(),
+            "duplicate mise_tools must fail",
+        );
+        assert!(error.contains("more than once"), "{error}");
         let _ = fs::remove_dir_all(root);
     }
 

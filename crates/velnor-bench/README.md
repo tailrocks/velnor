@@ -26,7 +26,12 @@ and persistent-host families — run on the **local** `velnor-job` driver
 (`drivers::velnor_job`), which dispatches a real job through the runner's
 own admission and capacity primitives and a real container lifecycle, and
 leaves the broker, acquisition and checkout stages honestly unobserved
-(absent from the record, named in its notes). Every other `VelnorJob` row
+(absent from the record, named in its notes). Persistent-host rows retain
+real warmup state — each warmup keeps its workspace and one stopped
+container — that the measured job observes; `after-gc`'s scoped GC removes
+exactly that retained state, never a host-wide prune. The trust-partition
+twins run in separate trust-scoped partitions, not label-only copies.
+Every other `VelnorJob` row
 remains **unrun** until the real runner-owned remote-dispatch driver
 exists. A registered runner, GitHub credentials, a fixture checkout,
 Docker, network access, or any other external prerequisite does not

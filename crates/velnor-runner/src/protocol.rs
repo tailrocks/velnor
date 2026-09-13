@@ -91,15 +91,54 @@ pub(crate) enum RunnerDeleteOutcome {
     BusyConflict,
 }
 
+/// Busy-runner vocabulary for a 422 runner DELETE. GitHub sends no machine
+/// code for this case — the known production message is `Sorry, the runner
+/// is currently running a job. Unable to delete.` — so the vocabulary match
+/// is scoped to the envelope's parsed message fields, never to the raw body:
+/// a repository name, URL, or unrelated field that happens to contain these
+/// words must not fake a conflict.
+const RUNNER_BUSY_MESSAGE_NEEDLES: &[&str] = &[
+    "currently running a job",
+    "unable to delete",
+    "runner is busy",
+    "runner_is_busy",
+];
+
 pub(crate) fn runner_delete_is_busy_conflict(status: u16, body: &str) -> bool {
     if status != 422 {
         return false;
     }
-    let lower = body.to_ascii_lowercase();
-    lower.contains("currently running a job")
-        || lower.contains("unable to delete")
-        || lower.contains("runner is busy")
-        || lower.contains("runner_is_busy")
+    runner_delete_messages(body).iter().any(|message| {
+        let lower = message.to_ascii_lowercase();
+        RUNNER_BUSY_MESSAGE_NEEDLES
+            .iter()
+            .any(|needle| lower.contains(needle))
+    })
+}
+
+/// Parsed `message` fields of a GitHub error envelope: the top-level
+/// `message` plus every `errors[]` entry message. Empty when the body is not
+/// a JSON envelope — an unparseable 422 is a generic API error, never a
+/// proven conflict (fail closed; the unclassified path surfaces
+/// `GitHubApiError`).
+fn runner_delete_messages(body: &str) -> Vec<String> {
+    let Ok(envelope) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut messages = Vec::new();
+    if let Some(message) = envelope.get("message").and_then(Value::as_str) {
+        messages.push(message.to_string());
+    }
+    if let Some(errors) = envelope.get("errors").and_then(Value::as_array) {
+        for entry in errors {
+            if let Some(message) = entry.as_str() {
+                messages.push(message.to_string());
+            } else if let Some(message) = entry.get("message").and_then(Value::as_str) {
+                messages.push(message.to_string());
+            }
+        }
+    }
+    messages
 }
 
 pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDeleteOutcome> {
@@ -6713,6 +6752,31 @@ mod tests {
             422,
             r#"{"message":"validation failed"}"#
         ));
+    }
+
+    #[test]
+    fn runner_delete_busy_message_nested_in_errors_array_is_conflict() {
+        let body = r#"{"message":"Validation failed","errors":[{"resource":"Runner","code":"custom","message":"Sorry, the runner is currently running a job."}]}"#;
+        assert!(runner_delete_is_busy_conflict(422, body));
+        assert_eq!(
+            classify_runner_delete(422, body),
+            Some(RunnerDeleteOutcome::BusyConflict)
+        );
+    }
+
+    #[test]
+    fn runner_delete_busy_words_outside_message_fields_are_not_conflict() {
+        // The vocabulary must match parsed message fields, never the raw
+        // body: a URL or unrelated field carrying these words proves nothing.
+        let body = r#"{"message":"Validation failed","documentation_url":"https://docs.github.com/runner_is_busy"}"#;
+        assert!(!runner_delete_is_busy_conflict(422, body));
+        assert_eq!(classify_runner_delete(422, body), None);
+        // An unparseable 422 fails closed to the generic API error path.
+        assert!(!runner_delete_is_busy_conflict(
+            422,
+            "currently running a job"
+        ));
+        assert_eq!(classify_runner_delete(422, "currently running a job"), None);
     }
 
     #[test]
