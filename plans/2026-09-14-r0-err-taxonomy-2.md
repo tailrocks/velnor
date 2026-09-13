@@ -7,9 +7,11 @@ broker/completion boundary: acquire / complete / ack paths in `protocol.rs`,
 
 ## Problem
 
-Retry/timeout/abandon decisions on the acquire/complete/ack paths re-derived
+Retry/abandon decisions on the acquire/complete/ack paths re-derived
 their verdict at the decision site instead of reading a category produced at
-the boundary where the status and body are observed:
+the boundary where the status and body are observed (timeouts were never in
+scope — every timeout on these paths is a fixed constant; see the
+correction note at the end of this file):
 
 1. `runner.rs` `handle_v2_message` re-parsed the raw skipped-acquire body via
    `acquire_reply_is_definitely_gone(&body)` to decide abandon-vs-leave.
@@ -162,3 +164,18 @@ one unrelated timing-sensitive test (`idle_scaling` CPU-ratio gate x2,
 unmodified base passes the full suite, and the final branch run is fully
 green (2112 passed). Same class as the slice-1 `gc_leader_lock` note:
 timing gates under contention, needs hermetic-budget work of its own.
+
+## Correction (r0-798-corr, PR follow-up to #798)
+
+Review found this slice overpromised: the retry loops did not all read the
+taxonomy, and the Problem statement above claimed timeout decisions the
+taxonomy never covered (fixed by editing "Retry/timeout/abandon" to
+"Retry/abandon" in place). The follow-up branch `r0-798-corr`
+(`plans/2026-09-14-r0-798-corr.md`) fixes the five in-scope omissions —
+the untyped `acquire run-service job` producer, the acquire loop's legacy
+derivation, the complete loop's local `retriable` bool, the untyped
+exhausted-transient completion producer, and the untyped
+`create broker session` producer plus its retry-everything loop — and
+records the complete remaining-untyped-sites list there. All timeouts stay
+fixed constants (30 s broker/run-service calls, 70 s poll, fixed backoff
+schedules); no category-derived timeouts exist or were introduced.
