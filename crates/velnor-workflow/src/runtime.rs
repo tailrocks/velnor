@@ -67,10 +67,16 @@ struct Analysis {
     limitations: Vec<String>,
 }
 
+#[expect(
+    dead_code,
+    reason = "runtime preserves the complete generated workflow contract while execution consumes selected fields"
+)]
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Workflow {
     github_runner: String,
+    #[serde(default)]
+    macos_runner: String,
     velnor_labels: Vec<String>,
     files: Vec<String>,
     notes: Vec<String>,

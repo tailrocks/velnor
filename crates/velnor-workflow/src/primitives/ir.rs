@@ -680,6 +680,7 @@ pub(crate) fn render_retained_output_cache_note(
 pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
+    pub(crate) macos_runner: String,
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
@@ -848,6 +849,7 @@ impl WorkflowIr {
         Self {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
+            macos_runner: config.macos_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
@@ -1801,7 +1803,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
         if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
-            return "macos-15".to_owned();
+            return yaml_scalar(&self.macos_runner);
         }
         self.runner_for(lane)
     }

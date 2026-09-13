@@ -206,6 +206,7 @@ impl From<RepositoryShape> for ProjectConfig {
             default_branch: shape.default_branch,
             runners: shape.runners,
             github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
