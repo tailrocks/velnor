@@ -190,13 +190,6 @@ impl DockerLeasePolicy {
         {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
         }
-        // `GET /containers/json` is docker ps. Do not treat `json` as an id;
-        // that answers "foreign Container resource json" for every list.
-        if segments.as_slice() == ["containers", "json"]
-            && matches!(method.as_str(), "GET" | "HEAD")
-        {
-            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
-        }
         if segments.as_slice() == ["containers", "create"] && method == "POST" {
             validate_container_create_request(request).map_err(create_capability_deny)?;
             return authorize_docker_route(
@@ -1500,6 +1493,13 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
                 value_is_present(value)
             }
             "binds" | "mounts" => contains_host_bind(value)? || value_is_present(value),
+            // Docker's zero value means "unset" for this known field. Do
+            // not generalize that exception to future numeric fields.
+            "blkioweight" => !is_zero_number(value),
+            // API 1.55 CLI sends `ConsoleSize: [0,0]` on every create
+            // (live preview.63 probe/backend-parity). That is "no TTY
+            // size", not host control. A nonzero size stays denied.
+            "consolesize" => !is_default_console_size(value),
             "autoremove" | "cgroupparent" | "cpucount" | "cpupercent" | "cpushares"
             | "cpuquota" | "cpuperiod" | "cpurealtimeperiod" | "cpurealtimeruntime"
             | "cpusetcpus" | "cpusetmems" | "memory" | "memoryreservation" | "memoryswap"
@@ -1508,10 +1508,10 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
             | "maskedpaths" | "readonlypaths" => false,
             // Docker CLI releases routinely add benign HostConfig fields and
-            // serialize their empty defaults (observed live: the API 1.55
-            // CLI sends `BlkioDeviceReadBps: []`). An absent/empty value
-            // grants no host control; only a populated unknown field is a
-            // capability request.
+            // serialize their null, false, string, array, or object defaults
+            // (observed live: API 1.55 sends `BlkioDeviceReadBps: []`). A
+            // populated unknown field is a capability request. Unknown
+            // numeric values remain denied, including zero.
             _ => value_is_present(value),
         };
         if unsafe_control {
@@ -1540,6 +1540,23 @@ fn is_guest_network_mode(value: &Value) -> bool {
     })
 }
 
+fn is_zero_number(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Number(number)
+            if number.as_i64() == Some(0) || number.as_u64() == Some(0)
+    )
+}
+
+fn is_default_console_size(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) if values.is_empty() => true,
+        Value::Array(values) if values.len() == 2 => values.iter().all(is_zero_number),
+        _ => false,
+    }
+}
+
 fn value_is_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1547,9 +1564,7 @@ fn value_is_present(value: &Value) -> bool {
         Value::String(value) => !value.trim().is_empty(),
         Value::Array(values) => !values.is_empty(),
         Value::Object(object) => !object.is_empty(),
-        // API 1.55 CLI serializes unused numeric HostConfig fields as 0
-        // (live: `BlkioWeight: 0`). Zero grants no host control.
-        Value::Number(value) => !value.as_f64().is_some_and(|number| number == 0.0),
+        Value::Number(_) => true,
     }
 }
 
@@ -3510,6 +3525,33 @@ mod tests {
     }
 
     #[test]
+    fn lease_policy_denies_global_container_list() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let error = policy
+            .authorize(&api_request("GET", "/v1.43/containers/json?all=1", b""))
+            .expect_err("global container listing would expose other leases");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("global container listing must return a Docker denial");
+        assert_eq!(deny.status, 404);
+    }
+
+    #[test]
+    fn lease_policy_allows_namespaced_image_inspect() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        assert_eq!(
+            policy
+                .authorize(&api_request(
+                    "GET",
+                    "/v1.55/images/moby/buildkit:buildx-stable-1/json",
+                    b""
+                ))
+                .unwrap(),
+            AuthorizedDockerRoute::DaemonRead
+        );
+    }
+
+    #[test]
     fn lease_policy_binds_exec_to_an_owned_container() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let body = br#"{"AttachStdout":true}"#;
@@ -3568,20 +3610,73 @@ mod tests {
     #[test]
     fn container_create_tolerates_empty_unknown_hostconfig_defaults() {
         // Live API 1.55 CLI default serialization: unknown HostConfig fields
-        // arrive as empty defaults and grant no host control. Observed on
-        // sentry 0.1.274~preview.47: `BlkioWeight: 0` denied create.
+        // arrive as empty defaults and grant no host control. `BlkioWeight: 0`
+        // is the one numeric default explicitly admitted below.
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"NetworkMode":"none","AutoRemove":true}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"NetworkMode":"none","AutoRemove":true}}"#,
         );
-        assert!(policy.authorize(&request).is_ok());
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
     }
 
     #[test]
-    fn container_create_nonzero_blkio_weight_is_lease_deny() {
+    fn container_create_rejects_unknown_numeric_zero_hostconfig_field() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":0}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("unknown numeric HostConfig fields must fail closed");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("unknown numeric field denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("FutureHostControl"));
+    }
+
+    #[test]
+    fn container_create_allows_only_zero_console_size_as_known_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"ConsoleSize":[0,0]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"ConsoleSize":[80,24]}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("nonzero ConsoleSize is a capability request");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("nonzero ConsoleSize denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("ConsoleSize"));
+    }
+
+    #[test]
+    fn container_create_allows_only_zero_blkio_weight_as_known_numeric_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioWeight":0}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
@@ -3592,7 +3687,7 @@ mod tests {
             .expect_err("nonzero BlkioWeight is host IO control");
         let deny = error
             .downcast_ref::<LeaseDeny>()
-            .expect("create denial must answer as LeaseDeny");
+            .expect("nonzero BlkioWeight denial must answer as LeaseDeny");
         assert_eq!(deny.status, 403);
         assert!(deny.message.contains("BlkioWeight"));
     }
@@ -3613,30 +3708,6 @@ mod tests {
             .expect("create denial must answer as LeaseDeny");
         assert_eq!(deny.status, 403);
         assert!(deny.message.contains("NetworkMode"));
-    }
-
-    #[test]
-    fn containers_json_list_is_daemon_read_not_foreign_id_json() {
-        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
-        let request = api_request("GET", "/v1.55/containers/json?all=1", b"");
-        assert_eq!(
-            policy.authorize(&request).unwrap(),
-            AuthorizedDockerRoute::DaemonRead
-        );
-    }
-
-    #[test]
-    fn namespaced_image_inspect_is_daemon_read() {
-        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
-        let request = api_request(
-            "GET",
-            "/v1.55/images/moby/buildkit:buildx-stable-1/json",
-            b"",
-        );
-        assert_eq!(
-            policy.authorize(&request).unwrap(),
-            AuthorizedDockerRoute::DaemonRead
-        );
     }
 
     #[test]

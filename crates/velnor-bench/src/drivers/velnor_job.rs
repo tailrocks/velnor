@@ -57,11 +57,11 @@ use crate::{
 enum Kind {
     /// One job lifecycle with the full local stage breakdown.
     StageBreakdown,
-    /// `context.concurrency` overlapping job lifecycles; stages are
-    /// phase-window walls, not per-job sums.
+    /// `context.concurrency` job lifecycles whose containers overlap, while
+    /// the benchmark's Docker control-plane phases remain serialized.
     ConcurrentSlots,
-    /// The same workload as a trusted and an untrusted job; stages carry
-    /// the per-stage slower of the pair.
+    /// Sequential trusted and untrusted labeled lifecycles; stages carry the
+    /// per-stage slower of the pair, not a claim about remote trust admission.
     TrustPartition,
     /// The Nth job on a retaining host: `warmups` unmeasured jobs run in
     /// `prepare`, then the measured one.
@@ -112,6 +112,7 @@ pub(super) fn build(scenario: &Scenario) -> Result<Box<dyn Workload>> {
         admission: DiskPressure::new(DiskPolicy::default()),
         owned_containers: Vec::new(),
         owned_networks: Vec::new(),
+        owned_images: Vec::new(),
         notes: vec![
             "velnor-job local driver: real admission, capacity and container lifecycle on this host; \
              broker-delivery, acquired-payload and checkout are unobserved (no broker, no git remote)"
@@ -160,6 +161,81 @@ fn parse_docker_id(stdout: &str) -> Result<String> {
     Ok(id.to_owned())
 }
 
+fn parse_owned_image_inspect(output: &str, expected_owner: &str) -> Result<String> {
+    let mut fields = output.split_whitespace();
+    let raw_id = fields
+        .next()
+        .context("Docker image inspect returned no image ID")?;
+    let owner = fields
+        .next()
+        .context("Docker image inspect returned no owner label")?;
+    if owner != expected_owner {
+        bail!("Docker image owner label mismatch: expected {expected_owner:?}, got {owner:?}");
+    }
+    if fields.next().is_some() {
+        bail!("Docker image inspect returned extra fields");
+    }
+    let id = raw_id.strip_prefix("sha256:").unwrap_or(raw_id);
+    Ok(format!("sha256:{}", parse_docker_id(id)?))
+}
+
+fn remove_owned_image(
+    context: &mut Context,
+    tag: &str,
+    expected_id: Option<&str>,
+    expected_owner: &str,
+) -> Result<()> {
+    let inspected = context
+        .runner
+        .run(
+            "docker",
+            &[
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}} {{index .Config.Labels \"com.velnor.bench.owner\"}}",
+                tag,
+            ],
+        )?
+        .clone();
+    if !inspected.ok() {
+        if inspected
+            .stderr
+            .to_ascii_lowercase()
+            .contains("no such image")
+        {
+            return Ok(());
+        }
+        bail!(
+            "docker owned image inspection failed with exit code {}: {}",
+            inspected.code,
+            inspected.stderr.trim()
+        );
+    }
+    let id = parse_owned_image_inspect(&inspected.stdout, expected_owner)?;
+    if let Some(expected_id) = expected_id
+        && id != expected_id
+    {
+        bail!("Docker image identity mismatch: expected {expected_id:?}, got {id:?}");
+    }
+    // Remove by the verified immutable ID. A tag can be retargeted after the
+    // inspection; deleting the ID cannot remove the retargeted image.
+    let removed = context.runner.run("docker", &["image", "rm", &id])?.clone();
+    if removed.ok()
+        || removed
+            .stderr
+            .to_ascii_lowercase()
+            .contains("no such image")
+    {
+        return Ok(());
+    }
+    bail!(
+        "docker owned image removal failed with exit code {}: {}",
+        removed.code,
+        removed.stderr.trim()
+    )
+}
+
 fn with_cleanup(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
     match cleanup {
         Ok(()) => primary,
@@ -186,6 +262,7 @@ struct VelnorJobWorkload {
     admission: DiskPressure,
     owned_containers: Vec<OwnedObject>,
     owned_networks: Vec<OwnedObject>,
+    owned_images: Vec<OwnedObject>,
     notes: Vec<String>,
 }
 
@@ -202,10 +279,20 @@ impl VelnorJobWorkload {
 
     fn object_name(&self, role: &str) -> String {
         format!(
-            "velnor-job-{role}-{}-{}-{}",
+            "velnor-job-{role}-{}-{:032x}-{}-{}",
             std::process::id(),
+            self.nonce,
             self.owner,
-            self.iteration
+            self.iteration,
+        )
+    }
+
+    fn gc_image_tag(&self) -> String {
+        format!(
+            "velnor-job-gc-{}-{:032x}-{}:latest",
+            std::process::id(),
+            self.nonce,
+            self.owner
         )
     }
 
@@ -221,12 +308,49 @@ impl VelnorJobWorkload {
         }
     }
 
+    fn own_image(&mut self, name: String) {
+        if !self.owned_images.iter().any(|owned| owned.name == name) {
+            self.owned_images.push(OwnedObject { name, id: None });
+        }
+    }
+
     fn record_id(objects: &mut [OwnedObject], name: &str, id: String) -> Result<()> {
         let owned = objects
             .iter_mut()
             .find(|owned| owned.name == name)
             .with_context(|| format!("{name} was not registered before creation"))?;
         owned.id = Some(id);
+        Ok(())
+    }
+
+    fn capture_owned_image(&mut self, context: &mut Context, tag: &str) -> Result<()> {
+        let inspected = context
+            .runner
+            .run(
+                "docker",
+                &[
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}} {{index .Config.Labels \"com.velnor.bench.owner\"}}",
+                    tag,
+                ],
+            )?
+            .clone();
+        require_success(&inspected, "docker image inspect owned image")?;
+        let id = parse_owned_image_inspect(&inspected.stdout, &self.owner_token())?;
+        Self::record_id(&mut self.owned_images, tag, id)
+    }
+
+    fn remove_owned_image_by_tag(&mut self, context: &mut Context, tag: &str) -> Result<()> {
+        let expected_id = self
+            .owned_images
+            .iter()
+            .find(|owned| owned.name == tag)
+            .and_then(|owned| owned.id.as_deref());
+        let owner = self.owner_token();
+        remove_owned_image(context, tag, expected_id, &owner)?;
+        self.owned_images.retain(|owned| owned.name != tag);
         Ok(())
     }
 
@@ -282,6 +406,15 @@ impl VelnorJobWorkload {
                     failures.push(format!("network {}: {error:#}", owned.name));
                     self.owned_networks.push(owned);
                 }
+            }
+        }
+        for owned in std::mem::take(&mut self.owned_images) {
+            let expected_id = owned.id.as_deref();
+            if let Err(error) =
+                remove_owned_image(context, &owned.name, expected_id, &self.owner_token())
+            {
+                failures.push(format!("image {}: {error:#}", owned.name));
+                self.owned_images.push(owned);
             }
         }
         if failures.is_empty() {
@@ -547,11 +680,12 @@ impl VelnorJobWorkload {
         Ok(())
     }
 
-    /// `concurrency` job lifecycles with overlapping lifetimes: create all,
-    /// start all, run all, inspect all, remove all. The harness drives them
-    /// from one thread, so its own syscalls serialize, but every container
-    /// is alive while its siblings run — the daemon contention is real.
-    /// Stages are phase-window walls: the batch's critical path.
+    /// `concurrency` job lifecycles with overlapping container lifetimes:
+    /// create all, start all, run all, inspect all, remove all. The harness
+    /// drives Docker from one thread, so control-plane syscalls serialize;
+    /// this measures a shared daemon with live sibling containers, not true
+    /// concurrent dispatch. Stages are phase-window walls: the batch's
+    /// critical path.
     fn concurrent_batch(
         &mut self,
         context: &mut Context,
@@ -644,9 +778,9 @@ impl VelnorJobWorkload {
         };
         stages.insert(Stage::ContainerCreate, create_ms);
 
-        // One phase, one window: every container starts, then every
+        // One serialized phase at a time: every container starts, then every
         // container runs its first command, then every completion is read.
-        // Lifetimes overlap across the whole batch.
+        // Container lifetimes overlap across the whole batch; API calls do not.
         let phase = |context: &mut Context,
                      containers: &[(String, String)],
                      operation: &str,
@@ -805,7 +939,8 @@ impl Workload for VelnorJobWorkload {
                     dir.join("Dockerfile"),
                     format!("FROM {image}\nRUN echo velnor-job-gc-churn > /gc.txt\n"),
                 )?;
-                let tag = format!("velnor-job-gc-{}-{}:latest", std::process::id(), self.owner);
+                let tag = self.gc_image_tag();
+                self.own_image(tag.clone());
                 let built = context
                     .runner
                     .run(
@@ -829,8 +964,8 @@ impl Workload for VelnorJobWorkload {
                     )?
                     .clone();
                 require_success(&size, "docker image inspect gc churn")?;
-                let removed = context.runner.run("docker", &["rmi", "-f", &tag])?.clone();
-                require_success(&removed, "docker rmi gc churn")?;
+                self.capture_owned_image(context, &tag)?;
+                self.remove_owned_image_by_tag(context, &tag)?;
                 let _ = std::fs::remove_dir_all(&dir);
                 self.notes.push(format!(
                     "after-gc precondition: 2 warmup job(s), then scoped GC removed one owned image ({} bytes); no host-wide prune",
@@ -937,11 +1072,11 @@ impl Workload for VelnorJobWorkload {
         let mut notes = self.notes.clone();
         match self.kind {
             Kind::ConcurrentSlots => notes.push(
-                "concurrent-slots: container lifetimes overlap across the batch; stages are phase-window walls"
+                "concurrent-slots: container lifetimes overlap, but Docker control-plane phases are serialized; stages are phase-window walls, not true concurrent dispatch"
                     .to_owned(),
             ),
             Kind::TrustPartition => notes.push(
-                "trust-partition: trusted and untrusted jobs both ran; stages carry the per-stage slower"
+                "trust-partition: sequential trusted and untrusted labeled lifecycles; stages carry the per-stage slower and do not measure remote trust admission or cache isolation"
                     .to_owned(),
             ),
             _ => {}
@@ -960,6 +1095,63 @@ mod tests {
         scenario::{Driver, Family, Runnability},
         sys::Runner,
     };
+
+    fn test_workload(nonce: u128) -> VelnorJobWorkload {
+        VelnorJobWorkload {
+            kind: Kind::AfterGc,
+            scenario: "persistent-host/after-gc",
+            scratch: None,
+            owner: 7,
+            nonce,
+            job_image: None,
+            iteration: 3,
+            admission: DiskPressure::new(DiskPolicy::default()),
+            owned_containers: Vec::new(),
+            owned_networks: Vec::new(),
+            owned_images: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn owned_image_inspect_requires_matching_owner_and_valid_id() {
+        let id = "a".repeat(64);
+        assert_eq!(
+            parse_owned_image_inspect(&format!("sha256:{id} owner-token"), "owner-token")
+                .expect("valid owned image"),
+            format!("sha256:{id}")
+        );
+        assert!(
+            parse_owned_image_inspect(&format!("sha256:{id} other-owner"), "owner-token").is_err()
+        );
+        assert!(parse_owned_image_inspect("sha256:not-an-id owner-token", "owner-token").is_err());
+        assert!(parse_owned_image_inspect(
+            &format!("sha256:{id} owner-token trailing"),
+            "owner-token"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fallback_object_names_and_gc_tags_include_nonce() {
+        let workload = test_workload(0xabc);
+        assert_eq!(
+            workload.object_name("job"),
+            format!(
+                "velnor-job-job-{}-{:032x}-7-3",
+                std::process::id(),
+                0xabc_u128
+            )
+        );
+        assert_eq!(
+            workload.gc_image_tag(),
+            format!(
+                "velnor-job-gc-{}-{:032x}-7:latest",
+                std::process::id(),
+                0xabc_u128
+            )
+        );
+    }
 
     #[test]
     fn local_rows_have_a_driver_and_remote_only_rows_do_not() {
