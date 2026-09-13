@@ -13,7 +13,9 @@ use std::path::Path;
 
 use super::file_walk::{is_test_support_path, join_repo_path, path_prefix};
 use super::{unit, RepositoryShape, ScanContext};
-use crate::{shell_change_dir, CachePurpose, CacheSpec, GeneratorError, UnitKind};
+use crate::{
+    shell_change_dir, CachePurpose, CacheSpec, GeneratorError, Unit, UnitKind, UnitService,
+};
 
 pub(crate) fn detect(
     context: &ScanContext<'_>,
@@ -55,6 +57,7 @@ fn detect_workspace(
     let modules = parse_include_modules(&settings_source);
     let gradle = gradle_command(context.file_set, settings_root);
     let command_prefix = shell_change_dir(settings_root);
+    let workspace_index = shape.units.len();
     shape.units.push(unit(
         UnitKind::Gradle,
         settings_root,
@@ -84,10 +87,14 @@ fn detect_workspace(
         pending.push((module.clone(), module_root, module_unit));
     }
 
+    let mut pending_sources = Vec::new();
     for (_module, module_root, mut module_unit) in pending {
         let mut dependencies = BTreeSet::new();
+        let mut sources = String::new();
         for build_file in module_build_files(context.file_set, &module_root) {
             let source = read_repo_file(context.root, &build_file)?;
+            sources.push_str(&source);
+            sources.push('\n');
             for dep in parse_project_deps(&source, &module_ids) {
                 if dep != module_unit.id {
                     dependencies.insert(dep);
@@ -95,7 +102,26 @@ fn detect_workspace(
             }
         }
         module_unit.depends_on = dependencies.into_iter().collect();
+        pending_sources.push((module_unit, sources));
+    }
+    let workspace_sources = pending_sources
+        .iter()
+        .map(|(_, sources)| sources.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (mut module_unit, sources) in pending_sources {
+        if let Some(service) = postgres_service(&sources, &workspace_sources) {
+            module_unit.services.push(service);
+            prepend_schema_tasks(&mut module_unit);
+        }
         shape.units.push(module_unit);
+    }
+    if let Some(service) = shape.units[workspace_index + 1..]
+        .iter()
+        .find_map(|module| module.services.first().cloned())
+    {
+        shape.units[workspace_index].services.push(service);
+        prepend_schema_tasks(&mut shape.units[workspace_index]);
     }
     Ok(())
 }
@@ -443,6 +469,160 @@ fn is_unqualified_identifier(tokens: &[GradleToken], index: usize, expected: &st
         .is_some_and(|token| matches!(token, GradleToken::Dot))
 }
 
+fn gradle_needs_live_postgres(source: &str) -> bool {
+    source.contains("jooqCodegen")
+        || source.contains("plugins.jooq")
+        || source.contains("plugins.flyway")
+        || source.contains("\nflyway {")
+}
+
+fn quoted_assignment(source: &str, name: &str) -> Option<String> {
+    let needle = format!("{name} = \"");
+    let start = source.find(&needle)? + needle.len();
+    let end = source[start..].find('"')?;
+    Some(source[start..start + end].to_owned())
+}
+
+fn jdbc_ident(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn jdbc_databases(source: &str) -> BTreeSet<String> {
+    let mut databases = BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("jdbc:postgresql://") {
+        rest = &rest[start + "jdbc:postgresql://".len()..];
+        let Some(slash) = rest.find('/') else {
+            break;
+        };
+        rest = &rest[slash + 1..];
+        let database = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .collect::<String>();
+        if jdbc_ident(&database)
+            && database != "postgres"
+            && database != "template0"
+            && database != "template1"
+        {
+            databases.insert(database);
+        }
+    }
+    databases
+}
+
+fn jdbc_port_and_database(source: &str) -> (u16, String) {
+    let default = (40000, "postgres".to_owned());
+    let Some(start) = source.find("jdbc:postgresql://") else {
+        return default;
+    };
+    let rest = &source[start + "jdbc:postgresql://".len()..];
+    let Some(slash) = rest.find('/') else {
+        return default;
+    };
+    let hostport = &rest[..slash];
+    let port = hostport.rsplit_once(':').map_or("40000", |(_, port)| port);
+    let port = port
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or(40000);
+    let database = rest[slash + 1..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .collect::<String>();
+    (
+        port,
+        if database.is_empty() {
+            "postgres".to_owned()
+        } else {
+            database
+        },
+    )
+}
+
+fn postgres_health_cmd(user: &str, primary: &str, extra: &BTreeSet<String>) -> String {
+    let extra = extra
+        .iter()
+        .filter(|database| *database != primary && jdbc_ident(database) && jdbc_ident(user))
+        .cloned()
+        .collect::<Vec<_>>();
+    if extra.is_empty() || !jdbc_ident(user) || !jdbc_ident(primary) {
+        return format!(
+            "--health-cmd \"pg_isready -U {user} -d {primary}\" --health-interval 10s --health-timeout 5s --health-retries 10"
+        );
+    }
+    let list = extra.join(" ");
+    format!(
+        "--health-cmd \"sh -c 'for db in {list}; do createdb -U {user} $db 2>/dev/null || true; done; pg_isready -U {user} -d {primary}'\" --health-interval 10s --health-timeout 5s --health-retries 10"
+    )
+}
+
+fn postgres_service(unit_source: &str, workspace_source: &str) -> Option<UnitService> {
+    if !gradle_needs_live_postgres(unit_source) {
+        return None;
+    }
+    let catalog = if workspace_source.is_empty() {
+        unit_source
+    } else {
+        workspace_source
+    };
+    let (port, database) = jdbc_port_and_database(unit_source);
+    let database = if database == "postgres" {
+        jdbc_port_and_database(catalog).1
+    } else {
+        database
+    };
+    let user = quoted_assignment(unit_source, "datasourceUsername")
+        .or_else(|| quoted_assignment(unit_source, "user"))
+        .or_else(|| quoted_assignment(catalog, "datasourceUsername"))
+        .or_else(|| quoted_assignment(catalog, "user"))
+        .unwrap_or_else(|| "postgres".to_owned());
+    let password = quoted_assignment(unit_source, "datasourcePassword")
+        .or_else(|| quoted_assignment(unit_source, "password"))
+        .or_else(|| quoted_assignment(catalog, "datasourcePassword"))
+        .or_else(|| quoted_assignment(catalog, "password"))
+        .unwrap_or_else(|| "postgres".to_owned());
+    let extra = jdbc_databases(catalog);
+    Some(UnitService {
+        name: "postgres".to_owned(),
+        image: "postgres:18-alpine".to_owned(),
+        env: vec![
+            ("POSTGRES_USER".to_owned(), user.clone()),
+            ("POSTGRES_PASSWORD".to_owned(), password),
+            ("POSTGRES_DB".to_owned(), database.clone()),
+        ],
+        ports: vec![format!("{port}:5432")],
+        options: postgres_health_cmd(&user, &database, &extra),
+    })
+}
+
+fn prepend_schema_tasks(unit: &mut Unit) {
+    for commands in [&mut unit.pr_commands, &mut unit.full_commands] {
+        for command in commands.iter_mut() {
+            if command.contains("flywayMigrate") {
+                continue;
+            }
+            if let Some(index) = command.find("./gradlew ") {
+                command.insert_str(
+                    index + "./gradlew ".len(),
+                    "--no-parallel flywayMigrate jooqCodegen ",
+                );
+            } else if let Some(index) = command.find("gradle ") {
+                command.insert_str(
+                    index + "gradle ".len(),
+                    "--no-parallel flywayMigrate jooqCodegen ",
+                );
+            }
+        }
+    }
+}
+
 fn typesafe_accessor(module: &str) -> String {
     let mut out = String::new();
     let mut capitalize = false;
@@ -465,7 +645,10 @@ fn typesafe_accessor(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_include_modules, parse_project_deps, typesafe_accessor};
+    use super::{
+        jdbc_databases, parse_include_modules, parse_project_deps, postgres_health_cmd,
+        postgres_service, typesafe_accessor,
+    };
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
@@ -586,6 +769,169 @@ include(":real")
             .iter()
             .any(|command| command.contains("./gradlew :app:check")));
         assert!(app.depends_on.contains(&"gradle-lib".to_owned()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
+    fn jooq_module_gets_postgres_service_and_schema_tasks() {
+        use super::super::scan_shape;
+        use crate::RunnerMode;
+        use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-gradle-jooq-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("domain")).unwrap();
+        fs::write(root.join("settings.gradle.kts"), "include(\"domain\")\n").unwrap();
+        fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        fs::write(root.join("build.gradle.kts"), "tasks {}\n").unwrap();
+        fs::write(
+            root.join("domain/build.gradle.kts"),
+            r#"
+plugins { alias(libs.plugins.jooq.codegen) }
+val datasourceUsername = "chainargos"
+val datasourcePassword = "chainargos"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+jooqCodegen(libs.postgresql)
+"#,
+        )
+        .unwrap();
+        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let domain = shape
+            .units
+            .iter()
+            .find(|unit| unit.id == "gradle-domain")
+            .unwrap();
+        assert_eq!(domain.services.len(), 1);
+        assert_eq!(domain.services[0].name, "postgres");
+        assert_eq!(domain.services[0].ports, vec!["40000:5432".to_owned()]);
+        assert!(domain
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("flywayMigrate jooqCodegen")
+                && command.contains(":domain:check")));
+        let workspace = shape.units.iter().find(|unit| unit.id == "gradle").unwrap();
+        assert_eq!(workspace.services.len(), 1);
+        assert!(workspace
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("flywayMigrate jooqCodegen")
+                && command.contains(" check ")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn jdbc_databases_collects_every_named_catalog() {
+        let source = r#"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+val legacyUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+val monitorUrl = "jdbc:postgresql://127.0.0.1:40000/transfer_monitor"
+"#;
+        let databases = jdbc_databases(source);
+        assert!(databases.contains("chainargos"));
+        assert!(databases.contains("legacy"));
+        assert!(databases.contains("transfer_monitor"));
+    }
+
+    #[test]
+    fn postgres_service_health_creates_workspace_jdbc_databases() {
+        let domain = r#"
+plugins { alias(libs.plugins.jooq.codegen) }
+val datasourceUsername = "chainargos"
+val datasourcePassword = "chainargos"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+jooqCodegen(libs.postgresql)
+"#;
+        let flyway = r#"
+plugins { alias(libs.plugins.flyway) }
+val datasourceUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+flyway { url = datasourceUrl }
+"#;
+        let workspace = format!("{domain}\n{flyway}");
+        let service = postgres_service(domain, &workspace).expect("jooq module needs postgres");
+        assert_eq!(
+            service
+                .env
+                .iter()
+                .find(|(name, _)| name == "POSTGRES_DB")
+                .map(|(_, value)| value.as_str()),
+            Some("chainargos")
+        );
+        assert!(
+            service.options.contains("createdb -U chainargos $db"),
+            "unqualified flywayMigrate needs every JDBC catalog: {}",
+            service.options
+        );
+        assert!(
+            service.options.contains("legacy"),
+            "legacy catalog missing from health-cmd: {}",
+            service.options
+        );
+        assert!(
+            postgres_health_cmd("chainargos", "chainargos", &jdbc_databases(&workspace))
+                .contains("legacy")
+        );
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
+    fn workspace_postgres_service_creates_sibling_flyway_catalogs() {
+        use super::super::scan_shape;
+        use crate::RunnerMode;
+        use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-gradle-multidb-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("domain")).unwrap();
+        fs::create_dir_all(root.join("legacy-flyway")).unwrap();
+        fs::write(
+            root.join("settings.gradle.kts"),
+            "include(\"domain\", \"legacy-flyway\")\n",
+        )
+        .unwrap();
+        fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        fs::write(root.join("build.gradle.kts"), "tasks {}\n").unwrap();
+        fs::write(
+            root.join("domain/build.gradle.kts"),
+            r#"
+plugins { alias(libs.plugins.jooq.codegen) }
+val datasourceUsername = "chainargos"
+val datasourcePassword = "chainargos"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/chainargos"
+jooqCodegen(libs.postgresql)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("legacy-flyway/build.gradle.kts"),
+            r#"
+plugins { alias(libs.plugins.flyway) }
+val datasourceUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+flyway { url = datasourceUrl }
+"#,
+        )
+        .unwrap();
+        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let domain = shape
+            .units
+            .iter()
+            .find(|unit| unit.id == "gradle-domain")
+            .unwrap();
+        assert!(
+            domain.services[0].options.contains("legacy"),
+            "domain flywayMigrate also migrates sibling catalogs: {}",
+            domain.services[0].options
+        );
         let _ = fs::remove_dir_all(root);
     }
 
