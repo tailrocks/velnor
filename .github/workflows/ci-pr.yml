@@ -41,8 +41,7 @@ permissions:
 jobs:
   plan:
     name: Planning
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       units: ${{ steps.plan.outputs.units }}
@@ -58,6 +57,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@9ffbcd0fa7787d8fa3feeb4a1ef797a1cb1fd8e2
+        with:
+          rev: 9ffbcd0fa7787d8fa3feeb4a1ef797a1cb1fd8e2
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=9ffbcd0fa7787d8fa3feeb4a1ef797a1cb1fd8e2" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
