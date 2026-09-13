@@ -2,10 +2,8 @@
 //!
 //! The lane matrix is the contract every unit pipeline renders against: which
 //! lane jobs a unit emits, which runner each lane selects, and which lane is
-//! allowed to save a cache entry. A Velnor-only surface also admits
-//! pull-request jobs on the Velnor untrusted trust path; trusted events remain
-//! the only path that can write persistent cache state. GitHub/Both keep the
-//! historical trusted-event gate on their Velnor lane.
+//! allowed to save a cache entry. Velnor jobs are restricted to default-branch
+//! trusted events; GitHub jobs carry the untrusted pull-request path.
 
 use super::{Args, LaneJob, Primitive, RenderCtx, Rendered, LANE_MATRIX};
 use crate::{GeneratorError, ProjectConfig, RunnerMode};
@@ -52,7 +50,7 @@ pub(crate) fn resolve(
     rows: &[super::ResolvedRow],
 ) -> Result<ResolvedLanes, GeneratorError> {
     let ir = super::WorkflowIr::from_config(config);
-    let default = ir.default_lane_jobs(true);
+    let default = super::WorkflowIr::default_lane_jobs(true);
     let mut jobs = default.clone();
     for row in rows.iter().filter(|row| row.primitive == LANE_MATRIX) {
         if let Some(names) = Args(&row.args).strings("jobs")? {

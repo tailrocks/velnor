@@ -58,6 +58,7 @@ mod script_step;
 mod sd_notify;
 pub mod service;
 mod slot_log;
+pub(crate) mod stable_workspace;
 mod storage;
 mod store_catalog;
 mod telemetry;

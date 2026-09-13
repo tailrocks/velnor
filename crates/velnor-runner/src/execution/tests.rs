@@ -85,6 +85,7 @@ fn checkout_guest_inputs_carry_token_and_flags() {
         fetch_tags: true,
         persist_credentials: false,
         clean: true,
+        preserve_target: false,
         lfs: false,
         condition: None,
         continue_on_error: false,

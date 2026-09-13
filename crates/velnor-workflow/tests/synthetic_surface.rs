@@ -2,9 +2,10 @@
 //!
 //! The fixture is a small polyglot repository — three Rust crates with
 //! different shapes, a Bun package, a root Dockerfile, and Markdown docs. It
-//! pins the two properties the registry must hold on any repository: one unit
-//! is exactly one workflow file and one CI graph node, and nothing about the
-//! repository's name, path, or unit ids is known to the renderer.
+//! pins two properties: one unit kind is exactly one reusable workflow file,
+//! and nothing about the repository's name, path, or unit ids is known to the
+//! renderer. Units of a kind fan out through the plan matrix so GitHub's
+//! unique-reusable-workflow limit is not a function of unit count.
 
 #![expect(
     clippy::unwrap_used,
@@ -84,6 +85,8 @@ fn generate(root: &Path) -> Generated {
             "--plain",
             "--default-branch",
             "main",
+            "--runners",
+            "both",
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -99,20 +102,17 @@ fn generate(root: &Path) -> Generated {
     Generated { output }
 }
 
-/// The nested workflow file the registry renders for one unit id.
-fn nested_file(unit_id: &str) -> String {
+/// The kind reusable the registry renders for one unit id.
+fn kind_file(unit_id: &str) -> String {
     let prefixes = [
         "bun", "docker", "docs", "gradle", "homebrew", "node", "opentofu", "rust", "swift",
     ];
-    let (kind, name) = prefixes
+    let kind = prefixes
         .iter()
-        .find_map(|prefix| {
-            unit_id
-                .strip_prefix(&format!("{prefix}-"))
-                .map(|name| (*prefix, name))
-        })
-        .unwrap_or_else(|| unit_id.split_once('-').unwrap_or((unit_id, unit_id)));
-    format!("ci-{kind}-{name}.yml")
+        .find(|prefix| unit_id == **prefix || unit_id.starts_with(&format!("{prefix}-")))
+        .copied()
+        .unwrap_or_else(|| unit_id.split('-').next().unwrap_or(unit_id));
+    format!("ci-unit-{kind}.yml")
 }
 
 fn write_config(root: &Path, config: &str) {
@@ -122,7 +122,7 @@ fn write_config(root: &Path, config: &str) {
 }
 
 #[test]
-fn every_unit_renders_exactly_one_workflow() {
+fn every_unit_kind_renders_exactly_one_reusable_workflow() {
     let workspace = tempfile();
     let root = copy_fixture(&workspace.join("fixture"));
     let generated = generate(&root);
@@ -139,21 +139,29 @@ fn every_unit_renders_exactly_one_workflow() {
             "rust-gamma",
         ]
     );
+    let mut kinds = Vec::new();
     for unit in &units {
-        let file = nested_file(unit);
+        let file = kind_file(unit);
+        if !kinds.contains(&file) {
+            kinds.push(file.clone());
+        }
         let content = generated.workflow(&file);
         assert!(
-            content.contains(&format!("CI_UNIT_ID: {unit}")),
-            "{file} does not run {unit}"
+            content.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
+            "{file} does not consume the unit input"
+        );
+        assert!(
+            content.contains("--unit \"$CI_UNIT_ID\""),
+            "{file} does not run the selected unit"
         );
     }
-    // One workflow per unit, plus the two static families this fixture
+    // One reusable per kind, plus the two static families this fixture
     // triggers (ci-policy.yml, maintenance.yml) and the three aggregates.
-    assert_eq!(generated.workflow_files().len(), units.len() + 3 + 2);
+    assert_eq!(generated.workflow_files().len(), kinds.len() + 3 + 2);
 }
 
 #[test]
-fn adding_a_crate_adds_one_workflow_and_one_graph_node() {
+fn adding_a_crate_reuses_the_kind_reusable_and_adds_a_unit() {
     let workspace = tempfile();
     let root = copy_fixture(&workspace.join("fixture"));
     let before = generate(&root);
@@ -194,15 +202,16 @@ fn adding_a_crate_adds_one_workflow_and_one_graph_node() {
         .filter(|file| !before_files.contains(file))
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(added, vec!["ci-rust-delta.yml".to_owned()]);
+    assert_eq!(added, Vec::<String>::new());
     assert_eq!(after.unit_ids().len(), before_units.len() + 1);
-    // Exactly one new graph node: the aggregate composes one more caller.
+    // Kind reusable already exists; adding a crate does not add a unique
+    // reusable workflow call.
     let growth = after
         .workflow("ci-pr.yml")
         .matches("uses: ./.github/workflows/")
         .count()
         - before_callers;
-    assert_eq!(growth, 1);
+    assert_eq!(growth, 0);
 
     // Removing a crate removes exactly what adding it added.
     fs::remove_dir_all(root.join("crates/delta")).unwrap();
@@ -519,7 +528,7 @@ fn tool_provisioning_is_pinned_and_minimal() {
         .into_iter()
         .filter(|id| id.starts_with("rust-"))
     {
-        let workflow = with.workflow(&nested_file(&unit));
+        let workflow = with.workflow(&kind_file(&unit));
         let install_args = workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("install_args:"))

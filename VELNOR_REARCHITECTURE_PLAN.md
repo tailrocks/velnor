@@ -244,6 +244,8 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R1-bench correction closed all five review issues: fail-closed fault residue sampling (`Result` + uncontained-on-sampling-error, network `not found` vocabulary fixed live), soak image sampling with per-round build-image teardown, zero-filled intermittent census classes, records kept for uninjected runs with the nonzero exit preserved, and spawn interception in the fault decorator with kill documented as passthrough (§110). |
 | 2026-09-13 | R2-perf BC-14 deleted the mtime pin and the persistent target layer: checkout leaves wall-clock mtimes (GitHub-hosted parity, backdated-2001 pin), the 5th bench phase is gone (`CheckoutPhase::ALL` is 4, span table exact), target materialize/publish + generation store + traversal budgets removed from the executor, `target/` resolves as an ordinary workspace path for cache/artifacts, and `VELNOR_CARGO_TARGET_PERSIST` fails loud instead of silently no-opping; measured via the R1-bench span contract (real-checkout 4-span pin, wall-clock pin, subscriber round-trip). |
 | 2026-09-13 | R2-perf BC-14 correction closed both review issues: the shipped `velnor.env` no longer advertises the removed `VELNOR_CARGO_TARGET_PERSIST` knob (block deleted per the no-legacy rule; the daemon's fail-loud admission error remains the operator guidance), and the native rust-cache covered summary reports `Store: host-persistent cache class` with the `persistent_target` local renamed to `covered_by_persistent_storage`, matching the sibling actions/cache copy since coverage is static stores only — pinned by a no-knob env assertion and a summary assertion on the warm-static-directories test. |
+| 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §116: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
+| 2026-09-13 | R0-f4-warm correction closed the five staleness gaps: no-checkout jobs refuse stable (ephemeral + forensics), stable forces `clean:true` (checkout-time clean only removes prior-job state), per-scope destination record with pre-checkout prune of absent paths (root-absent clears), `--unshallow` on full fetch when `.git/shallow` exists (direct flag + mirror local-fetch), and stable double-failure scrubs plus fails loud with both errors (checkout scrubs before bail); clone-URL-change pin added (remove/add-origin + fetch + force + reset + clean). Bench prose scoped to the pinned zero-unit test claim (§116); rust/warm + rust/noop runs pending. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -6417,7 +6419,111 @@ Gates observed in this worktree: `cargo fmt --all -- --check` clean;
 (`--all-targets --locked --features test-support -D warnings`); serial
 runner lib with `test-support` 1925 passed, 0 failed, 1 ignored.
 
-## 116. R0-secc fast-follow: checkout TOCTOU re-assert + service-guard job scope — 2026-09-13
+## 116. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
+
+BC-14 deleted the mtime pin and the persistent target layer for timestamp
+soundness. The warm-build claim for this remediation is pinned by the
+zero-unit test only (real git over file:// plus real Cargo on a
+zero-dependency fixture with a build-script crate and a proc-macro
+crate): a warm same-SHA rebuild into a stable workspace compiles zero
+units, while a changed source still rebuilds. Bench numbers (rust/warm
+and rust/noop on the explicit-sccache and opt-out fixtures) were not run
+for this change and are pending; no timing or speedup factor is claimed
+here.
+
+Mechanism: every job checks out into a fresh per-job-UUID directory, so
+Cargo fingerprints never survive and the fresh wall-clock mtimes mark
+every path-local crate dirty. A same-SHA `checkout --force` +
+`reset --hard` rewrites no tracked file, so keeping the workspace
+restores fingerprint hits without restoring the pin or the target store.
+
+What changed (`crates/velnor-runner`):
+
+- `stable_workspace.rs` (new): layout
+  `<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, colocated with
+  the per-job UUID directories so no slot identity is derived; scope is
+  the job's admitted trust scope (fork/unknown under the untrusted floor,
+  like the compiler stores) and the repo segment is the numeric
+  `github.repository_id`. One slot runs one job at a time, so the
+  directory is exclusively owned; names are never UUID-shaped so the
+  leftover-disk reaper cannot take them. The slot tree is capped at
+  30 GiB (parity with `MBX_TARGET_MAX_SIZE`), enforced only when a new
+  scope is created by evicting whole idle scopes least-recently-used
+  first over a marker-file clock; eviction is warn-and-continue hygiene,
+  and only directories the allocator could have made (clock or
+  `workspace/` present) are ever victims.
+- `manifest.rs`: `declares_mbx_opt_out` (truthy `MBX_DISABLE` in job,
+  container-nested, or enabled-step env) and `wants_stable_workspace`
+  (sccache action or opt-out). The mbx default path is untouched.
+- `runner.rs`: Docker jobs that want stability get the prepared workspace
+  plus `preserve_target` on every checkout plan; missing/invalid
+  repository ids and allocation failures fall back to the ephemeral
+  workspace with a forensics line — warmth never fails a build.
+- `checkout.rs`: `CheckoutPlan.preserve_target` (runner-set, never from
+  workflow input) adds `-e /target` to the `clean -ffdx` invocation, so
+  the anchored top-level `target/` survives while every other untracked
+  file is still removed. Ephemeral (default) behavior is byte-identical.
+- `storage.rs`/`runtime_env.rs`: `dir_size` and
+  `environment_token_pairs` widened to `pub(crate)` for reuse;
+  `action.rs` passes `preserve_target: false` (action bundles are
+  metadata-only).
+
+The new floor, also documented in `stable_workspace.rs` and
+`content/docs/guides/execution.mdx`: a warm same-SHA rebuild on a warm
+slot is a fresh check (sub-second, zero units). Anything that misses the
+fingerprints — a new SHA, a cold slot, an evicted scope — pays a
+content-hit rebuild instead: every unit re-invoked, each hitting its
+content cache on the sccache path, or a full recompile on the plain-Cargo
+opt-out path. Warm-fresh therefore approximates content-hit rebuild, and
+no longer the deleted instant-fresh.
+
+Rejected: routing sccache through mbx. The two are exclusive by design
+(`append_rust_acceleration` if/else, pinned by
+`explicit_sccache_is_mutually_exclusive_with_mbx`), and stacking has no
+safety proof: an sccache hit would serve an artifact while bypassing
+mbx's managed-target bookkeeping, diverging the state mbx assumes sole
+ownership of — the same stale-artifact class BC-14 removed — and no mbx
+contract documents wrapper stacking. Mtime pinning and persistent-target
+restore were out of scope by directive and would reintroduce BC-14
+directly.
+
+Tests: 16 new. Layout/namespacing/reaper-safety, scope sanitization,
+clocking, LRU order, budget eviction (oldest-first, stop-under-budget,
+junk sparing, current survival) in `stable_workspace`; opt-out
+detection (job/step/container env, falsy/disabled/container-spec
+negatives) and path coverage in `manifest`; stable preserve + tracked
+mtime invariance, ephemeral removal, clean-args anchoring, and the
+zero-unit warm same-SHA rebuild pin (real git over `file://` plus real
+Cargo on a zero-dependency fixture with a build-script crate and a
+proc-macro crate, with a changed-source rebuild soundness leg) in
+`checkout`; selection + repository-id refusal in `runner`.
+
+Gates observed in this worktree (base `11302b22`, branch `r0-f4-warm`):
+`cargo fmt -p velnor-runner` clean; `cargo clippy -p velnor-runner
+--all-targets -- -D warnings` clean; affected modules green
+(`manifest` 52, `stable_workspace` 7, `github_adapter` 28, `storage` 3,
+`container` 81, `action` 52, `fault_injection` 13, `execution` 134,
+`executor` 288, `checkout` 47 single-threaded, `stable_workspace` name
+filter 12 incl. the pin). Full parallel `--lib` shows the pre-existing
+timing-flake cluster (checkout mirror spans/lease fail identically on
+base; see report) — no failure in touched code.
+
+Correction 2026-09-13 (same branch): closed the five staleness gaps plus
+the missing URL-change pin, 8 new tests. (a) `stable_workspace_for_job`
+refuses jobs with no enabled checkout step or empty/invalid plans
+(ephemeral + forensics). (b) Stable forces `clean:true` via
+`apply_stable_checkout_policy` (top-level and composite paths). (c)
+Per-scope `.velnor-destinations` record with pre-checkout prune
+(`prune_stale_destinations`; root-absent clears the workspace). (d)
+Full fetch unshallows when `.git/shallow` exists: `--unshallow` flag on
+the direct path, local-mirror `--unshallow` + FETCH_HEAD restore on the
+mirror path. (e) Checkout scrubs before bailing on git failure, and
+`combine_job_and_cleanup` scrubs plus fails loud with both errors on
+stable double failure (ephemeral keeps masking). Clone-URL-change pin
+covers remove/add-origin + fetch + force + reset + clean. Bench prose
+above scoped to the zero-unit pin; rust/warm + rust/noop runs pending.
+
+## 117. R0-secc fast-follow: checkout TOCTOU re-assert + service-guard job scope — 2026-09-13
 
 Base `origin/main` at `91defe66` (post-#702). Two verifier follow-ups on §114,
 one focused correction each:
