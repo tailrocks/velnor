@@ -36,7 +36,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
                 "docs/**".to_owned(),
             ],
             vec![
-                "npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\"".to_owned(),
+                "npx --yes markdownlint-cli2@0.20.0 \"**/*.md\" \"#node_modules\" \"#**/AGENTS.md\" \"#**/CLAUDE.md\" \"#target\" \"#**/target/**\" \"#dist\" \"#coverage\" \"#**/.cache/**\" \"#migrations/**\"".to_owned(),
             ],
             Some(CacheSpec {
                 key_files: vec!["package-lock.json".to_owned(), "bun.lock".to_owned()],

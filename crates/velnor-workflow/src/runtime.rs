@@ -50,6 +50,8 @@ struct CiConfig {
     #[serde(default)]
     runners: String,
     #[serde(default)]
+    automatic: String,
+    #[serde(default)]
     analysis: Analysis,
     #[serde(default)]
     workflow: Workflow,
@@ -1470,11 +1472,9 @@ pub(crate) fn test_crates(
                 Path::new("cargo")
             };
         let mut command = Command::new(cargo_program.unwrap_or(default_cargo));
-        command
-            .arg(if nextest { "nextest" } else { "test" })
-            .arg(if nextest { "run" } else { "--all-features" });
+        command.arg(if nextest { "nextest" } else { "test" });
         if nextest {
-            command.arg("--all-features");
+            command.arg("run");
         }
         if locked {
             command.arg("--locked");
@@ -1789,6 +1789,10 @@ fn job_runs_on_matches_labels(job: &Mapping, expected: &[String]) -> bool {
 }
 
 fn normalize_gate_expression(value: &str) -> String {
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; the gate shape the policy matchers
+    // below recognize is identical, so canonicalize the spelling first.
+    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
     let value = value.trim();
     let value = value
         .strip_prefix("${{")
@@ -1963,8 +1967,14 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
     if is_approved_local_reusable(action) {
         return;
     }
+    if is_approved_local_action(action) {
+        return;
+    }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
     if reference_path.contains("/.github/workflows/") {
+        if is_approved_fleet_reusable(action) {
+            return;
+        }
         if action.starts_with("./") && action.contains('@') {
             failures.record(
                 path,
@@ -2003,6 +2013,50 @@ fn is_full_sha_reference(value: &str) -> bool {
     value
         .split_once('@')
         .is_some_and(|(action, reference)| !action.is_empty() && is_full_sha(reference))
+}
+
+/// A repository-local composite action, pinned by the audited tree itself:
+/// the policy audits the pull-request head tree, so a tampered local action
+/// is reviewed code exactly like an inline `run:` step, and a tampered
+/// reference outside `.github/actions/` stays rejected below.
+fn is_approved_local_action(value: &str) -> bool {
+    let Some(path) = value.strip_prefix("./.github/actions/") else {
+        return false;
+    };
+    !path.is_empty()
+        && !path.contains('@')
+        && !path.contains('\\')
+        && !path.split('/').any(|segment| segment == "..")
+}
+
+fn is_approved_fleet_reusable(value: &str) -> bool {
+    let Some((path, reference)) = value.split_once('@') else {
+        return false;
+    };
+    if !is_full_sha(reference) {
+        return false;
+    }
+    let mut segments = path.split('/');
+    let (Some(owner), Some(repository), Some(dot_github), Some(workflows), Some(file)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    segments.next().is_none()
+        && crate::estate::FLEET_VELNOR_ACTION_OWNERS.contains(&owner)
+        && repository == "velnor-actions"
+        && dot_github == ".github"
+        && workflows == "workflows"
+        && !file.is_empty()
+        && Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+        && !file.contains('\\')
+        && !file.contains("..")
 }
 
 fn is_full_sha(value: &str) -> bool {
@@ -2056,6 +2110,24 @@ fn inspect_runner(
     }
 }
 
+fn normalize_runner_expression(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or_else(
+            || value.split_whitespace().collect(),
+            |inner| inner.split_whitespace().collect(),
+        )
+}
+
+fn is_approved_dynamic_runner(label: &str) -> bool {
+    let normalized = normalize_runner_expression(label);
+    crate::estate::APPROVED_DYNAMIC_RUNNERS
+        .iter()
+        .any(|shape| normalized == **shape)
+}
+
 fn analyze_runner(
     value: &Value,
     matrix: Option<&Mapping>,
@@ -2084,9 +2156,13 @@ fn analyze_runner(
                 resolving.remove(field);
                 result
             } else if label.contains("${{") {
-                RunnerAnalysis {
-                    dynamic: true,
-                    ..RunnerAnalysis::default()
+                if is_approved_dynamic_runner(label) {
+                    RunnerAnalysis::default()
+                } else {
+                    RunnerAnalysis {
+                        dynamic: true,
+                        ..RunnerAnalysis::default()
+                    }
                 }
             } else if contains_self_hosted_label(label) {
                 RunnerAnalysis {
@@ -2233,10 +2309,15 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let velnor_lane_gate = format!(
         "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
+    let velnor_dispatch_only_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
         || value == velnor_lane_gate
         || value == format!("always()&&{velnor_lane_gate}")
+        || value == velnor_dispatch_only_gate
+        || value == format!("always()&&{velnor_dispatch_only_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
@@ -2253,6 +2334,10 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    strip_inputs_unit_selector(value).or_else(|| strip_selected_units_selector(value))
+}
+
+fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
     let value = value.strip_prefix("inputs.unit=='")?;
     let separator = value.find("'&&(")?;
     let unit = &value[..separator];
@@ -2260,6 +2345,19 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
+}
+
+fn strip_selected_units_selector(value: &str) -> Option<&str> {
+    // contains(format(',{0},',inputs.selected_units),',unit,')&&(gate)
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = value.strip_prefix(PREFIX)?;
+    let rest = rest.strip_prefix(',')?;
+    let separator = rest.find(",')&&(")?;
+    let unit = &rest[..separator];
+    if !is_unit_id(unit) {
+        return None;
+    }
+    rest[separator + ",')&&(".len()..].strip_suffix(')')
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -2284,12 +2382,16 @@ impl PolicyFindings {
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary ...",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
         ));
     };
     match command {
         "verify-tag" => verify_tag(&arguments[1..]),
         "package-binary" => package_binary(&arguments[1..]),
+        "package-deb" => package_deb(&arguments[1..]),
+        "package-guest" => package_guest(&arguments[1..]),
+        "verify-feed" => verify_feed(&arguments[1..]),
+        "update-feed" => update_feed(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2407,6 +2509,267 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
     Ok(())
+}
+
+fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["package", "version", "guest", "target"])?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    if !valid_package(package) || !is_artifact_version(version) {
+        return Err(GeneratorError::usage("invalid package or version"));
+    }
+    if let Some(guest) = options.get("guest") {
+        let guest = Path::new(guest);
+        if !guest.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "guest payload directory is missing: {}",
+                guest.display()
+            )));
+        }
+        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        copy_dir_files(guest, &dest)?;
+    }
+    let mut command = Command::new("cargo");
+    command.args([
+        "deb",
+        "--no-strip",
+        "--package",
+        package,
+        "--deb-version",
+        version,
+    ]);
+    if let Some(target) = options.get("target") {
+        if !valid_target(target) {
+            return Err(GeneratorError::usage("invalid package target"));
+        }
+        command.args(["--target", target]);
+    }
+    let status = command
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    collect_debian_packages(options.get("target").map(String::as_str))
+}
+
+fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
+    if !metadata.status.success() {
+        return Err(GeneratorError::usage("cargo metadata failed"));
+    }
+    let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
+    document["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages.iter().find_map(|item| {
+                (item["name"].as_str() == Some(package)).then(|| {
+                    item["manifest_path"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                })
+            })
+        })
+        .flatten()
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+}
+
+fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(dest)
+        .map_err(|error| GeneratorError::io("create guest package directory", dest, &error))?;
+    let entries =
+        fs::read_dir(src).map_err(|error| GeneratorError::io("read guest payload", src, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read guest payload entry", src, &error))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("stat guest payload entry", &from, &error))?;
+        if file_type.is_dir() {
+            copy_dir_files(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|error| GeneratorError::io("copy guest payload file", &to, &error))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_debian_packages(target: Option<&str>) -> Result<(), GeneratorError> {
+    let dist = Path::new("dist");
+    fs::create_dir_all(dist)
+        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
+    let mut sources = vec![PathBuf::from("target/debian")];
+    if let Some(target) = target {
+        sources.push(PathBuf::from("target").join(target).join("debian"));
+    }
+    let mut copied = 0_usize;
+    for source in sources {
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| GeneratorError::io("read debian output", &source, &error))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("deb") {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            fs::copy(&path, dist.join(name))
+                .map_err(|error| GeneratorError::io("copy debian package", &path, &error))?;
+            copied += 1;
+        }
+    }
+    if copied == 0 {
+        return Err(GeneratorError::usage(
+            "cargo deb produced no .deb under target/debian",
+        ));
+    }
+    Ok(())
+}
+
+fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
+    let arch = required_option(&options, "arch")?;
+    if !matches!(arch, "x86_64" | "aarch64") {
+        return Err(GeneratorError::usage(
+            "guest arch must be x86_64 or aarch64",
+        ));
+    }
+    let pins = Path::new("microvm/pins.json");
+    if pins.is_file() {
+        let package = required_option(&options, "package")?;
+        let bin = required_option(&options, "bin")?;
+        let agent = required_option(&options, "agent")?;
+        if !valid_package(package) || !valid_binary(bin) || !valid_binary(agent) {
+            return Err(GeneratorError::usage(
+                "invalid guest package, bin, or agent",
+            ));
+        }
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+curl --fail --show-error --silent --location --http1.1 \
+  --connect-timeout 30 --max-time 900 \
+  -o linux.tar.xz "$url"
+echo "$sha  linux.tar.xz" | sha256sum -c -
+"#,
+            )
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest kernel download failed"));
+        }
+        fs::create_dir_all("dist/microvm").map_err(|error| {
+            GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
+        })?;
+        let status = Command::new("cargo")
+            .args([
+                "run",
+                "--locked",
+                "--release",
+                "--package",
+                package,
+                "--bin",
+                bin,
+                "--",
+                "build",
+                "--arch",
+                arch,
+                "--out",
+                "dist/microvm",
+                "--tarball",
+                "linux.tar.xz",
+                "--guest-agent",
+                agent,
+            ])
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest image build failed"));
+        }
+        return Ok(());
+    }
+    let script = Path::new("microvm/build.sh");
+    if !script.is_file() {
+        return Err(GeneratorError::usage(
+            "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
+        ));
+    }
+    let status = Command::new("bash")
+        .args(["microvm/build.sh", arch])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("guest image build failed"));
+    }
+    Ok(())
+}
+
+fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    let kind = required_option(&options, "kind")?;
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
+    match kind {
+        "homebrew" => {
+            let formula = Path::new("Formula").join(format!("{package}.rb"));
+            if !formula.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "homebrew feed requires {}",
+                    formula.display()
+                )));
+            }
+        }
+        "apt" => {
+            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+                return Err(GeneratorError::usage(
+                    "apt feed requires conf/distributions or debian/",
+                ));
+            }
+        }
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "unsupported feed kind: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
+    verify_feed(arguments)?;
+    let kind = required_option(&options, "kind")?;
+    let channel = options.get("channel").map_or("stable", String::as_str);
+    if !matches!(channel, "stable" | "preview") {
+        return Err(GeneratorError::usage("channel must be stable or preview"));
+    }
+    match kind {
+        "homebrew" | "apt" => {
+            println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported feed kind: {other}"
+        ))),
+    }
 }
 
 fn required_option<'a>(
@@ -2590,6 +2953,7 @@ mod tests {
             verified: true,
             default_branch: "main".to_owned(),
             runners: "github".to_owned(),
+            automatic: "github".to_owned(),
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),
@@ -3327,6 +3691,11 @@ jobs:
     runs-on: [self-hosted, example-velnor]
     steps:
       - run: true
+  selected:
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
 ",
         )?;
         assert!(run_policy(root)?);
@@ -3355,6 +3724,48 @@ jobs:
 ",
         )?;
         assert!(!run_policy(mismatched)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_the_both_mode_lanes_dispatch_gate() -> Result<(), Box<dyn Error>> {
+        // Both-mode aggregates name the manual lane selector `lanes`; the
+        // gate shape is the generated one, only the input spelling differs.
+        let workflow = r"
+name: Velnor lanes reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-reusable", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor lanes dispatch
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both') }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        // A dispatch-only gate stays rejected: manual dispatch must ride with
+        // the automatic arms, never alone on the self-hosted lane.
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
@@ -3602,6 +4013,81 @@ jobs:
 
         let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
         let root = policy_fixture("uses-invalid", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_adopted_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: {lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+
+        // A lane selector that routes pull requests anywhere but the hosted
+        // label stays rejected: untrusted pull requests must never resolve
+        // to the persistent pool.
+        let unsafe_lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: {unsafe_lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-unsafe", &invalid, "both")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_matrix_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  build:\n    runs-on: ${{{{ fromJSON(matrix.config.runner) }}}}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("matrix-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_tree_pinned_local_actions() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./.github/actions/cache-cargo-registry\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("local-action-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./../actions/cache-cargo-registry\n";
+        let root = policy_fixture("local-action-escape", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_sha_pinned_fleet_reusables() -> Result<(), Box<dyn Error>> {
+        let sha = "851ef541d67f9cabebf2ddb2a2a02f51f6c54130";
+        let owner = crate::estate::FLEET_VELNOR_ACTION_OWNERS[0];
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@2026.8.33\n"
+        );
+        let root = policy_fixture("fleet-unpinned", &invalid, "github")?;
+        assert!(!run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: unknown-owner/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-owner", &invalid, "github")?;
         assert!(!run_policy(root)?);
         Ok(())
     }

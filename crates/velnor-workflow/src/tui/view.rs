@@ -685,7 +685,6 @@ mod tests {
                 dry_run: false,
                 check: false,
                 force: false,
-                adopt: false,
                 plain: false,
             },
             receiver,
@@ -722,6 +721,7 @@ mod tests {
                 targets: Vec::new(),
                 profile: None,
             }),
+            services: Vec::new(),
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),
@@ -737,6 +737,7 @@ mod tests {
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Github,
+            automatic: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
             macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),

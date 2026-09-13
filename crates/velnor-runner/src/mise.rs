@@ -651,6 +651,9 @@ backend = "aqua:protocolbuffers/protobuf/protoc"
         // provisions the pinned release itself, and the build fails if the
         // binary is present for any reason.
         assert!(dockerfile.contains("! command -v sccache"));
+        assert!(dockerfile.contains("libclang-dev"));
+        assert!(dockerfile.contains("llvm-config --libdir"));
+        assert!(!dockerfile.contains("clang/LLVM is absent on purpose"));
         assert!(!dockerfile.contains("mise exec -- sccache --version"));
         assert!(!dockerfile.contains("mise exec -- kache"));
         let tools = include_str!("../../../docker/job-mise.toml");

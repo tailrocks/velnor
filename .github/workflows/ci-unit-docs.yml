@@ -3,7 +3,7 @@ name: Documentation
 on:
   workflow_call:
     inputs:
-      unit:
+      selected_units:
         required: true
         type: string
       scope:
@@ -12,11 +12,17 @@ on:
       selection-artifact:
         required: true
         type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
 
 jobs:
   github-docs:
     name: "GitHub / docs"
-    if: ${{ inputs.unit == 'docs' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',docs,') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -26,13 +32,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+          name: velnor-workflow-runtime-215f02f150d5041edac3eccb8a91310013387dc5-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: 215f02f150d5041edac3eccb8a91310013387dc5
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$HOME/.cargo/bin/velnor-workflow"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -50,10 +72,10 @@ jobs:
       - name: Run Documentation checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: docs
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -185,7 +207,7 @@ jobs:
 
   velnor-docs:
     name: "Velnor / docs"
-    if: ${{ inputs.unit == 'docs' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',docs,') && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -195,6 +217,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.head_sha }}
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -216,10 +239,10 @@ jobs:
       - name: Run Documentation checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: ${{ inputs.unit }}
+          CI_UNIT_ID: docs
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
