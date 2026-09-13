@@ -736,6 +736,14 @@ impl ProjectConfig {
         write_toml_string(&mut output, "github_runner", &self.github_runner);
         write_toml_string(&mut output, "macos_runner", &self.macos_runner);
         write_toml_array(&mut output, "velnor_labels", &self.velnor_labels);
+        if let Some(group) = &self.velnor_runner_group {
+            write_toml_string(&mut output, "velnor_runner_group", group);
+        }
+        let _ = writeln!(
+            output,
+            "pull_request_on_velnor = {}",
+            self.pull_request_on_velnor
+        );
         let generated_workflows = workflow_file_names(self);
         write_toml_array(&mut output, "files", &generated_workflows);
         if !self.notes.is_empty() {
@@ -1399,6 +1407,7 @@ fn apply_generation_config(
         config.velnor_labels = labels.to_vec();
     }
     if let Some(group) = generation.velnor_runner_group() {
+        validate_config_text(group, "[workflow] velnor_runner_group")?;
         config.velnor_runner_group = Some(group.to_owned());
     }
     if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
@@ -1430,8 +1439,36 @@ fn apply_generation_config(
     apply_unit_rows(config, generation.units());
     materialize_capability_commands(config, root)?;
     read_static_files(config, generation.static_files(), root)?;
+    validate_velnor_pull_request_contract(config)?;
     refresh_mr_boxington_note(config);
     config.declared_surface = true;
+    Ok(())
+}
+
+fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    if !config.pull_request_on_velnor {
+        return Ok(());
+    }
+    if config.runners == RunnerMode::Github {
+        return Err(GeneratorError::usage(
+            "[workflow] pull_request_on_velnor requires the Velnor runner lane",
+        ));
+    }
+    let labels = config
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !estate::approved_velnor_runner_contract_matches(
+        &labels,
+        config.velnor_runner_group.as_deref(),
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] pull_request_on_velnor requires the exact approved Velnor runner contract: group `{}` and labels {:?}",
+            estate::approved_velnor_runner_group(),
+            estate::approved_velnor_runner_labels()
+        )));
+    }
     Ok(())
 }
 
@@ -7932,7 +7969,7 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_maintenance_stays_github_hosted_when_runners_are_velnor() {
+    fn generated_maintenance_splits_prune_and_cache_when_runners_are_velnor() {
         let config = scanned_fixture(RunnerMode::Velnor);
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -7940,6 +7977,7 @@ channel = "stable"
             "generated maintenance.yml",
         );
         let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let velnor = fixture_lane_selector();
         let runs_on: Vec<&str> = workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
@@ -7947,52 +7985,40 @@ channel = "stable"
             .collect();
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), hosted.as_str()],
-            "both maintenance jobs must stay GitHub-hosted: {workflow}"
+            [hosted.as_str(), velnor.as_str()],
+            "only PR pruning is GitHub-hosted: {workflow}"
+        );
+        assert!(!workflow.contains("setup-velnor-workflow"));
+        assert!(
+            workflow.contains("velnor-workflow cache-plan"),
+            "maintenance must use the generated cache planner: {workflow}"
         );
         assert!(
-            workflow.contains("setup-velnor-workflow"),
-            "maintenance must install the hosted workflow runtime: {workflow}"
+            workflow.contains("github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')"),
+            "closed-PR prune must stay live: {workflow}"
         );
-        assert_maintenance_setup_uses_literal_source_rev(workflow);
         let cache_budget = yaml_job(workflow, "cache-budget");
         assert!(
             cache_budget.contains("name: Cache retention"),
             "cache-budget is Cache retention: {cache_budget}"
         );
         assert!(
-            cache_budget.contains("runs-on: ubuntu-24.04"),
-            "Cache retention stays GitHub-hosted ubuntu-24.04: {cache_budget}"
+            cache_budget.contains(velnor.as_str()),
+            "Cache retention stays on the Velnor lane: {cache_budget}"
         );
-        assert!(
-            !workflow.contains("[self-hosted,"),
-            "maintenance must not select the Velnor lane: {workflow}"
-        );
-        for label in &config.velnor_labels {
-            if label == "self-hosted" {
-                continue;
-            }
-            assert!(
-                !workflow.contains(label.as_str()),
-                "maintenance must not name Velnor label `{label}`: {workflow}"
-            );
-        }
+        assert!(!cache_budget.contains("setup-velnor-workflow"));
         assert!(
             workflow.contains(
-                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
             ),
-            "cache retention must keep schedule and dispatch: {workflow}"
-        );
-        assert!(
-            !workflow.contains("github.event_name == 'push'"),
-            "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
+            "cache retention must stay on the trusted Velnor lane: {workflow}"
         );
         assert!(!workflow.contains("\n  push:"));
     }
 
     #[test]
-    fn generated_maintenance_keeps_hosted_lanes_for_every_runner_mode() {
-        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+    fn generated_maintenance_keeps_hosted_lanes_for_github_and_both() {
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
             let config = scanned_fixture(runners);
             let files = must(generated_files(&config), "generate");
             let workflow = must_some(

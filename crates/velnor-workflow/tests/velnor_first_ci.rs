@@ -14,6 +14,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -68,6 +69,63 @@ fn write_rust_fixture(root: &Path, crates: usize) {
     )
     .unwrap();
 }
+
+fn enable_approved_velnor_pull_requests(root: &Path) {
+    let approved = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github-gen/velnor-workflow.toml"),
+    )
+    .unwrap();
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let current = fs::read_to_string(&path).unwrap();
+    let mut lines = current
+        .lines()
+        .filter(|line| {
+            ![
+                "velnor_labels =",
+                "velnor_runner_group =",
+                "pull_request_on_velnor =",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for prefix in [
+        "velnor_labels =",
+        "velnor_runner_group =",
+        "pull_request_on_velnor =",
+    ] {
+        lines.push(
+            approved
+                .lines()
+                .find(|line| line.starts_with(prefix))
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+fn generator_output(root: &Path) -> std::process::Output {
+    let output = root.parent().unwrap().join(format!(
+        "{}-generator-output",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "--plain",
+            "--default-branch",
+            "main",
+            "--runners",
+            "velnor",
+            "--output",
+            output.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run velnor-workflow")
+}
+
 
 fn generate_with(root: &Path, extra: &[&str]) -> Generated {
     let output = root.parent().unwrap().join(format!(
@@ -255,10 +313,11 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
     )
     .unwrap();
+    enable_approved_velnor_pull_requests(&root);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
-        unit.contains("github.event_name == 'pull_request'"),
+        unit.contains("github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"),
         "opt-in Velnor lane must admit pull_request: {unit}"
     );
     let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
@@ -366,6 +425,37 @@ fn delete_generated_outputs_and_regenerate_from_evidence() {
     let second = generate_with(&root, &[]);
     let after = fs::read(second.output.join(".github/workflows/ci-pr.yml")).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn pull_request_on_velnor_rejects_an_arbitrary_runner_contract() {
+    let root = unique_dir("pr-on-velnor-invalid-runner");
+    write_rust_fixture(&root, 1);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(".github-gen/velnor-workflow.toml"))
+        .unwrap()
+        .write_all(b"pull_request_on_velnor = true\n")
+        .unwrap();
+    let outcome = generator_output(&root);
+    assert!(!outcome.status.success());
+    assert!(
+        String::from_utf8_lossy(&outcome.stderr).contains("exact approved Velnor runner contract")
+    );
+}
+
+#[test]
+fn pull_request_on_velnor_rejects_a_github_only_runner_mode() {
+    let root = unique_dir("pr-on-velnor-invalid-mode");
+    write_rust_fixture(&root, 1);
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let config = fs::read_to_string(&path)
+        .unwrap()
+        .replace("runners = \"both\"", "runners = \"github\"");
+    fs::write(&path, format!("{config}pull_request_on_velnor = true\n")).unwrap();
+    let outcome = generator_output(&root);
+    assert!(!outcome.status.success());
+    assert!(String::from_utf8_lossy(&outcome.stderr).contains("Velnor runner lane"));
 }
 
 #[test]
