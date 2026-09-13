@@ -245,17 +245,26 @@ pub(crate) fn validate_canonical_release_products(
     if !has_release_stage {
         return Ok(());
     }
-    if !contents.contains("/out/") || !contents.contains(".sha256") {
+    if !contents.contains("/out/")
+        || !contents.contains(".sha256")
+        || !contents.contains("rm -rf /out")
+    {
         return Err(GeneratorError::usage(format!(
             "Dockerfile release stage must stage checksummed canonical products in /out: {dockerfile}"
         )));
     }
     for line in contents.lines() {
-        if line.starts_with("COPY --from=release ")
-            && (line.contains("/src/target/") || line.contains("${CARGO_TARGET_DIR}"))
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("COPY ")
+            && (trimmed.contains("/src/target/") || trimmed.contains("${CARGO_TARGET_DIR}"))
         {
             return Err(GeneratorError::usage(format!(
                 "Dockerfile runtime stage consumes mutable target products: {dockerfile}"
+            )));
+        }
+        if trimmed.starts_with("COPY --from=release ") && !trimmed.contains("/out/") {
+            return Err(GeneratorError::usage(format!(
+                "Dockerfile runtime stage must copy canonical /out products: {dockerfile}"
             )));
         }
     }

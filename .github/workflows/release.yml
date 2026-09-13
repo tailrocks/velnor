@@ -973,7 +973,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
-          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'Cargo.lock', 'rust-toolchain.toml') }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-guest-seed-${{ matrix.arch }}-
 
@@ -1006,14 +1006,21 @@ jobs:
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
-          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
+          # A prefix restore of an older generation must rebuild, not fail the job.
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           agent="target/$TARGET/release/velnor-guest-agent"
           agent_dump="$(mktemp)"
           trap 'rm -f -- "$agent_dump"' EXIT
           # shellcheck disable=SC2209
-          DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" "$seed/rootfs.ext4" >/dev/null
-          cmp -- "$agent_dump" "$agent"
+          if ! DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" "$seed/rootfs.ext4" >/dev/null \
+            || ! cmp -- "$agent_dump" "$agent"; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mkdir -p dist/microvm
           cp "$seed/vmlinux" "$seed/vmlinux.sha256" "$seed/rootfs.ext4" dist/microvm/
           cp "$seed/rootfs.sha256" dist/microvm/rootfs.sha256
@@ -1080,7 +1087,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
-          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'Cargo.lock', 'rust-toolchain.toml') }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

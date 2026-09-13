@@ -2339,6 +2339,12 @@ fn validate_guest_seed_reuse_gates(
              failure"
         )));
     }
+    if reuse.contains("sha256sum --check") && reuse.matches("restored=false").count() < 2 {
+        return Err(GeneratorError::usage(format!(
+            "static workflow job `{job}` must fail open to a rebuild when a restored guest seed \
+             fails checksum or agent comparison"
+        )));
+    }
     Ok(())
 }
 
@@ -5228,7 +5234,10 @@ mod tests {
         );
         assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
-        assert!(action.contains("conclusion == \"success\""));
+        assert!(action.contains("actions/runs/$artifact_run_id"));
+        assert!(action.contains("run_conclusion"));
+        assert!(!action.contains(".workflow_run.conclusion == \"success\""));
+        assert!(!action.contains("if: steps.cache.outputs.cache-hit != 'true'\n      shell: bash\n      env:\n        INSTALL_REV:"));
         assert!(!action.contains("default-branch-push-only"));
         assert!(!action.contains("cargo install --locked --git https://"));
     }
@@ -6599,6 +6608,9 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(preview.contains("actions/cache/save@"));
         assert!(preview.contains("guest-seed-${{ matrix.arch }}-"));
         assert!(preview.contains("hashFiles('microvm/**'"));
+        assert!(preview.contains("crates/velnor-model/**"));
+        assert!(preview.contains("crates/velnor-control/**"));
+        assert!(preview.contains("restored=false"));
         assert!(!preview.contains("guest-seed-${{ matrix.arch }}-${{ github.sha }}"));
         assert!(preview.contains("if: steps.guest-seed-reuse.outputs.restored != 'true'"));
         assert!(preview.contains(
@@ -10082,18 +10094,27 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn canonical_docker_products_reject_runtime_target_consumption() {
-        let valid = "FROM scratch AS build\nRUN mkdir /out && cp app /out/app && sha256sum /out/app > /out/app.sha256\nFROM scratch AS release\nCOPY --from=build /out/app /app\n";
+        let valid = "FROM scratch AS build\nRUN rm -rf /out && mkdir /out && cp app /out/app && sha256sum /out/app > /out/app.sha256\nFROM scratch AS release\nCOPY --from=release /out/app /app\n";
         must(
             validate_canonical_release_products("Dockerfile", valid),
             "canonical /out production and consumption is accepted",
         );
-        let target = format!("{valid}COPY --from=release /src/target/release/app /app\n");
+        let target = format!("{valid}COPY --from=build /src/target/release/app /app\n");
         let error = must_fail(
             validate_canonical_release_products("Dockerfile", &target),
             "runtime consumption of /src/target must be rejected",
         );
         assert!(
             error.to_string().contains("mutable target products"),
+            "{error}"
+        );
+        let from_release = "FROM scratch AS build\nRUN rm -rf /out && mkdir /out && cp app /out/app && sha256sum /out/app > /out/app.sha256\nFROM scratch AS release\nCOPY --from=release /app /app\n";
+        let error = must_fail(
+            validate_canonical_release_products("Dockerfile", from_release),
+            "COPY --from=release without /out must be rejected",
+        );
+        assert!(
+            error.to_string().contains("canonical /out products"),
             "{error}"
         );
     }
