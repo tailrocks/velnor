@@ -5280,17 +5280,19 @@ mod tests {
         assert!(action.contains(
             "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
         ));
+        // The runtime sources canonically live in tailrocks/velnor: callers do
+        // not vendor the crate, so bootstrapping from the caller repository
+        // fails every foreign consumer.
         assert!(
-            action.contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}")
+            action.contains("cargo install --locked --git https://github.com/tailrocks/velnor.git")
         );
-        assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
+        assert!(!action.contains("SOURCE_REPOSITORY"));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
         assert!(action.contains("run_conclusion"));
         assert!(!action.contains(".workflow_run.conclusion == \"success\""));
         assert!(!action.contains("if: steps.cache.outputs.cache-hit != 'true'\n      shell: bash\n      env:\n        INSTALL_REV:"));
         assert!(!action.contains("default-branch-push-only"));
-        assert!(!action.contains("cargo install --locked --git https://"));
     }
 
     #[test]
