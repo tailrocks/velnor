@@ -5594,8 +5594,12 @@ where
     }
 
     fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
-        crate::docker_lease::reclaim_job_owned(job_id, |args| {
-            self.run_docker_cleanup(args).map(|result| result.stdout)
+        // Sequential phases: the listing facade borrows the runner first,
+        // then the removals run through the same tolerant cleanup runner.
+        let mut docker = crate::docker::Docker::job(&mut self.runner);
+        let snapshot = crate::docker_lease::list_job_owned(job_id, &mut docker)?;
+        crate::docker_lease::remove_job_owned(&snapshot, |args| {
+            self.run_docker_cleanup(args).map(|_| ())
         })
     }
 

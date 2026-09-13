@@ -15,11 +15,11 @@
 //!   codebase's established shape; this module is its async Engine sibling.
 //!
 //! Endpoint coverage is read-only control-plane only: `version`, `info`,
-//! container inspect, image inspect, network inspect, container list. Paths
-//! are unversioned, which is the negotiation: the daemon serves its native
-//! schema, nothing pins an old API version, and any schema drift surfaces as
-//! an [`EngineError`] that the facade answers with its CLI fallback — never
-//! as a misread value.
+//! container inspect, image inspect, network inspect, and the filtered
+//! container/network/volume lists. Paths are unversioned, which is the
+//! negotiation: the daemon serves its native schema, nothing pins an old API
+//! version, and any schema drift surfaces as an [`EngineError`] that the
+//! facade answers with its CLI fallback — never as a misread value.
 //!
 //! Transport rules, all load-bearing for the "identical results" guarantee:
 //!
@@ -580,24 +580,69 @@ impl EngineClient {
         parse_network(&value).map_err(|fault| EngineError::fault(op, fault))
     }
 
-    /// `GET /containers/json?all=1`. Client-layer coverage; facade routing is
-    /// the next slice (reclaim consumers parse CLI-format text through
-    /// injected closures today, so routing list here would change call
-    /// sites — explicitly out of this slice).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "next slice routes container list through the facade"
-        )
-    )]
+    /// `GET /containers/json?all=1&filters=...`. Serves the facade's
+    /// owned-container listing; the daemon applies the label filter, the same
+    /// translation the CLI's `--filter label=` performs.
     pub(crate) async fn list_containers(
         &self,
+        filter: &ListFilter,
         budget: Duration,
     ) -> EngineResult<Vec<EngineContainerSummary>> {
         let op = DockerOp::Query;
-        let value = self.get_json("/containers/json?all=1", op, budget).await?;
+        let path = format!("/containers/json?all=1&filters={}", filter.encode());
+        let value = self.get_json(&path, op, budget).await?;
         parse_container_list(&value).map_err(|fault| EngineError::fault(op, fault))
+    }
+
+    /// `GET /networks?filters=...`. Serves the facade's owned-network
+    /// listing.
+    pub(crate) async fn list_networks(
+        &self,
+        filter: &ListFilter,
+        budget: Duration,
+    ) -> EngineResult<Vec<EngineNetwork>> {
+        let op = DockerOp::Query;
+        let path = format!("/networks?filters={}", filter.encode());
+        let value = self.get_json(&path, op, budget).await?;
+        parse_network_list(&value).map_err(|fault| EngineError::fault(op, fault))
+    }
+
+    /// `GET /volumes?filters=...`. Serves the facade's owned-volume listing.
+    pub(crate) async fn list_volumes(
+        &self,
+        filter: &ListFilter,
+        budget: Duration,
+    ) -> EngineResult<Vec<EngineVolume>> {
+        let op = DockerOp::Query;
+        let path = format!("/volumes?filters={}", filter.encode());
+        let value = self.get_json(&path, op, budget).await?;
+        parse_volume_list(&value).map_err(|fault| EngineError::fault(op, fault))
+    }
+}
+
+/// One daemon list filter. Label-equality only: every listing this slice
+/// routes filters on `velnor.job-id=<job>` server-side. Key-exists and name
+/// filters are a later slice's variants, not a stringly escape hatch here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ListFilter {
+    LabelEquals { key: String, value: String },
+}
+
+impl ListFilter {
+    pub(crate) fn label_equals(key: &str, value: &str) -> Self {
+        Self::LabelEquals {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    /// The `filters=` query value: the daemon's `{"label": ["k=v"]}` JSON
+    /// document, percent-encoded. Built with `serde_json` so a label value
+    /// carrying quotes or backslashes can never break the document shape.
+    fn encode(&self) -> String {
+        let Self::LabelEquals { key, value } = self;
+        let document = serde_json::json!({ "label": [format!("{key}={value}")] });
+        encode_segment(&document.to_string())
     }
 }
 
@@ -888,14 +933,8 @@ pub(crate) struct EngineVersion {
     pub api_version: String,
 }
 
-/// Network inspect identity.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "next slice routes network inspect through the facade"
-    )
-)]
+/// Network identity: one list row or one inspect document carry the same
+/// `Name`/`Id` pair, so one struct serves both.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineNetwork {
     pub name: String,
@@ -903,13 +942,6 @@ pub(crate) struct EngineNetwork {
 }
 
 /// One container list row.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "next slice routes container list through the facade"
-    )
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineContainerSummary {
     pub id: String,
@@ -917,6 +949,12 @@ pub(crate) struct EngineContainerSummary {
     pub names: Vec<String>,
     pub labels: std::collections::BTreeMap<String, String>,
     pub state: String,
+}
+
+/// One volume list row: the name `volume ls -q` prints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EngineVolume {
+    pub name: String,
 }
 
 fn schema_missing(pointer: &str) -> (EngineFaultKind, String) {
@@ -1033,13 +1071,6 @@ fn parse_version(value: &serde_json::Value) -> FaultResult<EngineVersion> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "next slice routes network inspect through the facade"
-    )
-)]
 fn parse_network(value: &serde_json::Value) -> FaultResult<EngineNetwork> {
     Ok(EngineNetwork {
         name: require_str(value, "/Name")?.to_string(),
@@ -1047,13 +1078,36 @@ fn parse_network(value: &serde_json::Value) -> FaultResult<EngineNetwork> {
     })
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "next slice routes container list through the facade"
-    )
-)]
+fn parse_network_list(value: &serde_json::Value) -> FaultResult<Vec<EngineNetwork>> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| schema_missing("network list array"))?;
+    rows.iter().map(parse_network).collect()
+}
+
+/// Volume rows from `{"Volumes": [...], "Warnings": ...}`. A null `Volumes`
+/// reads as empty: null and `[]` both unambiguously mean "no volumes"
+/// (the CLI prints nothing for either), so there is nothing to misread —
+/// but a missing key or a non-array is skew, and falls back.
+fn parse_volume_list(value: &serde_json::Value) -> FaultResult<Vec<EngineVolume>> {
+    let Some(volumes) = value.get("Volumes") else {
+        return Err(schema_missing("/Volumes"));
+    };
+    if volumes.is_null() {
+        return Ok(Vec::new());
+    }
+    let rows = volumes
+        .as_array()
+        .ok_or_else(|| schema_missing("/Volumes array"))?;
+    rows.iter()
+        .map(|row| {
+            Ok(EngineVolume {
+                name: require_str(row, "/Name")?.to_string(),
+            })
+        })
+        .collect()
+}
+
 fn parse_container_list(value: &serde_json::Value) -> FaultResult<Vec<EngineContainerSummary>> {
     let rows = value
         .as_array()
@@ -1433,25 +1487,38 @@ mod tests {
                     json_response(r#"{"Version":"29.4.0","ApiVersion":"1.52"}"#)
                 } else if head.contains("GET /info ") {
                     json_response(r#"{"CgroupDriver":"systemd","CgroupVersion":2}"#)
-                } else if head.contains("/containers/json") {
+                } else if head.contains("GET /containers/json?") {
                     json_response(r#"[{"Id":"aaa","State":"running"}]"#)
                 } else if head.contains("/containers/") {
                     json_response(inspect_body())
                 } else if head.contains("/images/") {
                     json_response(r#"{"Id":"sha256:feed"}"#)
+                } else if head.contains("GET /networks?") {
+                    json_response(r#"[{"Name":"n","Id":"i"}]"#)
+                } else if head.contains("GET /volumes?") {
+                    json_response(r#"{"Volumes":[{"Name":"v"}],"Warnings":null}"#)
                 } else {
                     json_response(r#"{"Name":"n","Id":"i"}"#)
                 }
             },
-            6,
+            8,
         );
         let client = EngineClient::new(mock.socket.clone());
+        let filter = ListFilter::label_equals("velnor.job-id", "velnor-job-1");
         assert_eq!(client.version(BUDGET).await.unwrap().api_version, "1.52");
         assert_eq!(
             client.daemon_info(BUDGET).await.unwrap().cgroup_driver,
             "systemd"
         );
-        assert_eq!(client.list_containers(BUDGET).await.unwrap().len(), 1);
+        assert_eq!(
+            client.list_containers(&filter, BUDGET).await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            client.list_networks(&filter, BUDGET).await.unwrap().len(),
+            1
+        );
+        assert_eq!(client.list_volumes(&filter, BUDGET).await.unwrap().len(), 1);
         assert!(
             client
                 .inspect_container("svc", BUDGET)
@@ -1465,16 +1532,28 @@ mod tests {
         );
         assert_eq!(client.inspect_network("n", BUDGET).await.unwrap().id, "i");
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 6);
+        assert_eq!(seen.len(), 8);
         for line in seen.iter() {
             assert!(line.starts_with("GET /"), "{line}");
             assert!(!line.contains("/v1."), "no pinned old version: {line}");
         }
         assert!(seen.iter().any(|line| line == "GET /version HTTP/1.1"));
         assert!(seen.iter().any(|line| line == "GET /info HTTP/1.1"));
+        let filters = "%7B%22label%22%3A%5B%22velnor.job-id%3Dvelnor-job-1%22%5D%7D";
         assert!(
             seen.iter()
-                .any(|line| line == "GET /containers/json?all=1 HTTP/1.1"),
+                .any(|line| line
+                    == &format!("GET /containers/json?all=1&filters={filters} HTTP/1.1")),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|line| line == &format!("GET /networks?filters={filters} HTTP/1.1")),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|line| line == &format!("GET /volumes?filters={filters} HTTP/1.1")),
             "{seen:?}"
         );
         assert!(
@@ -1482,6 +1561,69 @@ mod tests {
                 .any(|line| line == "GET /images/img%3Atag/json HTTP/1.1"),
             "{seen:?}"
         );
+    }
+
+    #[test]
+    fn list_filter_encodes_label_equality_as_daemon_json() {
+        assert_eq!(
+            ListFilter::label_equals("velnor.job-id", "velnor-job-1").encode(),
+            "%7B%22label%22%3A%5B%22velnor.job-id%3Dvelnor-job-1%22%5D%7D"
+        );
+        // A hostile value stays inside the JSON string: quotes are JSON
+        // escapes first, percent-encoding second, so the document shape holds.
+        let encoded = ListFilter::label_equals("k", r#"a"b\c"#).encode();
+        assert!(
+            encoded.contains("%5C%22"),
+            "quote must arrive escaped, got {encoded}"
+        );
+    }
+
+    #[test]
+    fn network_and_volume_lists_parse_live_shapes() {
+        // `GET /networks?filters=...`, Engine 29.4.0, verbatim.
+        let networks: serde_json::Value = serde_json::from_str(
+            r#"[{"Name":"velnor-eng2-net","Id":"51890326820b1aaec84f85251e1ae0695801bffc1f6504481191ce7c6f647bdc","Created":"2026-09-14T01:40:37.95747574+07:00","Scope":"local","Driver":"bridge","EnableIPv4":true,"EnableIPv6":false,"IPAM":{"Driver":"default","Options":{},"Config":[{"Subnet":"192.168.97.0/24","Gateway":"192.168.97.1"}]},"Internal":false,"Attachable":false,"Ingress":false,"ConfigFrom":{"Network":""},"ConfigOnly":false,"Options":{},"Labels":{"velnor.job-id":"velnor-eng2-probe"}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_network_list(&networks).unwrap(),
+            vec![EngineNetwork {
+                name: "velnor-eng2-net".into(),
+                id: "51890326820b1aaec84f85251e1ae0695801bffc1f6504481191ce7c6f647bdc".into(),
+            }]
+        );
+        // `GET /volumes?filters=...`, Engine 29.4.0, verbatim.
+        let volumes: serde_json::Value = serde_json::from_str(
+            r#"{"Volumes":[{"CreatedAt":"2026-09-14T01:40:38+07:00","Driver":"local","Labels":{"velnor.job-id":"velnor-eng2-probe"},"Mountpoint":"/var/lib/docker/volumes/velnor-eng2-vol/_data","Name":"velnor-eng2-vol","Options":null,"Scope":"local"}],"Warnings":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_volume_list(&volumes).unwrap(),
+            vec![EngineVolume {
+                name: "velnor-eng2-vol".into(),
+            }]
+        );
+        // Empty matches read as empty on every daemon generation: live
+        // 29.4.0 sends `[]`; a null `Volumes` is the same fact, not skew.
+        for body in [
+            r#"{"Volumes":[],"Warnings":null}"#,
+            r#"{"Volumes":null,"Warnings":null}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert!(parse_volume_list(&value).unwrap().is_empty(), "{body}");
+        }
+        assert!(parse_network_list(&serde_json::json!([]))
+            .unwrap()
+            .is_empty());
+        // A missing `Volumes` key or a trashed row is skew, and falls back.
+        for body in [r#"{"Warnings":null}"#, r#"{"Volumes":[{}]}"#] {
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                parse_volume_list(&value).unwrap_err().0,
+                EngineFaultKind::Schema,
+                "{body}"
+            );
+        }
     }
 
     #[tokio::test]

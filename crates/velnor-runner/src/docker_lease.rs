@@ -810,7 +810,8 @@ pub fn force_remove_network_args(ids: &[String]) -> Vec<String> {
 /// Drop-guard for a job's `velnor-net-*` network.
 ///
 /// The per-job network is created before any container exists and is normally
-/// removed by terminal cleanup (`reclaim_job_owned`). Every path that skips
+/// removed by terminal cleanup ([`list_job_owned`]/[`remove_job_owned`]).
+/// Every path that skips
 /// that cleanup — an early `?` between network creation and the step loop, a
 /// panic unwinding out of the executor, cleanup returning an error after the
 /// network removal itself failed — used to leak the network. Enough leaked
@@ -1885,25 +1886,53 @@ fn without_expect_continue(request: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn reclaim_job_owned(
+/// Terminal cleanup's list phase: every object carrying `velnor.job-id`.
+/// Listed through the Engine-routed facade; the remove phase consumes it.
+pub struct JobOwnedSnapshot {
+    pub containers: Vec<docker_client::OwnedContainer>,
+    pub networks: Vec<String>,
+    pub volumes: Vec<String>,
+}
+
+/// List the three owned kinds through the Engine-routed facade: one API
+/// call each on the fast path, the historical `ps`/`network ls`/`volume ls`
+/// on fallback.
+///
+/// Terminal cleanup runs this before [`remove_job_owned`]: two phases where
+/// the old closure version interleaved six calls. The borrow checker forces
+/// the shape — one `&mut` runner cannot serve a live listing facade and a
+/// removal closure at once — and terminal cleanup owns the job outright (its
+/// containers are already gone; this path never revalidated between list and
+/// rm), so batching changes no decision, only the call order.
+pub fn list_job_owned(
     job_id: &str,
-    mut docker: impl FnMut(&[String]) -> Result<String>,
+    docker: &mut docker_client::Docker<'_>,
+) -> Result<JobOwnedSnapshot> {
+    Ok(JobOwnedSnapshot {
+        containers: docker.list_owned_containers(job_id)?,
+        networks: docker.list_owned_networks(job_id)?,
+        volumes: docker.list_owned_volumes(job_id)?,
+    })
+}
+
+/// Terminal cleanup's remove phase: force-remove the snapshot's objects,
+/// skipping empty kinds. Removals stay CLI — mutations are out of the
+/// Engine migration's scope — through the same tolerant cleanup runner the
+/// closure version used.
+pub fn remove_job_owned(
+    snapshot: &JobOwnedSnapshot,
+    mut remove: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<()> {
-    let listed = docker(&list_owned_containers_args(job_id))?;
-    let ids = docker_client::owned_container_ids_excluding_buildkit(&listed);
+    let ids = docker_client::owned_container_ids_excluding_buildkit_rows(&snapshot.containers);
     if !ids.is_empty() {
-        docker(&force_remove_container_args(&ids)).map(|_| ())?;
+        remove(&force_remove_container_args(&ids))?;
     }
-    reclaim_listed(
-        &list_owned_networks_args(job_id),
-        &mut docker,
-        force_remove_network_args,
-    )?;
-    reclaim_listed(
-        &list_owned_volumes_args(job_id),
-        &mut docker,
-        force_remove_volume_args,
-    )?;
+    if !snapshot.networks.is_empty() {
+        remove(&force_remove_network_args(&snapshot.networks))?;
+    }
+    if !snapshot.volumes.is_empty() {
+        remove(&force_remove_volume_args(&snapshot.volumes))?;
+    }
     Ok(())
 }
 
@@ -4748,33 +4777,90 @@ mod tests {
         );
     }
 
+    /// Scripted [`CommandRunner`](crate::executor::CommandRunner) for the
+    /// list phase: the Engine route defaults off in tests, so the facade
+    /// runs its historical CLI legs through here.
+    struct ScriptRunner {
+        outputs: std::collections::VecDeque<String>,
+        calls: Vec<Vec<String>>,
+    }
+
+    impl crate::executor::CommandRunner for ScriptRunner {
+        fn run(
+            &mut self,
+            program: &str,
+            args: &[String],
+        ) -> anyhow::Result<crate::executor::CommandResult> {
+            assert_eq!(program, "docker");
+            self.calls.push(args.to_vec());
+            let stdout = self.outputs.pop_front().expect("script exhausted");
+            Ok(crate::executor::CommandResult {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
     #[test]
-    fn reclaim_job_owned_removes_guest_container_network_and_volume() {
-        let mut calls = Vec::new();
-        let mut outputs = vec![
-            "aaa\tguest-postgres\nbbb\tbuildx_buildkit_velnor-builder-dead0\n".to_string(),
-            String::new(),
-            "guest-net\n".to_string(),
-            String::new(),
-            "guest-vol\n".to_string(),
-            String::new(),
-        ];
-        reclaim_job_owned("velnor-job-1", |args| {
-            calls.push(args.to_vec());
-            if outputs.is_empty() {
-                return Err(anyhow!("unexpected docker call {args:?}"));
-            }
-            Ok(outputs.remove(0))
+    fn job_owned_reclaim_lists_then_removes_each_kind() {
+        let mut runner = ScriptRunner {
+            outputs: [
+                "aaa\tguest-postgres\nbbb\tbuildx_buildkit_velnor-builder-dead0\n",
+                "guest-net\n",
+                "guest-vol\n",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            calls: Vec::new(),
+        };
+        let mut removals = Vec::new();
+        {
+            let mut docker = docker_client::Docker::job(&mut runner);
+            let snapshot = list_job_owned("velnor-job-1", &mut docker).unwrap();
+            remove_job_owned(&snapshot, |args| {
+                removals.push(args.to_vec());
+                Ok(())
+            })
+            .unwrap();
+        }
+        // All three listings first (the facade's historical CLI legs), then
+        // the removals: phases, not interleaved calls.
+        assert_eq!(
+            runner.calls,
+            vec![
+                list_owned_containers_args("velnor-job-1"),
+                list_owned_networks_args("velnor-job-1"),
+                list_owned_volumes_args("velnor-job-1"),
+            ]
+        );
+        // Same removal decisions as the closure version: the guest goes, the
+        // BuildKit daemon stays for its own reclaim, network and volume go.
+        assert_eq!(
+            removals,
+            vec![
+                force_remove_container_args(&["aaa".into()]),
+                force_remove_network_args(&["guest-net".into()]),
+                force_remove_volume_args(&["guest-vol".into()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn remove_job_owned_skips_empty_kinds() {
+        let snapshot = JobOwnedSnapshot {
+            containers: Vec::new(),
+            networks: Vec::new(),
+            volumes: Vec::new(),
+        };
+        let mut removals = Vec::new();
+        remove_job_owned(&snapshot, |args| {
+            removals.push(args.to_vec());
+            Ok(())
         })
         .unwrap();
-
-        assert_eq!(calls[0], list_owned_containers_args("velnor-job-1"));
-        assert_eq!(calls[1], force_remove_container_args(&["aaa".into()]));
-        assert_eq!(calls[2], list_owned_networks_args("velnor-job-1"));
-        assert_eq!(calls[3], force_remove_network_args(&["guest-net".into()]));
-        assert_eq!(calls[4], list_owned_volumes_args("velnor-job-1"));
-        assert_eq!(calls[5], force_remove_volume_args(&["guest-vol".into()]));
-        assert!(outputs.is_empty());
+        assert!(removals.is_empty());
     }
 
     #[test]
@@ -4971,7 +5057,9 @@ bbb\tbuildx_buildkit_velnor-builder-dead0
 ccc\tvelnor-docker-action-velnor-job-dead
 ";
         assert_eq!(
-            docker_client::owned_container_ids_excluding_buildkit(formatted),
+            docker_client::owned_container_ids_excluding_buildkit_rows(
+                &docker_client::parse_owned_container_rows(formatted)
+            ),
             vec!["aaa".to_string(), "ccc".to_string()]
         );
     }

@@ -149,6 +149,18 @@ pub(crate) struct PortMapping {
     pub host_address: String,
 }
 
+/// One owned-container list row: the short id `ps` prints plus the
+/// `{{.Names}}` rendering. Both transports project this shape: the CLI leg
+/// parses its tab-separated line, the API leg truncates the full id to the
+/// 12-char short form and strips the leading `/` the daemon prefixes every
+/// API name (both proven live on 29.4.0: `ps --format {{.ID}}` prints 12
+/// chars, `{{.Names}}` renders no slash).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OwnedContainer {
+    pub id: String,
+    pub names: String,
+}
+
 /// The Engine's cgroup driver and version: the daemon-generation fact the job
 /// cgroup boundary proof caches.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,6 +431,47 @@ pub(crate) fn parse_id_list(stdout: &str) -> Vec<String> {
     ids
 }
 
+/// The 12-char short id the CLI list legs print (`ps --format {{.ID}}` and
+/// `network ls -q` both print short, proven live on 29.4.0), so the API
+/// projections truncate full daemon ids to the same form. Pass-through when
+/// already short: never fabricate chars.
+fn short_id(full: &str) -> String {
+    full.chars().take(12).collect()
+}
+
+/// Sorted, deduplicated ids: the [`parse_id_list`] postcondition for API
+/// legs, which arrive unsorted from JSON arrays.
+fn sorted_ids(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Parse `ps --format '{{.ID}}\t{{.Names}}'` rows into owned containers.
+/// The row split is the historical reading, unchanged: id before the first
+/// tab (the whole line when no tab is present), names after, empty ids
+/// skipped. Both the text decision below and the facade's CLI leg parse
+/// through here, so there is one owner of what the line means.
+pub(crate) fn parse_owned_container_rows(formatted: &str) -> Vec<OwnedContainer> {
+    let mut rows = Vec::new();
+    for line in formatted.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (id, names) = line.split_once('\t').unwrap_or((line, line));
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        rows.push(OwnedContainer {
+            id: id.to_string(),
+            names: names.trim().to_string(),
+        });
+    }
+    rows
+}
+
 /// The port order both transports agree on: lexicographic by container
 /// port, then host address.
 pub(crate) fn sort_port_mappings(mappings: &mut [PortMapping]) {
@@ -635,28 +688,43 @@ pub(crate) fn stale_job_owned_snapshot(
     })
 }
 
+/// Project API container rows into the CLI `ps` shape: short ids,
+/// slashless comma-joined names. Named so the parity test covers the
+/// projection directly, including the shapes the socket test never serves
+/// (multi-name rows, empty names, already-short ids).
+fn project_owned_rows(summaries: &[super::engine::EngineContainerSummary]) -> Vec<OwnedContainer> {
+    summaries
+        .iter()
+        .map(|summary| OwnedContainer {
+            id: short_id(&summary.id),
+            names: summary
+                .names
+                .iter()
+                .map(|name| name.strip_prefix('/').unwrap_or(name))
+                .collect::<Vec<_>>()
+                .join(","),
+        })
+        .collect()
+}
+
 /// Labeled job containers minus docker-container BuildKit daemons.
 ///
 /// BuildKit carries `velnor.job-id`, so the generic owned-container reclaim
 /// used to `docker rm --force` it with the 6h step timeout while job-end
 /// and doctor also rm'd the same id. Concurrent Engine deletes of a Created
 /// `buildx_buildkit_velnor-builder-*` deadlock; the leftover stays. BuildKit
-/// has its own prefix reclaim with a 20s bound.
-pub(crate) fn owned_container_ids_excluding_buildkit(formatted: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    for line in formatted.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (id, names) = line.split_once('\t').unwrap_or((line, line));
-        let id = id.trim();
-        let names = names.trim();
-        if id.is_empty() || names.contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX) {
-            continue;
-        }
-        ids.push(id.to_string());
-    }
+/// has its own prefix reclaim with a 20s bound. Decides over typed rows —
+/// CLI text parses through [`parse_owned_container_rows`] first — so the
+/// two transports cannot disagree on what gets removed.
+pub(crate) fn owned_container_ids_excluding_buildkit_rows(rows: &[OwnedContainer]) -> Vec<String> {
+    let mut ids = rows
+        .iter()
+        .filter(|row| {
+            !row.names
+                .contains(crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX)
+        })
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
     ids
@@ -1481,6 +1549,77 @@ impl<'r> Docker<'r> {
         let args = buildx_disk_usage_args(builder);
         parse_buildx_disk_usage(&self.call(&args, builder)?)
     }
+
+    /// Containers carrying `velnor.job-id=<job_id>`: short ids plus names.
+    /// Terminal cleanup's list phase consumes this. The API leg truncates
+    /// full ids to the short form the CLI leg prints and strips the leading
+    /// `/` from every API name, so both legs return identical rows and the
+    /// shared BuildKit-exclusion decision cannot differ by transport.
+    pub(crate) fn list_owned_containers(&mut self, job_id: &str) -> Result<Vec<OwnedContainer>> {
+        if let Some(rows) = self.engine_or_cli(
+            &crate::docker_lease::list_owned_containers_args(job_id),
+            |engine, budget| async move {
+                let filter = super::engine::ListFilter::label_equals(
+                    crate::docker_lease::JOB_ID_LABEL,
+                    job_id,
+                );
+                let summaries = engine.list_containers(&filter, budget).await?;
+                Ok(project_owned_rows(&summaries))
+            },
+        ) {
+            return Ok(rows);
+        }
+        let args = crate::docker_lease::list_owned_containers_args(job_id);
+        Ok(parse_owned_container_rows(&self.call(&args, job_id)?))
+    }
+
+    /// Short ids of the networks carrying `velnor.job-id=<job_id>`, sorted.
+    /// `network ls -q` prints short ids (proven live), so the API leg
+    /// truncates to the same 12 chars; both legs sort and dedup.
+    pub(crate) fn list_owned_networks(&mut self, job_id: &str) -> Result<Vec<String>> {
+        if let Some(ids) = self.engine_or_cli(
+            &crate::docker_lease::list_owned_networks_args(job_id),
+            |engine, budget| async move {
+                let filter = super::engine::ListFilter::label_equals(
+                    crate::docker_lease::JOB_ID_LABEL,
+                    job_id,
+                );
+                let networks = engine.list_networks(&filter, budget).await?;
+                Ok(sorted_ids(
+                    networks
+                        .iter()
+                        .map(|network| short_id(&network.id))
+                        .collect(),
+                ))
+            },
+        ) {
+            return Ok(ids);
+        }
+        let args = crate::docker_lease::list_owned_networks_args(job_id);
+        Ok(parse_id_list(&self.call(&args, job_id)?))
+    }
+
+    /// Names of the volumes carrying `velnor.job-id=<job_id>`, sorted.
+    /// `volume ls -q` prints names, the API's `Name` field verbatim.
+    pub(crate) fn list_owned_volumes(&mut self, job_id: &str) -> Result<Vec<String>> {
+        if let Some(names) = self.engine_or_cli(
+            &crate::docker_lease::list_owned_volumes_args(job_id),
+            |engine, budget| async move {
+                let filter = super::engine::ListFilter::label_equals(
+                    crate::docker_lease::JOB_ID_LABEL,
+                    job_id,
+                );
+                let volumes = engine.list_volumes(&filter, budget).await?;
+                Ok(sorted_ids(
+                    volumes.iter().map(|volume| volume.name.clone()).collect(),
+                ))
+            },
+        ) {
+            return Ok(names);
+        }
+        let args = crate::docker_lease::list_owned_volumes_args(job_id);
+        Ok(parse_id_list(&self.call(&args, job_id)?))
+    }
 }
 
 #[cfg(test)]
@@ -2301,6 +2440,174 @@ Total:\t\t6.054MB
         summarize(
             "cli ",
             cli.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Owned-list routing: identical rows, subprocesses only on fallback
+    // ------------------------------------------------------------------
+
+    /// Live-shaped list documents: Id/Names/Labels/State values verbatim
+    /// from Engine 29.4.0 `GET` captures (unread fields elided, as in the
+    /// inspect fixtures), plus the short-id-prefix CLI text the daemon
+    /// printed for the same objects.
+    const ROUTED_PS: &str = r#"[{"Id":"9f7d9044009aa16e83c437b67d71e7325a2377d6d00b1ec6beb3adad0812e7b4","Names":["/velnor-eng2-probe"],"Labels":{"velnor.job-id":"velnor-eng2-probe"},"State":"created"},{"Id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","Names":["/buildx_buildkit_velnor-builder-dead0"],"Labels":{"velnor.job-id":"velnor-eng2-probe"},"State":"exited"}]"#;
+    const ROUTED_NETWORKS: &str = r#"[{"Name":"velnor-eng2-net","Id":"51890326820b1aaec84f85251e1ae0695801bffc1f6504481191ce7c6f647bdc","Scope":"local","Driver":"bridge","Labels":{"velnor.job-id":"velnor-eng2-probe"}}]"#;
+    const ROUTED_VOLUMES: &str = r#"{"Volumes":[{"Driver":"local","Labels":{"velnor.job-id":"velnor-eng2-probe"},"Name":"velnor-eng2-vol","Scope":"local"}],"Warnings":null}"#;
+
+    fn routed_list_mock(connections: usize) -> MockEngine {
+        MockEngine::serve(
+            |head| {
+                if head.contains("GET /containers/json?") {
+                    json_response(ROUTED_PS)
+                } else if head.contains("GET /networks?") {
+                    json_response(ROUTED_NETWORKS)
+                } else {
+                    json_response(ROUTED_VOLUMES)
+                }
+            },
+            connections,
+        )
+    }
+
+    type ListValues = (Vec<OwnedContainer>, Vec<String>, Vec<String>);
+
+    fn list_sequence(docker: &mut Docker<'_>) -> Result<ListValues> {
+        Ok((
+            docker.list_owned_containers("velnor-eng2-probe")?,
+            docker.list_owned_networks("velnor-eng2-probe")?,
+            docker.list_owned_volumes("velnor-eng2-probe")?,
+        ))
+    }
+
+    fn cli_script_for_list_sequence() -> Vec<CommandResult> {
+        vec![
+            ok("9f7d9044009a\tvelnor-eng2-probe\nbbbbbbbbbbbb\tbuildx_buildkit_velnor-builder-dead0\n"),
+            ok("51890326820b\n"),
+            ok("velnor-eng2-vol\n"),
+        ]
+    }
+
+    #[test]
+    fn owned_list_sequence_is_identical_with_zero_subprocess_on_api() {
+        let mock = routed_list_mock(3);
+
+        // Before: engine off, three listings are three CLI calls.
+        let cli_values = {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("list-cli");
+            let mut runner = ScriptRunner::scripted_host(cli_script_for_list_sequence());
+            let values = {
+                let mut docker = Docker::job(&mut runner);
+                list_sequence(&mut docker).expect("cli sequence serves")
+            };
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 3);
+            values
+        };
+
+        // After: engine on, the same values with no runner call at all.
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("list-api");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let api_values = {
+            let mut docker = Docker::job(&mut runner);
+            list_sequence(&mut docker).expect("api sequence serves")
+        };
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no CLI call may run while the API serves"
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 3);
+        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(api_values, cli_values, "transports must agree exactly");
+        // The shared decision sees the same rows on both legs: the guest is
+        // reclaimed, the BuildKit daemon is excluded.
+        assert_eq!(
+            owned_container_ids_excluding_buildkit_rows(&api_values.0),
+            vec!["9f7d9044009a".to_string()]
+        );
+    }
+
+    #[test]
+    fn owned_list_status_failure_falls_back_to_one_cli_call() {
+        let mock = MockEngine::serve(
+            |_| b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("list-fallback-status");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("51890326820b\n")]);
+        let networks = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .list_owned_networks("velnor-eng2-probe")
+                .expect("fallback serves")
+        };
+        assert_eq!(networks, vec!["51890326820b".to_string()]);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[test]
+    fn owned_row_projection_matches_cli_rendering() {
+        use super::super::engine::EngineContainerSummary;
+        use std::collections::BTreeMap;
+        let summaries = vec![
+            EngineContainerSummary {
+                id: "9f7d9044009aa16e83c437b67d71e7325a2377d6d00b1ec6beb3adad0812e7b4".into(),
+                names: vec!["/velnor-eng2-probe".into()],
+                labels: BTreeMap::new(),
+                state: "created".into(),
+            },
+            // Multi-name rows join with a comma, like the CLI's renderer;
+            // the join keeps the BuildKit-contains check total.
+            EngineContainerSummary {
+                id: "short".into(),
+                names: vec!["/guest".into(), "buildx_buildkit_velnor-builder-x0".into()],
+                labels: BTreeMap::new(),
+                state: "running".into(),
+            },
+            EngineContainerSummary {
+                id: "cccccccccccc".into(),
+                names: Vec::new(),
+                labels: BTreeMap::new(),
+                state: "exited".into(),
+            },
+        ];
+        assert_eq!(
+            project_owned_rows(&summaries),
+            vec![
+                OwnedContainer {
+                    id: "9f7d9044009a".into(),
+                    names: "velnor-eng2-probe".into(),
+                },
+                OwnedContainer {
+                    id: "short".into(),
+                    names: "guest,buildx_buildkit_velnor-builder-x0".into(),
+                },
+                OwnedContainer {
+                    id: "cccccccccccc".into(),
+                    names: String::new(),
+                },
+            ]
+        );
+        // Full ids truncate to the 12 chars the CLI prints; short ids pass
+        // through untouched.
+        assert_eq!(
+            short_id("9f7d9044009aa16e83c437b67d71e7325a2377d6d00b1ec6beb3adad0812e7b4"),
+            "9f7d9044009a"
+        );
+        assert_eq!(short_id("short"), "short");
+        // Text and rows decide identically: the BuildKit row drops out of
+        // both, the nameless row stays in both.
+        let text = "9f7d9044009a\tvelnor-eng2-probe\nshort\tguest,buildx_buildkit_velnor-builder-x0\ncccccccccccc\t\n";
+        assert_eq!(
+            owned_container_ids_excluding_buildkit_rows(&parse_owned_container_rows(text)),
+            owned_container_ids_excluding_buildkit_rows(&project_owned_rows(&summaries)),
         );
     }
 
