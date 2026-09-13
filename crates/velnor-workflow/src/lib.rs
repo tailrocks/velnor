@@ -2483,7 +2483,7 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
 fn workflow_runtime_download(lane: RunnerMode) -> String {
     if lane == RunnerMode::Github {
         format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}\n          path: .velnor-workflow-runtime\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
+            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          DEFAULT_BRANCH: ${{{{ github.event.repository.default_branch }}}}\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg head_branch \"$DEFAULT_BRANCH\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" '.revision == $revision and .repository == $repository and .head_branch == $head_branch and .platform == $platform and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          run_id=\"$(jq -er '.run_id' \"$manifest\")\"\n          run=\"$(gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$run_id\")\"\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"$DEFAULT_BRANCH\" '.conclusion == \"success\" and .head_sha == $revision and .head_branch == $head_branch and .head_repository.full_name == .repository.full_name' <<<\"$run\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
             ActionPin::DownloadArtifact.reference()
         )
     } else {
@@ -2493,7 +2493,7 @@ fn workflow_runtime_download(lane: RunnerMode) -> String {
 
 fn workflow_runtime_artifact_upload() -> String {
     format!(
-        "      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}\n          path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          install -m 0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -4735,6 +4735,7 @@ mod tests {
         "velnor-workflow test-crates --config .github/ci/project.toml";
     use super::*;
     use crate::estate::render_apt_package_update_template;
+    use crate::primitives::watch::validate_canonical_release_products;
     use crate::primitives::{
         CacheBackend, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES, MUTABLE_MOUNT_HOST_DIR,
     };
@@ -4948,8 +4949,28 @@ mod tests {
         assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
-        assert!(workflow.contains("name: velnor-workflow-runtime"));
+        assert!(workflow.contains("name: velnor-workflow-runtime-"));
+        assert!(workflow.contains("${{ runner.os }}-${{ runner.arch }}"));
+        assert!(workflow.contains("manifest.json"));
         assert!(!workflow.contains("cargo install --locked --git"));
+    }
+
+    #[test]
+    fn runtime_lane_consumes_platform_qualified_verified_products() {
+        let mut output = String::new();
+        WorkflowIr::render_workflow_runtime_download(&mut output, RunnerMode::Github);
+        assert!(output.contains(
+            &format!(
+                "name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-$EYES_OS-$EYES_ARCH"
+            )
+            .replace("$EYES_OS", "${{ runner.os }}")
+            .replace("$EYES_ARCH", "${{ runner.arch }}")
+        ));
+        assert!(output.contains("DEFAULT_BRANCH"));
+        assert!(output.contains(".head_sha == $revision"));
+        assert!(output.contains("conclusion == \"success\""));
+        assert!(output.contains("runtime digest mismatch"));
+        assert!(!output.contains("path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found"));
     }
 
     #[test]
@@ -9612,6 +9633,45 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert_eq!(empty.generator, GENERATOR_REVISION);
         let _ = fs::remove_dir_all(bare);
         let _ = fs::remove_dir_all(declared);
+    }
+
+    #[test]
+    fn canonical_docker_products_reject_runtime_target_consumption() {
+        let valid = "FROM scratch AS build\nRUN mkdir /out && cp app /out/app && sha256sum /out/app > /out/app.sha256\nFROM scratch AS release\nCOPY --from=build /out/app /app\n";
+        must(
+            validate_canonical_release_products("Dockerfile", valid),
+            "canonical /out production and consumption is accepted",
+        );
+        let target = format!("{valid}COPY --from=release /src/target/release/app /app\n");
+        let error = must_fail(
+            validate_canonical_release_products("Dockerfile", &target),
+            "runtime consumption of /src/target must be rejected",
+        );
+        assert!(
+            error.to_string().contains("mutable target products"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn docker_release_stage_requires_canonical_checksummed_products() {
+        let missing = "FROM scratch AS build\nRUN cargo build --release\nFROM scratch AS release\nCOPY --from=build /out/app /app\n";
+        let error = must_fail(
+            validate_canonical_release_products("Dockerfile", missing),
+            "a release stage without checksummed /out products must be rejected",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("checksummed canonical products in /out"),
+            "{error}"
+        );
+
+        let plain = "FROM scratch AS build\nRUN cargo build --release\n";
+        must(
+            validate_canonical_release_products("Dockerfile", plain),
+            "a Dockerfile without a release stage is outside the canonical-products contract",
+        );
     }
 
     #[test]

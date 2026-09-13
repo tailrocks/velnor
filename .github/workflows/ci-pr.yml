@@ -43,11 +43,23 @@ jobs:
           VELNOR_SELECTION_FILE: ${{ runner.temp }}/velnor-ci-selection
         run: velnor-workflow plan --config .github/ci/project.toml
 
+      - name: Prepare Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: 20927051d368ed1ecd8e46e6777d18899176a536
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/velnor-workflow-runtime"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          install -m 0755 "$HOME/.cargo/bin/velnor-workflow" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-20927051d368ed1ecd8e46e6777d18899176a536
-          path: ~/.cargo/bin/velnor-workflow
+          name: velnor-workflow-runtime-20927051d368ed1ecd8e46e6777d18899176a536-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime
           if-no-files-found: error
           retention-days: 7
       - name: Publish Velnor CI selection

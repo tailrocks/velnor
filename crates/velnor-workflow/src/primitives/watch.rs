@@ -157,6 +157,7 @@ pub(crate) fn docker_watch_paths(
         let contents = std::fs::read_to_string(root.join(dockerfile)).map_err(|error| {
             GeneratorError::io("read Dockerfile", &root.join(dockerfile), &error)
         })?;
+        validate_canonical_release_products(dockerfile, &contents)?;
         for line in contents.lines() {
             let tokens = line
                 .split_whitespace()
@@ -226,4 +227,37 @@ pub(crate) fn docker_watch_paths(
         }
     }
     Ok(watch.into_iter().collect())
+}
+
+/// Release images must publish immutable canonical products, not expose the
+/// mutable Cargo target directory to a runtime stage. When a Dockerfile has a
+/// `release` stage, that stage must stage `/out` artifacts and checksums; a
+/// later stage may consume only `/out`.
+pub(crate) fn validate_canonical_release_products(
+    dockerfile: &str,
+    contents: &str,
+) -> Result<(), GeneratorError> {
+    let has_release_stage = contents.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("FROM ")
+            && (line.ends_with(" AS release") || line.ends_with(" as release"))
+    });
+    if !has_release_stage {
+        return Ok(());
+    }
+    if !contents.contains("/out/") || !contents.contains(".sha256") {
+        return Err(GeneratorError::usage(format!(
+            "Dockerfile release stage must stage checksummed canonical products in /out: {dockerfile}"
+        )));
+    }
+    for line in contents.lines() {
+        if line.starts_with("COPY --from=release ")
+            && (line.contains("/src/target/") || line.contains("${CARGO_TARGET_DIR}"))
+        {
+            return Err(GeneratorError::usage(format!(
+                "Dockerfile runtime stage consumes mutable target products: {dockerfile}"
+            )));
+        }
+    }
+    Ok(())
 }

@@ -26,8 +26,24 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-20927051d368ed1ecd8e46e6777d18899176a536
+          name: velnor-workflow-runtime-20927051d368ed1ecd8e46e6777d18899176a536-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_REVISION: 20927051d368ed1ecd8e46e6777d18899176a536
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg head_branch "$DEFAULT_BRANCH" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.revision == $revision and .repository == $repository and .head_branch == $head_branch and .platform == $platform and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          run_id="$(jq -er '.run_id' "$manifest")"
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          jq -e --arg revision "$EXPECTED_REVISION" --arg head_branch "$DEFAULT_BRANCH" '.conclusion == "success" and .head_sha == $revision and .head_branch == $head_branch and .head_repository.full_name == .repository.full_name' <<<"$run" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         run: |
