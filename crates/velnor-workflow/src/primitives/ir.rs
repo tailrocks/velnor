@@ -804,6 +804,32 @@ fn kind_matrix_output_from_file(file: &str) -> String {
     format!("{stem}_matrix")
 }
 
+fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
+    match file
+        .strip_prefix("ci-unit-")
+        .and_then(|value| value.strip_suffix(".yml"))?
+    {
+        "rust" => Some(UnitKind::Rust),
+        "gradle" => Some(UnitKind::Gradle),
+        "node" => Some(UnitKind::Node),
+        "bun" => Some(UnitKind::Bun),
+        "swift" => Some(UnitKind::Swift),
+        "opentofu" => Some(UnitKind::OpenTofu),
+        "docker" => Some(UnitKind::Docker),
+        "homebrew" => Some(UnitKind::Homebrew),
+        "docs" => Some(UnitKind::Docs),
+        _ => None,
+    }
+}
+
+/// Membership test a kind-reusable job uses instead of `inputs.unit ==`.
+/// Calling the reusable once per kind (not once per matrix unit) keeps GitHub
+/// job count linear in the kind's units. A caller-side matrix instantiates
+/// every job in the reusable for every selected unit: N×N skipped jobs.
+fn reusable_selected_unit_selector(unit_id: &str) -> String {
+    format!("contains(format(',{{0}},', inputs.selected_units), ',{unit_id},')")
+}
+
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
@@ -1010,7 +1036,7 @@ impl WorkflowIr {
                 self.runners == RunnerMode::Velnor,
             );
         }
-        Self::render_node_callers(nodes, &mut output, kind != WorkflowKind::PullRequest);
+        self.render_node_callers(nodes, &mut output, kind != WorkflowKind::PullRequest);
         if kind == WorkflowKind::Nightly {
             self.render_nodes_required(nodes, &mut output, true, "nightly-required", true);
             self.render_nightly_alert(&mut output);
@@ -1059,10 +1085,14 @@ impl WorkflowIr {
         }
     }
 
-    /// One reusable-workflow caller per unit kind. Selected units of that kind
-    /// fan out through `strategy.matrix.include` from the plan artifact so
-    /// unselected units are never scheduled.
+    /// One reusable-workflow caller per unit kind. The kind reusable already
+    /// contains one job per unit; a caller-side matrix would instantiate that
+    /// whole job set once per selected unit (N×N skipped GitHub jobs). Pass
+    /// the plan's selected-unit CSV and SHAs as `workflow_call` inputs so
+    /// unselected jobs skip inside one call and unit `run` sees the plan SHAs
+    /// (`github.event.pull_request` is empty in `workflow_call` context).
     pub(crate) fn render_node_callers(
+        &self,
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
@@ -1074,6 +1104,7 @@ impl WorkflowIr {
                 .or_default()
                 .push((unit_id, name));
         }
+        let base_sha = self.base_sha_expression();
         for ((job_id, file), _units) in groups {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
@@ -1088,9 +1119,14 @@ impl WorkflowIr {
                 conditions.push("needs.policy.result == 'success'".to_owned());
             }
             conditions.push(format!("needs.plan.outputs.{matrix_output} != '[]'"));
+            let group_name = match kind_from_unit_workflow_file(file) {
+                Some(kind) => unit_group(kind),
+                None => job_id,
+            };
             let _ = writeln!(
                 output,
-                "  {job_id}:\n    name: ${{{{ matrix.label }}}}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    strategy:\n      fail-fast: false\n      matrix:\n        include: ${{{{ fromJSON(needs.plan.outputs.{matrix_output}) }}}}\n    uses: ./.github/workflows/{file}\n    with:\n      unit: ${{{{ matrix.unit }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
+                "  {job_id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection\n      base_sha: ${{{{ {base_sha} }}}}\n      head_sha: ${{{{ github.sha }}}}",
+                yaml_scalar(group_name),
                 conditions.join(" && "),
                 needs.join(", "),
             );
@@ -1121,8 +1157,11 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let display_name = check_name;
-        let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
@@ -1132,7 +1171,7 @@ impl WorkflowIr {
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
             needs.join(", "),
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         if simulate_failure {
             let simulate = github_expression("inputs.simulate_failure");
@@ -1165,21 +1204,24 @@ impl WorkflowIr {
             );
         }
         if check_name == "ci-required" {
-            let required_gate = if self.runners == RunnerMode::Velnor {
-                format!("always() && {}", self.velnor_control_plane_expression())
+            let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+                format!(
+                    "always() && ({})",
+                    self.velnor_control_plane_expression()
+                )
             } else {
                 "always()".to_owned()
             };
             let _ = writeln!(
                 output,
                 "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
-                self.runner_for(self.runners)
+                self.runner_for(self.control_plane_lane())
             );
         }
     }
 
     pub(crate) fn render_nightly_alert(&self, output: &mut String) {
-        let if_condition = if self.runners == RunnerMode::Velnor {
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
             format!(
                 "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
                 self.default_branch
@@ -1190,7 +1232,7 @@ impl WorkflowIr {
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
 Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
@@ -1258,7 +1300,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string",
             yaml_scalar(&sidebar_group_name(unit))
         );
         self.render_workflow_env(&mut output, unit);
@@ -1299,7 +1341,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n\njobs:",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      selected_units:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n\njobs:",
             yaml_scalar(unit_group(kind))
         );
         for unit in members {
@@ -1375,7 +1417,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let _ = writeln!(output, "  {id}:\n    name: {}", yaml_scalar(&name));
         let lane_gate = self.lane_event_expression(lane);
         let gate = input_unit.map_or(lane_gate.clone(), |unit_id| {
-            format!("inputs.unit == '{unit_id}' && ({lane_gate})")
+            format!(
+                "{} && ({lane_gate})",
+                reusable_selected_unit_selector(unit_id)
+            )
         });
         let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         let _ = writeln!(output, "    runs-on: {}", self.runner_for_unit(lane, unit));
@@ -1389,7 +1434,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
         self.render_unit_runtime(output, lane, unit);
@@ -1418,12 +1463,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         render_cargo_source_preparation(output, unit);
-        let base_sha = self.base_sha_expression();
+        let unit_id_value = input_unit.map_or_else(
+            || "${{ inputs.unit }}".to_owned(),
+            ToOwned::to_owned,
+        );
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ {} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
-            base_sha,
             checks_env(unit),
         );
         render_phase_report_step(
@@ -1502,23 +1549,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
-        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+        if self.control_plane_lane() != RunnerMode::Github
+            || self.runners == RunnerMode::Velnor
+            || unit.kind == UnitKind::Swift
+        {
             Self::render_workflow_runtime_setup(output, lane);
         } else {
             Self::render_workflow_runtime_download(output, lane);
         }
     }
 
+    fn control_plane_lane(&self) -> RunnerMode {
+        match self.automatic {
+            RunnerMode::Velnor => RunnerMode::Velnor,
+            RunnerMode::Github | RunnerMode::Both => RunnerMode::Github,
+        }
+    }
+
     pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
-        // Planning follows config.runners. Velnor uses the image-provided
-        // runtime. GitHub planning pins `uses:` to SOURCE_REV and installs
-        // `${{ github.sha }}` so same-repo PR / default-branch push `plan`
-        // understands generation-time fields such as `automatic`.
-        let runners = if self.runners == RunnerMode::Velnor {
-            RunnerMode::Velnor
-        } else {
-            RunnerMode::Github
-        };
+        // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
+        // the control plane off GitHub-hosted runners. `automatic = both`
+        // plans on GitHub so this repository can compare lanes. GitHub
+        // planning pins `uses:` to SOURCE_REV and installs `${{ github.sha }}`
+        // so same-repo `plan` understands generation-time fields.
+        let runners = self.control_plane_lane();
         let gate = if runners == RunnerMode::Velnor {
             format!(
                 "    if: ${{{{ {} }}}}\n",
@@ -1633,9 +1687,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                         self.automatic_event_expression()
                     )
                 } else {
-                    format!(
-                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || ({dispatch_github})"
-                    )
+                    dispatch_github.to_owned()
                 }
             }
             RunnerMode::Velnor => {
@@ -2167,8 +2219,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
             }
         }
-        let gate = if runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
@@ -2178,7 +2233,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             output,
             "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
-            self.runner_for(runners),
+            self.runner_for(self.control_plane_lane()),
         );
         for job in needs
             .iter()
@@ -2201,15 +2256,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
             );
         }
-        let required_gate = if runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+        let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
         let _ = writeln!(
             output,
             "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
-            self.runner_for(runners)
+            self.runner_for(self.control_plane_lane())
         );
     }
 }
