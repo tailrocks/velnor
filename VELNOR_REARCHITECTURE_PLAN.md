@@ -244,8 +244,8 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R1-bench correction closed all five review issues: fail-closed fault residue sampling (`Result` + uncontained-on-sampling-error, network `not found` vocabulary fixed live), soak image sampling with per-round build-image teardown, zero-filled intermittent census classes, records kept for uninjected runs with the nonzero exit preserved, and spawn interception in the fault decorator with kill documented as passthrough (§110). |
 | 2026-09-13 | R2-perf BC-14 deleted the mtime pin and the persistent target layer: checkout leaves wall-clock mtimes (GitHub-hosted parity, backdated-2001 pin), the 5th bench phase is gone (`CheckoutPhase::ALL` is 4, span table exact), target materialize/publish + generation store + traversal budgets removed from the executor, `target/` resolves as an ordinary workspace path for cache/artifacts, and `VELNOR_CARGO_TARGET_PERSIST` fails loud instead of silently no-opping; measured via the R1-bench span contract (real-checkout 4-span pin, wall-clock pin, subscriber round-trip). |
 | 2026-09-13 | R2-perf BC-14 correction closed both review issues: the shipped `velnor.env` no longer advertises the removed `VELNOR_CARGO_TARGET_PERSIST` knob (block deleted per the no-legacy rule; the daemon's fail-loud admission error remains the operator guidance), and the native rust-cache covered summary reports `Store: host-persistent cache class` with the `persistent_target` local renamed to `covered_by_persistent_storage`, matching the sibling actions/cache copy since coverage is static stores only — pinned by a no-knob env assertion and a summary assertion on the warm-static-directories test. |
-| 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §115: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
-| 2026-09-13 | R0-f4-warm correction closed the five staleness gaps: no-checkout jobs refuse stable (ephemeral + forensics), stable forces `clean:true` (checkout-time clean only removes prior-job state), per-scope destination record with pre-checkout prune of absent paths (root-absent clears), `--unshallow` on full fetch when `.git/shallow` exists (direct flag + mirror local-fetch), and stable double-failure scrubs plus fails loud with both errors (checkout scrubs before bail); clone-URL-change pin added (remove/add-origin + fetch + force + reset + clean). Bench prose scoped to the pinned zero-unit test claim (§115); rust/warm + rust/noop runs pending. |
+| 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §116: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
+| 2026-09-13 | R0-f4-warm correction closed the five staleness gaps: no-checkout jobs refuse stable (ephemeral + forensics), stable forces `clean:true` (checkout-time clean only removes prior-job state), per-scope destination record with pre-checkout prune of absent paths (root-absent clears), `--unshallow` on full fetch when `.git/shallow` exists (direct flag + mirror local-fetch), and stable double-failure scrubs plus fails loud with both errors (checkout scrubs before bail); clone-URL-change pin added (remove/add-origin + fetch + force + reset + clean). Bench prose scoped to the pinned zero-unit test claim (§116); rust/warm + rust/noop runs pending. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -6383,7 +6383,43 @@ runner lib with `test-support` 1897 passed, 0 failed, 1 ignored. (One
 parallel-only flake in untouched `checkout_emits_the_four_bench_phase_spans`,
 passing alone, matching the §111 note.)
 
-## 115. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
+## 115. R0-705-corr: ignored-umbrella status conversion, cancelled gate, umbrella row flag — 2026-09-13
+
+Fast-follow to #705 (branch `r0-705-corr` from `origin/main` at
+`91defe66`). Closes the §113 out-of-scope note: the `steps` context
+stays job-global, so after an ignored umbrella the inner `Failure`
+entries poisoned the job-scope scans and a later `failure()` step
+wrongly ran.
+
+- **Converted inner ids.** `pop_composite` now returns the inner step
+  ids recorded in the popped scope frame; at an ignored `End` they are
+  marked converted (`converted_conclusions`), and `job_status` /
+  `status_scope_has_failure` skip converted ids. Inner `steps.<id>`
+  reads stay raw (upstream converts the composite conclusion only),
+  matching upstream `job.status` deriving from top-level step results
+  only. The defensive flush converts still-open scopes the same way.
+- **Cancelled gate.** `umbrella_result` takes the cancelled state and
+  never converts under cancellation (upstream completes a killed step
+  `Canceled`; `ApplyContinueOnError` converts `Failed` only). The
+  `results`-range conversion keys off the gated flag, so it follows.
+- **Umbrella row flag.** `absorb`/`merge_nested` no longer OR inner
+  ignored flags into the frame; the timeline row flag is assigned from
+  the umbrella conversion at `End`. Previously an umbrella that still
+  fails (no own `continue-on-error`) reported conclusion success
+  whenever any inner step was ignored.
+
+Tests: 3 new (ignored umbrella + `failure()`/`success()`/`job.status`
+readers with raw `steps.boom` read, cancelled-gate unit, row-flag
+fix). Efficacy proven by mutation: without the conversion call the
+status test fails with `failure()` running; with the flag OR restored
+the row test fails.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --locked` clean; strict clippy clean on runner
+(`--all-targets --locked --features test-support -D warnings`); serial
+runner lib with `test-support` 1925 passed, 0 failed, 1 ignored.
+
+## 116. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
 
 BC-14 deleted the mtime pin and the persistent target layer for timestamp
 soundness. The warm-build claim for this remediation is pinned by the
