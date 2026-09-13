@@ -99,11 +99,12 @@ pub struct GitHubApiError {
     /// `x-ratelimit-remaining`. Required to tell quota 403 (remaining=0)
     /// from permission 403 (remaining>0); GitHub sends reset headers on both.
     pub remaining: Option<u64>,
-    /// Boundary-produced [`BrokerErrorCategory`]. `None` everywhere except
-    /// the broker/completion production sites that classify
-    /// (terminal completion refusal, broker acknowledge): transport
-    /// failures carry no status to classify from, and every other
-    /// `GitHubApiError` producer predates the taxonomy.
+    /// Boundary-produced [`BrokerErrorCategory`]. `Some` only at the classified
+    /// broker/completion production sites (acquire attempt, completion
+    /// refusal and exhausted-transient budget, broker acknowledge, broker
+    /// session create): transport failures carry no status to classify from,
+    /// and every other `GitHubApiError` producer predates the taxonomy (see
+    /// the remaining-untyped-sites list in `plans/2026-09-14-r0-798-corr.md`).
     pub(crate) category: Option<BrokerErrorCategory>,
 }
 
@@ -2133,7 +2134,12 @@ impl BrokerClient {
         let (status, text) =
             github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if !(200..300).contains(&status) {
-            return Err(github_api_error("create broker session", status, text));
+            return Err(github_api_error_categorized(
+                "create broker session",
+                status,
+                text,
+                classify_broker_session_create_error(status),
+            ));
         }
         serde_json::from_str(&text).context("parse create broker session response")
     }
@@ -2210,6 +2216,21 @@ fn classify_broker_ack_error(status: u16) -> BrokerErrorCategory {
     }
 }
 
+/// Boundary classifier for a failed broker `create session` POST, read by
+/// `create_broker_session_with_retry`. A deterministic refusal is `Terminal`
+/// (fixed credentials fail identically on every attempt: fail fast); a 409
+/// is `Conflict` (a lost response may already have created the session, so
+/// the retry converges instead of abandoning); anything transport-shaped is
+/// `Transient`. Same status shape as the ack classifier, separate function
+/// because the retry policy it drives differs (retry vs never-retry).
+fn classify_broker_session_create_error(status: u16) -> BrokerErrorCategory {
+    match status {
+        409 => BrokerErrorCategory::Conflict,
+        status if is_retriable_completion_status(status) => BrokerErrorCategory::Transient,
+        _ => BrokerErrorCategory::Terminal,
+    }
+}
+
 #[derive(Clone)]
 pub struct RunServiceClient {
     http: Client,
@@ -2225,6 +2246,17 @@ pub struct RunServiceClient {
         reason = "tests may panic"
     )]
     acquire_retry_delay_override: Option<Duration>,
+    #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
+    complete_retry_delay_override: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -2283,6 +2315,17 @@ impl RunServiceClient {
                 reason = "tests may panic"
             )]
             acquire_retry_delay_override: None,
+            #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
+            complete_retry_delay_override: None,
         })
     }
 
@@ -2298,6 +2341,21 @@ impl RunServiceClient {
     )]
     pub(crate) fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
         self.acquire_retry_delay_override = Some(delay);
+        self
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
+    pub(crate) fn with_complete_retry_delay_for_test(mut self, delay: Duration) -> Self {
+        self.complete_retry_delay_override = Some(delay);
         self
     }
 
@@ -2341,7 +2399,12 @@ impl RunServiceClient {
                         });
                     }
                     if !(200..300).contains(&status) {
-                        Some(github_api_error("acquire run-service job", status, text))
+                        Some(github_api_error_categorized(
+                            "acquire run-service job",
+                            status,
+                            text,
+                            classify_acquire_attempt_error(status),
+                        ))
                     } else {
                         match serde_json::from_str::<Value>(&text) {
                             Ok(value) => return Ok(AcquireJobOutcome::Acquired(value)),
@@ -2369,9 +2432,9 @@ impl RunServiceClient {
             // poison payload) fails fast on this attempt instead of burning
             // the whole retry budget — the bearer token cannot change
             // mid-call, so the same request fails identically on every
-            // attempt. Only transient failures sleep and retry, bounded by
-            // `RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS`.
-            if !acquire_failure_is_transient(&error) {
+            // attempt. Only transient and unclassified transport failures
+            // sleep and retry, bounded by `RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS`.
+            if !acquire_attempt_failure_is_transient(&error) {
                 return Err(AcquireJobError::Permanent(error).into());
             }
             if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
@@ -2406,6 +2469,24 @@ impl RunServiceClient {
         let span = RUN_SERVICE_ACQUIRE_RETRY_MAX_SECS - RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS;
         let jitter = (std::process::id() as u64 + u64::from(attempt) * 7) % (span + 1);
         Duration::from_secs(RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS + jitter)
+    }
+
+    fn complete_retry_delay(&self, attempt: u32) -> Duration {
+        #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
+        if let Some(delay) = self.complete_retry_delay_override {
+            return delay;
+        }
+
+        Duration::from_secs(5u64.saturating_mul(1 << (attempt - 1)).min(60))
     }
 
     pub async fn renew_job(
@@ -2483,7 +2564,7 @@ impl RunServiceClient {
                 30,
             )
             .await;
-            let retriable = match &outcome {
+            let category: Option<BrokerErrorCategory> = match &outcome {
                 Ok((status, body)) => match classify_completion_response(*status, body) {
                     CompletionResponseClass::Accepted => {
                         return Ok(CompletionAcknowledgement::Accepted);
@@ -2491,36 +2572,48 @@ impl RunServiceClient {
                     CompletionResponseClass::RemoteObservedTerminal => {
                         return Ok(CompletionAcknowledgement::RemoteObservedTerminal);
                     }
-                    CompletionResponseClass::RetryableFailure => true,
-                    CompletionResponseClass::PermanentFailure => false,
+                    CompletionResponseClass::RetryableFailure => {
+                        Some(BrokerErrorCategory::Transient)
+                    }
+                    CompletionResponseClass::PermanentFailure => {
+                        Some(BrokerErrorCategory::Terminal)
+                    }
                 },
-                Err(_) => true,
+                // Status-less transport failure: unclassified, fail open to
+                // retry — not knowing the remote's answer is the case where
+                // retrying is the only correct move.
+                Err(_) => None,
             };
-            if attempt >= MAX_ATTEMPTS || !retriable {
-                // A deterministic refusal leaves the boundary carrying
-                // `Terminal`, so the journal's abandon policy reads the
-                // boundary verdict instead of re-deriving it. An exhausted
-                // transient budget and status-less transport failures stay
-                // unclassified: the policy fails open to retry for those.
-                let terminal = !retriable;
+            // Category-driven policy: only the boundary's `Terminal` verdict
+            // fails fast; `Transient` and unclassified transport failures
+            // sleep and retry inside the unchanged 6-attempt budget.
+            let terminal = matches!(category, Some(BrokerErrorCategory::Terminal));
+            if attempt >= MAX_ATTEMPTS || terminal {
+                // Every classified failure leaves the boundary carrying its
+                // category, so the journal's abandon policy reads the
+                // boundary verdict instead of re-deriving it. Status-less
+                // transport failures stay unclassified: the policy fails
+                // open to retry for those.
                 return match outcome {
                     Ok((status, text)) => {
-                        if terminal {
-                            Err(github_api_error_categorized(
-                                "complete run-service job",
-                                status,
-                                text,
-                                BrokerErrorCategory::Terminal,
-                            ))
-                        } else {
-                            Err(github_api_error("complete run-service job", status, text))
-                        }
+                        // Proof: every `Ok` failure arm classifies above;
+                        // reaching here with `None` requires the `Err` arm.
+                        #[allow(clippy::unreachable, reason = "only the Err arm is unclassified")]
+                        let Some(category) = category
+                        else {
+                            unreachable!("classified completion failure always carries a category");
+                        };
+                        Err(github_api_error_categorized(
+                            "complete run-service job",
+                            status,
+                            text,
+                            category,
+                        ))
                     }
                     Err(error) => Err(error).context("complete run-service job request"),
                 };
             }
-            let delay =
-                std::time::Duration::from_secs(5u64.saturating_mul(1 << (attempt - 1)).min(60));
+            let delay = self.complete_retry_delay(attempt);
             match &outcome {
                 Ok((status, _)) => eprintln!(
                     "complete job attempt {attempt}/{MAX_ATTEMPTS} failed (status={status}); retrying in {}s",
@@ -2537,6 +2630,39 @@ impl RunServiceClient {
     }
 }
 
+/// Retry policy for an `acquirejob` attempt failure. Reads the
+/// boundary-produced [`BrokerErrorCategory`]; unclassified errors
+/// (status-less transport failures, test doubles) fall back to the
+/// historical [`acquire_failure_is_transient`] derivation. `Conflict` is
+/// unreachable here — a 409 returns `Skipped` before the retry path — so any
+/// non-transient verdict fails fast as `Permanent`, and the
+/// `is_transient_acquire_error` session gate keeps its verdicts.
+fn acquire_attempt_failure_is_transient(error: &anyhow::Error) -> bool {
+    match broker_error_category(error) {
+        Some(BrokerErrorCategory::Transient) => true,
+        Some(_) => false,
+        None => acquire_failure_is_transient(error),
+    }
+}
+
+/// Boundary classifier for an `acquirejob` attempt failure that is neither
+/// a skip (404/409/422 return `Skipped` before this point) nor a success.
+/// Same verdict shape as the historical status derivation below, so typing
+/// the producer changes forensics, not policy: transport-shaped and 5xx
+/// failures are [`BrokerErrorCategory::Transient`] (retry inside the
+/// 5-attempt budget), deterministic 4xx refusals are
+/// [`BrokerErrorCategory::Terminal`] (fail fast).
+fn classify_acquire_attempt_error(status: u16) -> BrokerErrorCategory {
+    if matches!(status, 0 | 408 | 429 | 500..=599) {
+        BrokerErrorCategory::Transient
+    } else {
+        BrokerErrorCategory::Terminal
+    }
+}
+
+/// Historical acquire-failure derivation, now the unclassified fallback for
+/// [`acquire_attempt_failure_is_transient`]: timeout/connect transport
+/// failures retry, local faults and deterministic refusals fail fast.
 fn acquire_failure_is_transient(error: &anyhow::Error) -> bool {
     let Some(api_error) = error
         .chain()
@@ -8808,10 +8934,12 @@ mod tests {
 
     #[test]
     fn completion_permanence_prefers_the_boundary_category() {
-        // The boundary verdict wins over status re-derivation in both
-        // directions: a `Terminal` refusal with a retriable-looking status
-        // is permanent, and a non-terminal category with a refusal status
-        // is not.
+        // Policy-precedence unit over synthetic errors: the boundary verdict
+        // wins over status re-derivation in both directions (a `Terminal`
+        // refusal with a retriable-looking status is permanent, and a
+        // non-terminal category with a refusal status is not). That the loop
+        // actually produces these categories is proven by the wiremock tests
+        // below, not here.
         let boundary_terminal = github_api_error_categorized(
             "complete run-service job",
             503,
@@ -8916,6 +9044,50 @@ mod tests {
         for status in [400u16, 401, 403, 404, 422] {
             assert_eq!(
                 classify_broker_ack_error(status),
+                BrokerErrorCategory::Terminal,
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn broker_session_create_errors_classify_for_retry_policy() {
+        for status in [0u16, 408, 429, 500, 503] {
+            assert_eq!(
+                classify_broker_session_create_error(status),
+                BrokerErrorCategory::Transient,
+                "status {status}"
+            );
+        }
+        assert_eq!(
+            classify_broker_session_create_error(409),
+            BrokerErrorCategory::Conflict
+        );
+        for status in [400u16, 401, 403, 404, 422] {
+            assert_eq!(
+                classify_broker_session_create_error(status),
+                BrokerErrorCategory::Terminal,
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn acquire_attempt_errors_classify_like_the_legacy_derivation() {
+        // Same verdict shape the loop enforced before the taxonomy, so typing
+        // the producer changes forensics, not policy. 404/409/422 never reach
+        // this classifier (they return `Skipped` first); their mapping here
+        // is a defensive totality, not a policy.
+        for status in [0u16, 408, 429, 500, 503] {
+            assert_eq!(
+                classify_acquire_attempt_error(status),
+                BrokerErrorCategory::Transient,
+                "status {status}"
+            );
+        }
+        for status in [400u16, 401, 403, 404, 409, 422] {
+            assert_eq!(
+                classify_acquire_attempt_error(status),
                 BrokerErrorCategory::Terminal,
                 "status {status}"
             );
@@ -9111,6 +9283,58 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn complete_job_exhausted_transient_carries_boundary_category() {
+        // Regression (r0-798-corr): before the correction the exhausted
+        // transient budget surfaced an untyped error (`broker_error_category`
+        // returned `None` and permanence fell back to status re-derivation).
+        // The loop now decides on the category and the produced error carries
+        // it, so the journal reads the boundary verdict in both outcomes.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let run_service_url = format!("{}/run/jobs/123", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/completejob"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
+            .expect(6)
+            .mount(&server)
+            .await;
+
+        let completion = RunServiceCompleteJob {
+            plan_id: "plan".to_owned(),
+            job_id: "job".to_owned(),
+            conclusion: TaskResult::Succeeded,
+            outputs: BTreeMap::new(),
+            step_results: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            environment_url: None,
+            billing_owner_id: None,
+            infrastructure_failure_category: None,
+        };
+        let error = RunServiceClient::new("token")
+            .unwrap()
+            .with_complete_retry_delay_for_test(Duration::ZERO)
+            .complete_job(&run_service_url, completion)
+            .await
+            .expect_err("an always-503 completion must exhaust the retry budget");
+
+        assert_eq!(
+            broker_error_category(&error),
+            Some(BrokerErrorCategory::Transient)
+        );
+        assert!(!completion_failure_is_permanent(&error));
+        assert_eq!(
+            error.to_string(),
+            "complete run-service job failed: status=503, body=try later"
+        );
+    }
+
     use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
 
     #[test]
@@ -9286,6 +9510,52 @@ mod tests {
 
         assert_eq!(session.session_id.as_deref(), Some("session-1"));
         assert_eq!(session.agent.id, 0);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn create_session_failures_carry_boundary_category() {
+        // Regression (r0-798-corr): the session-create producer was untyped,
+        // so the retry loop could not read a category at all. A deterministic
+        // refusal now carries `Terminal` (fail fast), a transport-shaped
+        // failure `Transient`, and a 409 `Conflict`.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let broker = BrokerClient::new(&server.uri(), "token").unwrap();
+        let session = TaskAgentSession::new("owner (PID: 1)", 42, "velnor-test");
+
+        for (status, body, expected) in [
+            (401u16, "bad credentials", BrokerErrorCategory::Terminal),
+            (503u16, "try later", BrokerErrorCategory::Transient),
+            (409u16, "already exists", BrokerErrorCategory::Conflict),
+        ] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/session"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let error = broker
+                .create_session(&session)
+                .await
+                .expect_err("a failed session create must surface the refusal");
+            assert_eq!(
+                broker_error_category(&error),
+                Some(expected),
+                "status {status}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("create broker session failed: status={status}, body={body}"),
+                "status {status}"
+            );
+        }
     }
 
     #[test]
@@ -9496,6 +9766,10 @@ mod tests {
 
     #[test]
     fn acquire_failure_classifies_local_faults_separately_from_transport() {
+        // Pins the unclassified fallback the category-driven
+        // `acquire_attempt_failure_is_transient` delegates to: status-less
+        // transport faults retry, local faults and deterministic refusals
+        // fail fast.
         let permission = anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "private transport directory",
@@ -9634,6 +9908,100 @@ mod tests {
                 .to_string()
                 .contains("permanent run-service acquire failure"),
             "{error:#}"
+        );
+        // Wiring regression (r0-798-corr): the fail-fast outcome dates to 798
+        // (then via legacy status derivation); the boundary category on the
+        // produced error is what proves the loop now reads the taxonomy.
+        assert_eq!(
+            broker_error_category(&error),
+            Some(BrokerErrorCategory::Terminal)
+        );
+    }
+
+    #[test]
+    fn acquire_attempt_failure_prefers_the_boundary_category() {
+        // The boundary verdict wins over status re-derivation in both
+        // directions; the legacy derivation disagrees on both inputs, so this
+        // test fails if the loop ever reads the status again.
+        let boundary_terminal = github_api_error_categorized(
+            "acquire run-service job",
+            503,
+            "try later",
+            BrokerErrorCategory::Terminal,
+        );
+        assert!(!acquire_attempt_failure_is_transient(&boundary_terminal));
+        assert!(acquire_failure_is_transient(&boundary_terminal));
+
+        let boundary_transient = github_api_error_categorized(
+            "acquire run-service job",
+            400,
+            "bad request",
+            BrokerErrorCategory::Transient,
+        );
+        assert!(acquire_attempt_failure_is_transient(&boundary_transient));
+        assert!(!acquire_failure_is_transient(&boundary_transient));
+
+        // Unclassified errors keep the historical derivation: transport
+        // timeouts retry, local faults and deterministic refusals fail fast.
+        let timeout = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "request timed out",
+        ));
+        assert!(acquire_attempt_failure_is_transient(&timeout));
+        let permission = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private transport directory",
+        ));
+        assert!(!acquire_attempt_failure_is_transient(&permission));
+        assert!(!acquire_attempt_failure_is_transient(&github_api_error(
+            "acquire run-service job",
+            401,
+            "bad credentials"
+        )));
+        assert!(acquire_attempt_failure_is_transient(&github_api_error(
+            "acquire run-service job",
+            503,
+            "try later"
+        )));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_exhausted_transient_carries_boundary_category() {
+        // Regression (r0-798-corr): before the correction the exhausted
+        // transient budget surfaced an untyped error (`broker_error_category`
+        // returned `None` while the session gate re-derived the verdict from
+        // the wrapper). The produced error now carries the category the loop
+        // decided on, and the session stays alive as before.
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
+            .expect(5)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let error = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect_err("an always-503 acquire must exhaust the retry budget");
+
+        assert!(is_transient_acquire_error(&error));
+        assert_eq!(
+            broker_error_category(&error),
+            Some(BrokerErrorCategory::Transient)
         );
     }
 
