@@ -23,11 +23,11 @@
 //! the transport changes.
 //!
 //! `engine` is the Engine API fast path over the daemon Unix socket:
-//! read-only queries plus the idempotent container-lifecycle mutations.
-//! Migrated facade calls try it first under a capped budget and fall back
-//! to their historical CLI call on any API failure, so the CLI stays the
-//! arbiter — and the error taxonomy stays the CLI's — whenever the API
-//! does not affirmatively succeed.
+//! read-only queries, the idempotent container-lifecycle mutations, and
+//! one payload call (script-step exec). Migrated facade calls try it first
+//! and fall back to their historical CLI call on any API failure, so the
+//! CLI stays the arbiter — and the error taxonomy stays the CLI's —
+//! whenever the API does not affirmatively succeed.
 
 pub(crate) mod client;
 pub mod deadline;
