@@ -1498,7 +1498,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             self.pins.checkout,
             base_sha = base_sha,
         );
-        output.push_str(&workflow_runtime_artifact_upload());
+        if runners != RunnerMode::Velnor {
+            output.push_str(&workflow_runtime_artifact_upload());
+        }
         output.push_str(&workflow_selection_artifact_upload());
     }
 
