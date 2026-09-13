@@ -73,7 +73,7 @@ const VELNOR_POLICY_WORKFLOW_REV: &str = "ca1bb1458e06d7d8e385088f48130e9b39bf84
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "ef56ec1e17c243cd766bde17f69bd635f5b832a6";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "c8d550574a5006d03804c37f7fc161ee68d9bcb1";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
