@@ -152,8 +152,12 @@ fn every_unit_kind_renders_exactly_one_reusable_workflow() {
         }
         let content = generated.workflow(&file);
         assert!(
-            content.contains("CI_UNIT_ID: ${{ inputs.unit }}"),
-            "{file} does not consume the unit input"
+            content.contains("CI_UNIT_ID: "),
+            "{file} does not bind CI_UNIT_ID"
+        );
+        assert!(
+            content.contains("BASE_SHA: ${{ inputs.base_sha }}"),
+            "{file} does not consume the caller plan base SHA"
         );
         assert!(
             content.contains("--unit \"$CI_UNIT_ID\""),
