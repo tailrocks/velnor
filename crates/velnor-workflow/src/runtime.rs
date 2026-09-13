@@ -22,6 +22,9 @@ use serde_yaml::{Mapping, Value};
 
 use sha2::{Digest, Sha256};
 
+use super::primitives::snapshot::{
+    plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
+};
 use super::GeneratorError;
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
@@ -246,8 +249,96 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             release(&arguments[1..])?;
             Ok(true)
         }
+        "cache-plan" => {
+            let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
+            let mode = options.get("mode").map_or("plan", String::as_str);
+            if !matches!(mode, "plan" | "budget") {
+                return Err(GeneratorError::usage(format!(
+                    "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
+                )));
+            }
+            if mode == "budget" {
+                println!("{}", RetentionPolicy::default_policy().total_bytes);
+                return Ok(true);
+            }
+            cache_plan(
+                options.get("entries").map(String::as_str),
+                options.get("now").map(String::as_str),
+            )?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
+}
+
+/// One Actions cache entry as the maintenance job collects it from the API.
+#[derive(Deserialize)]
+struct CacheEntryRecord {
+    id: String,
+    key: String,
+    size_in_bytes: u64,
+    created_at: String,
+}
+
+/// Compute the retention eviction plan for the Actions cache account: the same
+/// [`RetentionPolicy`] and the same `plan_evictions` the generator's tests
+/// exercise, run against the account snapshot the maintenance job collects.
+/// The plan is the workflow's only eviction decision — the job applies it
+/// verbatim and records every eviction's class and reason in the summary.
+///
+/// `--now` pins the clock for tests; a live run uses the system clock.
+fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+    let entries_text = if let Some(path) = entries_path {
+        fs::read_to_string(path).map_err(|error| {
+            GeneratorError::io("read cache account snapshot", Path::new(path), &error)
+        })?
+    } else {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+            GeneratorError::usage(format!("read cache account snapshot: {error}"))
+        })?;
+        text
+    };
+    let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
+        GeneratorError::usage(format!(
+            "the cache account snapshot is not an array of cache records: {error}"
+        ))
+    })?;
+    let entries = records
+        .into_iter()
+        .map(|record| SnapshotCacheEntry {
+            id: record.id,
+            key: record.key,
+            size_in_bytes: record.size_in_bytes,
+            created_at: record.created_at,
+        })
+        .collect::<Vec<_>>();
+    let now_epoch = match now {
+        Some(pinned) => parse_pinned_epoch(pinned)?,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))?
+            .as_secs()
+            .cast_signed(),
+    };
+    let plan = plan_evictions(&entries, &RetentionPolicy::default_policy(), now_epoch);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, &plan)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    writeln!(handle)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    Ok(())
+}
+
+/// Parse the pinned `--now` clock as seconds since the epoch, so a test run
+/// names a reproducible instant.
+fn parse_pinned_epoch(pinned: &str) -> Result<i64, GeneratorError> {
+    pinned.parse::<i64>().map_err(|_| {
+        GeneratorError::usage(format!(
+            "unsupported --now value {pinned}: name seconds since the epoch"
+        ))
+    })
 }
 
 fn parse_options(
@@ -1409,14 +1500,14 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         }
 
         // Velnor policy is intentionally a separate approved shape: it uses
-        // the local cache backend and a self-hosted runner, and the trusted
+        // the local cache backend and a self-hosted runner, and the safe
         // event gate is mandatory. Runner labels and the default branch are
         // repository configuration, so compare those two lane fields through
         // the generic static-runner/trusted-gate validators below while the
         // remaining job structure stays an exact generator comparison.
         if !mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(has_trusted_runner_gate)
+            .is_some_and(|condition| has_safe_runner_gate(condition, job))
         {
             return false;
         }
@@ -1458,6 +1549,33 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     let mut resolving = BTreeSet::new();
     let analysis = analyze_runner(runs_on, None, &mut resolving);
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
+}
+
+fn is_static_velnor_runner(job: &Mapping) -> bool {
+    let Some(runs_on) = mapping_value(job, "runs-on") else {
+        return false;
+    };
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(runs_on, None, &mut resolving);
+    analysis.self_hosted
+        && !analysis.dynamic
+        && !analysis.invalid
+        && contains_velnor_runner_label(runs_on)
+}
+
+fn contains_velnor_runner_label(value: &Value) -> bool {
+    match value {
+        Value::String(value) => value.to_ascii_lowercase().contains("velnor"),
+        Value::Mapping(mapping) => mapping.values().any(contains_velnor_runner_label),
+        Value::Sequence(sequence) => sequence.iter().any(contains_velnor_runner_label),
+        Value::Tagged(tagged) => contains_velnor_runner_label(tagged.value()),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
+    has_trusted_runner_gate(condition)
+        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1505,7 +1623,7 @@ fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &m
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(has_trusted_runner_gate);
+            .is_some_and(|condition| has_safe_runner_gate(condition, job));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
@@ -1824,6 +1942,17 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         .map_or(value, str::trim)
         .split_whitespace()
         .collect::<String>();
+    if value == "github.event_name=='pull_request_target'"
+        || value == "always()&&github.event_name=='pull_request_target'"
+    {
+        return true;
+    }
+    if let Some(trusted) = value
+        .strip_prefix("github.event_name=='pull_request_target'||(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return has_trusted_runner_gate(trusted);
+    }
     let marker = "github.ref=='refs/heads/";
     let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
         return false;
@@ -1856,6 +1985,31 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         || value
             .strip_prefix(&format!("{release_gate}&&"))
             .is_some_and(is_safe_trusted_gate_conjunction)
+}
+
+fn has_untrusted_pull_request_gate(value: &str) -> bool {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    let value = value.strip_prefix("always()&&").unwrap_or(&value);
+    let value = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(value);
+    if value == "github.event_name=='pull_request'" {
+        return true;
+    }
+    let Some(trusted) = value
+        .strip_prefix("github.event_name=='pull_request'||(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    has_trusted_runner_gate(trusted)
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -2813,6 +2967,38 @@ jobs:
     }
 
     #[test]
+    fn policy_accepts_the_generated_untrusted_velnor_pull_request_gate(
+    ) -> Result<(), Box<dyn Error>> {
+        let workflow = r"
+name: Velnor PR
+on:
+  pull_request:
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor PR aggregate
+on: push
+jobs:
+  verify:
+    if: ${{ always() && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
     fn policy_accepts_the_generated_inline_transport_in_every_variant() -> Result<(), Box<dyn Error>>
     {
         // The base-owned entrypoint carries the `Policy` variant.
@@ -2842,9 +3028,9 @@ jobs:
         let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
         assert!(!run_policy(root)?);
 
-        // Velnor policy uses the local cache backend and a trusted default-
-        // branch event gate, while preserving the same pinned revision.
-        let trusted_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}\n";
+        // Velnor policy uses the local cache backend and a pull-request-safe
+        // event gate, while preserving the same pinned revision.
+        let trusted_gate = "    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
@@ -2856,6 +3042,20 @@ jobs:
             )
         );
         let root = policy_fixture("inline-velnor", &workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let pull_request_gate = "    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
+        let workflow = format!(
+            "name: Velnor pull request policy\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(pull_request_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-pull-request", &workflow, "velnor")?;
         assert!(run_policy(root)?);
 
         // The Velnor lane remains fail-closed for both revision drift and
@@ -3126,7 +3326,7 @@ name: SpoofedGate
 on: pull_request
 jobs:
   verify:
-    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push') }}
     runs-on: [self-hosted, velnor]
 ";
         let root = policy_fixture("spoofed-gate", workflow, "velnor")?;

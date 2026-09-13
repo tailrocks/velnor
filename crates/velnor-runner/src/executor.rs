@@ -3527,6 +3527,7 @@ where
                 let name = crate::buildkit::persistent_builder_name(
                     &requested_name,
                     &state.trust_scope,
+                    buildkit_trust_tier(state),
                     container.repository.as_deref(),
                 );
                 // `keep-state` is accepted and always honored: persistent
@@ -3552,8 +3553,7 @@ where
                     format!("Releasing builder {name} (persistent; keep-state={keep_state})\n");
                 let mut stderr = String::new();
                 // cleanup=false releases the hold but never stops: the
-                // no-op stop keeps the decision atomic under the claim lock
-                // without acting.
+                // no-op stop decides under the claim lock without acting.
                 let stop = || {
                     if cleanup {
                         crate::buildkit::stop_builder_daemon(&name)
@@ -3571,6 +3571,7 @@ where
                             &name,
                             &container.name,
                             stop,
+                            || crate::buildkit::start_builder_daemon(&name),
                         ) {
                             Ok(outcome) => Some(outcome),
                             Err(error) => {
@@ -3603,6 +3604,12 @@ where
                     Some(_) if !cleanup => {
                         stdout
                             .push_str("No other holders: cleanup disabled, daemon left running\n");
+                    }
+                    Some(outcome) if outcome.restarted => {
+                        stdout.push_str(
+                            "No other holders at release, but a new job claimed during the \
+                             stop: daemon restarted for it, cache kept\n",
+                        );
                     }
                     Some(outcome) if outcome.stopped => {
                         stdout.push_str(
@@ -4151,9 +4158,11 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env)?);
         let requested_name = native_input_or(&action_state, action, "name", "velnor-builder")?;
+        let tier = buildkit_trust_tier(state);
         let name = crate::buildkit::persistent_builder_name(
             &requested_name,
             &state.trust_scope,
+            tier,
             container.repository.as_deref(),
         );
         // Claim before first use, and record the claim for teardown in the
@@ -4171,9 +4180,44 @@ where
             crate::buildkit::claim_builder(
                 &run_root,
                 &name,
+                &crate::buildkit::BuilderIdentity {
+                    scope: &state.trust_scope,
+                    tier,
+                    repository: container.repository.as_deref(),
+                },
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
             )?;
+            // Cap the workflow-minted builders in this scope/tier/repository:
+            // per-victim failures are best-effort, but an over-cap group with
+            // no unclaimed victim fails setup loud — silently minting another
+            // daemon is how one job grew the fleet unbounded. The horizon
+            // pass stays best-effort so corpse-pinned and idle builders
+            // converge on long-lived daemons without startup or doctor.
+            let cap = crate::buildkit::enforce_builder_cap(
+                &run_root,
+                &state.trust_scope,
+                tier,
+                container.repository.as_deref(),
+                crate::buildkit::remove_builder,
+            )?;
+            for failure in &cap.failures {
+                eprintln!("buildx setup: cap enforcement: {failure}");
+            }
+            if let Some(report) =
+                crate::buildkit::maybe_reap_idle_builders(&run_root, std::time::SystemTime::now())
+            {
+                for failure in &report.failures {
+                    eprintln!("buildx setup: horizon reap: {failure}");
+                }
+                for claims in &report.unreadable_claims {
+                    eprintln!(
+                        "buildx setup: horizon reap: unreadable claim file {claims} pins its \
+                         builder as claimed; quiesce this daemon's jobs, delete the file, and \
+                         let the next claim recreate it"
+                    );
+                }
+            }
         }
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -4734,6 +4778,7 @@ where
                     &builder,
                     &container.name,
                     || crate::buildkit::stop_builder_daemon(&builder),
+                    || crate::buildkit::start_builder_daemon(&builder),
                 )?;
             }
         }
@@ -11087,6 +11132,26 @@ fn job_scope_from_temp(temp: Option<&Path>) -> String {
         .and_then(|name| name.to_str())
         .map(sanitize_artifact_name)
         .unwrap_or_else(|| "job".to_string())
+}
+
+/// The BuildKit trust tier for this job, derived from the runner-authoritative
+/// immutable environment. Immutable — not `state.env`, which `::set-env` and
+/// `GITHUB_ENV` can rewrite — so a workflow cannot promote its branch job
+/// into the release tier's daemon and cache.
+fn buildkit_trust_tier(state: &JobExecutionState) -> &'static str {
+    let get = |name: &str| -> Option<&str> {
+        state
+            .immutable_env
+            .get(name)
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+    };
+    crate::buildkit::builder_trust_tier(
+        get("GITHUB_REF"),
+        get("GITHUB_REF_TYPE"),
+        get("GITHUB_EVENT_NAME"),
+        get("GITHUB_REF_PROTECTED"),
+    )
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -18491,13 +18556,18 @@ type=sha,format=long,prefix=,enable=true"
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
         // Persistent builder: default requested name, trusted test scope,
+        // unknown tier (no ref signals in the fixture env),
         // unknown-repository fixture repo.
         let builder = crate::buildkit::persistent_builder_name(
             "velnor-builder",
             "trusted",
+            crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
-        assert_eq!(builder, "velnor-builder-shared-trusted-unknown-repository");
+        assert_eq!(
+            builder,
+            "velnor-builder-shared-trusted-unknown-unknown-repository"
+        );
         assert!(calls.iter().any(|c| c
             .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
             && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
@@ -26378,11 +26448,12 @@ fi"#
         let builder = crate::buildkit::persistent_builder_name(
             "jackin-construct",
             "untrusted",
+            crate::buildkit::TRUST_TIER_UNKNOWN,
             Some("unknown-repository"),
         );
         assert_eq!(
             builder,
-            "velnor-builder-shared-untrusted-unknown-repository-jackin-construct"
+            "velnor-builder-shared-untrusted-unknown-unknown-repository-jackin-construct"
         );
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], builder);
@@ -26455,7 +26526,7 @@ fi"#
             assert_eq!(post.exit_code, 0);
             assert!(
                 post.stdout.contains(
-                    "Releasing builder velnor-builder-shared-untrusted-unknown-repository-builder"
+                    "Releasing builder velnor-builder-shared-untrusted-unknown-unknown-repository-builder"
                 ),
                 "post names the persistent builder: {:?}",
                 post.stdout

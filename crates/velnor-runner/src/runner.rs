@@ -4597,6 +4597,13 @@ fn maybe_startup_host_docker_reclaim_with(
         for failure in &report.failures {
             eprintln!("Warning: startup builder horizon reap: {failure}");
         }
+        for claims in &report.unreadable_claims {
+            eprintln!(
+                "Warning: startup builder horizon reap: unreadable claim file {claims} pins \
+                 its builder as claimed; quiesce this daemon's jobs, delete the file, and \
+                 let the next claim recreate it"
+            );
+        }
         if !report.stopped.is_empty() || !report.deleted.is_empty() {
             eprintln!(
                 "startup builder horizon: stopped {} idle daemon(s), deleted {} builder(s)",
@@ -13702,6 +13709,13 @@ fn doctor_host_docker_reclaim(
         let report = crate::buildkit::reap_idle_builders(&run_root, std::time::SystemTime::now());
         for failure in &report.failures {
             eprintln!("Warning: doctor builder horizon reap: {failure}");
+        }
+        for claims in &report.unreadable_claims {
+            eprintln!(
+                "doctor builder horizon: unreadable claim file {claims} pins its builder as \
+                 claimed; quiesce this daemon's jobs, delete the file, and let the next \
+                 claim recreate it"
+            );
         }
         if !report.stopped.is_empty() || !report.deleted.is_empty() {
             println!(

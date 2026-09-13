@@ -18,6 +18,7 @@ mod pipeline;
 mod plan;
 mod regen;
 pub(crate) mod release;
+pub(crate) mod snapshot;
 pub(crate) mod watch;
 
 use std::collections::BTreeMap;
@@ -31,8 +32,8 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
-    render_retained_output_cache_note, WorkflowIr, WorkflowKind,
+    checks_env, config_snapshot_identity, render_cargo_source_preparation,
+    render_pinned_toolchain_steps, render_retained_output_cache_note, WorkflowIr, WorkflowKind,
 };
 
 /// Default `timeout-minutes` for a unit verification job.
@@ -131,8 +132,9 @@ pub(crate) struct LaneJob {
     /// The hosted lane is the only lane allowed to save a cache entry: entries
     /// are written from trusted events only.
     pub(crate) cache_save: bool,
-    /// The self-hosted lane runs trusted events only and says so with an
-    /// explicit default-branch gate.
+    /// The Velnor lane carries the generated event gate. Velnor-only surfaces
+    /// admit pull requests through the untrusted trust path; persistent cache
+    /// writes remain restricted to trusted events.
     pub(crate) trusted: bool,
 }
 
@@ -178,8 +180,9 @@ impl CacheBackend {
                     // The Rust-toolchain cache is generator-internal:
                     // `render_pinned_toolchain_steps` emits it directly and never
                     // hangs it off a unit's declared contract, so it cannot arrive
-                    // through this match. Refuse rather than silently enable it.
-                    None | Some(CachePurpose::Toolchains) => false,
+                    // through this match. Docker seeds render their own lifecycle.
+                    // Refuse rather than silently enable either non-generic cache.
+                    None | Some(CachePurpose::Toolchains | CachePurpose::DockerSeed) => false,
                     Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
                     Some(CachePurpose::Outputs) => {
                         !ir.uses_mr_boxington(unit)

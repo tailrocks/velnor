@@ -51,18 +51,28 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         "GITHUB_REPOSITORY_OWNER_ID",
         job.variable("github.repository_owner_id"),
     );
-    push_var(&mut env, "GITHUB_REF", job.variable("github.ref"));
+    // The four BuildKit tier signals are always emitted, empty when the
+    // broker omits them: container env merges under these authoritative
+    // values, so omitting one would let repository-controlled env spoof the
+    // trust tier. Empty reads as missing (fail-closed `unknown`) everywhere.
+    push_var_or_default(&mut env, "GITHUB_REF", job.variable("github.ref"), "");
     push_var_or_derived(
         &mut env,
         "GITHUB_REF_NAME",
         job.variable("github.ref_name"),
         job.variable("github.ref").map(ref_name),
     );
-    push_var(&mut env, "GITHUB_REF_TYPE", job.variable("github.ref_type"));
-    push_var(
+    push_var_or_default(
+        &mut env,
+        "GITHUB_REF_TYPE",
+        job.variable("github.ref_type"),
+        "",
+    );
+    push_var_or_default(
         &mut env,
         "GITHUB_REF_PROTECTED",
         job.variable("github.ref_protected"),
+        "",
     );
     push_var(&mut env, "GITHUB_BASE_REF", job.variable("github.base_ref"));
     push_var(&mut env, "GITHUB_HEAD_REF", job.variable("github.head_ref"));
@@ -85,10 +95,11 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         "GITHUB_WORKFLOW_SHA",
         job.variable("github.workflow_sha"),
     );
-    push_var(
+    push_var_or_default(
         &mut env,
         "GITHUB_EVENT_NAME",
         job.variable("github.event_name"),
+        "",
     );
     push_var(&mut env, "GITHUB_RUN_ID", job.variable("github.run_id"));
     push_var(
@@ -826,6 +837,38 @@ mod tests {
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("MBX_DISABLE".into(), "1".into())));
         assert!(!env.iter().any(|(name, _)| name == "MBX_CACHE_DIR"));
+    }
+
+    #[test]
+    fn tier_signals_are_always_emitted_empty_when_the_broker_omits_them() {
+        // Container env merges under these authoritative values, so a missing
+        // signal must still overwrite — never leave room for a spoofed tier.
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "github.ref": { "value": "refs/heads/main" }
+            }
+        }))
+        .unwrap();
+
+        let env = job_runtime_env(&job);
+
+        assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
+        for name in [
+            "GITHUB_REF_TYPE",
+            "GITHUB_EVENT_NAME",
+            "GITHUB_REF_PROTECTED",
+        ] {
+            assert!(
+                env.contains(&(name.to_string(), String::new())),
+                "missing empty default for {name}"
+            );
+        }
     }
 
     fn cache_session_job(

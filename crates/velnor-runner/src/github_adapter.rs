@@ -408,6 +408,9 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
 /// (`VELNOR_SOURCE_SHA`, `VELNOR_MANIFEST_VERSION`). Repository-controlled
 /// env of the same names is dropped first: a workflow must not spoof the
 /// pool's isolation level or the release it runs under.
+/// `GITHUB_*` is dropped too: container env merges under the authoritative
+/// job env, so any `GITHUB_*` the broker omits would otherwise survive into
+/// the immutable environment that derives the BuildKit trust tier.
 fn backend_advertising_env(
     mut env: Vec<(String, String)>,
     backend: velnor_model::ExecutionBackendKind,
@@ -417,6 +420,7 @@ fn backend_advertising_env(
             && name != "VELNOR_SOURCE_SHA"
             && name != "VELNOR_MANIFEST_VERSION"
             && !is_docker_control_env(name)
+            && !is_runner_owned_env(name)
     });
     env.push((
         "VELNOR_EXECUTION_BACKEND".to_string(),
@@ -851,7 +855,7 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
     match environment {
         Value::Object(object) => object
             .iter()
-            .filter(|(name, _)| !is_docker_control_env(name))
+            .filter(|(name, _)| !is_docker_control_env(name) && !is_runner_owned_env(name))
             .map(|(name, value)| (name.clone(), scalar_env_value(value)))
             .collect(),
         Value::Array(values) => values
@@ -862,7 +866,7 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
                     .get("name")
                     .or_else(|| object.get("Name"))
                     .and_then(Value::as_str)?;
-                if is_docker_control_env(name) {
+                if is_docker_control_env(name) || is_runner_owned_env(name) {
                     return None;
                 }
                 let value = object.get("value").or_else(|| object.get("Value"))?;
@@ -871,6 +875,17 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Runner-owned env names that repository-controlled container env must not
+/// set. `GITHUB_*` (including the four BuildKit tier signals `GITHUB_REF`,
+/// `GITHUB_REF_TYPE`, `GITHUB_EVENT_NAME`, `GITHUB_REF_PROTECTED`) merges into
+/// the immutable job environment under the authoritative job values, so a
+/// broker-omitted signal would otherwise let a workflow spoof the tier and
+/// share a release daemon's ID-keyed cache mounts.
+fn is_runner_owned_env(name: &str) -> bool {
+    name.get(.."GITHUB_".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GITHUB_"))
 }
 
 fn is_docker_control_env(name: &str) -> bool {
@@ -1756,6 +1771,60 @@ mod tests {
                 ),
                 ("VELNOR_SOURCE_SHA".to_string(), "spoofed".to_string()),
                 ("VELNOR_MANIFEST_VERSION".to_string(), "spoofed".to_string()),
+            ],
+            velnor_model::ExecutionBackendKind::Docker,
+        );
+        assert_eq!(
+            env,
+            vec![
+                ("NODE_OPTIONS".to_string(), "x".to_string()),
+                ("VELNOR_EXECUTION_BACKEND".to_string(), "docker".to_string()),
+                (
+                    "VELNOR_SOURCE_SHA".to_string(),
+                    env!("VELNOR_SOURCE_SHA").to_string(),
+                ),
+                (
+                    "VELNOR_MANIFEST_VERSION".to_string(),
+                    crate::manifest::MANIFEST_VERSION.to_string(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn container_env_strips_runner_owned_github_names() {
+        // Repository-controlled container env must not set GITHUB_*: the four
+        // tier signals feed the immutable job environment, and a broker-omitted
+        // signal would otherwise let a workflow spoof the BuildKit trust tier.
+        let object = serde_json::json!({
+            "NODE_OPTIONS": "--max-old-space-size=4096",
+            "GITHUB_REF": "refs/tags/v9.9.9",
+            "GITHUB_REF_TYPE": "tag",
+            "GITHUB_EVENT_NAME": "release",
+            "GITHUB_REF_PROTECTED": "true",
+            "GITHUB_SHA": "evil",
+        });
+        assert_eq!(
+            container_env_value(&object),
+            vec![(
+                "NODE_OPTIONS".to_string(),
+                "--max-old-space-size=4096".to_string()
+            )]
+        );
+        let array = serde_json::json!([
+            { "name": "RUST_LOG", "value": "debug" },
+            { "name": "GITHUB_REF", "value": "refs/tags/v9.9.9" },
+        ]);
+        assert_eq!(
+            container_env_value(&array),
+            vec![("RUST_LOG".to_string(), "debug".to_string())]
+        );
+        // Belt and suspenders at the advertising layer: nothing GITHUB_*-
+        // shaped survives into the job container spec env.
+        let env = backend_advertising_env(
+            vec![
+                ("NODE_OPTIONS".to_string(), "x".to_string()),
+                ("GITHUB_REF_TYPE".to_string(), "tag".to_string()),
             ],
             velnor_model::ExecutionBackendKind::Docker,
         );

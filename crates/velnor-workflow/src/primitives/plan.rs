@@ -6,8 +6,8 @@ use crate::{GeneratorError, RunnerMode};
 /// Render the `plan:` job.
 ///
 /// Planning executes checked-in shell files on the selected control-plane
-/// runner. A Velnor lane is trusted-event gated so it never exposes untrusted
-/// pull-request code to self-hosted capacity.
+/// runner. A Velnor-only lane admits pull requests through Velnor's untrusted
+/// trust path; trusted events remain branch-gated by the generated expression.
 pub(crate) struct AffectedPlan;
 
 impl Primitive for AffectedPlan {

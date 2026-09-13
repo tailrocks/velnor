@@ -107,16 +107,7 @@ impl Primitive for StaticWorkflow {
                 "`{STATIC_WORKFLOW}` declares `{file}`, which needs a `template`; the workflow body is explicit input, never a guess"
             ))
         })?;
-        // A surface that selects its hosted runner declares the token instead
-        // of spelling a label; surfaces without it render unchanged.
-        let template = template.replace(
-            "__VELNOR_GITHUB_RUNNER__",
-            &yaml_scalar(&ctx.config.github_runner),
-        );
-        let content = crate::render_pinned_toolchain_fill(
-            ctx.config,
-            &crate::render_static_template(&template),
-        )?;
+        let content = crate::render_static_template_for_config(ctx.config, &file, &template)?;
         Ok(Rendered {
             files: std::iter::once((
                 std::path::PathBuf::from(".github/workflows").join(file),
@@ -964,87 +955,119 @@ jobs:
             echo "::warning::some closed-PR cache entries could not be deleted; rerun maintenance"
           fi
   cache-budget:
-    name: Cache budget snapshot
+    name: Cache retention
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Snapshot Actions cache account
+VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
         env:
           GH_TOKEN: ${{ github.token }}
-          MAX_BYTES: '8589934592'
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/cache-budget"
+          mkdir -p "$RUNNER_TEMP/cache-retention"
           gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
             --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
-            > "$RUNNER_TEMP/cache-budget/entries.jsonl"
-          jq -s '.' "$RUNNER_TEMP/cache-budget/entries.jsonl" \
-            > "$RUNNER_TEMP/cache-budget/entries.json"
-          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
-          count="$(jq 'length' "$RUNNER_TEMP/cache-budget/entries.json")"
-          headroom="$((MAX_BYTES - total))"
+            > "$RUNNER_TEMP/cache-retention/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-retention/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-retention/entries.json"
+          # `gh api --paginate --jq` runs the filter once per page and
+          # concatenates the outputs: summing inside the filter prints one
+          # number per page, and the total silently understates the account.
+          # Slurp the page stream first, then take one total over every entry.
+          total="$(jq '[.[].size_in_bytes] | add // 0' "$RUNNER_TEMP/cache-retention/entries.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-retention/entries.json")"
+          headroom="$(( "$(velnor-workflow cache-plan --mode=budget)" - total ))"
           jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
             --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, max_bytes: 8589934592, headroom_bytes: $headroom}' \
-            > "$RUNNER_TEMP/cache-budget/summary.json"
-          cat "$RUNNER_TEMP/cache-budget/summary.json" >> "$GITHUB_STEP_SUMMARY"
-      - name: Publish cache budget snapshot
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cache-budget-${{ github.run_id }}
-          path: ${{ runner.temp }}/cache-budget
-          if-no-files-found: error
-          retention-days: 14
-      - name: Evict least-recently-used caches over budget
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAX_BYTES: '8589934592'
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom}' \
+            > "$RUNNER_TEMP/cache-retention/summary.json"
+          cat "$RUNNER_TEMP/cache-retention/summary.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Plan retention evictions
         run: |
           set -euo pipefail
-          total="$(jq 'map(.size_in_bytes) | add // 0' "$RUNNER_TEMP/cache-budget/entries.json")"
-          if (( total <= MAX_BYTES )); then
-            echo "Cache account within budget: $total bytes"
-            exit 0
+          # The plan is the generator's own retention policy, executed - never
+          # a shell copy of it: per-class budgets, bounded generations per
+          # variant class, and the protected classes (toolchain seeds, Cargo
+          # source bundles, the Docker seed baseline) reserved before rolling
+          # compiler snapshots are touched. An access timestamp is not a
+          # lease: entries younger than the producer window are out of reach,
+          # because a producer may have published them seconds ago or be about
+          # to publish their successor, and creation is the only producer
+          # signal the cache API carries.
+          velnor-workflow cache-plan \
+            --now "$(date -u +%s)" \
+            --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/plan.json"
+          if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
+            {
+              echo "Retention plan (evict oldest first: bound, class budget, global budget):"
+              jq -r 'sort_by(.class, .reason) | group_by(.class, .reason)[] | "  \(.[0].class) / \(.[0].reason): \(length) entries, \(map(.size_in_bytes) | add) bytes"' \
+                "$RUNNER_TEMP/cache-retention/plan.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "Cache account over budget: $total bytes; evicting least-recently-used entries"
+      - name: Apply retention evictions
+        run: |
+          set -euo pipefail
           evicted=0
           freed=0
-          # Oldest access first: caches no running lane has touched recently are
-          # the cheapest to rebuild, so they go before anything else.
-          while IFS=$'\t' read -r id size key; do
-            if (( total <= MAX_BYTES )); then break; fi
+          failed=0
+          # The plan is applied verbatim, in its own order: generations beyond
+          # their class bound first, then classes over budget, then the global
+          # sweep - which never touches a protected class.
+          while IFS=$'\t' read -r class reason id size key; do
             if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
-              total=$((total - size))
               evicted=$((evicted + 1))
               freed=$((freed + size))
-              echo "evicted id=$id size=$size key=$key (remaining total $total)"
+              echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
             else
-              echo "::warning::failed to evict cache id $id (key $key)" >&2
+              failed=$((failed + 1))
+              echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
             fi
-          done < <(jq -r 'sort_by(.last_accessed_at)[] | [.id, .size_in_bytes, .key] | @tsv' \
-            "$RUNNER_TEMP/cache-budget/entries.json")
-          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson total "$total" \
-            '{evicted_caches: $evicted, freed_bytes: $freed, remaining_total_bytes: $total}' \
+          done < <(jq -r '.[] | [.class, .reason, .id, .size_in_bytes, .key] | @tsv' \
+            "$RUNNER_TEMP/cache-retention/plan.json")
+          # Every eviction is recorded under its cache class and its reason,
+          # so a later cold run can be correlated with the eviction that
+          # caused it.
+          {
+            echo "Evictions by cache class:"
+            jq -r 'group_by(.class)[] | "  \(.[0].class): \(length) evictions, \(map(.size_in_bytes) | add) bytes"' \
+              "$RUNNER_TEMP/cache-retention/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson failed "$failed" \
+            '{evicted_caches: $evicted, failed_evictions: $failed, freed_bytes: $freed}' \
             >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish retention evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-retention-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-retention
+          if-no-files-found: error
+          retention-days: 14
       - name: Enforce cache budget
         env:
           GH_TOKEN: ${{ github.token }}
-          MAX_BYTES: '8589934592'
         run: |
           set -euo pipefail
           # Re-query live state: the enforcement decision must reflect what the
-          # account actually holds after eviction, not the pre-eviction snapshot.
+          # account actually holds after eviction, not the pre-eviction
+          # snapshot. The same page-streaming rule as collection applies: the
+          # sum is taken after slurping every page.
           total="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
-            --jq '[.actions_caches[].size_in_bytes] | add // 0')"
-          if (( total > MAX_BYTES )); then
-            echo "::error::Actions cache account exceeds 8 GiB: $total bytes" >&2
+            --jq '.actions_caches[].size_in_bytes' | jq -s 'add // 0')"
+          budget="$(velnor-workflow cache-plan --mode=budget)"
+          if (( total > budget )); then
+            echo "::error::Actions cache account exceeds budget: $total > $budget bytes" >&2
             exit 1
           fi
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
-    let mut output = MAINTENANCE_WORKFLOW
+    let setup = workflow_runtime_setup_for_config(config);
+    let mut output = MAINTENANCE_WORKFLOW.replace("VELNOR_RUNTIME_SETUP_STEPS", &setup);
+    output = output
         .replace("runs-on: ubuntu-24.04", &format!("runs-on: {}", selected_runner(config)))
         .replace(
         "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
@@ -1284,15 +1307,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "7c0923a74ff252f37b7b99a9c58128a6d9e426c7df7a423569c083f2bbad4ce1",
+                "e976ec22ba4a90ae2ebc55edb80b8d8f577bc0fbc857216cea0f1b933d81f7ff",
             ),
             (
                 "preview.yml",
-                "01378eb561dd0970bdc5cccc00938a135e428a3aae32619e85da93dac60916a6",
+                "5f8a2e93d1948697f1da4ec866e8f98bd8a9c5c9f832803892292050a018d60d",
             ),
             (
                 "maintenance.yml",
-                "ba5fef94b52fb31521ff44b170c8edfb723fe47187a1cf79c91f76d010f84d00",
+                "3c7a3cb5eee1f237acc7f8a888ce22512ccf86e464d01246475c12c6f10c1926",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1310,14 +1333,19 @@ mod tests {
             Some(binary_spec()),
         );
         let surface = generate(&root, &config, None);
-        for (file, digest) in PINNED {
-            let rendered = rendered(&surface, file);
-            assert_eq!(
-                digest_of(&rendered),
-                *digest,
-                "{file} diverges from the pinned legacy render"
-            );
-        }
+        let divergent: Vec<String> = PINNED
+            .iter()
+            .filter_map(|(file, digest)| {
+                let rendered = rendered(&surface, file);
+                let actual = digest_of(&rendered);
+                (actual != *digest).then(|| format!("{file}: {actual}"))
+            })
+            .collect();
+        assert!(
+            divergent.is_empty(),
+            "pinned renders diverged:\n  {}",
+            divergent.join("\n  ")
+        );
         // The publisher verifies before it publishes; the rolling preview and
         // the signer stay tag- and attestation-driven.
         let release = rendered(&surface, "release.yml");
