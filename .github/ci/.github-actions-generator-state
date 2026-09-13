@@ -2,12 +2,12 @@
 schema = 2
 [inputs]
 config	a508cd5fe3276b9a
-scan	454d7f3135f5b042
+scan	e8189a6b79259949
 generator	11
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	008c1d47f05105b9
-.github/ci/project.toml	5705fb4ad2e2a29a
+.github/ci/project.toml	a78b0bf957c37be7
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-bun-velnor.yml	1716b0e88c860c7d
 .github/workflows/ci-docker-docker.yml	d94957df5e3e1c4e
@@ -20,17 +20,17 @@ generator	11
 .github/workflows/ci-rust-policy.yml	17601d666c47b968
 .github/workflows/ci-rust-production-topology.yml	ccce2cf16363b687
 .github/workflows/ci-rust-unit-collector.yml	775a4c9d716e3a4b
-.github/workflows/ci-rust-velnor-bench.yml	a9214cecc55a3497
+.github/workflows/ci-rust-velnor-bench.yml	0411cbd5a91e3edb
 .github/workflows/ci-rust-velnor-client.yml	86552bfb799efcb6
 .github/workflows/ci-rust-velnor-control.yml	27ca942243bb7fe3
 .github/workflows/ci-rust-velnor-model.yml	c2655ffc9b42c070
 .github/workflows/ci-rust-velnor-render.yml	2a884a3a2a52136c
-.github/workflows/ci-rust-velnor-runner.yml	d10e7ad8f05a3d9f
+.github/workflows/ci-rust-velnor-runner.yml	24cd6aee3ce11b93
 .github/workflows/ci-rust-velnor-tools.yml	d987a0cedc754824
 .github/workflows/ci-rust-velnor-workflow-contract.yml	e0482b98196ae182
 .github/workflows/ci-rust-velnor-workflow.yml	0f7d285f2209f2a3
-.github/workflows/ci-rust-velnorctl.yml	494988099d07d315
+.github/workflows/ci-rust-velnorctl.yml	ffd7af1f0a5fd275
 .github/workflows/maintenance.yml	c2515bc3cdd226ee
 .github/workflows/nightly.yml	d4812ddd3d1a9027
-.github/workflows/preview.yml	54de5bc714f3f716
-.github/workflows/release.yml	f3a89de9be002901
+.github/workflows/preview.yml	5c9dd565587168ba
+.github/workflows/release.yml	273344089e37e101
