@@ -94,10 +94,10 @@ jobs:
           # variant class, and the protected classes (toolchain seeds, Cargo
           # source bundles, the Docker seed baseline) reserved before rolling
           # compiler snapshots are touched. An access timestamp is not a
-          # lease: entries younger than the producer window are out of reach,
-          # because a producer may have published them seconds ago or be about
-          # to publish their successor, and creation is the only producer
-          # signal the cache API carries.
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \
