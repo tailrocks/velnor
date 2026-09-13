@@ -132,7 +132,7 @@ fn generate_fail(root: &Path, extra: &[&str]) -> String {
 }
 
 #[test]
-fn omitted_cli_runners_defaults_to_github() {
+fn omitted_cli_runners_defaults_to_both() {
     let help = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .arg("--help")
         .output()
@@ -141,6 +141,10 @@ fn omitted_cli_runners_defaults_to_github() {
         "{}{}",
         String::from_utf8_lossy(&help.stdout),
         String::from_utf8_lossy(&help.stderr)
+    );
+    assert!(
+        text.contains("default: both") || text.to_lowercase().contains("[default: both]"),
+        "CLI help must default runners to both: {text}"
     );
     assert!(
         !text.contains("default: velnor"),

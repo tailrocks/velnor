@@ -506,15 +506,21 @@ pub(crate) fn render_pinned_toolchain_steps(
     }
 }
 
-/// The mise tool ids a unit's own commands require. The language toolchain is
-/// deliberately absent — rustup provisions it from the repository's pin — and
-/// so is every tool a policy step installs through its own action. Each
-/// additional id widens the supply chain of every job that runs it, so a unit
-/// that invokes none of these gets nothing.
-pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<&'static str> {
+/// The mise tool ids a unit's jobs install: what the scan detects from the
+/// unit's own commands, plus what the repository declares for tools the scan
+/// cannot see. The language toolchain is deliberately absent — rustup
+/// provisions it from the repository's pin — and so is every tool a policy
+/// step installs through its own action. Each additional id widens the supply
+/// chain of every job that runs it.
+pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<String> {
     let mut tools = Vec::new();
     if needs_nextest(unit) {
-        tools.push("aqua:nextest-rs/nextest/cargo-nextest");
+        tools.push("aqua:nextest-rs/nextest/cargo-nextest".to_owned());
+    }
+    for declared in &unit.mise_tools {
+        if !tools.iter().any(|tool| tool == declared) {
+            tools.push(declared.clone());
+        }
     }
     tools
 }
@@ -1389,7 +1395,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             self.pins.checkout
         );
-        Self::render_workflow_runtime_download(output, lane);
+        self.render_unit_runtime(output, lane, unit);
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
@@ -1492,12 +1498,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_runtime_download(lane));
     }
 
-    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, trusted: bool) {
-        // Planning follows config.runners on trusted aggregates. Velnor uses
-        // the image-provided runtime. Pull-request and GitHub-configured
-        // planning stay GitHub-hosted and publish the SOURCE_REV runtime
-        // product for GitHub unit jobs.
-        let runners = if self.runners == RunnerMode::Velnor && trusted {
+    fn render_unit_runtime(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
+        if lane != RunnerMode::Github {
+            return;
+        }
+        // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
+        // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
+        // cannot consume a Linux-built plan artifact even when Planning is hosted.
+        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+            Self::render_workflow_runtime_setup(output, lane);
+        } else {
+            Self::render_workflow_runtime_download(output, lane);
+        }
+    }
+
+    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
+        // Planning follows config.runners. Velnor uses the image-provided
+        // runtime. GitHub planning bootstraps the pinned runtime.
+        let runners = if self.runners == RunnerMode::Velnor {
             RunnerMode::Velnor
         } else {
             RunnerMode::Github
@@ -1771,7 +1789,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 self.pins.checkout,
             );
-            Self::render_workflow_runtime_download(output, lane);
+            self.render_unit_runtime(output, lane, unit);
             output.push_str(&workflow_selection_artifact_download(None));
             self.render_tool_provisioning(output, lane, unit, cache_save);
             if CacheBackend::Detected.enables_actions_cache(self, unit)
@@ -1961,7 +1979,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             // The Rust toolchain is never a mise tool: the scan refuses a
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
-            // the unit's own commands name.
+            // the unit's own commands name or the repository declares.
             let mise_tools = mise_tool_ids(unit);
             let invokes_mise = commands_invoke_mise(unit);
             if !mise_tools.is_empty() {

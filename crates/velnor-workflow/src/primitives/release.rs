@@ -18,9 +18,9 @@ use super::{
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
-    velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
-    ProjectConfig, ReleaseSpec, RunnerMode, GENERATED_HEADER,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    velnor_runner_group, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
+    yaml_scalar, ActionPin, GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode,
+    GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -1037,7 +1037,7 @@ jobs:
   prune-pr-cache:
     name: Prune closed-PR cache
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
-    runs-on: __MAINTENANCE_PRUNE_RUNNER__
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
@@ -1071,7 +1071,7 @@ jobs:
   cache-budget:
     name: Cache retention
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: __MAINTENANCE_CACHE_RUNNER__
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
 VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
@@ -1105,10 +1105,10 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           # variant class, and the protected classes (toolchain seeds, Cargo
           # source bundles, the Docker seed baseline) reserved before rolling
           # compiler snapshots are touched. An access timestamp is not a
-          # lease: entries younger than the producer window are out of reach,
-          # because a producer may have published them seconds ago or be about
-          # to publish their successor, and creation is the only producer
-          # signal the cache API carries.
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \
@@ -1178,47 +1178,29 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           fi
 "#;
 
+/// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
+/// on the hosted image and always install `setup-velnor-workflow` at HEAD so
+/// default-branch dispatch can source-bootstrap, even when CI lanes select
+/// `runners = "velnor"`.
 fn render_maintenance(config: &ProjectConfig) -> String {
-    let cache_lane = if config.runners == RunnerMode::Velnor {
-        RunnerMode::Velnor
-    } else {
-        RunnerMode::Github
-    };
-    let prune_gate = format!(
-        "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
-        config.default_branch
-    );
-    let cache_gate = if cache_lane == RunnerMode::Velnor {
-        format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            config.default_branch
-        )
-    } else {
-        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
-    };
-    let setup = if cache_lane == RunnerMode::Github {
-        workflow_runtime_setup(RunnerMode::Github)
-    } else {
-        String::new()
-    };
-
     MAINTENANCE_WORKFLOW
-        .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
-            "__MAINTENANCE_PRUNE_RUNNER__",
-            &configured_runner(config, RunnerMode::Github),
+            "VELNOR_RUNTIME_SETUP_STEPS",
+            &workflow_runtime_setup_with_install_rev(
+                RunnerMode::Github,
+                &github_expression("github.sha"),
+            ),
         )
         .replace(
-            "__MAINTENANCE_CACHE_RUNNER__",
-            &configured_runner(config, cache_lane),
+            "runs-on: ubuntu-24.04",
+            &format!("runs-on: {}", yaml_scalar(&config.github_runner)),
         )
         .replace(
             "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
-            &format!("if: ${{{{ {prune_gate} }}}}"),
-        )
-        .replace(
-            "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
-            &format!("if: ${{{{ {cache_gate} }}}}"),
+            &format!(
+                "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
+                config.default_branch
+            ),
         )
 }
 
@@ -1288,6 +1270,30 @@ mod tests {
             workflow.contains("setup-velnor-workflow"),
             "maintenance must install the hosted workflow runtime: {workflow}"
         );
+        let head_rev = github_expression("github.sha");
+        assert!(
+            workflow.contains(&format!(
+                "uses: {}@{head_rev}",
+                crate::VELNOR_WORKFLOW_SETUP_ACTION
+            )),
+            "maintenance must resolve setup at HEAD: {workflow}"
+        );
+        assert!(
+            workflow.contains(&format!("rev: {head_rev}")),
+            "maintenance cache-plan must install HEAD: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!(
+                "uses: {}@{}",
+                crate::VELNOR_WORKFLOW_SETUP_ACTION,
+                crate::VELNOR_WORKFLOW_SOURCE_REV
+            )),
+            "maintenance must not pin setup to SOURCE_REV: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!("rev: {}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
+            "maintenance must not pin cache-plan to SOURCE_REV: {workflow}"
+        );
         assert!(
             !workflow.contains("[self-hosted,"),
             "maintenance must not select the Velnor lane: {workflow}"
@@ -1319,39 +1325,6 @@ mod tests {
             !workflow.contains("github.event_name == 'push'"),
             "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
         );
-    }
-
-    fn assert_maintenance_runner_split(workflow: &str, config: &ProjectConfig) {
-        let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
-        let velnor = format!("runs-on: {}", configured_runner(config, RunnerMode::Velnor));
-        let runs_on: Vec<&str> = workflow
-            .lines()
-            .filter(|line| line.trim_start().starts_with("runs-on:"))
-            .map(str::trim)
-            .collect();
-        assert_eq!(
-            runs_on.as_slice(),
-            [hosted.as_str(), velnor.as_str()],
-            "only PR pruning is GitHub-hosted: {workflow}"
-        );
-        assert!(!workflow.contains("setup-velnor-workflow"));
-        let prune_if = format!(
-            "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
-            config.default_branch
-        );
-        assert!(
-            workflow.contains(&prune_if),
-            "closed-PR prune must stay live: {workflow}"
-        );
-        let cache_gate = format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            config.default_branch
-        );
-        assert!(
-            workflow.contains(&cache_gate),
-            "Velnor cache retention must stay on the trusted lane: {workflow}"
-        );
-        assert!(!workflow.contains("\n  push:"));
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
@@ -1395,6 +1368,7 @@ mod tests {
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
+            mise_tools: Vec::new(),
             // The scan guarantees this fact on every Rust unit of a real
             // repository; the test config carries the same contract, pinning
             // the targets the fixture's release contract builds for.
@@ -1529,7 +1503,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "4b0e986f2b63fd619c6908b868c451603b1d3bfa758fab1e8ca070bb75c71bc4",
+                "3e4437d765a3e1a24cb3d4c8146c8347b5f140e1d0fa7b5c2143587b31402bd6",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1609,12 +1583,12 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_splits_prune_and_cache_when_runners_are_velnor() {
+    fn maintenance_stays_github_hosted_when_runners_are_velnor() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.runners = RunnerMode::Velnor;
 
         let direct = super::render_maintenance(&cfg);
-        assert_maintenance_runner_split(&direct, &cfg);
+        assert_maintenance_is_github_hosted(&direct, &cfg);
 
         let root = scanned_root("maintenance-hosted");
         let surface = generate(&root, &cfg, None);
@@ -1623,13 +1597,13 @@ mod tests {
             generated.starts_with(crate::GENERATED_HEADER),
             "generated maintenance.yml must carry the header: {generated}"
         );
-        assert_maintenance_runner_split(&generated, &cfg);
+        assert_maintenance_is_github_hosted(&generated, &cfg);
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn maintenance_uses_configured_runners_for_all_hosted_modes() {
-        for runners in [RunnerMode::Github, RunnerMode::Both] {
+        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
             let mut cfg = config(&["maintenance.yml"], None);
             cfg.runners = runners;
             let workflow = super::render_maintenance(&cfg);
@@ -1645,7 +1619,7 @@ mod tests {
         cfg.default_branch = "trunk".to_owned();
 
         let workflow = super::render_maintenance(&cfg);
-        assert_maintenance_runner_split(&workflow, &cfg);
+        assert_maintenance_is_github_hosted(&workflow, &cfg);
         assert!(
             workflow.contains("runs-on: ubuntu-22.04"),
             "maintenance must honor config.github_runner: {workflow}"

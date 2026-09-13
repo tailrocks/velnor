@@ -702,53 +702,32 @@ fn charge_acquisition_probe(journal: &mut Journal, job_id: &JobId, generation: G
     }
 }
 
-pub fn accept_job(
+/// Mark an owned job Running once workflow execution begins.
+///
+/// The daemon calls this right after its store `JobStarted` transition, so
+/// the journal phase tracks the execution the store already recorded. A
+/// rejection means the owned row went missing or moved generation underneath
+/// the caller.
+///
+/// # Errors
+/// Journal write failure, or a rejection (no owned job at this generation).
+pub fn record_job_started(
     journal: &mut Journal,
     job_id: &JobId,
-    slot_id: &SlotId,
-) -> anyhow::Result<Generation> {
-    let state = journal.materialized_state()?;
-    if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
-        if job.slot_id != *slot_id {
-            anyhow::bail!(
-                "job {} is owned by slot {}, not {}",
-                job_id.0,
-                job.slot_id.0,
-                slot_id.0
-            );
-        }
-        return Ok(job.generation);
-    }
-    let slot = state
-        .slots
-        .iter()
-        .find(|slot| slot.slot_id == *slot_id)
-        .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
-    let generation = slot.generation;
-    let assigned = journal.apply(Event::Assigned {
-        slot_id: slot_id.clone(),
+    generation: Generation,
+) -> anyhow::Result<()> {
+    let outcome = journal.apply(Event::JobStarted {
         job_id: job_id.clone(),
         generation,
     })?;
-    if assigned.rejected {
+    if outcome.rejected {
         anyhow::bail!(
-            "Assigned rejected for {} on {} (slot must still be Ready)",
+            "job start rejected for job {} generation {}",
             job_id.0,
-            slot_id.0
+            generation.0
         );
     }
-    let owned = journal.apply(Event::JobOwned {
-        job_id: job_id.clone(),
-        slot_id: slot_id.clone(),
-        attempt: 1,
-        generation,
-        worker: format!("velnor-job@{}", job_id.0),
-        accepted_unix: 0,
-    })?;
-    if owned.rejected {
-        anyhow::bail!("JobOwned rejected for {} on {}", job_id.0, slot_id.0);
-    }
-    Ok(generation)
+    Ok(())
 }
 
 /// Slot this runner config belongs to. `None` when the journal has no slots.
@@ -773,12 +752,7 @@ pub fn infer_slot_id(journal: &Journal, config_dir: &Path) -> Option<SlotId> {
     let running: Vec<&SlotId> = state
         .jobs
         .iter()
-        .filter(|job| {
-            matches!(
-                job.phase,
-                ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Starting
-            )
-        })
+        .filter(|job| matches!(job.phase, ActorPhase::Assigned | ActorPhase::Running))
         .map(|job| &job.slot_id)
         .collect();
     if running.len() == 1 {
@@ -949,10 +923,13 @@ mod tests {
                 slot_id: slot.clone(),
                 generation: g,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: slot.clone(),
                 job_id: job_id.clone(),
                 generation: g,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
@@ -971,6 +948,22 @@ mod tests {
                 .rejected
         );
         g
+    }
+
+    /// Own a job through the acquisition path: intend, resolve, confirm.
+    fn own_next_job(journal: &mut Journal, job_id: &JobId, slot_id: &SlotId) -> Generation {
+        let generation = intend_acquisition(
+            journal,
+            job_id,
+            slot_id,
+            "msg-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+        )
+        .unwrap();
+        resolve_acquisition(journal, job_id, job_id, "plan-1", generation).unwrap();
+        confirm_acquisition(journal, job_id, slot_id, generation).unwrap();
+        generation
     }
 
     fn prime_ready_slot(journal: &mut Journal) -> (SlotId, Generation) {
@@ -1627,12 +1620,11 @@ mod tests {
             "abandoning must never authorize a second terminal send"
         );
         // And the freed slot really does take the next job.
-        accept_job(
+        own_next_job(
             &mut journal,
             &JobId("job-2".into()),
             &SlotId("scope-1".into()),
-        )
-        .unwrap();
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1723,14 +1715,14 @@ mod tests {
             || Ok::<(), anyhow::Error>(()),
         )
         .unwrap();
-        let second = accept_job(
+        let second = own_next_job(
             &mut journal,
             &JobId("job-2".into()),
             &SlotId("scope-1".into()),
         );
-        assert!(
-            second.is_ok(),
-            "Ready slot must accept the next job after RemoteAcked, got {second:?}"
+        assert_eq!(
+            second, generation,
+            "Ready slot must accept the next job after RemoteAcked"
         );
         std::fs::remove_dir_all(dir).ok();
     }
@@ -1758,14 +1750,17 @@ mod tests {
         let state = journal.load_state().unwrap();
         assert_eq!(state.jobs[0].phase, ActorPhase::Completing);
         assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
-        let rejected = accept_job(
+        let rejected = intend_acquisition(
             &mut journal,
             &JobId("job-2".into()),
             &SlotId("scope-1".into()),
+            "msg-2",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
         )
         .unwrap_err();
         assert!(
-            rejected.to_string().contains("Assigned rejected"),
+            rejected.to_string().contains("acquisition intent rejected"),
             "{rejected}"
         );
         std::fs::remove_dir_all(dir).ok();
@@ -1794,12 +1789,12 @@ mod tests {
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
         assert_eq!(state.slots[0].phase, ActorPhase::Ready);
-        accept_job(
+        // Slot must leave Completing after async complete_job.
+        own_next_job(
             &mut journal,
             &JobId("job-next".into()),
             &SlotId("scope-1".into()),
-        )
-        .expect("slot must leave Completing after async complete_job");
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2079,70 +2074,38 @@ mod tests {
     }
 
     #[test]
-    fn accept_job_owns_a_ready_slot() {
+    fn acquisition_path_owns_a_ready_slot() {
         let dir = tmp("accept");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
-        let slot = SlotId("scope-1".into());
-        let g = Generation::INITIAL;
-        for event in [
-            Event::ControlLive,
-            Event::JournalWritable,
-            Event::Dependency {
-                github_reachable: true,
-            },
-            Event::Routing {
-                valid: true,
-                group_valid: true,
-            },
-            Event::DesiredCapacity { ready: 1 },
-            Event::PermitReserved {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-            Event::ExecutorProven {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-            Event::SessionLive {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-            Event::RegistrationIntended {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-            Event::Registered {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-            Event::ReadyAttempt {
-                slot_id: slot.clone(),
-                generation: g,
-            },
-        ] {
-            assert!(!journal.apply(event).unwrap().rejected);
-        }
-        let generation = accept_job(&mut journal, &JobId("guid-1".into()), &slot).unwrap();
+        let (slot, g) = prime_ready_slot(&mut journal);
+        let generation = own_next_job(&mut journal, &JobId("guid-1".into()), &slot);
         assert_eq!(generation, g);
         let state = journal.load_state().unwrap();
         assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
         assert_eq!(state.jobs[0].job_id.0, "guid-1");
+        assert!(!state.jobs[0].provisional);
         std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
-    fn accept_job_rejects_a_second_live_owner() {
+    fn acquisition_path_rejects_a_second_live_owner() {
         let dir = tmp("accept-second");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let job_id = JobId("already".into());
         let _ = prime_owned(&mut journal, &job_id);
-        let error = accept_job(
+        let error = intend_acquisition(
             &mut journal,
             &JobId("other".into()),
             &SlotId("scope-1".into()),
+            "msg-other",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("Assigned rejected"), "{error}");
+        assert!(
+            error.to_string().contains("acquisition intent rejected"),
+            "{error}"
+        );
         assert_eq!(
             ensure_owned(&mut journal, &job_id).unwrap(),
             Generation::INITIAL

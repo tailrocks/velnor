@@ -1451,6 +1451,7 @@ pub(crate) fn enforce_policy_with_revision(
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
+    let velnor_labels = configured_velnor_labels(root);
     let mut found_policy_entrypoint = false;
     let mut failures = PolicyFindings::default();
     // GitHub rejects a workflow whose YAML carries duplicate keys, so the
@@ -1483,7 +1484,13 @@ pub(crate) fn enforce_policy_with_revision(
             failures.record(&path, "workflow document must be a YAML mapping");
             continue;
         };
-        inspect_workflow(workflow, &path, trusted_revision, &mut failures);
+        inspect_workflow(
+            workflow,
+            &path,
+            trusted_revision,
+            &velnor_labels,
+            &mut failures,
+        );
     }
     if !found_policy_entrypoint {
         failures.record(
@@ -1505,6 +1512,7 @@ fn inspect_workflow(
     workflow: &Mapping,
     path: &Path,
     trusted_revision: &str,
+    velnor_labels: &[String],
     failures: &mut PolicyFindings,
 ) {
     let approved_policy_entrypoint =
@@ -1519,7 +1527,7 @@ fn inspect_workflow(
                     failures.record(path, "pull_request_target is forbidden");
                 }
             }
-            "jobs" => inspect_jobs(value, path, trusted_revision, failures),
+            "jobs" => inspect_jobs(value, path, trusted_revision, velnor_labels, failures),
             _ => inspect_yaml_value(value, path, None, false, trusted_revision, failures),
         }
     }
@@ -1596,7 +1604,7 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         // remaining job structure stays an exact generator comparison.
         if !mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job))
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, &[]))
         {
             return false;
         }
@@ -1640,8 +1648,96 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
 }
 
-fn has_safe_runner_gate(condition: &str, _job: &Mapping) -> bool {
-    has_trusted_runner_gate(condition)
+fn has_safe_runner_gate(condition: &str, job: &Mapping, velnor_labels: &[String]) -> bool {
+    if has_trusted_runner_gate(condition) {
+        return true;
+    }
+    is_generated_velnor_pr_gate(condition)
+        && is_static_self_hosted_runner(job)
+        && job_runs_on_matches_labels(job, velnor_labels)
+}
+
+fn configured_velnor_labels(root: &Path) -> Vec<String> {
+    let path = root.join(DEFAULT_CONFIG);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
+        return Vec::new();
+    };
+    value
+        .get("workflow")
+        .and_then(toml::Value::as_table)
+        .and_then(|workflow| workflow.get("velnor_labels"))
+        .and_then(toml::Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn job_runs_on_matches_labels(job: &Mapping, expected: &[String]) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(runs_on) = mapping_value(job, "runs-on") else {
+        return false;
+    };
+    let Some(labels) = runs_on.as_sequence() else {
+        return false;
+    };
+    if labels.len() != expected.len() {
+        return false;
+    }
+    labels
+        .iter()
+        .zip(expected)
+        .all(|(label, expected)| label.as_str() == Some(expected.as_str()))
+}
+
+fn normalize_gate_expression(value: &str) -> String {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    if let Some(inner) = value
+        .strip_prefix("always()&&(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        inner.to_owned()
+    } else {
+        value
+    }
+}
+
+fn is_generated_velnor_pr_gate(value: &str) -> bool {
+    let normalized = normalize_gate_expression(value);
+    let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
+    let marker = "github.ref=='refs/heads/";
+    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
+        return false;
+    };
+    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
+        return false;
+    };
+    let branch = &value[start..end];
+    if !valid_branch(branch) {
+        return false;
+    }
+    let control_plane = format!(
+        "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
+    );
+    let velnor_lane = format!(
+        "github.event_name=='pull_request'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))"
+    );
+    value == control_plane || value == velnor_lane
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1669,7 +1765,13 @@ fn claims_inline_policy_transport(job: &Mapping) -> bool {
         == Some("Checkout caller workflow data")
 }
 
-fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &mut PolicyFindings) {
+fn inspect_jobs(
+    value: &Value,
+    path: &Path,
+    trusted_revision: &str,
+    velnor_labels: &[String],
+    failures: &mut PolicyFindings,
+) {
     let Some(jobs) = value.as_mapping() else {
         failures.record(path, "jobs must be a YAML mapping");
         return;
@@ -1689,7 +1791,7 @@ fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &m
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job));
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_labels));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
@@ -3196,6 +3298,80 @@ jobs:
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
         assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_generated_pr_gates_on_configured_velnor_labels() -> Result<(), Box<dyn Error>>
+    {
+        let root = policy_fixture(
+            "velnor-pr-configured",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+  ci-required:
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            r"
+name: rust
+on:
+  workflow_call:
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+",
+        )?;
+        assert!(run_policy(root)?);
+
+        let mismatched = policy_fixture(
+            "velnor-pr-mismatched",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(
+            mismatched.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        std::fs::write(
+            mismatched.join(".github/workflows/ci-pr.yml"),
+            r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, other-runner]
+    steps:
+      - run: true
+",
+        )?;
+        assert!(!run_policy(mismatched)?);
         Ok(())
     }
 

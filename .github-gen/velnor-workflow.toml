@@ -13,7 +13,7 @@ exclude = ["migrations/**"]
 # Velnor dispatch-only; automatic = "both" auto-runs both on trusted events
 # so the lanes can be compared.
 [workflow]
-runners = "velnor"
+runners = "both"
 automatic = "velnor"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"

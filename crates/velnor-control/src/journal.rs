@@ -229,7 +229,7 @@ impl FleetState {
 fn job_occupies_slot(phase: ActorPhase) -> bool {
     matches!(
         phase,
-        ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running | ActorPhase::Completing
+        ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
     )
 }
 
@@ -523,11 +523,6 @@ pub enum Event {
         slot_id: SlotId,
         generation: Generation,
     },
-    Assigned {
-        slot_id: SlotId,
-        job_id: JobId,
-        generation: Generation,
-    },
     /// Written *before* `acquirejob` is called, so a crash between the call and
     /// its reply leaves durable evidence that this runner may already own the
     /// job. Recovery resolves it with `renewjob`, which only the lease holder
@@ -696,10 +691,6 @@ pub enum SideEffect {
     },
     AdvertiseCapacity {
         permits: u32,
-    },
-    StartJob {
-        job_id: JobId,
-        generation: Generation,
     },
     SendCompletion {
         job_id: JobId,
@@ -911,18 +902,6 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 });
             }
         }
-        Event::Assigned {
-            slot_id,
-            job_id: _,
-            generation,
-        } => {
-            let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase != ActorPhase::Ready {
-                rejected = true;
-            } else {
-                slot.phase = ActorPhase::Assigned;
-            }
-        }
         Event::JobAcquisitionIntended {
             slot_id,
             job_id,
@@ -932,9 +911,9 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             intended_unix,
         } => {
             // Occupy the slot before calling GitHub, so a crash in the acquire
-            // window leaves evidence. This does to the slot exactly what
-            // `Assigned` does — the slot must be `Assigned` for `JobOwned` to
-            // be accepted — while the job row it creates is deliberately
+            // window leaves evidence. This is the only transition that moves a
+            // slot to `Assigned` — the slot must be `Assigned` for `JobOwned`
+            // to be accepted — while the job row it creates is deliberately
             // provisional: it is not proof of ownership and cannot back a
             // completion.
             let slot = state.slot_mut(&slot_id);
@@ -1067,7 +1046,6 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     probe_attempts: 0,
                     probe_deadline_unix: 0,
                 });
-                commands.push(SideEffect::StartJob { job_id, generation });
             }
         }
         Event::JobStarted { job_id, generation } => {
@@ -2119,13 +2097,13 @@ fn parse_actor_phase(value: &str) -> StoreResult<ActorPhase> {
         "registered" => Ok(ActorPhase::Registered),
         "ready" => Ok(ActorPhase::Ready),
         "assigned" => Ok(ActorPhase::Assigned),
-        "starting" => Ok(ActorPhase::Starting),
         "running" => Ok(ActorPhase::Running),
         "completing" => Ok(ActorPhase::Completing),
-        "retiring" => Ok(ActorPhase::Retiring),
-        "degraded" => Ok(ActorPhase::Degraded),
         "fenced" => Ok(ActorPhase::Fenced),
-        "quarantined" => Ok(ActorPhase::Quarantined),
+        // The retired phases (`starting`, `retiring`, `degraded`,
+        // `quarantined`) fail closed here: a materialized row naming one is
+        // evidence from a vocabulary this binary no longer speaks, and
+        // guessing which live phase it meant would invent capacity state.
         _ => Err(invalid_materialized("actor phase", value)),
     }
 }
@@ -2736,7 +2714,6 @@ fn event_generation(event: &Event) -> Generation {
         | Event::Registered { generation, .. }
         | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
-        | Event::Assigned { generation, .. }
         | Event::JobOwned { generation, .. }
         | Event::JobStarted { generation, .. }
         | Event::JobTerminalResult { generation, .. }
@@ -2775,7 +2752,6 @@ fn event_kind(event: &Event) -> &'static str {
         Event::Registered { .. } => "registered",
         Event::RegistrationLost { .. } => "registration_lost",
         Event::ReadyAttempt { .. } => "ready_attempt",
-        Event::Assigned { .. } => "assigned",
         Event::JobOwned { .. } => "job_owned",
         Event::JobStarted { .. } => "job_started",
         Event::JobTerminalResult { .. } => "job_terminal_result",
@@ -2971,10 +2947,13 @@ mod tests {
                 slot_id: slot(slot_name),
                 generation: g,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: slot(slot_name),
                 job_id: job(job_name),
                 generation: g,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: job(job_name),
@@ -3455,10 +3434,13 @@ mod tests {
         );
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot("scope-1"),
                     job_id: job("job-2"),
                     generation: g,
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected,
@@ -3496,10 +3478,13 @@ mod tests {
                 slot_id: slot("scope-1"),
                 generation: g,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: g,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: job("job-1"),
@@ -3707,17 +3692,21 @@ mod tests {
         assert_eq!(journal.load_state().unwrap().health().actual_ready_slots, 1);
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot_id.clone(),
                     job_id: job("job-1"),
                     generation: r#gen(),
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
         );
-        let assigned = journal.load_state().unwrap();
-        assert_eq!(assigned.health().actual_ready_slots, 0);
-        assert!(assigned.jobs.is_empty());
+        let intended = journal.load_state().unwrap();
+        assert_eq!(intended.health().actual_ready_slots, 0);
+        assert_eq!(intended.jobs.len(), 1);
+        assert!(intended.jobs[0].provisional);
         assert!(
             !journal
                 .apply(Event::JobOwned {
@@ -4384,10 +4373,13 @@ mod tests {
         let job_id = job("worker-1");
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot("scope-1"),
                     job_id: job_id.clone(),
                     generation: r#gen(),
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
@@ -4597,7 +4589,6 @@ mod tests {
 
         for phase in [
             ActorPhase::Assigned,
-            ActorPhase::Starting,
             ActorPhase::Running,
             ActorPhase::Completing,
         ] {
@@ -4677,10 +4668,13 @@ mod tests {
         );
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot_id.clone(),
                     job_id: job("job-1"),
                     generation,
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
@@ -4738,10 +4732,13 @@ mod tests {
         let job_id = job("job-1");
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot_id.clone(),
                     job_id: job_id.clone(),
                     generation: r#gen(),
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
@@ -4864,10 +4861,13 @@ mod tests {
                 slot_id: slot_id.clone(),
                 generation,
             },
-            Event::Assigned {
+            Event::JobAcquisitionIntended {
                 slot_id: slot_id.clone(),
                 job_id: job_id.clone(),
                 generation,
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             },
             Event::JobOwned {
                 job_id: job_id.clone(),
@@ -5145,7 +5145,7 @@ mod tests {
     }
 
     #[test]
-    fn job_ownership_survives_reopen_before_start_command() {
+    fn job_ownership_survives_reopen() {
         let (dir, mut journal) = open_tmp("job-own");
         prime_ready(&mut journal, "scope-1");
         journal
@@ -5155,10 +5155,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         let outcome = journal
@@ -5171,10 +5174,11 @@ mod tests {
                 accepted_unix: 0,
             })
             .unwrap();
-        assert!(matches!(
-            outcome.commands.as_slice(),
-            [SideEffect::StartJob { .. }]
-        ));
+        assert!(
+            outcome.commands.is_empty(),
+            "ownership is durable state, not a spawn command: {:?}",
+            outcome.commands
+        );
         drop(journal);
         let recovered = Journal::open(dir.join("journal.db"))
             .unwrap()
@@ -5195,10 +5199,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -5274,10 +5281,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -5336,10 +5346,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -5457,10 +5470,13 @@ mod tests {
             .unwrap();
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: slot("scope-1"),
                     job_id: job("guid-1"),
                     generation: r#gen(),
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected
@@ -5506,10 +5522,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -5547,10 +5566,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -6172,10 +6194,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("guid-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -6226,7 +6251,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_assignment_is_rejected() {
+    fn duplicate_acquisition_intent_is_rejected() {
         let (_dir, mut journal) = open_tmp("dup-assign");
         prime_ready(&mut journal, "scope-1");
         journal
@@ -6236,18 +6261,24 @@ mod tests {
             })
             .unwrap();
         let first = journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         assert!(!first.rejected);
         let second = journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-2"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         assert!(second.rejected);
@@ -6264,10 +6295,13 @@ mod tests {
             })
             .unwrap();
         journal
-            .apply(Event::Assigned {
+            .apply(Event::JobAcquisitionIntended {
                 slot_id: slot("scope-1"),
                 job_id: job("job-1"),
                 generation: r#gen(),
+                message_id: "msg-1".into(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: 1_000,
             })
             .unwrap();
         journal
@@ -6291,6 +6325,26 @@ mod tests {
             .unwrap();
         assert!(retire.rejected);
         assert_eq!(journal.load_state().unwrap().package_generation, 3);
+    }
+
+    #[test]
+    fn retired_actor_phases_fail_closed_on_materialization() {
+        for retired in ["starting", "retiring", "degraded", "quarantined"] {
+            let error = parse_actor_phase(retired).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        }
+        for live in [
+            "absent",
+            "provisioning",
+            "registered",
+            "ready",
+            "assigned",
+            "running",
+            "completing",
+            "fenced",
+        ] {
+            assert!(parse_actor_phase(live).is_ok(), "{live}");
+        }
     }
 
     #[test]
