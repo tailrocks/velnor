@@ -78,14 +78,14 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // This revision is the direct ancestor carrying the validator change for the
 // inline Velnor policy shape. Keep the pin paired with that validator contract;
 // advancing either side alone makes generated policy jobs fail closed.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "215f02f150d5041edac3eccb8a91310013387dc5";
+const VELNOR_POLICY_WORKFLOW_REV: &str = "6017727759da543800c90be401c60c7f0d42092b";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. `uses:` always interpolates this
 // literal: GitHub Actions rejects expressions in `uses:` versions (HTTP 422).
-// #758 (`172845cf`) carries #742 CONTROLLED_BOOTSTRAP for default-branch
-// `workflow_dispatch`; 8c84b39d left that gate false (job 34771893905). Bump
-// after publishing a Velnor commit that changes the workflow runtime contract.
-pub(crate) const VELNOR_WORKFLOW_SOURCE_REV: &str = "215f02f150d5041edac3eccb8a91310013387dc5";
+// #791 (`60177277`) carries Testcontainers port publish, routing-policy
+// refresh, and Gradle postgres multi-DB init. Bump after publishing a Velnor
+// commit that changes the workflow runtime contract.
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "6017727759da543800c90be401c60c7f0d42092b";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 const MOLD_VERSION: &str = "2.42.0";
 const MOLD_X86_64_SHA256: &str = "f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d";
@@ -2768,7 +2768,30 @@ pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
 }
 
 pub(crate) fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
-    !(lane == RunnerMode::Velnor && unit.kind == UnitKind::Swift)
+    lane_supports_unit_kind(lane, unit.kind)
+}
+
+/// Whether `lane` can execute a unit of `kind`. This is the canonical
+/// runner-support rule: unit-surface rendering and runner-aware planning both
+/// delegate here, so a kind the Velnor lane cannot run is skipped in
+/// rendering and excluded from a velnor-only selection by the same
+/// predicate.
+pub(crate) fn lane_supports_unit_kind(lane: RunnerMode, kind: UnitKind) -> bool {
+    !(lane == RunnerMode::Velnor && kind == UnitKind::Swift)
+}
+
+/// Whether the selected `runners` can execute a unit of `kind`: at least one
+/// selected runner must support it. A velnor-only selection drops whatever
+/// the Velnor lane cannot run; `github` and `both` keep every known kind
+/// because the GitHub lane runs them all.
+pub(crate) fn runners_support_unit_kind(runners: RunnerMode, kind: UnitKind) -> bool {
+    match runners {
+        RunnerMode::Both => {
+            lane_supports_unit_kind(RunnerMode::Github, kind)
+                || lane_supports_unit_kind(RunnerMode::Velnor, kind)
+        }
+        lane => lane_supports_unit_kind(lane, kind),
+    }
 }
 
 #[allow(dead_code)]
@@ -5344,11 +5367,11 @@ mod tests {
     fn hosted_runtime_setup_uses_the_versioned_setup_action() {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "215f02f150d5041edac3eccb8a91310013387dc5"
+            "6017727759da543800c90be401c60c7f0d42092b"
         );
         assert_eq!(
             VELNOR_POLICY_WORKFLOW_REV,
-            "215f02f150d5041edac3eccb8a91310013387dc5"
+            "6017727759da543800c90be401c60c7f0d42092b"
         );
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
@@ -5404,13 +5427,13 @@ mod tests {
     fn github_sha_install_rev_keeps_literal_uses_pin() {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "215f02f150d5041edac3eccb8a91310013387dc5"
+            "6017727759da543800c90be401c60c7f0d42092b"
         );
         let head_rev = github_expression("github.sha");
         let maintenance = workflow_runtime_setup_with_install_rev(RunnerMode::Github, &head_rev);
         let uses_line = setup_action_uses_line(&maintenance);
         assert!(
-            uses_line.contains("@215f02f150d5041edac3eccb8a91310013387dc5"),
+            uses_line.contains("@6017727759da543800c90be401c60c7f0d42092b"),
             "uses: is always SOURCE_REV: {uses_line}"
         );
         assert!(
@@ -8361,11 +8384,11 @@ channel = "stable"
     fn assert_maintenance_setup_uses_literal_source_rev(workflow: &str) {
         assert_eq!(
             VELNOR_WORKFLOW_SOURCE_REV,
-            "215f02f150d5041edac3eccb8a91310013387dc5"
+            "6017727759da543800c90be401c60c7f0d42092b"
         );
         let uses_line = setup_action_uses_line(workflow);
         assert!(
-            uses_line.contains("@215f02f150d5041edac3eccb8a91310013387dc5"),
+            uses_line.contains("@6017727759da543800c90be401c60c7f0d42092b"),
             "uses: must pin SOURCE_REV: {uses_line}"
         );
         assert!(
@@ -8588,6 +8611,64 @@ channel = "stable"
         assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
+    }
+
+    #[test]
+    fn plan_step_consumes_the_dispatch_runner_input_in_every_mode() {
+        // The dispatch `runner` input exists on every aggregate, so every
+        // mode wires it into the plan step: a velnor-only dispatch plans a
+        // velnor-only selection, while automatic events plan unfiltered.
+        let consumer = "VELNOR_RUNNER: ${{ github.event.inputs.runner || '' }}";
+        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let config = scanned_fixture(runners);
+            let generator = WorkflowIr::from_config(&config);
+            for aggregate in [
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+            ] {
+                assert!(aggregate.contains(consumer), "{runners:?}: {aggregate}");
+                // The consumer sits in the plan step.
+                let plan = must_some(aggregate.find("  plan:"), "plan job");
+                let runner_env = must_some(aggregate.find(consumer), "plan runner env");
+                assert!(plan < runner_env, "{runners:?}: {aggregate}");
+            }
+        }
+    }
+
+    #[test]
+    fn admitted_runners_support_every_kind_but_velnor_only_swift() {
+        let kinds = [
+            UnitKind::Rust,
+            UnitKind::Gradle,
+            UnitKind::Node,
+            UnitKind::Bun,
+            UnitKind::Swift,
+            UnitKind::OpenTofu,
+            UnitKind::Docker,
+            UnitKind::Homebrew,
+            UnitKind::Docs,
+        ];
+        for kind in kinds {
+            assert!(
+                runners_support_unit_kind(RunnerMode::Github, kind),
+                "{kind:?}"
+            );
+            assert!(
+                runners_support_unit_kind(RunnerMode::Both, kind),
+                "{kind:?}"
+            );
+            assert_eq!(
+                runners_support_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+            assert_eq!(
+                lane_supports_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

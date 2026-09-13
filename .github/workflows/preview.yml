@@ -413,11 +413,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@215f02f150d5041edac3eccb8a91310013387dc5
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 215f02f150d5041edac3eccb8a91310013387dc5
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=215f02f150d5041edac3eccb8a91310013387dc5" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Enforce workflow policy
         env:
           EVENT_NAME: ${{ github.event_name }}

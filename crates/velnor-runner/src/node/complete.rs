@@ -231,6 +231,11 @@ fn record_attempt_failure(
     generation: Generation,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    // Category-driven: `permanent` is true only for the completion
+    // boundary's `Terminal` verdict (or, for unclassified errors, the
+    // historical status derivation, which fails open to retry). A
+    // permanent refusal spends the whole recovery budget at once, so the
+    // abandon path releases the slot now instead of after doomed retries.
     let permanent = completion_failure_is_permanent(&error);
     match journal.apply(Event::CompletionAttemptFailed {
         job_id: job_id.clone(),

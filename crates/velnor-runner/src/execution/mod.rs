@@ -20,6 +20,7 @@ mod guest_runtime;
 mod isolation;
 mod net;
 mod snapshot;
+mod step_conditions;
 mod unix_api;
 
 pub use artifacts::{
@@ -75,6 +76,7 @@ pub use net::{
     teardown_net_invocations,
 };
 pub use snapshot::{GuestReady, SnapshotIdentity};
+pub(crate) use step_conditions::condition_is_statically_false;
 pub use unix_api::UnixFirecrackerClient;
 
 /// Guest-agent entry: decode a vsock plan and run it on the local Docker daemon.

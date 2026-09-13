@@ -41,10 +41,10 @@ use crate::{
         configure_safe_directory, reap_stale_checkout_credentials, CheckoutPlan,
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
+    execution::condition_is_statically_false,
     executor::{
-        condition_is_statically_false, BoundedStepSender, CommandRunner, DockerJobEngine,
-        ExecutableStep, JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
-        STEP_PUBLISH_CHANNEL_CAPACITY,
+        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
+        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -56,14 +56,15 @@ use crate::{
     },
     platform,
     protocol::{
-        acquire_reply_is_definitely_gone, decode_jit_config, github_api_retry_delay,
+        broker_error_category, decode_jit_config, github_api_retry_delay,
         is_transient_acquire_error, renew_failure_is_job_gone, unix_epoch_now, AcquireJobOutcome,
-        BrokerClient, DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope,
-        ListedRunner, OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
-        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
-        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        BrokerClient, BrokerErrorCategory, DistributedTaskClient, GitHubApiError,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
+        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
+        RunServiceVariableValue, RunnerBusyConflict, RunnerJobRequestRef, RunnerStatus,
+        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
+        RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -619,6 +620,18 @@ fn resolve_run_service_acquisition_in_journal(
         run_service_url,
         unix_epoch_now(),
     )
+}
+
+/// Category-driven abandon policy for a skipped `acquirejob` reply. Only
+/// the boundary's `Terminal` verdict (a typed gone) frees the slot now.
+/// `Conflict` — and, defensively, any `Transient` the classifier never
+/// produces — leaves the provisional row for the `renewjob` oracle: the
+/// reply does not prove this runner lost the job, and abandoning a row
+/// this runner may own would strand the job until its lease expired.
+/// Duplicate broker delivery is safe either way: re-recording the same
+/// acquisition intent is idempotent.
+fn acquire_skip_abandons_intent(category: BrokerErrorCategory) -> bool {
+    matches!(category, BrokerErrorCategory::Terminal)
 }
 
 /// Drop a provisional row the run service says is gone, freeing the slot now
@@ -6196,8 +6209,18 @@ async fn handle_v2_message(
             )
             .await
     {
+        // Best-effort by design, never retried: the ack is only a Busy
+        // marker, the broker redelivers regardless, and a duplicate ack is
+        // safe. The boundary category is forensic, so a broken ack path is
+        // still visible in the logs.
+        let category = match broker_error_category(&error) {
+            Some(BrokerErrorCategory::Transient) => "transient",
+            Some(BrokerErrorCategory::Terminal) => "terminal",
+            Some(BrokerErrorCategory::Conflict) => "conflict",
+            None => "unclassified",
+        };
         eprintln!(
-            "Best-effort broker acknowledge failed for request {}: {}",
+            "Best-effort broker acknowledge failed for request {} (category={category}): {}",
             reference.runner_request_id,
             sanitized_retry_error(&error)
         );
@@ -6296,14 +6319,16 @@ async fn handle_v2_message(
             status,
             request_id,
             body,
+            category,
         } => {
-            // Free the slot only on a *definite* gone, read from the typed body
-            // and never from the outer HTTP status. A 409 says the job is held
-            // and cannot say by whom — upstream's error envelope carries no
-            // runner identity — so it is not proof that this runner did not
-            // acquire the job and then crash. Its row stays for the renewjob
-            // probe, which is the only oracle that can tell.
-            if acquire_reply_is_definitely_gone(&body) {
+            // Category-driven abandon policy: free the slot only on the
+            // boundary's `Terminal` verdict (a typed gone). A `Conflict`
+            // reply says the job is held and cannot say by whom —
+            // upstream's error envelope carries no runner identity — so it
+            // is not proof that this runner did not acquire the job and
+            // then crash. Its row stays for the renewjob probe, which is
+            // the only oracle that can tell.
+            if acquire_skip_abandons_intent(category) {
                 if let Err(error) = abandon_run_service_acquisition_in_journal(
                     &acquisition_journal_dir,
                     config_dir,
@@ -14776,6 +14801,7 @@ fn default_agent_name() -> String {
 )]
 mod tests {
     use super::*;
+    use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
 
     #[test]
@@ -15302,6 +15328,7 @@ mod tests {
             retry_after_seconds: Some(120),
             rate_limit_reset_epoch: None,
             remaining: Some(0),
+            category: None,
         });
 
         assert!(supervised_retry_delay_for_error(1, &error) >= Duration::from_secs(120));
@@ -15322,6 +15349,7 @@ mod tests {
                     + 3600,
             ),
             remaining: Some(4999),
+            category: None,
         });
 
         assert_eq!(
@@ -16409,6 +16437,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
             "Registration deadbeef was not found.".to_string(),
@@ -16420,6 +16449,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let server = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -16428,6 +16458,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         assert!(lock_renewal_refresh_is_terminal(&missing));
         assert!(lock_renewal_refresh_is_terminal(&gone));
@@ -16656,6 +16687,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let forbidden_error = anyhow::Error::from(GitHubApiError {
             status: 403,
@@ -16664,6 +16696,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -16672,6 +16705,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let missing_runner = anyhow::Error::from(GitHubApiError {
             status: 404,
@@ -16680,6 +16714,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
 
@@ -16700,6 +16735,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
@@ -16708,6 +16744,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
 
         assert!(should_refresh_completion_after_error(&auth_error, false));
@@ -18473,6 +18510,18 @@ jobs:
             drop(journal);
             fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    /// The abandon policy reads the boundary category, not the reply body:
+    /// only `Terminal` (a typed gone) frees the slot; `Conflict` leaves the
+    /// row for the `renewjob` oracle.
+    #[test]
+    fn acquire_skip_abandons_intent_only_for_terminal() {
+        assert!(acquire_skip_abandons_intent(BrokerErrorCategory::Terminal));
+        assert!(!acquire_skip_abandons_intent(BrokerErrorCategory::Conflict));
+        assert!(!acquire_skip_abandons_intent(
+            BrokerErrorCategory::Transient
+        ));
     }
 
     /// The acquire reply's identity replaces the broker request's, in one write,

@@ -87,6 +87,7 @@ fn detect_workspace(
         pending.push((module.clone(), module_root, module_unit));
     }
 
+    let mut pending_sources = Vec::new();
     for (_module, module_root, mut module_unit) in pending {
         let mut dependencies = BTreeSet::new();
         let mut sources = String::new();
@@ -101,7 +102,15 @@ fn detect_workspace(
             }
         }
         module_unit.depends_on = dependencies.into_iter().collect();
-        if let Some(service) = postgres_service(&sources) {
+        pending_sources.push((module_unit, sources));
+    }
+    let workspace_sources = pending_sources
+        .iter()
+        .map(|(_, sources)| sources.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (mut module_unit, sources) in pending_sources {
+        if let Some(service) = postgres_service(&sources, &workspace_sources) {
             module_unit.services.push(service);
             prepend_schema_tasks(&mut module_unit);
         }
@@ -474,6 +483,38 @@ fn quoted_assignment(source: &str, name: &str) -> Option<String> {
     Some(source[start..start + end].to_owned())
 }
 
+fn jdbc_ident(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn jdbc_databases(source: &str) -> BTreeSet<String> {
+    let mut databases = BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("jdbc:postgresql://") {
+        rest = &rest[start + "jdbc:postgresql://".len()..];
+        let Some(slash) = rest.find('/') else {
+            break;
+        };
+        rest = &rest[slash + 1..];
+        let database = rest
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .collect::<String>();
+        if jdbc_ident(&database)
+            && database != "postgres"
+            && database != "template0"
+            && database != "template1"
+        {
+            databases.insert(database);
+        }
+    }
+    databases
+}
+
 fn jdbc_port_and_database(source: &str) -> (u16, String) {
     let default = (40000, "postgres".to_owned());
     let Some(start) = source.find("jdbc:postgresql://") else {
@@ -505,17 +546,49 @@ fn jdbc_port_and_database(source: &str) -> (u16, String) {
     )
 }
 
-fn postgres_service(source: &str) -> Option<UnitService> {
-    if !gradle_needs_live_postgres(source) {
+fn postgres_health_cmd(user: &str, primary: &str, extra: &BTreeSet<String>) -> String {
+    let extra = extra
+        .iter()
+        .filter(|database| *database != primary && jdbc_ident(database) && jdbc_ident(user))
+        .cloned()
+        .collect::<Vec<_>>();
+    if extra.is_empty() || !jdbc_ident(user) || !jdbc_ident(primary) {
+        return format!(
+            "--health-cmd \"pg_isready -U {user} -d {primary}\" --health-interval 10s --health-timeout 5s --health-retries 10"
+        );
+    }
+    let list = extra.join(" ");
+    format!(
+        "--health-cmd \"sh -c 'for db in {list}; do createdb -U {user} $db 2>/dev/null || true; done; pg_isready -U {user} -d {primary}'\" --health-interval 10s --health-timeout 5s --health-retries 10"
+    )
+}
+
+fn postgres_service(unit_source: &str, workspace_source: &str) -> Option<UnitService> {
+    if !gradle_needs_live_postgres(unit_source) {
         return None;
     }
-    let (port, database) = jdbc_port_and_database(source);
-    let user = quoted_assignment(source, "datasourceUsername")
-        .or_else(|| quoted_assignment(source, "user"))
+    let catalog = if workspace_source.is_empty() {
+        unit_source
+    } else {
+        workspace_source
+    };
+    let (port, database) = jdbc_port_and_database(unit_source);
+    let database = if database == "postgres" {
+        jdbc_port_and_database(catalog).1
+    } else {
+        database
+    };
+    let user = quoted_assignment(unit_source, "datasourceUsername")
+        .or_else(|| quoted_assignment(unit_source, "user"))
+        .or_else(|| quoted_assignment(catalog, "datasourceUsername"))
+        .or_else(|| quoted_assignment(catalog, "user"))
         .unwrap_or_else(|| "postgres".to_owned());
-    let password = quoted_assignment(source, "datasourcePassword")
-        .or_else(|| quoted_assignment(source, "password"))
+    let password = quoted_assignment(unit_source, "datasourcePassword")
+        .or_else(|| quoted_assignment(unit_source, "password"))
+        .or_else(|| quoted_assignment(catalog, "datasourcePassword"))
+        .or_else(|| quoted_assignment(catalog, "password"))
         .unwrap_or_else(|| "postgres".to_owned());
+    let extra = jdbc_databases(catalog);
     Some(UnitService {
         name: "postgres".to_owned(),
         image: "postgres:18-alpine".to_owned(),
@@ -525,9 +598,7 @@ fn postgres_service(source: &str) -> Option<UnitService> {
             ("POSTGRES_DB".to_owned(), database.clone()),
         ],
         ports: vec![format!("{port}:5432")],
-        options: format!(
-            "--health-cmd \"pg_isready -U {user} -d {database}\" --health-interval 10s --health-timeout 5s --health-retries 10"
-        ),
+        options: postgres_health_cmd(&user, &database, &extra),
     })
 }
 
@@ -574,7 +645,10 @@ fn typesafe_accessor(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_include_modules, parse_project_deps, typesafe_accessor};
+    use super::{
+        jdbc_databases, parse_include_modules, parse_project_deps, postgres_health_cmd,
+        postgres_service, typesafe_accessor,
+    };
     use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
@@ -748,6 +822,117 @@ jooqCodegen(libs.postgresql)
             .iter()
             .any(|command| command.contains("flywayMigrate jooqCodegen")
                 && command.contains(" check ")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn jdbc_databases_collects_every_named_catalog() {
+        let source = r#"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
+val legacyUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+val monitorUrl = "jdbc:postgresql://127.0.0.1:40000/transfer_monitor"
+"#;
+        let databases = jdbc_databases(source);
+        assert!(databases.contains("exampledb"));
+        assert!(databases.contains("legacy"));
+        assert!(databases.contains("transfer_monitor"));
+    }
+
+    #[test]
+    #[expect(clippy::expect_used, reason = "fixture setup fails the test")]
+    fn postgres_service_health_creates_workspace_jdbc_databases() {
+        let domain = r#"
+plugins { alias(libs.plugins.jooq.codegen) }
+val datasourceUsername = "exampledb"
+val datasourcePassword = "exampledb"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
+jooqCodegen(libs.postgresql)
+"#;
+        let flyway = r#"
+plugins { alias(libs.plugins.flyway) }
+val datasourceUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+flyway { url = datasourceUrl }
+"#;
+        let workspace = format!("{domain}\n{flyway}");
+        let service = postgres_service(domain, &workspace).expect("jooq module needs postgres");
+        assert_eq!(
+            service
+                .env
+                .iter()
+                .find(|(name, _)| name == "POSTGRES_DB")
+                .map(|(_, value)| value.as_str()),
+            Some("exampledb")
+        );
+        assert!(
+            service.options.contains("createdb -U exampledb $db"),
+            "unqualified flywayMigrate needs every JDBC catalog: {}",
+            service.options
+        );
+        assert!(
+            service.options.contains("legacy"),
+            "legacy catalog missing from health-cmd: {}",
+            service.options
+        );
+        assert!(
+            postgres_health_cmd("exampledb", "exampledb", &jdbc_databases(&workspace))
+                .contains("legacy")
+        );
+    }
+
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "fixture setup fails the test")]
+    fn workspace_postgres_service_creates_sibling_flyway_catalogs() {
+        use super::super::scan_shape;
+        use crate::RunnerMode;
+        use std::fs;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "velnor-gradle-multidb-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("domain")).unwrap();
+        fs::create_dir_all(root.join("legacy-flyway")).unwrap();
+        fs::write(
+            root.join("settings.gradle.kts"),
+            "include(\"domain\", \"legacy-flyway\")\n",
+        )
+        .unwrap();
+        fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
+        fs::write(root.join("build.gradle.kts"), "tasks {}\n").unwrap();
+        fs::write(
+            root.join("domain/build.gradle.kts"),
+            r#"
+plugins { alias(libs.plugins.jooq.codegen) }
+val datasourceUsername = "exampledb"
+val datasourcePassword = "exampledb"
+val datasourceUrl = "jdbc:postgresql://${System.getenv("POSTGRESQL_DB_HOST") ?: "127.0.0.1"}:40000/exampledb"
+jooqCodegen(libs.postgresql)
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("legacy-flyway/build.gradle.kts"),
+            r#"
+plugins { alias(libs.plugins.flyway) }
+val datasourceUrl = "jdbc:postgresql://127.0.0.1:40000/legacy"
+flyway { url = datasourceUrl }
+"#,
+        )
+        .unwrap();
+        let shape = scan_shape(&root, RunnerMode::Velnor, "main", &[]).unwrap();
+        let domain = shape
+            .units
+            .iter()
+            .find(|unit| unit.id == "gradle-domain")
+            .unwrap();
+        assert!(
+            domain.services[0].options.contains("legacy"),
+            "domain flywayMigrate also migrates sibling catalogs: {}",
+            domain.services[0].options
+        );
         let _ = fs::remove_dir_all(root);
     }
 

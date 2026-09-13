@@ -1492,12 +1492,15 @@ async fn observe_github_and_routing(
             .or_else(|| exec.name.clone())
             .unwrap_or_default();
         let trust = prove::runtime_trust_scope(&exec.trust_scope);
-        // Repo-scoped fleets derive policy from the URL (operator override
-        // on disk wins). Org-scoped fleets load the generated
-        // `<org>-desired-policy.json` allowlist every cycle and replace
-        // `routing-policy.json`. Never snapshot live group membership: a
-        // truncated GitHub group would become the desired baseline and hide
-        // drift.
+        // Repo-scoped fleets derive policy from URL + labels + trust (the
+        // immutable daemon config). Refresh the on-disk snapshot when that
+        // config changes; otherwise a first-boot `untrusted` file freezes
+        // `routing_valid=false` after the operator raises VELNOR_TRUST_SCOPE.
+        // Explicit `--routing-policy-file` is the operator override. Org
+        // fleets load the generated `<org>-desired-policy.json` allowlist
+        // every cycle and replace `routing-policy.json`. Never snapshot live
+        // group membership: a truncated GitHub group would become the desired
+        // baseline and hide drift.
         let repo_policy = exec.url.as_deref().and_then(|url| {
             prove::policy_from_github_url(url, group.clone(), exec.labels.clone(), trust.clone())
         });
@@ -1506,7 +1509,7 @@ async fn observe_github_and_routing(
             prove::write_policy(&args.state_dir, &policy)?;
             Some(policy)
         } else if let Some(policy) = repo_policy {
-            prove::write_policy_if_absent(&args.state_dir, &policy)?;
+            prove::write_policy_if_changed(&args.state_dir, &policy)?;
             Some(policy)
         } else if let Some(url) = exec.url.as_deref() {
             if let Ok(scope) = crate::protocol::GitHubScope::parse(url) {
@@ -4699,6 +4702,72 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// First-boot `write_policy_if_absent` froze `trust_scope=untrusted` on
+    /// disk. Raising `VELNOR_TRUST_SCOPE=trusted` updated evidence but not
+    /// policy, so `routing_valid` stayed false and slots refused jobs.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn repo_scoped_derived_policy_refreshes_when_trust_scope_changes() {
+        let env_guard = crate::test_support::github_test_env().await;
+        env_guard.set_native();
+        // SAFETY: the test holds the process-wide GITHUB_TOKEN environment lock.
+        unsafe { std::env::remove_var("GITHUB_TOKEN") };
+
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-ctrl-repo-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_exec_config(&dir, &dummy_exec("https://github.com/acme/repo"), 1).unwrap();
+        std::fs::write(
+            dir.join(prove::ROUTING_POLICY_FILE),
+            serde_json::to_vec_pretty(&json!({
+                "group": "velnor",
+                "selected_repositories": ["acme/repo"],
+                "labels": ["velnor"],
+                "trust_scope": "untrusted"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".into(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        journal
+            .apply(Event::DesiredCapacity {
+                ready: args.desired_ready,
+            })
+            .unwrap();
+        let mut pacing = GithubPacing::default();
+        observe_github_and_routing(
+            &args,
+            &mut journal,
+            &mut pacing,
+            tokio::time::Instant::now() + CONTROLLER_REMOTE_BUDGET,
+        )
+        .await
+        .unwrap();
+        let policy = prove::read_policy(&dir).expect("derived policy must be on disk");
+        assert_eq!(
+            policy.trust_scope, "trusted",
+            "repo-scoped policy must track daemon trust_scope, not freeze the first-boot snapshot: {policy:?}"
+        );
+        assert_eq!(policy.selected_repositories, vec!["acme/repo"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn unresolved_org_policy_names_every_searched_source() {
         let note = unresolved_desired_policy_note(Some("https://github.com/tailrocks"));
@@ -4885,6 +4954,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: Some(reset),
             remaining: Some(0),
+            category: None,
         });
         assert!(pacing.registration_due("velnor-1", now));
         assert!(pacing.registration_due("velnor-2", now));
@@ -4906,6 +4976,7 @@ mod tests {
             retry_after_seconds: Some(30),
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let mut pacing = GithubPacing::default();
         pacing.record_registration_error("velnor-1", now, &throttled);
@@ -4927,6 +4998,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: Some(epoch_now() + 3500),
             remaining: Some(4200),
+            category: None,
         });
         pacing.record_registration_error("velnor-1", now, &permission);
         assert!(
