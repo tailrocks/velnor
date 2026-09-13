@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! The two shipped binaries must never disagree about a job's resource budget.
 //!
 //! `DaemonArgs` is declared twice — once in `velnor_runner::service`, once in

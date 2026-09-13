@@ -98,6 +98,15 @@ pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     #[test]
     fn crate_version_is_reported() {

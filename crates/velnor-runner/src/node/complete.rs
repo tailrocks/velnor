@@ -867,6 +867,15 @@ fn ack_remote(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use velnor_control::journal::{Event, ACQUISITION_RESOLUTION_SECONDS, MAX_ACQUISITION_PROBES};

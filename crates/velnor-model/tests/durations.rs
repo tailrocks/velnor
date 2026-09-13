@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Machine duration contract: unsigned `*_ms` fields, `null` for
 //! unavailable, typed overflow errors instead of silent wrapping.
 

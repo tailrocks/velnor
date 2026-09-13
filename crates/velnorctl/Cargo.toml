@@ -43,3 +43,11 @@ release-build = ["velnor-runner/release-build"]
 
 [dev-dependencies]
 sha2 = { workspace = true }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

@@ -56,6 +56,15 @@ use std::time::Duration;
 /// CLI fallback talks to on both the job and the host path.
 pub(crate) fn socket_path() -> PathBuf {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     if let Some(override_path) = test_socket_override() {
         return override_path;
     }
@@ -82,6 +91,15 @@ const MAX_HEAD_BYTES: usize = 64 * 1024;
 /// the `min` keeps the honest plumbing so a future tighter class still wins.
 pub(crate) fn api_budget(class_deadline: Duration) -> Duration {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     if let Some(override_ms) = test_budget_override() {
         return Duration::from_millis(override_ms).min(class_deadline);
     }
@@ -117,12 +135,39 @@ pub(crate) fn engine_api_enabled() -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 static TEST_SOCKET: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 static TEST_BUDGET_MS: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn test_socket_override() -> Option<PathBuf> {
     TEST_SOCKET
         .lock()
@@ -131,6 +176,15 @@ fn test_socket_override() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn test_budget_override() -> Option<u64> {
     *TEST_BUDGET_MS
         .lock()
@@ -138,6 +192,15 @@ fn test_budget_override() -> Option<u64> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn set_test_overrides(socket: Option<PathBuf>, budget_ms: Option<u64>) {
     *TEST_SOCKET
         .lock()
@@ -151,11 +214,29 @@ fn set_test_overrides(socket: Option<PathBuf>, budget_ms: Option<u64>) {
 /// serial lock for its lifetime so parallel tests neither thrash the
 /// process-global overrides nor pollute each other's counter deltas.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) struct EngineTestGuard {
     _serial: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl EngineTestGuard {
     /// Force the API path on at `socket`, with an optional budget override
     /// in milliseconds for timeout tests.
@@ -168,6 +249,15 @@ impl EngineTestGuard {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl Drop for EngineTestGuard {
     fn drop(&mut self) {
         set_test_overrides(None, None);
@@ -179,9 +269,27 @@ impl Drop for EngineTestGuard {
 /// query falls back to the CLI. Hold alongside an [`EngineTestGuard`] so
 /// the metrics serial lock keeps parallel tests off the process-global flag.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) struct FailRuntimeBuildGuard;
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl FailRuntimeBuildGuard {
     pub(crate) fn inject() -> Self {
         FAIL_RUNTIME_BUILD.store(1, Ordering::Relaxed);
@@ -190,6 +298,15 @@ impl FailRuntimeBuildGuard {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl Drop for FailRuntimeBuildGuard {
     fn drop(&mut self) {
         FAIL_RUNTIME_BUILD.store(0, Ordering::Relaxed);
@@ -204,6 +321,15 @@ static ENGINE_RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
     std::sync::OnceLock::new();
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 static FAIL_RUNTIME_BUILD: AtomicU8 = AtomicU8::new(0);
 
 /// Runtime for API calls issued where no runtime is current: the dedicated
@@ -218,6 +344,15 @@ static FAIL_RUNTIME_BUILD: AtomicU8 = AtomicU8::new(0);
 /// sick host stays on the CLI without rebuilding per query.
 fn engine_runtime() -> Option<&'static tokio::runtime::Runtime> {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     if FAIL_RUNTIME_BUILD.load(Ordering::Relaxed) != 0 {
         return None;
     }
@@ -381,6 +516,15 @@ impl EngineError {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     #[must_use]
     pub(crate) fn kind(&self) -> Option<EngineFaultKind> {
         match self {
@@ -1099,6 +1243,15 @@ fn parse_container_list(value: &serde_json::Value) -> FaultResult<Vec<EngineCont
 pub(crate) use mock::MockEngine;
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) mod mock {
     //! Scripted Engine socket server for tests: std blocking I/O on a helper
     //! thread (the `unix_api.rs` test shape), routing canned responses by
@@ -1237,6 +1390,15 @@ pub(crate) mod mock {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::mock::{close_delimited, json_response};
     use super::*;

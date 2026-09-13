@@ -1507,6 +1507,15 @@ fn collect_pointer_protected(path: &Path, depth: usize, protected: &mut BTreeSet
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) mod test_clock {
     use std::path::Path;
     use std::time::Duration;
@@ -1542,6 +1551,15 @@ pub(crate) mod test_clock {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use test_clock::backdate;

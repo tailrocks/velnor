@@ -437,6 +437,15 @@ impl SidecarLock {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn write_file_with_temp_path(
     path: &std::path::Path,
     _parent: &std::path::Path,
@@ -543,7 +552,15 @@ fn open_anchored_parent(
         if component == std::path::Component::RootDir {
             continue;
         }
-        let std::path::Component::Normal(name) = component else {
+        // Proof: `parent_path` is `path.parent()`, so its components are a
+        // subset of the `path` components validated as RootDir|Normal above;
+        // after the RootDir skip only Normal remains.
+        #[allow(
+            clippy::unreachable,
+            reason = "parent components are a validated subset"
+        )]
+        let std::path::Component::Normal(name) = component
+        else {
             unreachable!("directory components were validated above");
         };
         let Some(child) = open_directory_child(&parent, name, create)? else {
@@ -1014,6 +1031,15 @@ fn validate_context_file(file: &ContextFile) -> Result<(), ConfigError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

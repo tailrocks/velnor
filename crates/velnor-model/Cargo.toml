@@ -19,3 +19,11 @@ rustix.workspace = true
 [dev-dependencies]
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

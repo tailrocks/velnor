@@ -326,12 +326,30 @@ impl DockerLifecycleGuard {
     /// host-wide slot. Teardown still runs: a stuck peer must delay Docker
     /// mutations, never wedge a slot's turnover.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub fn degraded(&self) -> bool {
         self._degraded
     }
 
     /// How long the acquire waited before a slot freed or the bound elapsed.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub fn waited(&self) -> Duration {
         self._waited
     }
@@ -608,6 +626,15 @@ fn unix_now() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

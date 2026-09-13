@@ -57,6 +57,15 @@ impl LifecycleService {
 
     /// Create a lifecycle service backed by the host-shared operational store.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     #[must_use]
     pub fn with_store(store: Arc<Store>) -> Self {
         Self {
@@ -354,6 +363,15 @@ fn unavailable() -> PortError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Packaged-invoker coverage: every `velnorctl <verb>` invocation shipped in
 //! the package (systemd units, Debian maintainer scripts) and in the release
 //! workflow must resolve against this binary's parse surface. Ported from the

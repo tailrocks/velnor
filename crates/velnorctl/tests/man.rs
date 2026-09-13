@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! `velnorctl man` behavior over the clap-derived page set: determinism,
 //! safety refusals, atomic writes, and structural documentation contracts.
 

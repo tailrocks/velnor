@@ -1138,6 +1138,15 @@ fn parse_create_value(body: &[u8]) -> Result<Value> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub fn inject_ownership_labels(body: &[u8], job_id: &str, daemon_id: &str) -> Result<Vec<u8>> {
     let mut value = parse_create_value(body)?;
     inject_ownership_labels_value(&mut value, job_id, daemon_id)?;
@@ -1175,6 +1184,15 @@ fn inject_ownership_labels_value(value: &mut Value, job_id: &str, daemon_id: &st
 
 /// Rewrite a Docker Engine HTTP/1.1 request so object creates carry job labels.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub fn rewrite_docker_api_request(
     request: &[u8],
     job_id: &str,
@@ -2538,6 +2556,9 @@ fn handle_client_with(
             host_state = Some(connect_lease_host(host_socket, &conns)?);
         }
         let reusable = {
+            // Proof: the branch above assigns `Some` or returns via `?`, so
+            // the state is `Some` here.
+            #[allow(clippy::expect_used, reason = "host state just initialized")]
             let (host, _) = host_state.as_mut().expect("host state initialized");
             if let Err(error) = host
                 .write_all(&forwarded)
@@ -3612,6 +3633,15 @@ fn normalize_chunked_request_header(header: &[u8], body_len: usize) -> Result<Ve
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use anyhow::anyhow;

@@ -67,18 +67,23 @@ pub enum Command {
     Release(ReleaseArgs),
 }
 
-impl From<ServiceCommand> for Command {
-    fn from(command: ServiceCommand) -> Self {
+impl TryFrom<ServiceCommand> for Command {
+    type Error = anyhow::Error;
+
+    /// Node roles dispatch before conversion, so they cannot become a
+    /// [`Command`]: the fallible conversion reports that caller error
+    /// instead of panicking on four of the seven [`ServiceCommand`] variants.
+    fn try_from(command: ServiceCommand) -> Result<Self, Self::Error> {
         match command {
-            ServiceCommand::Daemon(args) => Self::Daemon(args),
-            ServiceCommand::Release(args) => Self::Release(args),
-            ServiceCommand::Capabilities(args) => Self::Capabilities(args.into()),
+            ServiceCommand::Daemon(args) => Ok(Self::Daemon(args)),
+            ServiceCommand::Release(args) => Ok(Self::Release(args)),
+            ServiceCommand::Capabilities(args) => Ok(Self::Capabilities(args.into())),
             ServiceCommand::Guardian(_)
             | ServiceCommand::Controller(_)
             | ServiceCommand::Slot(_)
-            | ServiceCommand::Job(_) => {
-                unreachable!("node roles dispatch before Command conversion")
-            }
+            | ServiceCommand::Job(_) => Err(anyhow::anyhow!(
+                "node roles dispatch before Command conversion"
+            )),
         }
     }
 }
@@ -583,7 +588,7 @@ pub async fn execute() -> anyhow::Result<()> {
             crate::node::run_job(args).await
         }
         other => {
-            let command = Command::from(other);
+            let command = Command::try_from(other)?;
             let telemetry_dir = match &command {
                 Command::Daemon(args) => {
                     crate::runner::daemon_config_dir(&((**args).clone().into()))
@@ -602,31 +607,104 @@ async fn dispatch_service(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Daemon(args) => crate::runner::daemon((*args).into()).await,
         Command::Release(args) => crate::release::run(args.into()),
-        Command::Capabilities(args) => crate::manifest::run(args),
-        other => crate::scaffold::dispatch(other_command(other)).await,
-    }
-}
-
-fn other_command(command: Command) -> crate::args::Command {
-    match command {
-        Command::Cache(args) => crate::args::Command::Cache(args),
-        Command::Capabilities(args) => crate::args::Command::Capabilities(args),
-        Command::Configure(args) => crate::args::Command::Configure(args),
-        Command::Preflight(args) => crate::args::Command::Preflight(args),
-        Command::Remove(args) => crate::args::Command::Remove(args),
-        Command::Status(args) => crate::args::Command::Status(args),
-        Command::Storage(args) => crate::args::Command::Storage(args),
-        Command::Doctor(args) => crate::args::Command::Doctor(args),
-        Command::Daemon(_) | Command::Release(_) => {
-            unreachable!("handled by the service dispatcher")
+        Command::Cache(args) => crate::scaffold::dispatch(crate::args::Command::Cache(args)).await,
+        Command::Capabilities(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Capabilities(args)).await
+        }
+        Command::Configure(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Configure(args)).await
+        }
+        Command::Preflight(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Preflight(args)).await
+        }
+        Command::Remove(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Remove(args)).await
+        }
+        Command::Status(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Status(args)).await
+        }
+        Command::Storage(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Storage(args)).await
+        }
+        Command::Doctor(args) => {
+            crate::scaffold::dispatch(crate::args::Command::Doctor(args)).await
         }
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use clap::error::ErrorKind;
+
+    #[test]
+    fn service_command_conversion_reports_node_roles_instead_of_panicking() {
+        let daemon = ServiceCli::try_parse_from(["velnor-runner", "daemon"])
+            .expect("daemon arguments should parse");
+        assert!(matches!(
+            Command::try_from(daemon.command),
+            Ok(Command::Daemon(_))
+        ));
+
+        let capabilities = ServiceCli::try_parse_from(["velnor-runner", "capabilities", "export"])
+            .expect("capabilities arguments should parse");
+        assert!(matches!(
+            Command::try_from(capabilities.command),
+            Ok(Command::Capabilities(_))
+        ));
+
+        for argv in [
+            vec![
+                "velnor-runner",
+                "guardian",
+                "--state-dir",
+                "/tmp/velnor-state",
+            ],
+            vec![
+                "velnor-runner",
+                "controller",
+                "--state-dir",
+                "/tmp/velnor-state",
+            ],
+            vec![
+                "velnor-runner",
+                "slot",
+                "--state-dir",
+                "/tmp/velnor-state",
+                "--scope",
+                "scope",
+                "--slot-index",
+                "0",
+                "--generation",
+                "1",
+            ],
+            vec![
+                "velnor-runner",
+                "job",
+                "--state-dir",
+                "/tmp/velnor-state",
+                "--job-id",
+                "job",
+            ],
+        ] {
+            let parsed =
+                ServiceCli::try_parse_from(argv).expect("node role arguments should parse");
+            let error = Command::try_from(parsed.command).expect_err("node roles must not convert");
+            assert!(
+                error.to_string().contains("node roles dispatch"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
 
     #[test]
     fn service_slot_requires_generation() {

@@ -128,6 +128,9 @@ pub fn parse(expression: &str, env: &dyn ParseEnvironment) -> Result<Option<Node
         ));
     }
 
+    // Proof: the length check above returns unless exactly one operand
+    // remains, so `pop` is `Some`.
+    #[allow(clippy::expect_used, reason = "exactly one operand remains")]
     let result = context.operands.pop().expect("exactly one operand remains");
     check_max_depth(expression, &result, 1)?;
     Ok(Some(result))
@@ -169,6 +172,10 @@ fn push_operand(context: &mut ParseContext<'_>, token: &Token) -> Result<(), Par
         TokenKind::Null | TokenKind::Boolean | TokenKind::Number | TokenKind::String => {
             Node::Literal(token.parsed_value.clone().unwrap_or(Value::Null))
         }
+        // Proof: the single caller dispatches only non-operator,
+        // non-`Unexpected` tokens here, which are exactly the eight kinds
+        // covered above.
+        #[allow(clippy::unreachable, reason = "only operand token kinds reach here")]
         other => unreachable!("token kind {other:?} is not an operand"),
     };
 
@@ -233,6 +240,9 @@ fn flush_top_operator(context: &mut ParseContext<'_>) -> Result<(), ParseError> 
 
     let node = match operator.kind {
         TokenKind::LogicalOperator => match operator.raw_value.as_str() {
+            // Proof: `pop_operands` returns exactly `operand_count` nodes or
+            // errors, and `!` has count 1.
+            #[allow(clippy::expect_used, reason = "unary operator pops one operand")]
             "!" => Node::Not(Box::new(operands.into_iter().next().expect("one operand"))),
             "&&" | "||" => {
                 // Upstream flattens nested `And`/`Or` into a single n-ary node
@@ -268,7 +278,12 @@ fn flush_top_operator(context: &mut ParseContext<'_>) -> Result<(), ParseError> 
                     }
                 };
                 let mut operands = operands.into_iter();
+                // Proof: the binary operators that reach here have operand
+                // count 2 (unknown operators return `Err` above), and
+                // `pop_operands` returns exactly that many nodes or errors.
+                #[allow(clippy::expect_used, reason = "binary operator pops two operands")]
                 let left = operands.next().expect("binary operator has a left operand");
+                #[allow(clippy::expect_used, reason = "binary operator pops two operands")]
                 let right = operands
                     .next()
                     .expect("binary operator has a right operand");
@@ -277,7 +292,11 @@ fn flush_top_operator(context: &mut ParseContext<'_>) -> Result<(), ParseError> 
         },
         TokenKind::Dereference | TokenKind::StartIndex => {
             let mut operands = operands.into_iter();
+            // Proof: both index operators have operand count 2, and
+            // `pop_operands` returns exactly that many nodes or errors.
+            #[allow(clippy::expect_used, reason = "index operator pops two operands")]
             let left = operands.next().expect("index has a left operand");
+            #[allow(clippy::expect_used, reason = "index operator pops two operands")]
             let right = operands.next().expect("index has a right operand");
             Node::Index(Box::new(left), Box::new(right))
         }
@@ -299,7 +318,11 @@ fn flush_top_end_index(context: &mut ParseContext<'_>) -> Result<(), ParseError>
     let operator = pop_operator(context, TokenKind::StartIndex)?;
     let operands = pop_operands(context, operator.operand_count())?;
     let mut operands = operands.into_iter();
+    // Proof: `pop_operator` verified `StartIndex` (operand count 2) or
+    // returned `Err`, and `pop_operands` returns exactly that many nodes.
+    #[allow(clippy::expect_used, reason = "index operator pops two operands")]
     let left = operands.next().expect("index has a left operand");
+    #[allow(clippy::expect_used, reason = "index operator pops two operands")]
     let right = operands.next().expect("index has a right operand");
     context
         .operands

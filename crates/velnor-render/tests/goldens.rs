@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Golden renderer matrix: every approved resource noun through every
 //! output format, byte-compared against committed goldens, plus
 //! stdout/stderr separation and unversioned-`name` guarantees.

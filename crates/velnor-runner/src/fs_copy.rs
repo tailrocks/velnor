@@ -387,6 +387,15 @@ impl NoFollowDestinationDir {
     /// the staged tree is visible. Any failed publication attempts to restore
     /// the original destination.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub fn publish_staged_directory(
         &self,
         staging_name: &OsStr,
@@ -1432,6 +1441,15 @@ impl NoFollowDestinationDir {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub fn publish_staged_directory(
         &self,
         _staging_name: &OsStr,
@@ -1484,6 +1502,15 @@ fn open_source_file_nonblocking_no_follow_at(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     #[cfg(unix)]
     use std::{io::Read, sync::mpsc, thread, time::Duration};

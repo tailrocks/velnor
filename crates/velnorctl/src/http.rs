@@ -78,6 +78,15 @@ impl ApiState {
 
     /// Build an in-memory state for unit tests using the default instance.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     #[must_use]
     pub fn from_services(services: &velnor_control::application::ApplicationServices) -> Self {
         Self::from_services_for_instance(services, "default")
@@ -1055,6 +1064,15 @@ impl IntoResponse for ApiError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};

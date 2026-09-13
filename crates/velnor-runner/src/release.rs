@@ -239,6 +239,9 @@ impl fmt::Display for OciDigest {
 
 fn hex_lower(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
+    // Proof: both digits are nibbles (`byte >> 4`, `byte & 0x0f`), hence
+    // `< 16`, so `from_digit(_, 16)` is always `Some`.
+    #[allow(clippy::unwrap_used, reason = "nibbles are always valid hex digits")]
     for byte in bytes {
         out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
         out.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap());
@@ -394,6 +397,10 @@ impl PackageRecord {
     /// Same canonical-bytes contract as a [`ReleaseRecord`]: two-space pretty
     /// JSON plus a trailing newline, so the digest is reproducible.
     pub fn to_canonical_json(&self) -> String {
+        // Proof: the record graph derives `Eq` (no floats) with all-derived
+        // `Serialize` over strings, ints, and a fieldless enum — no maps, no
+        // custom serializers — so `serde_json` cannot fail.
+        #[allow(clippy::expect_used, reason = "record serialization is infallible")]
         let mut json =
             serde_json::to_string_pretty(self).expect("package record always serializes");
         json.push('\n');
@@ -694,6 +701,10 @@ impl ReleaseRecord {
     pub fn to_canonical_json(&self) -> String {
         let mut normalized = self.clone();
         normalized.architectures.sort_by_key(|item| item.arch);
+        // Proof: the record graph derives `Eq` (no floats) with all-derived
+        // `Serialize` over strings, ints, vecs, and a fieldless enum — no
+        // maps, no custom serializers — so `serde_json` cannot fail.
+        #[allow(clippy::expect_used, reason = "record serialization is infallible")]
         let mut json =
             serde_json::to_string_pretty(&normalized).expect("release record always serializes");
         json.push('\n');
@@ -1511,6 +1522,9 @@ impl ReleaseStore {
         let bytes = record.to_canonical_json();
         let digest = Sha256Hex::of_bytes(bytes.as_bytes());
         let path = self.record_path(key);
+        // Proof: `record_path` ends in the `record.json` file name, so the
+        // path always has a parent.
+        #[allow(clippy::unwrap_used, reason = "record path always has a parent")]
         fs::create_dir_all(path.parent().unwrap())?;
         if path.exists() {
             let existing = fs::read(&path)?;
@@ -1597,6 +1611,9 @@ fn write_atomic_symlink(path: &Path, tag: &str) -> Result<()> {
     use std::os::unix::fs::symlink;
     let parent = path.parent().context("release pointer has no parent")?;
     fs::create_dir_all(parent)?;
+    // Proof: both callers pass `root.join("active")` / `root.join("previous")`,
+    // which always end in a file name.
+    #[allow(clippy::unwrap_used, reason = "pointer path always has a file name")]
     let tmp = parent.join(format!(
         ".{}.tmp",
         path.file_name().unwrap().to_string_lossy()
@@ -1984,6 +2001,9 @@ fn verify_and_tag_release_image(record: &ReleaseRecord) -> Result<()> {
         "--format",
         "{{json .RepoDigests}}",
     ])?)?;
+    // Proof: `str::split` yields at least one item even for an empty string,
+    // so `.next()` is always `Some`.
+    #[allow(clippy::unwrap_used, reason = "split always yields a first item")]
     let expected_ref = format!(
         "{}@{}",
         record.oci_image_ref.split('@').next().unwrap(),
@@ -2125,4 +2145,13 @@ fn export_command(args: ReleaseExportArgs) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests;

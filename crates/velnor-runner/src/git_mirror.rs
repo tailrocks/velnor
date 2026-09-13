@@ -608,6 +608,15 @@ fn ensure_success(code: i32, operation: &str, stderr: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},

@@ -29,6 +29,15 @@ const MAX_MANIFEST_INPUTS: usize = 256;
 /// its absence an explicit, testable policy state rather than a compile-time
 /// source-path failure.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn release_workflow_text() -> Option<String> {
     let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let workflow_path = repository_root.join(".github/workflows/release.yml");
@@ -1795,6 +1804,15 @@ pub fn run(args: CapabilitiesArgs) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

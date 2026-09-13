@@ -2104,6 +2104,15 @@ pub struct RunServiceClient {
     http: Client,
     bearer_token: String,
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     acquire_retry_delay_override: Option<Duration>,
 }
 
@@ -2147,11 +2156,29 @@ impl RunServiceClient {
             http,
             bearer_token: bearer_token.into(),
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             acquire_retry_delay_override: None,
         })
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub(crate) fn with_acquire_retry_delay_for_test(mut self, delay: Duration) -> Self {
         self.acquire_retry_delay_override = Some(delay);
         self
@@ -2213,7 +2240,11 @@ impl RunServiceClient {
                 Err(error) => Some(error.context("acquire run-service job request")),
             };
 
-            let Some(error) = retry_error else {
+            // Proof: every `Ok` success path returns above; reaching here
+            // requires the `Err` arm, which always yields `Some`.
+            #[allow(clippy::unreachable, reason = "only the Err arm falls through")]
+            let Some(error) = retry_error
+            else {
                 unreachable!("successful acquire returns before retry handling");
             };
             if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
@@ -2237,6 +2268,15 @@ impl RunServiceClient {
 
     fn acquire_retry_delay(&self, attempt: u32) -> Duration {
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         if let Some(delay) = self.acquire_retry_delay_override {
             return delay;
         }
@@ -4882,11 +4922,29 @@ fn artifact_create_request(
 #[derive(Debug)]
 struct ArtifactTempFile {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     path: std::path::PathBuf,
     file: Option<std::fs::File>,
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl ArtifactTempFile {
     fn path(&self) -> &std::path::Path {
         &self.path
@@ -4896,6 +4954,15 @@ impl ArtifactTempFile {
 impl Drop for ArtifactTempFile {
     fn drop(&mut self) {
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -4930,6 +4997,15 @@ fn open_artifact_temp_file(
     Ok((
         ArtifactTempFile {
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             path,
             file: None,
         },
@@ -5881,6 +5957,9 @@ fn validate_zip_central_directory(
     };
     let eocd_index = usize::try_from(eocd_offset - (file_len - tail_len))
         .context("ZIP EOCD offset overflowed")?;
+    // Proof: `EOCD_BYTES` is the constant 22, which fits in `usize` on
+    // every target.
+    #[allow(clippy::unwrap_used, reason = "constant 22 fits in usize")]
     let eocd = tail
         .get(eocd_index..eocd_index + usize::try_from(EOCD_BYTES).unwrap())
         .context("truncated ZIP end record")?;
@@ -6229,6 +6308,15 @@ fn artifacts_owned_by_job(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn test_results_artifact_descriptor(
     job_id: &str,
     database_id: u64,
@@ -6237,6 +6325,15 @@ fn test_results_artifact_descriptor(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn named_test_results_artifact_descriptor(
     job_id: &str,
     database_id: u64,
@@ -6539,6 +6636,15 @@ fn download_artifacts_blocking_in_temp_dir(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

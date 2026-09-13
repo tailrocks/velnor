@@ -33,6 +33,9 @@ pub fn parse_command_file_contents(contents: &str) -> Result<Vec<FileCommand>> {
         if let (Some(equals_index), Some(heredoc_index)) = (equals_index, heredoc_index)
             && equals_index < heredoc_index
         {
+            // Proof: this arm requires `line.find('=') == Some`, so the same
+            // line splits on `'='`.
+            #[allow(clippy::expect_used, reason = "line provably contains '='")]
             let (name, value) = line.split_once('=').expect("line contains equals");
             validate_name(name)?;
             commands.push(FileCommand {
@@ -96,6 +99,15 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

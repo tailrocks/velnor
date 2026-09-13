@@ -170,11 +170,29 @@ impl std::error::Error for DurationOverflowError {}
 
 /// Deterministic fixed timestamp used by golden fixtures.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn golden_timestamp() -> Timestamp {
     Timestamp::parse("2026-08-24T12:30:45Z").expect("golden timestamp")
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

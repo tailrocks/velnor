@@ -1,3 +1,17 @@
+// Test-support probes: this module compiles only under `cfg(test)` or the
+// `test-support` feature, and every consumer is a test (unit or integration).
+// Like test code, probe setup fails loudly instead of threading `Result`s
+// through fixtures, so the whole module keeps the test lint scope.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "test-support probes fail loudly like tests"
+)]
+
 use std::{
     collections::BTreeMap,
     fs,

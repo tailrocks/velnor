@@ -243,6 +243,15 @@ impl LoopbackVsock {
     /// Configure frames that arrive after the guest's terminal completion.
     /// Used to prove the host rejects post-terminal replay traffic.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     #[must_use]
     pub fn with_post_completion_frames(
         mut self,
@@ -1518,6 +1527,15 @@ pub fn handle_delivered_plan(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use crate::execution::RecordingCommands;

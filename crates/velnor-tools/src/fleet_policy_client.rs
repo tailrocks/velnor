@@ -56,6 +56,15 @@ pub enum FleetHttpMethod {
 
 impl FleetHttpMethod {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn as_str(self) -> &'static str {
         match self {
             FleetHttpMethod::Get => "GET",
@@ -110,11 +119,19 @@ pub trait FleetHttp {
 
 fn bearer_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
+    // Proof: the pattern is a static literal with valid regex syntax (flag,
+    // group, character class); every `redact` call compiles it, and unit
+    // tests execute that path.
+    #[allow(clippy::expect_used, reason = "static regex literal is valid")]
     PATTERN.get_or_init(|| Regex::new(r"(?i)(bearer\s+)[A-Za-z0-9._\-]+").expect("valid regex"))
 }
 
 fn token_shape_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
+    // Proof: the pattern is a static literal with valid regex syntax
+    // (bounded alternation); every `redact` call compiles it, and unit
+    // tests execute that path.
+    #[allow(clippy::expect_used, reason = "static regex literal is valid")]
     PATTERN.get_or_init(|| {
         Regex::new(r"\b(gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})\b")
             .expect("valid regex")
@@ -806,6 +823,15 @@ fn bounded_detail(detail: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod fake_api {
     use super::{FleetHttp, FleetHttpError, FleetHttpRequest, FleetHttpResponse};
     use serde_json::{json, Value};
@@ -1044,6 +1070,15 @@ mod fake_api {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use crate::fleet_policy::GroupVisibility;

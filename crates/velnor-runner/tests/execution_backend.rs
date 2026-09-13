@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Shipped config parse and load (twice). Dispatch coverage lives in-crate.
 
 use velnor_model::{ExecutionBackendKind, ExecutionFile};

@@ -806,6 +806,9 @@ async fn route(
     let primary = chain[0];
     if let Err(error) = ctx.service.ensure_tenant(primary) {
         eprintln!("Warning: gha cache tenant initialization: {error:#}");
+        // Proof: `body()` fails only on an invalid status/header; the status
+        // is a const and the header name/value are static valid strings.
+        #[allow(clippy::unwrap_used, reason = "response parts are static and valid")]
         return Ok(Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .header("content-type", "application/json")
@@ -816,6 +819,10 @@ async fn route(
     let method = req.method().clone();
 
     let respond = |status: StatusCode, body: Value| {
+        // Proof: `body()` fails only on an invalid status/header; the status
+        // is a valid `StatusCode` and the header name/value are static valid
+        // strings.
+        #[allow(clippy::unwrap_used, reason = "response parts are static and valid")]
         Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -845,6 +852,9 @@ async fn route(
         (hyper::Method::GET, p) if p.ends_with("/cache") => {
             lookup_v1(&req, ctx, &chain).map(|entry| match entry {
                 Some(entry) => respond(StatusCode::OK, entry),
+                // Proof: `body()` fails only on an invalid status/header;
+                // the status is a const and no headers are set.
+                #[allow(clippy::unwrap_used, reason = "response parts are static and valid")]
                 None => Response::builder()
                     .status(StatusCode::NO_CONTENT)
                     .body(full_body(Bytes::new()))
@@ -856,6 +866,14 @@ async fn route(
                 download_chain(&ctx.service, id, &chain)
                     .await
                     .map(|(body, size)| {
+                        // Proof: `body()` fails only on an invalid
+                        // status/header; the status is a const, the
+                        // content-type is a static valid string, and the
+                        // content length is a `u64`, which always renders.
+                        #[allow(
+                            clippy::unwrap_used,
+                            reason = "response parts are static and valid"
+                        )]
                         Response::builder()
                             .status(StatusCode::OK)
                             .header("content-type", "application/octet-stream")
@@ -913,6 +931,9 @@ fn v2_upload_id(path: &str) -> Option<&str> {
 }
 
 fn respond_unauthorized() -> Response<ResponseBody> {
+    // Proof: `body()` fails only on an invalid status/header; the status is
+    // a const and the header name/value are static valid strings.
+    #[allow(clippy::unwrap_used, reason = "response parts are static and valid")]
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("content-type", "application/json")
@@ -1710,6 +1731,15 @@ pub(crate) async fn bind_configured(service: CacheService) -> Result<SocketAddr>
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use futures_util::stream;
