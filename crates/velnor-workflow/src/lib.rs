@@ -4974,6 +4974,26 @@ mod tests {
     }
 
     #[test]
+    fn setup_action_bootstrap_allows_same_repository_prs_only() {
+        let action_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.github-gen/sources/actions/setup-velnor-workflow/action.yml");
+        let action = must(
+            fs::read_to_string(&action_path),
+            "read declared setup action",
+        );
+        assert!(action.contains("same-repository PRs may bootstrap"));
+        assert!(action.contains(
+            "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
+        ));
+        assert!(
+            action.contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}")
+        );
+        assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
+        assert!(!action.contains("default-branch-push-only"));
+        assert!(!action.contains("cargo install --locked --git https://"));
+    }
+
+    #[test]
     fn adopted_templates_refresh_literal_velnor_source_pins_only() {
         let old_revision = "0123456789abcdef0123456789abcdef01234567";
         let template = format!(

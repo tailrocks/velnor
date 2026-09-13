@@ -6,7 +6,7 @@ scan	88e42558ab4f635d
 generator	9
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
-.github/actions/setup-velnor-workflow/action.yml	a303ec1bdb933892
+.github/actions/setup-velnor-workflow/action.yml	97ece8ac48a6c76c
 .github/ci/project.toml	5705fb4ad2e2a29a
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-bun-velnor.yml	0f105e9f48ea94f5

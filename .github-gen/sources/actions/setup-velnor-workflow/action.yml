@@ -1,9 +1,9 @@
 # Composite replacement for the former inline `cargo install` step. A revision
 # resolves only through a platform-qualified artifact whose manifest proves the
 # producer repository, default branch, exact revision, successful run, runner
-# platform, and binary digest. A source build is explicit recovery only: a
-# trusted default-branch push may bootstrap the first artifact for a revision;
-# every other context fails closed when no trusted product exists.
+# platform, and binary digest. A source build is controlled bootstrap only:
+# trusted default-branch pushes and same-repository PRs may bootstrap a
+# revision; forks and every other context fail closed without a product.
 name: Set up Velnor workflow runtime
 description: Install the velnor-workflow binary with cache and toolchain-env isolation
 
@@ -83,11 +83,12 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
         INSTALL_REV: ${{ inputs.rev }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        TRUSTED_BOOTSTRAP: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        CONTROLLED_BOOTSTRAP: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
       run: |
         set -euo pipefail
-        [[ "$TRUSTED_BOOTSTRAP" == 'true' ]] || {
-          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch-push-only" >&2
+        [[ "$CONTROLLED_BOOTSTRAP" == 'true' ]] || {
+          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch-push or same-repository-PR only" >&2
           exit 1
         }
         # Authenticate git for the install below (public repo; also covers
@@ -97,7 +98,7 @@ runs:
         # setup step runs later in the job, so any inherited RUSTC_WRAPPER
         # points at a binary that does not exist yet and breaks the build.
         env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL \
-          cargo install --locked --git https://github.com/tailrocks/velnor.git \
+          cargo install --locked --git "$SOURCE_REPOSITORY" \
             --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
         runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
         binary_sha256="$(sha256sum "$runtime/velnor-workflow" | awk '{print $1}')"
