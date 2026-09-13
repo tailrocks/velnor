@@ -877,9 +877,18 @@ impl CommandRunner for ProcessCommandRunner {
                 stderr: String::new(),
             });
         }
-        let claimed_args = rm_claim.as_ref().map(|claim| {
-            crate::docker::client::container_rm_args_with_claimed_ids(args, &claim.ids)
-        });
+        let claimed_args = rm_claim
+            .as_ref()
+            .map(|claim| {
+                crate::docker::client::NonEmptyDockerArgs::new(args)
+                    .map(|args| {
+                        crate::docker::client::container_rm_args_with_claimed_ids(
+                            args, &claim.ids,
+                        )
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("docker rm claim requires non-empty arguments"))
+            })
+            .transpose()?;
         let args = claimed_args.as_deref().unwrap_or(args);
         let owned_args = timed_docker_args(program, args)?;
         let args = owned_args.as_deref().unwrap_or(args);
