@@ -274,10 +274,53 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
 /// One Actions cache entry as the maintenance job collects it from the API.
 #[derive(Deserialize)]
 struct CacheEntryRecord {
+    #[serde(deserialize_with = "deserialize_cache_id")]
     id: String,
     key: String,
     size_in_bytes: u64,
     created_at: String,
+}
+
+/// Accept the Actions API's numeric cache id and carry it losslessly as the
+/// planner's string identity. The API has shipped both JSON shapes; treating
+/// its current numeric encoding as invalid turns retention into a cold-cache
+/// failure instead of the bounded maintenance it exists to perform.
+fn deserialize_cache_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CacheIdVisitor;
+
+    impl serde::de::Visitor<'_> for CacheIdVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a numeric or string Actions cache id")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_owned())
+        }
+    }
+
+    deserializer.deserialize_any(CacheIdVisitor)
 }
 
 /// Compute the retention eviction plan for the Actions cache account: the same
@@ -2280,6 +2323,18 @@ mod tests {
             format!("runners = \"{runners}\"\n"),
         )?;
         Ok(root)
+    }
+
+    #[test]
+    fn numeric_actions_cache_ids_become_lossless_internal_strings() -> Result<(), serde_json::Error>
+    {
+        let record: CacheEntryRecord = serde_json::from_str(
+            r#"{"id":7636963307,"key":"velnor-docker-seed-Linux-X64-example",
+                "size_in_bytes":1,"created_at":"2026-09-01T00:00:00Z"}"#,
+        )?;
+        assert_eq!(record.id, "7636963307");
+        assert_eq!(record.key, "velnor-docker-seed-Linux-X64-example");
+        Ok(())
     }
 
     fn run_policy(root: std::path::PathBuf) -> Result<bool, Box<dyn Error>> {
