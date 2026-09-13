@@ -2968,6 +2968,7 @@ mod tests {
             true,
             true,
             false,
+            false,
             None,
             &mut Vec::new(),
         )
@@ -3050,6 +3051,7 @@ mod tests {
             false,
             true,
             true,
+            false,
             false,
             None,
             &mut Vec::new(),
