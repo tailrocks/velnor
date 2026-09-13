@@ -7531,9 +7531,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
         // offline line inside the preparation step would satisfy any "later"
         // assertion — so the step's own body is checked for the absence.
         let preparation_end = preparation
-            + workflow[preparation..]
-                .find("\n      - name: ")
-                .expect("another step follows the preparation step");
+            + must_some(
+                workflow[preparation..].find("\n      - name: "),
+                "another step follows the preparation step",
+            );
         let preparation_body = &workflow[preparation..preparation_end];
         assert!(
             !preparation_body.contains("CARGO_NET_OFFLINE"),
