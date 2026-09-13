@@ -3,7 +3,7 @@ schema = 2
 [inputs]
 config	dee90542d277db41
 scan	3539b3be981c4bf6
-generator	19
+generator	20
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	02089ff9fee52b2a

@@ -54,8 +54,9 @@ fn dockerfile_basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Pair `Dockerfile.amd64` / `Dockerfile.arm64` into one native-arch command so
-/// a single-arch runner does not fail-closed on the foreign architecture file.
+/// Pair architecture-specific Dockerfiles so a single-architecture runner
+/// builds only the image matching its native architecture. Unknown host
+/// architectures fail closed instead of silently selecting amd64.
 fn docker_build_commands(build_context: &str, dockerfiles: &[&String]) -> Vec<String> {
     let mut amd64 = None;
     let mut arm64 = None;
@@ -74,7 +75,7 @@ fn docker_build_commands(build_context: &str, dockerfiles: &[&String]) -> Vec<St
     match (amd64, arm64) {
         (Some(amd64), Some(arm64)) => {
             commands.push(format!(
-                r#"case "$(uname -m)" in aarch64|arm64) {} ;; *) {} ;; esac"#,
+                r#"case "$(uname -m)" in aarch64|arm64) {} ;; x86_64|amd64) {} ;; *) echo "unsupported Docker build architecture: $(uname -m)" >&2; exit 1 ;; esac"#,
                 docker_build_command(arm64, build_context),
                 docker_build_command(amd64, build_context)
             ));
@@ -90,7 +91,7 @@ fn docker_build_commands(build_context: &str, dockerfiles: &[&String]) -> Vec<St
 #[cfg(test)]
 mod tests {
     #[test]
-    fn paired_arch_dockerfiles_select_native_uname() {
+    fn paired_arch_dockerfiles_select_native_uname_and_fail_closed() {
         let amd = "img/Dockerfile.amd64".to_owned();
         let arm = "img/Dockerfile.arm64".to_owned();
         let commands = super::docker_build_commands("img", &[&amd, &arm]);
@@ -99,7 +100,9 @@ mod tests {
         assert!(command.contains(r#"case "$(uname -m)" in aarch64|arm64)"#));
         assert!(command.contains("Dockerfile.arm64"));
         assert!(command.contains("Dockerfile.amd64"));
-        assert!(!command.contains("Dockerfile.arm64") || command.contains("uname"));
+        assert!(command.contains("x86_64|amd64)"));
+        assert!(command.contains("unsupported Docker build architecture"));
+        assert!(command.contains("exit 1"));
     }
 
     #[test]
