@@ -1561,8 +1561,9 @@ fn reject_unsafe_nested_host_controls(
             | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
             | "publishallports" | "containeridfile" => is_strict_value_present(value),
             // Live API 1.55: `{"Name":"no","MaximumRetryCount":0}` is the
-            // default (no restart). `always` / `on-failure` stay denied.
-            "restartpolicy" => !is_default_restart_policy(value)?,
+            // default (no restart). BuildKit uses `unless-stopped`.
+            // `always` / `on-failure` stay denied.
+            "restartpolicy" => !is_guest_restart_policy(value, image)?,
             // BuildKit's GPU request is an exact, driverless shape. Other
             // device requests stay denied.
             "devicerequests" => !is_guest_device_requests(value)?,
@@ -1732,8 +1733,19 @@ fn is_guest_named_volume_mount(value: &Value) -> Result<bool> {
 }
 
 fn is_default_restart_policy(value: &Value) -> Result<bool> {
+    is_named_restart_policy(value, &["", "no", "none"])
+}
+
+fn is_guest_restart_policy(value: &Value, image: Option<&str>) -> Result<bool> {
+    if is_default_restart_policy(value)? {
+        return Ok(true);
+    }
+    Ok(is_buildkit_image(image) && is_named_restart_policy(value, &["unless-stopped"])?)
+}
+
+fn is_named_restart_policy(value: &Value, allowed_names: &[&str]) -> Result<bool> {
     match value {
-        Value::Null => Ok(true),
+        Value::Null => Ok(allowed_names.iter().any(|name| name.is_empty())),
         Value::Object(object) => {
             reject_case_insensitive_duplicate_keys(object, "Docker RestartPolicy")?;
             const ALLOWED_FIELDS: [&str; 2] = ["name", "maximumretrycount"];
@@ -1758,9 +1770,9 @@ fn is_default_restart_policy(value: &Value) -> Result<bool> {
                 .find(|(key, _)| key.eq_ignore_ascii_case("maximumretrycount"))
                 .map(|(_, value)| value)
                 .is_none_or(|value| value.as_i64() == Some(0) || value.as_u64() == Some(0));
-            Ok((name.is_empty()
-                || name.eq_ignore_ascii_case("no")
-                || name.eq_ignore_ascii_case("none"))
+            Ok(allowed_names
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
                 && retries)
         }
         _ => Ok(false),
@@ -4062,7 +4074,7 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"Privileged":true,"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"Privileged":true,"RestartPolicy":{"MaximumRetryCount":0,"Name":"unless-stopped"},"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
@@ -4079,6 +4091,15 @@ mod tests {
             ))
             .expect_err("privileged busybox is host control");
         assert!(error.to_string().contains("Privileged"), "{error:#}");
+
+        let error = policy
+            .authorize(&api_request(
+                "POST",
+                "/v1.43/containers/create?name=job-container",
+                br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"MaximumRetryCount":0,"Name":"unless-stopped"}}}"#,
+            ))
+            .expect_err("unless-stopped busybox is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
     }
 
     #[test]
