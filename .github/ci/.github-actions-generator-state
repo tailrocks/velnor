@@ -3,7 +3,7 @@ schema = 2
 [inputs]
 config	e5ef66264aa25ccc
 scan	45274eaaede3697d
-generator	5
+generator	6
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
@@ -18,7 +18,7 @@ generator	5
 .github/workflows/ci-pr.yml	8f5b248b7784ac3a
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
 .github/workflows/ci-rust-policy.yml	26380674e102f3bf
-.github/workflows/ci-rust-production-topology.yml	702e38544955f8ff
+.github/workflows/ci-rust-production-topology.yml	d9da59da822541a6
 .github/workflows/ci-rust-unit-collector.yml	83868476a50b8087
 .github/workflows/ci-rust-velnor-bench.yml	e3f658d25aa8535e
 .github/workflows/ci-rust-velnor-client.yml	2065cfe55ec749f9

@@ -212,9 +212,19 @@ pub(crate) fn checks_env(unit: &Unit) -> String {
     env
 }
 
-/// Every command the unit runs, on either lane.
+/// Every command the unit runs, on either lane: the scan-derived base
+/// commands plus every lane-specific override a repo-owned config declared.
+/// A unit may pin commands per lane only — its base vectors then stay empty —
+/// so a predicate that skips the overrides would conclude the unit runs
+/// nothing at all.
 fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
-    unit.pr_commands.iter().chain(&unit.full_commands)
+    unit.pr_commands
+        .iter()
+        .chain(&unit.full_commands)
+        .chain(unit.github_pr_commands.iter().flatten())
+        .chain(unit.github_full_commands.iter().flatten())
+        .chain(unit.velnor_pr_commands.iter().flatten())
+        .chain(unit.velnor_full_commands.iter().flatten())
 }
 
 /// Whether any of the unit's commands drive the test runner through Cargo or
@@ -300,14 +310,11 @@ pub(crate) fn mise_tool_ids(unit: &Unit) -> Vec<&'static str> {
 /// Whether the unit's commands hand work to the mise task runner itself, which
 /// needs the mise binary on `PATH` even when no tool is installed through it.
 pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
-    unit.pr_commands
-        .iter()
-        .chain(&unit.full_commands)
-        .any(|command| {
-            command
-                .split_whitespace()
-                .any(|token| token == "mise" || token.starts_with("mise:"))
-        })
+    unit_commands(unit).any(|command| {
+        command
+            .split_whitespace()
+            .any(|token| token == "mise" || token.starts_with("mise:"))
+    })
 }
 
 /// Fetch every declared Cargo source up front, after the cache restore and
