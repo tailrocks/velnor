@@ -5,6 +5,7 @@ profile = "rust-workspace-release"
 verified = true
 default_branch = "main"
 runners = "both"
+automatic = "both"
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
