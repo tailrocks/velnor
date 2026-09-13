@@ -206,6 +206,52 @@ fn fifty_one_units_stay_under_github_unique_reusable_limit() {
 }
 
 #[test]
+fn generated_velnor_first_surface_passes_policy() {
+    let root = unique_dir("policy-velnor-first");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("runs-on: [self-hosted, example-velnor]"),
+        "automatic PR must emit the Velnor lane: {unit}"
+    );
+    assert!(
+        unit.contains("github.event_name == 'pull_request'"),
+        "Velnor lane must admit pull_request: {unit}"
+    );
+    let pin = generated
+        .workflow("ci-policy.yml")
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("--rev ")
+                .map(|value| value.trim().trim_end_matches('\\').trim().to_owned())
+                .filter(|value| value.len() == 40)
+        })
+        .expect("policy pin");
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "policy",
+            "--workflow-root",
+            generated.output.to_str().unwrap(),
+            "--approved-policy-revision",
+            &pin,
+        ])
+        .output()
+        .expect("run policy");
+    assert!(
+        outcome.status.success(),
+        "generated Velnor-first surface must pass policy:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+}
+
+#[test]
 fn github_only_projects_omit_self_hosted_unit_jobs() {
     let root = unique_dir("github-only");
     write_rust_fixture(&root, 2);
