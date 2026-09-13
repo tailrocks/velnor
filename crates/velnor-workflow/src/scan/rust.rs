@@ -398,8 +398,11 @@ fn analyze_rust_manifests(
             ""
         };
         let test_command = if has_nextest {
+            // Crates without any test target must still verify green: without
+            // the flag nextest exits nonzero on an empty collection, failing
+            // test-less crates that fmt and clippy accept.
             format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector}"
+                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector} --no-tests pass"
             )
         } else {
             format!(
@@ -507,6 +510,7 @@ fn analyze_rust_manifests(
                 mutable_mount_seed: false,
             }),
             tool_version: None,
+            mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
         });
     }
@@ -560,6 +564,7 @@ fn analyze_rust_manifests(
                 mutable_mount_seed: false,
             }),
             tool_version: None,
+            mise_tools: Vec::new(),
             toolchain: Some(toolchain.clone()),
         });
     }

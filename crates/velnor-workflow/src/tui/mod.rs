@@ -967,6 +967,7 @@ mod tests {
             pinned_lockfile: false,
             cache: None,
             tool_version: None,
+            mise_tools: Vec::new(),
             // Generation refuses a Rust unit without a recorded pin, so the
             // fixture records the pin its workflows are rendered against.
             toolchain: Some(crate::RustToolchain {
