@@ -18,7 +18,7 @@ and are not used as the primary table.
 
 Fleet version on jobs that uploaded logs:
 
-```
+```text
 Current runner version: 'Velnor Runner/0.1.274 (protocol: 2.337.0)'
 ```
 
@@ -115,13 +115,13 @@ Same physical slot, new runner process each job.
 Job 103697787049 (run 34747340103, Rust · velnor-runner / Velnor,
 `velnor-dogfood-slot-1-next-180744-12`, `runner_id` 4634). Exact log line:
 
-```
+```text
 Cache paths live on Velnor host-persistent storage (always warm)
 ```
 
 Same job, git mirror and checkout:
 
-```
+```text
 Linked 399 object file(s) (14916966 bytes) and 0 ref(s) from the shared mirror; no objects were copied and no network fetch was needed
 Pinned 549 file and directory mtimes to the commit timestamp (stable cargo fingerprints across jobs)
 Repository path: /var/lib/velnor-dogfood/work/slot-1/48e7aeae-fd5e-58c6-bb54-afd7f5476d06/workspace/.
@@ -141,7 +141,7 @@ job [103684693084](https://github.com/tailrocks/velnor/actions/runs/34739692833/
 Started 2026-09-13T06:22:31Z, completed 2026-09-13T06:26:04Z, `queue_s=2`,
 `exec_s=213`. Exact lines:
 
-```
+```text
 Current runner version: 'Velnor Runner/0.1.274 (protocol: 2.337.0)'
 Finished `release` profile [optimized] target(s) in 1m 59s
 mbx[cache]: 0 hits, 1 misses, 1779 not looked up, 243 bypassed; 0 B downloaded, 0 B uploaded, 1.0 GiB stored locally
@@ -155,7 +155,7 @@ Started 2026-09-13T07:45:49Z, completed 2026-09-13T07:47:26Z, `exec_s=97`.
 BuildKit layers `#6` through `#29` are `CACHED`; `#37` is `CACHED`. Exact
 lines:
 
-```
+```text
 Current runner version: 'Velnor Runner/0.1.274 (protocol: 2.337.0)'
 #6 CACHED
 #29 CACHED
@@ -186,7 +186,7 @@ change).
 - `gh run view 34747340103 --job 103697787039 --log` → `log not found: 103697787039`
 - Check-run annotation (exact):
 
-```
+```text
 The self-hosted runner lost communication with the server. Verify the machine is running and has a healthy network connection. Anything in your workflow that terminates the runner process, starves it for CPU/Memory, or blocks its network access can cause this error.
 ```
 
