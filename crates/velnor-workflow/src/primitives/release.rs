@@ -1307,15 +1307,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "3c1734d64b344b630f759f2b7e720d087209a77ef60296ea469427c82aec4d17",
+                "0d451baa88aa023fab6ee55519a861de37a15cc54fb65c4c481db872b7b8791a",
             ),
             (
                 "preview.yml",
-                "05643b18151cfc11bcff803a1fad92d20dfa2ba36c2b2d14c401ad5ff937a7a6",
+                "b3d94e1084c915c4696ea59ea3780100c4293b877999265dfe42c3bc9720d147",
             ),
             (
                 "maintenance.yml",
-                "1d3385593f2b6bebb7a0b508ab56479f98323632aa9cf982b1c1af3ddf797855",
+                "37d54429257db18a7680c1e6fcfcc93c3af4d71856a86c08cce127a2e23d8db3",
             ),
             (
                 "ci-release-package-signer.yml",
