@@ -189,13 +189,14 @@ impl DockerLeasePolicy {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
         }
         if segments.as_slice() == ["containers", "create"] && method == "POST" {
+            validate_container_create_request(request).map_err(create_capability_deny)?;
             return authorize_docker_route(
                 AuthorizedDockerRoute::Create(DockerResourceKind::Container),
                 upgrade,
             );
         }
         if segments.as_slice() == ["networks", "create"] && method == "POST" {
-            validate_network_create_request(request)?;
+            validate_network_create_request(request).map_err(create_capability_deny)?;
             return authorize_docker_route(
                 AuthorizedDockerRoute::Create(DockerResourceKind::Network),
                 upgrade,
@@ -1723,6 +1724,27 @@ fn validate_network_create_request(request: &[u8]) -> Result<()> {
     validate_network_create_value(&value)
 }
 
+/// Full container create body validation, including the exact
+/// `HostConfig`/`CgroupParent` rules the request transform later enforces.
+/// Running it here — instead of letting the transform discover the same
+/// failure — means a rejected create is answered with a structured 403 deny
+/// response; the guest never sees the connection drop mid-request.
+fn validate_container_create_request(request: &[u8]) -> Result<()> {
+    let body = docker_request_body(request)?;
+    let mut value = parse_create_value(body).context("parse Docker container create request")?;
+    inject_job_cgroup_parent_value(&mut value)
+}
+
+/// Denials detected during create-request validation are capability
+/// rejections, not proxy failures: report them as `LeaseDeny` so the serve
+/// loop writes the JSON status response instead of closing the connection.
+fn create_capability_deny(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<LeaseDeny>().is_some() {
+        return error;
+    }
+    LeaseDeny::forbidden(format!("Docker lease denied create request: {error:#}"))
+}
+
 fn validate_network_create_value(value: &Value) -> Result<()> {
     let object = value
         .as_object()
@@ -1964,7 +1986,12 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
             | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
             | "maskedpaths" | "readonlypaths" => false,
-            _ => true,
+            // Docker CLI releases routinely add benign HostConfig fields and
+            // serialize their empty defaults (observed live: the API 1.55
+            // CLI sends `BlkioDeviceReadBps: []`). An absent/empty value
+            // grants no host control; only a populated unknown field is a
+            // capability request.
+            _ => value_is_present(value),
         };
         if unsafe_control {
             bail!("Docker container create HostConfig field {key:?} requests host control access");
@@ -4153,6 +4180,54 @@ mod tests {
             .authorize(&request)
             .expect_err("encoded separators must not reach Docker");
         assert!(error.to_string().contains("encoded path separator"));
+    }
+
+    #[test]
+    fn container_create_tolerates_empty_unknown_hostconfig_defaults() {
+        // Live API 1.55 CLI default serialization: unknown HostConfig fields
+        // arrive as empty defaults and grant no host control.
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[]}}"#,
+        );
+        assert!(policy.authorize(&request).is_ok());
+    }
+
+    #[test]
+    fn container_create_with_populated_unknown_hostconfig_field_is_lease_deny() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[{"Path":"/dev/sda","Rate":1024}]}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("populated unknown HostConfig field is a capability request");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("create denial must answer as LeaseDeny, not a dropped connection");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("BlkioDeviceReadBps"));
+    }
+
+    #[test]
+    fn invalid_network_create_body_is_lease_deny() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/networks/create",
+            br#"{"Name":"job-net","Driver":"host"}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("host-driver network create must be denied");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("network create denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
     }
 
     fn assert_container_rms_are_singleton(calls: &[Vec<String>]) {
