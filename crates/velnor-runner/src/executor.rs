@@ -20941,6 +20941,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         // The rm bail attaches DockerCommandError like every other
         // docker-failure production point: the retry policy reads the chain,
         // never the text. The message itself is unchanged.
+        // A live-object refusal is Conflict: another writer holds the object
+        // (the daemon's 409 sentence, shared by the Engine API leg).
         let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
             vec![1],
             vec!["Error response from daemon: cannot remove a running container"],
@@ -20966,7 +20968,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 .any(|cause| cause.downcast_ref::<DockerCommandError>().is_some()),
             "rm failure must carry DockerCommandError: {error:#}"
         );
-        assert_eq!(docker_error_category(&error), DockerErrorCategory::Terminal);
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Conflict);
     }
 
     #[test]

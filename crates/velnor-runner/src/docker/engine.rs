@@ -14,12 +14,22 @@
 //!   `execution/unix_api.rs` precedent shows hand-rolled socket HTTP is this
 //!   codebase's established shape; this module is its async Engine sibling.
 //!
-//! Endpoint coverage is read-only control-plane only: `version`, `info`,
-//! container inspect, image inspect, network inspect, and the filtered
-//! container/network/volume lists. Paths are unversioned, which is the
-//! negotiation: the daemon serves its native schema, nothing pins an old API
-//! version, and any schema drift surfaces as an [`EngineError`] that the
-//! facade answers with its CLI fallback — never as a misread value.
+//! Endpoint coverage is read-only control-plane plus the idempotent
+//! container-lifecycle mutations: `version`, `info`, container inspect,
+//! image inspect, network inspect, the filtered container/network/volume
+//! lists, and container start/stop/remove. Paths are unversioned, which is
+//! the negotiation: the daemon serves its native schema, nothing pins an
+//! old API version, and any schema drift surfaces as an [`EngineError`]
+//! that the facade answers with its CLI fallback — never as a misread
+//! value.
+//!
+//! The mutations are safe under the fallback contract because they are
+//! idempotent: a timed-out API attempt that the daemon did act on is
+//! re-driven by the CLI fallback, and re-starting, re-stopping, or
+//! re-removing converges instead of erroring (re-removing a gone
+//! container reads as already-removed on both legs). Non-idempotent
+//! mutations (create, run) can never share this contract: a fallback
+//! after an ambiguous timeout could act twice.
 //!
 //! Transport rules, all load-bearing for the "identical results" guarantee:
 //!
@@ -36,9 +46,9 @@
 //!   perform no redaction. [`EngineError`]'s `Display` carries status codes,
 //!   byte counts, and I/O error strings only.
 //!
-//! The facade ([`super::client`]) owns routing: every migrated query tries
+//! The facade ([`super::client`]) owns routing: every migrated call tries
 //! the API first under a capped budget and falls back to its historical CLI
-//! query on ANY API failure, logging the fallback with telemetry. Engine
+//! call on ANY API failure, logging the fallback with telemetry. Engine
 //! errors therefore never surface and never need a
 //! `DockerErrorCategory` mapping of their own: whatever the caller sees is
 //! either an API value
@@ -612,23 +622,34 @@ impl EngineClient {
         Self { socket }
     }
 
-    /// `GET` one path and return the status code with the exact body bytes.
+    /// One request and return the status code with the exact body bytes.
     /// The whole attempt — connect, write, read — runs under `budget`.
-    async fn get(
+    /// `GET` sends the historical header set byte-identically; the
+    /// bodyless mutations declare their empty body so the daemon never
+    /// waits for bytes that are not coming.
+    async fn request(
         &self,
+        method: &str,
         path: &str,
         op: DockerOp,
         budget: Duration,
     ) -> EngineResult<(u16, Vec<u8>)> {
         let socket = self.socket.clone();
+        let method = method.to_string();
         let path = path.to_string();
         let attempt = async move {
             let mut stream = tokio::net::UnixStream::connect(&socket)
                 .await
                 .map_err(|error| (EngineFaultKind::Connect, error.to_string()))?;
-            let request = format!(
-                "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
-            );
+            let request = if method == "GET" {
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+                )
+            } else {
+                format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+            };
             tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
                 .await
                 .map_err(|error| (EngineFaultKind::Write, error.to_string()))?;
@@ -650,7 +671,7 @@ impl EngineClient {
         op: DockerOp,
         budget: Duration,
     ) -> EngineResult<serde_json::Value> {
-        let (status, body) = self.get(path, op, budget).await?;
+        let (status, body) = self.request("GET", path, op, budget).await?;
         if !(200..300).contains(&status) {
             return Err(EngineError::fault(
                 op,
@@ -762,6 +783,92 @@ impl EngineClient {
         let value = self.get_json(&path, op, budget).await?;
         parse_volume_list(&value).map_err(|fault| EngineError::fault(op, fault))
     }
+
+    /// `POST /containers/{name}/start`. Serves the facade's idempotent
+    /// container start: 2xx started it, 304 means it was already running
+    /// (both success, proven live on 29.4.0). Any other status is an API
+    /// error the CLI fallback re-derives — 404 included, so a missing
+    /// container still surfaces as the CLI's own [`super::client::NotFound`].
+    pub(crate) async fn start_container(
+        &self,
+        name: &str,
+        budget: Duration,
+    ) -> EngineResult<super::client::StartOutcome> {
+        let op = DockerOp::Start;
+        let path = format!("/containers/{}/start", encode_segment(name));
+        let (status, _body) = self.request("POST", &path, op, budget).await?;
+        match status {
+            200..300 => Ok(super::client::StartOutcome::Started),
+            304 => Ok(super::client::StartOutcome::AlreadyStarted),
+            _ => Err(status_fault(op, status)),
+        }
+    }
+
+    /// `POST /containers/{name}/stop[?t=N]`. Serves the facade's idempotent
+    /// container stop: 2xx stopped it, 304 means it was already stopped
+    /// (both success, proven live on 29.4.0). `timeout` is the SIGKILL
+    /// grace in seconds, the `docker stop -t` value verbatim; `None`
+    /// omits `t` so the daemon applies its own default, exactly as the
+    /// CLI does without `-t`. Any other status falls back like start.
+    pub(crate) async fn stop_container(
+        &self,
+        name: &str,
+        timeout: Option<u64>,
+        budget: Duration,
+    ) -> EngineResult<super::client::StopOutcome> {
+        let op = DockerOp::Stop;
+        let mut path = format!("/containers/{}/stop", encode_segment(name));
+        if let Some(secs) = timeout {
+            path.push_str(&format!("?t={secs}"));
+        }
+        let (status, _body) = self.request("POST", &path, op, budget).await?;
+        match status {
+            200..300 => Ok(super::client::StopOutcome::Stopped),
+            304 => Ok(super::client::StopOutcome::AlreadyStopped),
+            _ => Err(status_fault(op, status)),
+        }
+    }
+
+    /// `DELETE /containers/{name}[?force=1][&v=1]`. Serves the facade's
+    /// idempotent container remove: 2xx removed it, 404 means it was
+    /// already gone (both success, proven live on 29.4.0). 409 — a
+    /// running container without force — is an API error the CLI
+    /// fallback re-derives into the typed
+    /// [`super::client::DockerErrorCategory::Conflict`], so genuine
+    /// conflicts surface instead of succeeding.
+    pub(crate) async fn remove_container(
+        &self,
+        name: &str,
+        force: bool,
+        volumes: bool,
+        budget: Duration,
+    ) -> EngineResult<super::client::RemoveOutcome> {
+        let op = DockerOp::Remove;
+        let mut path = format!("/containers/{}", encode_segment(name));
+        let mut query = Vec::new();
+        if force {
+            query.push("force=1");
+        }
+        if volumes {
+            query.push("v=1");
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        let (status, _body) = self.request("DELETE", &path, op, budget).await?;
+        match status {
+            200..300 => Ok(super::client::RemoveOutcome::Removed),
+            404 => Ok(super::client::RemoveOutcome::AlreadyRemoved),
+            _ => Err(status_fault(op, status)),
+        }
+    }
+}
+
+/// A daemon non-success status as an API error: the code only, never the
+/// error document (which names the object).
+fn status_fault(op: DockerOp, status: u16) -> EngineError {
+    EngineError::fault(op, (EngineFaultKind::Status, format!("http {status}")))
 }
 
 /// One daemon list filter. Label-equality only: every listing this slice
@@ -1451,6 +1558,22 @@ pub(crate) mod mock {
         )
         .into_bytes()
     }
+
+    /// Raw empty-body response with an explicit status line: the shape the
+    /// lifecycle mutations serve (`204 No Content`, `304 Not Modified`).
+    pub(crate) fn status_response(status: &str) -> Vec<u8> {
+        format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+    }
+
+    /// Raw error-document response: status line plus a JSON body, the shape
+    /// the daemon's 404/409 answers carry.
+    pub(crate) fn error_response(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
 }
 
 #[cfg(test)]
@@ -1464,7 +1587,7 @@ pub(crate) mod mock {
     reason = "tests may panic"
 )]
 mod tests {
-    use super::mock::{close_delimited, json_response};
+    use super::mock::{close_delimited, error_response, json_response, status_response};
     use super::*;
     use std::sync::Arc;
 
@@ -2012,6 +2135,133 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, EngineError::Timeout { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn mutations_use_unversioned_post_delete_paths() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = Arc::clone(&seen);
+        let mock = MockEngine::serve(
+            move |head| {
+                let line = head.lines().next().unwrap_or("").to_string();
+                seen_server.lock().unwrap().push(line);
+                status_response("204 No Content")
+            },
+            6,
+        );
+        let client = EngineClient::new(mock.socket.clone());
+        assert_eq!(
+            client.start_container("svc", BUDGET).await.unwrap(),
+            super::super::client::StartOutcome::Started
+        );
+        assert_eq!(
+            client.stop_container("svc", None, BUDGET).await.unwrap(),
+            super::super::client::StopOutcome::Stopped
+        );
+        assert_eq!(
+            client.stop_container("svc", Some(5), BUDGET).await.unwrap(),
+            super::super::client::StopOutcome::Stopped
+        );
+        assert_eq!(
+            client
+                .remove_container("svc", true, true, BUDGET)
+                .await
+                .unwrap(),
+            super::super::client::RemoveOutcome::Removed
+        );
+        assert_eq!(
+            client
+                .remove_container("svc", true, false, BUDGET)
+                .await
+                .unwrap(),
+            super::super::client::RemoveOutcome::Removed
+        );
+        assert_eq!(
+            client
+                .remove_container("svc", false, false, BUDGET)
+                .await
+                .unwrap(),
+            super::super::client::RemoveOutcome::Removed
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![
+                "POST /containers/svc/start HTTP/1.1".to_string(),
+                "POST /containers/svc/stop HTTP/1.1".to_string(),
+                "POST /containers/svc/stop?t=5 HTTP/1.1".to_string(),
+                "DELETE /containers/svc?force=1&v=1 HTTP/1.1".to_string(),
+                "DELETE /containers/svc?force=1 HTTP/1.1".to_string(),
+                "DELETE /containers/svc HTTP/1.1".to_string(),
+            ]
+        );
+        for line in seen.iter() {
+            assert!(!line.contains("/v1."), "no pinned old version: {line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mutation_statuses_map_to_idempotent_outcomes_or_typed_errors() {
+        use super::super::client::{RemoveOutcome, StartOutcome, StopOutcome};
+        // Live-shaped error documents, Engine 29.4.0 verbatim.
+        const NO_SUCH: &str = r#"{"message":"No such container: svc"}"#;
+        const RUNNING: &str = r#"{"message":"cannot remove container \"svc\": container is running: stop the container before removing or force remove"}"#;
+
+        // Start: 204 started, 304 already running — both success.
+        let mock = MockEngine::serve(|_| status_response("204 No Content"), 1);
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .start_container("svc", BUDGET)
+                .await
+                .unwrap(),
+            StartOutcome::Started
+        );
+        let mock = MockEngine::serve(|_| status_response("304 Not Modified"), 1);
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .start_container("svc", BUDGET)
+                .await
+                .unwrap(),
+            StartOutcome::AlreadyStarted
+        );
+        // Start on missing is an API error (the CLI fallback re-derives
+        // NotFound); the error document never surfaces.
+        let mock = MockEngine::serve(|_| error_response("404 Not Found", NO_SUCH), 1);
+        let error = EngineClient::new(mock.socket.clone())
+            .start_container("svc", BUDGET)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Status));
+        assert!(!format!("{error}").contains("No such"), "{error}");
+
+        // Stop: same shape.
+        let mock = MockEngine::serve(|_| status_response("304 Not Modified"), 1);
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .stop_container("svc", Some(5), BUDGET)
+                .await
+                .unwrap(),
+            StopOutcome::AlreadyStopped
+        );
+
+        // Remove: 404 is already-removed success even with the live error
+        // document attached; 409 is a typed API error the facade falls
+        // back from, and its message never surfaces.
+        let mock = MockEngine::serve(|_| error_response("404 Not Found", NO_SUCH), 1);
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .remove_container("svc", false, false, BUDGET)
+                .await
+                .unwrap(),
+            RemoveOutcome::AlreadyRemoved
+        );
+        let mock = MockEngine::serve(|_| error_response("409 Conflict", RUNNING), 1);
+        let error = EngineClient::new(mock.socket.clone())
+            .remove_container("svc", false, false, BUDGET)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Status));
+        assert_eq!(format!("{error}"), "engine api remove status: http 409");
     }
 
     #[test]
