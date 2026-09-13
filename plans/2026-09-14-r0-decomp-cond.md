@@ -24,8 +24,8 @@ slice-1 `composite_scopes` / slice-2 `command_output` precedent).
 Moved verbatim, bodies byte-identical:
 
 - `impl JobExecutionState`: `is_cancelled` + `set_cancellation`
-  (cancelled re-evaluation logic: the live-token read), `success_status`
-  + `failure_status` + `job_status` + `action_status` (status-function
+  (cancelled re-evaluation logic: the live-token read), `success_status` +
+  `failure_status` + `job_status` + `action_status` (status-function
   evaluation), `status_scope_has_failure` (stays module-private: all
   callers moved with it), `evaluate_condition` +
   `evaluate_post_condition` + `evaluate_condition_expression` (the
