@@ -167,11 +167,11 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
         .next()
 }
 
-fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
+fn docker_lifecycle_guard(stage: &'static str) -> Result<crate::capacity::DockerLifecycleGuard> {
     let run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| std::env::temp_dir().join("velnor"));
-    crate::capacity::DockerLifecycleGuard::lock(&run_root)
+    crate::capacity::DockerLifecycleGuard::lock_for_stage(&run_root, stage)
 }
 
 // ANSI color helpers for Velnor-authored adapter output.
@@ -612,6 +612,34 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Best-effort reap of a stale map entry: SIGKILL, then `wait` so no
+/// zombie survives. Loud on failure but infallible — this runs where
+/// failing the caller's operation over a stale entry would be wrong.
+fn reap_spawned_child(child: &mut Child, pid: u32) {
+    let _ = child.kill();
+    if let Err(error) = child.wait() {
+        eprintln!("forensics.lifecycle event=spawned-child-reap-failed pid={pid} error={error:#}");
+    }
+}
+
+/// Direct `kill(pid, SIGTERM)` for a pid with no retained `Child` handle.
+///
+/// One syscall: no fork+exec of `kill(1)` per signal, no PATH lookup, no
+/// argv to smuggle through. ESRCH means already gone, which is success —
+/// the same contract as the cancel ladder's `signal_process_group`, and
+/// what lets a `stop_jailer` retry converge after the entry is dropped.
+fn signal_spawned_pid(pid: u32) -> Result<()> {
+    let raw = i32::try_from(pid).with_context(|| format!("pid {pid} out of range"))?;
+    let Some(target) = rustix::process::Pid::from_raw(raw) else {
+        bail!("refusing to signal pid 0");
+    };
+    match rustix::process::kill_process(target, rustix::process::Signal::TERM) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("kill {pid}: {error}")),
+    }
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
@@ -777,10 +805,17 @@ impl CommandRunner for ProcessCommandRunner {
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let pid = child.id();
-        spawned_children()
+        // A pid key must never silently drop a live handle: dropping a
+        // `Child` without `wait` leaks a zombie that holds its pid. Reap
+        // any stale entry first (defensive — a zombie holds its pid, so a
+        // collision already implies a prior leak).
+        if let Some(mut stale) = spawned_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pid, child);
+            .insert(pid, child)
+        {
+            reap_spawned_child(&mut stale, pid);
+        }
         Ok(SpawnedProcess { pid })
     }
 
@@ -790,22 +825,18 @@ impl CommandRunner for ProcessCommandRunner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&process.pid)
         {
-            child
-                .kill()
-                .with_context(|| format!("kill {}", process.pid))?;
+            // Wait on every path: a `kill` that fails because the child
+            // already exited still leaves a zombie until `wait` reaps it,
+            // and the old `?` between them leaked exactly that. The entry
+            // is already removed, so a retry falls through to the
+            // direct-signal path below and reports ESRCH as gone.
+            let _ = child.kill();
             child
                 .wait()
                 .with_context(|| format!("wait for {}", process.pid))?;
             return Ok(());
         }
-        let status = Command::new("kill")
-            .args(["-TERM", &process.pid.to_string()])
-            .status()
-            .with_context(|| format!("kill {}", process.pid))?;
-        if !status.success() {
-            bail!("kill {} exited {:?}", process.pid, status.code());
-        }
-        Ok(())
+        signal_spawned_pid(process.pid)
     }
 
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
@@ -5121,7 +5152,7 @@ where
     }
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup")?;
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -5157,7 +5188,7 @@ where
     /// volume. Keeping that delete on the slot's critical path turns the
     /// volume retry timeout into slot turnover latency.
     pub(crate) fn cleanup_without_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-without-buildkit")?;
         self.cleanup_without_buildkit_unlocked(container)
     }
 
@@ -5184,7 +5215,7 @@ where
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-services")?;
         self.cleanup_services_unlocked(container)
     }
 
@@ -5221,7 +5252,7 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-job-and-network")?;
         self.cleanup_job_and_network_without_buildkit_unlocked(container)
     }
 
@@ -5257,7 +5288,7 @@ where
     /// with the job's unique scope. Match that exact suffix, then remove the
     /// daemon together with its anonymous/named state volume.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-job-buildkit")?;
         self.cleanup_job_buildkit_unlocked(container)
     }
 
@@ -5418,7 +5449,7 @@ where
         if let Some(previous) = self.job_network_guard.take() {
             drop(previous);
         }
-        self.with_docker_lifecycle(|executor| {
+        self.with_docker_lifecycle("create-network", |executor| {
             executor.run_docker(&container.create_network_args())
         })?;
         // Own the network from creation to terminal cleanup. Dropping the
@@ -5433,13 +5464,13 @@ where
             // Service environment holds workflow credentials; start_args keeps
             // it in a mode-0600 env file instead of the world-readable argv.
             let prepared = service.start_args(&container.env_dir())?;
-            self.with_docker_lifecycle(|executor| {
+            self.with_docker_lifecycle("start-service", |executor| {
                 executor.run_docker_with_env(prepared.args(), prepared.process_env())
             })?;
             self.wait_for_service(service)?;
         }
         let prepared = container.start_args()?;
-        self.with_docker_lifecycle(|executor| {
+        self.with_docker_lifecycle("start-job", |executor| {
             executor.run_docker_with_env(prepared.args(), prepared.process_env())
         })?;
         // Docker accepts repeated network-shaped create options with behavior
@@ -5448,7 +5479,7 @@ where
         // can observe it. This also makes each workflow service key the exact
         // embedded-DNS alias on the per-job network.
         if !container.services.is_empty() {
-            self.with_docker_lifecycle(|executor| {
+            self.with_docker_lifecycle("reconcile-network", |executor| {
                 executor.run_docker(&container.disconnect_network_args())?;
                 executor.run_docker(&container.connect_network_args())?;
                 for service in &container.services {
@@ -5563,7 +5594,7 @@ where
     }
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
-        let Ok(_lifecycle) = docker_lifecycle_guard() else {
+        let Ok(_lifecycle) = docker_lifecycle_guard("cleanup-stale") else {
             return;
         };
         // Drop the lease before stale cleanup so an in-flight Engine request
@@ -5620,9 +5651,10 @@ where
 
     fn with_docker_lifecycle<T>(
         &mut self,
+        stage: &'static str,
         operation: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard(stage)?;
         operation(self)
     }
 
@@ -14084,6 +14116,46 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_reaps_drops_the_entry_and_treats_gone_as_gone() {
+        let mut runner = ProcessCommandRunner;
+        // `exec` so the shell's pid IS the sleeper: no orphaned grandchild
+        // outlives the kill.
+        let child = runner
+            .spawn("sh", &["-c".to_string(), "exec sleep 30".to_string()])
+            .unwrap();
+        assert!(spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&child.pid));
+        runner.kill(&child).unwrap();
+        assert!(
+            !spawned_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&child.pid),
+            "kill must drop the map entry"
+        );
+        // Reaped, not a zombie: `kill(pid, 0)` still succeeds for a zombie.
+        // SAFETY: signal 0 sends nothing; the pid was our child, just waited.
+        let probed = unsafe { libc::kill(child.pid as i32, 0) };
+        assert_eq!(probed, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        // Second kill takes the direct-signal fallback: already gone is Ok,
+        // so a `stop_jailer` retry converges instead of erroring forever.
+        runner.kill(&child).unwrap();
+        // A pid that can never exist exercises the same ESRCH arm.
+        runner
+            .kill(&SpawnedProcess {
+                pid: i32::MAX as u32,
+            })
+            .unwrap();
+    }
 
     #[test]
     fn native_input_lookup_is_case_insensitive() {
