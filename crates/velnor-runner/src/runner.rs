@@ -14924,7 +14924,9 @@ mod tests {
                     .remove("github.repository");
             }),
             ("missing plan scope", |body| {
-                body["plan"] = serde_json::json!({ "planId": "plan" });
+                // `PlanId` is schema-required, so the only expressible
+                // "no plan reference" message blanks it.
+                body["plan"] = serde_json::json!({ "planId": "   " });
             }),
         ];
         for (name, mutate) in mutations {
