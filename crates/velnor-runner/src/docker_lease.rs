@@ -1487,11 +1487,15 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
                 Value::Bool(true) => true,
                 _ => true,
             },
-            "capadd" | "devices" | "devicecgrouprules" | "devicerequests" | "securityopt"
-            | "runtime" | "sysctls" | "volumedriver" | "volumesfrom" | "volumeoptions"
-            | "portbindings" | "publishallports" | "containeridfile" | "restartpolicy" => {
+            "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
+            | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
+            | "publishallports" | "containeridfile" | "restartpolicy" => {
                 is_strict_value_present(value)
             }
+            // Live API 1.55 CLI sends an empty GPU request object
+            // (`Driver:""`, `Count:0`, empty IDs/caps). That is not host
+            // control. A populated request (e.g. nvidia) stays denied.
+            "devicerequests" => !is_empty_default(value),
             "binds" | "mounts" => contains_host_bind(value)? || is_strict_value_present(value),
             // Docker's zero value means "unset" for this known field. Do
             // not generalize that exception to future numeric fields.
@@ -1517,7 +1521,9 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             _ => !is_empty_default(value),
         };
         if unsafe_control {
-            bail!("Docker container create HostConfig field {key:?} requests host control access");
+            bail!(
+                "Docker container create HostConfig field {key:?} requests host control access: {value}"
+            );
         }
     }
     Ok(())
@@ -1543,11 +1549,12 @@ fn is_guest_network_mode(value: &Value) -> bool {
 }
 
 fn is_zero_number(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Number(number)
-            if number.as_i64() == Some(0) || number.as_u64() == Some(0)
-    )
+    match value {
+        Value::Number(number) => {
+            number.as_i64() == Some(0) || number.as_u64() == Some(0) || number.as_f64() == Some(0.0)
+        }
+        _ => false,
+    }
 }
 
 fn is_default_console_size(value: &Value) -> bool {
@@ -3636,6 +3643,33 @@ mod tests {
     }
 
     #[test]
+    fn container_create_empty_device_requests_are_absent() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"DeviceRequests":[{"Driver":"","Count":0,"DeviceIDs":[],"Capabilities":[],"Options":{}}]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"DeviceRequests":[{"Driver":"nvidia","Count":1}]}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("populated DeviceRequests is host control");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("DeviceRequests denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("DeviceRequests"));
+        assert!(deny.message.contains("nvidia"));
+    }
+
+    #[test]
     fn container_create_unknown_numeric_zero_is_empty_default() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
@@ -3665,7 +3699,6 @@ mod tests {
         for (field, value) in [
             ("Binds", "[{}]"),
             ("Mounts", "[{}]"),
-            ("DeviceRequests", "[{}]"),
             ("Sysctls", "{\"net.ipv4.ip_forward\":0}"),
         ] {
             let body = format!(r#"{{"Image":"busybox:1.36","HostConfig":{{"{field}":{value}}}}}"#);
