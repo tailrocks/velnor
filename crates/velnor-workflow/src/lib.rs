@@ -66,17 +66,14 @@ const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/veln
 // transport change merges — `cargo install --rev` reaches any public SHA, so
 // the pin must move in the direct follow-up commit, not wait for a later PR.
 //
-// MERGE-ORDER REQUIREMENT, MANDATORY BEFORE ANY MAIN PUSH: this revision still
-// carries the reusable-workflow validator, which rejects the inline shape this
-// generator now emits (the 07d0831 binary fails the generated job with
-// "pull_request_target is forbidden"). Until the follow-up commit advances this
-// pin, every policy lane fails loudly; the transport change must not sit on the
-// default branch across that window.
-const VELNOR_POLICY_WORKFLOW_REV: &str = "5bea6c12f45441d3c1ae409902446d1f64cbb4b4";
+// This revision is the direct ancestor carrying the validator change for the
+// inline Velnor policy shape. Keep the pin paired with that validator contract;
+// advancing either side alone makes generated policy jobs fail closed.
+const VELNOR_POLICY_WORKFLOW_REV: &str = "ca1bb1458e06d7d8e385088f48130e9b39bf841f";
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
 // Keep hosted-runner bootstrap reproducible. Bump this after publishing a
 // Velnor commit that changes the workflow runtime contract.
-const VELNOR_WORKFLOW_SOURCE_REV: &str = "9c1a0782ec6138207986ee42016c0af1282ee02c";
+const VELNOR_WORKFLOW_SOURCE_REV: &str = "ca1bb1458e06d7d8e385088f48130e9b39bf841f";
 const MR_BOXINGTON_VERSION: &str = "1.8.3";
 // The GitHub cache payload changed from Cargo's target tree to mbx objects.
 // Keep the transition explicit: the generated custom keys bypass the action's

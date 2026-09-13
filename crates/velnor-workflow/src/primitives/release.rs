@@ -1264,11 +1264,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "532e2c3e0b842ef84057030d1af74e8ae9e12e282b0b57b0719ba8d2e9ccf717",
+                "0ee555c5a52737ce0d9b0329ce4953c71f1a2811c37386b17bb1edd3fda4db8f",
             ),
             (
                 "preview.yml",
-                "2e9fbdd5575f49f983873d6101281d05aa721a2143c97d3b9904433660f7497e",
+                "01378eb561dd0970bdc5cccc00938a135e428a3aae32619e85da93dac60916a6",
             ),
             (
                 "maintenance.yml",
