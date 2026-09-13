@@ -739,17 +739,27 @@ fn workflow_dispatch_inputs(
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
+    runners: RunnerMode,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
-        WorkflowKind::PullRequest => (
-            "CI",
-            "CI / PR",
-            format!(
-                "on:\n  pull_request:\n  merge_group:\n{}",
-                workflow_dispatch_inputs("affected", default_branch, "")
-            ),
-            "true",
-        ),
+        WorkflowKind::PullRequest => {
+            // Merge-queue validation runs on the GitHub lane only; a
+            // velnor-only surface has no lane that can run it.
+            let merge_group = if runners == RunnerMode::Velnor {
+                ""
+            } else {
+                "  merge_group:\n"
+            };
+            (
+                "CI",
+                "CI / PR",
+                format!(
+                    "on:\n  pull_request:\n{merge_group}{}",
+                    workflow_dispatch_inputs("affected", default_branch, "")
+                ),
+                "true",
+            )
+        }
         WorkflowKind::Main => (
             "CI",
             "CI / main",
@@ -870,7 +880,7 @@ impl WorkflowIr {
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, self.runners);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -976,7 +986,7 @@ impl WorkflowIr {
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, self.runners);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"

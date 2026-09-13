@@ -3033,10 +3033,13 @@ fn generated_release(config: &ProjectConfig) -> Option<String> {
 }
 
 fn render_actionlint_config(config: &ProjectConfig) -> String {
-    let macos = config
-        .units
-        .iter()
-        .any(|unit| unit.kind == UnitKind::Swift)
+    let apple_release = config.release.as_ref().is_some_and(|release| {
+        release
+            .targets
+            .iter()
+            .any(|target| target.ends_with("-apple-darwin"))
+    });
+    let macos = (config.units.iter().any(|unit| unit.kind == UnitKind::Swift) || apple_release)
         .then_some(&config.macos_runner);
     let labels = config
         .velnor_labels
@@ -7893,6 +7896,38 @@ channel = "stable"
     }
 
     #[test]
+    fn generated_actionlint_config_covers_apple_release_targets() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        assert!(
+            !config.units.iter().any(|unit| unit.kind == UnitKind::Swift),
+            "the fixture must carry no Swift unit for this assertion"
+        );
+        config.release = Some(ReleaseSpec {
+            kind: "rust-binary".to_owned(),
+            package: "example".to_owned(),
+            binary: "example".to_owned(),
+            targets: vec![
+                "x86_64-unknown-linux-gnu".to_owned(),
+                "aarch64-apple-darwin".to_owned(),
+            ],
+            ..ReleaseSpec::default()
+        });
+        let actionlint = render_actionlint_config(&config);
+        assert!(
+            actionlint.contains("    - macos-15\n"),
+            "an apple release target needs the macos label: {actionlint}"
+        );
+        if let Some(release) = config.release.as_mut() {
+            release.targets.pop();
+        }
+        let linux_only = render_actionlint_config(&config);
+        assert!(
+            !linux_only.contains("macos-15"),
+            "linux-only releases must not allowlist the macos label: {linux_only}"
+        );
+    }
+
+    #[test]
     fn generated_project_config_is_stable_when_workflow_discovery_order_changes() {
         let mut config = scanned_fixture(RunnerMode::Both);
         let expected = config.toml();
@@ -8286,12 +8321,32 @@ channel = "stable"
                 !gate.is_empty() && !gate.contains("merge_group"),
                 "the velnor lane keeps its trusted gate and skips merge_group: {surface}"
             );
+            for surface in [pr.as_str(), nested.as_str()] {
+                assert!(
+                    job_gate(surface, "plan").is_empty(),
+                    "the PR plan job carries no trusted gate on a github lane: {surface}"
+                );
+                assert_eq!(
+                    job_gate(surface, "ci-required"),
+                    "    if: ${{ always() }}",
+                    "ci-required stays unconditional on a github-lane PR: {surface}"
+                );
+            }
         }
 
         let config = scanned_fixture(RunnerMode::Velnor);
         let generator = WorkflowIr::from_config(&config);
         let velnor_pr = generator.render(WorkflowKind::PullRequest);
-        assert!(velnor_pr.contains("merge_group:\n"));
+        assert!(
+            !velnor_pr.contains("merge_group:\n"),
+            "a velnor-only surface has no github lane to validate the merge queue: {velnor_pr}"
+        );
+        let velnor_nested =
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator));
+        assert!(
+            !velnor_nested.contains("merge_group:\n"),
+            "the nested velnor-only PR render skips merge_group too: {velnor_nested}"
+        );
         let index = must_some(
             config
                 .units
@@ -8312,6 +8367,25 @@ channel = "stable"
             .as_deref(),
             Some("full")
         );
+    }
+
+    /// The job-level `if:` gate of the named job in a rendered workflow,
+    /// located by job header so neighboring jobs cannot leak into the
+    /// assertion. Only the four-space job key counts: step-level `if:` lines
+    /// sit deeper and are not gates.
+    fn job_gate(surface: &str, job: &str) -> String {
+        let header = format!("  {job}:");
+        let mut in_job = false;
+        for line in surface.lines() {
+            if line.starts_with("  ") && !line.starts_with("   ") {
+                in_job = line == header;
+                continue;
+            }
+            if in_job && line.starts_with("    if: ") {
+                return line.to_owned();
+            }
+        }
+        String::new()
     }
 
     /// The `if:` gate of the first velnor lane job in a rendered unit
