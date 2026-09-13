@@ -959,6 +959,9 @@ jobs:
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
     steps:
 VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
         env:
@@ -1134,6 +1137,47 @@ mod tests {
             &format!("the surface is missing {file}"),
         )
         .clone()
+    }
+
+    /// The `id:` job body, from the job key through the line before the next
+    /// top-level job.
+    fn yaml_job<'a>(workflow: &'a str, id: &str) -> &'a str {
+        let header = format!("  {id}:");
+        let mut start = None;
+        let mut end = None;
+        let mut offset = 0;
+        for line in workflow.split_inclusive('\n') {
+            let content = line.trim_end_matches('\n');
+            if start.is_none() {
+                if content == header {
+                    start = Some(offset);
+                }
+            } else if content.starts_with("  ")
+                && !content.starts_with("   ")
+                && content.ends_with(':')
+            {
+                end = Some(offset);
+                break;
+            }
+            offset += line.len();
+        }
+        let start = must_some(start, &format!("{id} job"));
+        must_some(
+            workflow.get(start..end.unwrap_or(workflow.len())),
+            &format!("{id} job bytes"),
+        )
+    }
+
+    fn assert_cache_retention_has_actions_write(workflow: &str) {
+        let job = yaml_job(workflow, "cache-budget");
+        assert!(
+            job.contains("name: Cache retention"),
+            "cache-budget must be the Cache retention job: {job}"
+        );
+        assert!(
+            job.contains("permissions:\n      contents: read\n      actions: write"),
+            "Cache retention must grant actions: write: {job}"
+        );
     }
 
     fn assert_maintenance_is_github_hosted(workflow: &str, config: &ProjectConfig) {
@@ -1359,7 +1403,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "4b0e986f2b63fd619c6908b868c451603b1d3bfa758fab1e8ca070bb75c71bc4",
+                "eb99f200d5b896e58c9e3cd17560a121d71e8a719ca7fe89cf7c9c4d988cd166",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1445,6 +1489,7 @@ mod tests {
 
         let direct = super::render_maintenance(&cfg);
         assert_maintenance_is_github_hosted(&direct, &cfg);
+        assert_cache_retention_has_actions_write(&direct);
 
         let root = scanned_root("maintenance-hosted");
         let surface = generate(&root, &cfg, None);
@@ -1454,6 +1499,17 @@ mod tests {
             "generated maintenance.yml must carry the header: {generated}"
         );
         assert_maintenance_is_github_hosted(&generated, &cfg);
+        assert_cache_retention_has_actions_write(&generated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_cache_retention_job_has_actions_write() {
+        let cfg = config(&["maintenance.yml"], None);
+        let root = scanned_root("cache-retention-permissions");
+        let surface = generate(&root, &cfg, None);
+        let generated = rendered(&surface, "maintenance.yml");
+        assert_cache_retention_has_actions_write(&generated);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1466,6 +1522,7 @@ mod tests {
 
         let workflow = super::render_maintenance(&cfg);
         assert_maintenance_is_github_hosted(&workflow, &cfg);
+        assert_cache_retention_has_actions_write(&workflow);
         assert!(
             workflow.contains("runs-on: ubuntu-22.04"),
             "maintenance must honor config.github_runner: {workflow}"

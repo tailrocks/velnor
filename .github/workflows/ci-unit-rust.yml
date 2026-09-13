@@ -298,6 +298,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -734,6 +738,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1179,6 +1187,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1624,6 +1636,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -2069,6 +2085,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -2514,6 +2534,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -2959,6 +2983,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3404,6 +3432,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -3849,6 +3881,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -4294,6 +4330,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -4739,6 +4779,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -5184,6 +5228,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -5628,6 +5676,10 @@ jobs:
         with:
           name: ${{ inputs.selection-artifact }}
           path: .velnor-ci-selection
+      - name: Install declared Mise tools
+        run: |
+          set -euo pipefail
+          mise --yes install
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
