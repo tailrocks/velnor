@@ -4,17 +4,21 @@ Base: origin/main tip 2e320bd5. Branch: r0-lifecycle-s5. Worktree: /tmp/velnor-l
 
 ## Fix (this branch, strict scope)
 
-Convert the store `JobState`/`SlotPhase` writes to projections; the tables
-stay as materialized views.
+Convert the store `JobState`/`SlotPhase` transition writes to
+projections; the tables stay as materialized views on those paths
+(`record_job` still seeds `phase` verbatim out of band).
 
 - control/store: new read functions `project_job_state` (phase cell ->
   `JobState`, fail-closed `store.job.state.unknown`),
   `project_job_transition` (`(from, reason) -> target`, else
   `IllegalJobEdge`), `project_slot_phase` (`&SlotRow -> SlotPhase`),
   `project_slot_transition` (`(from, target) -> target`, else
-  `IllegalSlotEdge`). The job/slot write paths materialize exactly what
-  the projections return; `decode_summary_row` projects through
-  `project_job_state` too, so readers and writers share one seam.
+  `IllegalSlotEdge`). The job/slot *transition* write paths materialize
+  exactly what the projections return; `decode_summary_row` projects
+  through `project_job_state` too, so readers and transition writers
+  share one seam. `record_job` is the out-of-band seeding seam: it
+  writes `phase` verbatim with no edge check (pre-existing wart,
+  preserved not introduced).
 - model: `transition_target` / `slot_transition_allowed` kept as the
   projection asserts (cheap: pure, total); doc comments recast, no
   signature or behavior change.
@@ -23,13 +27,20 @@ stay as materialized views.
   the same `CONFLICT` envelopes (`store.job.transition.illegal`,
   `store.slot.transition.illegal`, same remediations, nothing written).
   Runner forensics lines from steps 1-3 remain the log half.
-- Admission gate (run_id/attempt-skip stuck-row fix): `record_job`
+- Admission gate (admitted-yet-undecodable stuck-row fix): `record_job`
   rejects rows missing `run_id`/`attempt`
-  (`store.job.summary.unidentified`, like `insert_summary`) or carrying
-  negatives (`store.job.summary.range`). Such rows could never be read
-  back or driven to terminal and would sit nonterminal forever holding a
-  storage reservation. The gate also covers refreshes, so an update
-  cannot NULL out a healthy row's identity.
+  (`store.job.summary.unidentified`, like `insert_summary`), carrying
+  negatives, or carrying an attempt above `u32::MAX`
+  (`store.job.summary.range`). Such rows stay readable via
+  `job_summaries` and drivable via `record_job_transition`; only the
+  `decode_summary_row` paths (`fetch_summary*`) break on them. The gate
+  covers new admissions and refreshes (an update cannot NULL out a
+  healthy row's identity). No backfill sweep for pre-existing rows: a
+  sweep is unsafe — their external identity cannot be invented
+  (invented values corrupt external (GitHub) correlation, and
+  colliding triples yield store.job.summary.ambiguous in
+  fetch_summary), and deleting them would destroy
+  legitimate records that remain readable and drivable.
 
 NOT attempted (step 6, separate work): drain unification.
 
@@ -49,8 +60,10 @@ every edge and still applies). No schema change.
 - New: `projections_match_transition_tables_exhaustively` (7x17 job +
   11x11 slot matrices vs the tables), `..._materialized_columns_equal_
   projections_and_illegal_edges_count`, `admission_gate_rejects_rows_
-  without_usable_identity` (control).
-- Suites: model 129+4+6+4, control lib 243 + integration 33
+  without_usable_identity`, `admission_gate_rejects_attempt_above_u32_
+  max` (oversized-attempt rejection + `u32::MAX` decode round-trip;
+  control).
+- Suites: model 129+4+6+4, control lib 244 + integration 33
   (retention 8, store_integration 18, summary_corpus 7), runner
   node_arch 23 + other integration 10, runner ops 34, node 138: all pass.
 - Full runner lib: 1965 pass, 5 flake in untouched

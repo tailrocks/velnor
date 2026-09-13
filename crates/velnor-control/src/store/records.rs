@@ -744,10 +744,20 @@ impl Store {
     /// `(instance_slug, job_uid)`.
     ///
     /// Admission is gated on the run/attempt identity: a row missing
-    /// either (or carrying a negative) is rejected with
-    /// `store.job.summary.unidentified` (`store.job.summary.range`),
-    /// because such a row could never be read back or driven to terminal
-    /// and would sit nonterminal forever.
+    /// either is rejected with `store.job.summary.unidentified`, and a
+    /// row carrying a negative (or an attempt above `u32::MAX`) with
+    /// `store.job.summary.range`. Such a row would stay readable via
+    /// [`Store::job_summaries`] and drivable via
+    /// [`Store::record_job_transition`]; only the `decode_summary_row`
+    /// paths (`fetch_summary*`) break on it. The gate covers new
+    /// admissions (and refreshes) only: pre-existing rows are untouched,
+    /// since no backfill can invent their external identity and deleting
+    /// them would destroy legitimate records.
+    ///
+    /// This is the out-of-band seeding seam: `phase` is written verbatim
+    /// with no edge check (pre-existing wart, preserved not introduced).
+    /// Only the transition paths project through
+    /// [`project_job_transition`].
     ///
     /// # Errors
     /// Envelope-classified persistence failures.
@@ -2037,20 +2047,25 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
 }
 
 fn validate_job_row(row: &JobRow) -> StoreResult<()> {
-    // Admission gate: a row without its run/attempt identity can never be
-    // read back (`decode_summary_row` requires both) nor driven to terminal
-    // through the identity key, so it would sit nonterminal forever while
-    // holding a storage reservation. Reject it here, like `insert_summary`.
+    // Admission gate: `decode_summary_row` requires both run_id and
+    // attempt (`u64`/`u32`), so an admitted-yet-undecodable row would
+    // break the `fetch_summary*` paths. Reject it here, like
+    // `insert_summary`. The row would stay readable via `job_summaries`
+    // and drivable via `record_job_transition`; only the decode paths
+    // break. New admissions (and refreshes) only: pre-existing rows are
+    // untouched, since no backfill can invent their external identity.
     let Some(run_id) = row.run_id else {
         return Err(unidentified_summary());
     };
     let Some(attempt) = row.attempt else {
         return Err(unidentified_summary());
     };
+    // run_id needs no upper bound: a non-negative i64 always fits the
+    // decode target u64.
     if run_id < 0 {
         return Err(summary_out_of_range("run_id"));
     }
-    if attempt < 0 {
+    if attempt < 0 || attempt > i64::from(u32::MAX) {
         return Err(summary_out_of_range("attempt"));
     }
     let invalid = || {
@@ -2284,11 +2299,16 @@ pub struct IllegalJobEdge {
 /// Project the observable [`JobState`] from one materialized job row's
 /// phase cell.
 ///
-/// The `jobs.phase` column is a materialized view: writers store exactly
-/// what [`project_job_transition`] returns for the applied edge, and every
-/// reader — including this write path's own `from` state — projects
+/// The `jobs.phase` column is a materialized view on the transition
+/// paths: [`Store::record_job_transition`] stores exactly what
+/// [`project_job_transition`] returns for the applied edge, and every
+/// reader — including that write path's own `from` state — projects
 /// through this function, so a stored phase the closed taxonomy cannot
 /// produce fails closed instead of drifting.
+///
+/// [`Store::record_job`] is the out-of-band seeding seam: it writes
+/// `phase` verbatim with no edge check. Pre-existing wart, preserved
+/// here, not introduced.
 pub fn project_job_state(materialized_phase: &str) -> StoreResult<JobState> {
     JobState::try_from(materialized_phase).map_err(|_| {
         StoreError::new(ExitClass::Operation, "store.job.state.unknown")
