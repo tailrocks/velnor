@@ -1511,19 +1511,25 @@ mod tests {
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
         );
         assert_eq!(config.automatic(), Some("github"));
-        must(config.validate(&[], &[]), "both+github automatic is valid");
+        must(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "both+github automatic is valid",
+        );
 
         let both = config_for(
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\n",
         );
         assert_eq!(both.automatic(), Some("both"));
-        must(both.validate(&[], &[]), "both+both automatic is valid");
+        must(
+            both.validate(&[], &[], &BTreeSet::new()),
+            "both+both automatic is valid",
+        );
 
         let error = must_fail(
             config_for(
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"velnor\"\n",
             )
-            .validate(&[], &[]),
+            .validate(&[], &[], &BTreeSet::new()),
             "github runners cannot enable velnor automatic",
         );
         assert!(

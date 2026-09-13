@@ -5632,6 +5632,7 @@ mod tests {
             velnor_runner_group: None,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         }
     }
 
