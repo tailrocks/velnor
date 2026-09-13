@@ -7792,6 +7792,25 @@ channel = "stable"
         }
     }
 
+    #[test]
+    fn generated_cache_retention_job_has_actions_write() {
+        let config = scanned_fixture(RunnerMode::Velnor);
+        let files = must(generated_files(&config), "generate");
+        let workflow = must_some(
+            files.get(&PathBuf::from(".github/workflows/maintenance.yml")),
+            "generated maintenance.yml",
+        );
+        let job = yaml_job(workflow, "cache-budget");
+        assert!(
+            job.contains("name: Cache retention"),
+            "cache-budget must be the Cache retention job: {job}"
+        );
+        assert!(
+            job.contains("permissions:\n      contents: read\n      actions: write"),
+            "Cache retention must grant actions: write: {job}"
+        );
+    }
+
     /// The `id:` job body a generated aggregate renders, from the job key
     /// through the line before the next top-level job.
     fn yaml_job<'a>(workflow: &'a str, id: &str) -> &'a str {
