@@ -9,12 +9,12 @@ on:
     inputs:
       runner:
         description: Execution backend
-        required: false
-        default: github
+        required: true
+        default: velnor
         type: choice
         options:
-          - github
           - velnor
+          - github
           - both
       scope:
         description: Verification scope
@@ -197,9 +197,9 @@ jobs:
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results
@@ -446,9 +446,9 @@ jobs:
           fi
   required:
     name: Required
-    if: ${{ always() }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [ci-required]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Mirror CI / Required

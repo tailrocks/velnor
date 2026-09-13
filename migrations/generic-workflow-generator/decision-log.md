@@ -6,7 +6,7 @@ Verified decisions only.
 - 2026-09-13: Required check display name is `Required` under workflow `CI` (`CI / Required`). Job id stays `ci-required`.
 - 2026-09-13: `pull_request` and `merge_group` both publish the required check. No workflow-level path filters.
 - 2026-09-13: `--adopt` removed. Foreign workflow bodies are never imported. `--force` replaces unowned workflow files with generated output.
-- 2026-09-14: PR 752 closed for `runners=github` stripping Velnor-first execution. Restore: this repo `runners = "velnor"`; trusted aggregates plan on Velnor (image runtime); pull-request planning stays GitHub-hosted so untrusted code never runs self-hosted and `ci-required` can publish; omitted dispatch stays `github`.
+- 2026-09-14: PR 752 closed twice. First close: `runners=github`. Second: GitHub-default generated output contrary to Velnor-default contract. Adapt: `[workflow] runners = "velnor"` emits Velnor-only lanes, dispatch default `velnor`, image-runtime planning; omitted CLI/`runners=github|both` stay GitHub-default.
 - 2026-09-13: `[workflow] templates` and `pull_request_on_velnor = true` fail closed.
 - 2026-09-13: Generation-config command arrays fail closed. Runtime command lists are materialized from typed capabilities (scan + `workspace_check` + `ci_tasks` + docker seed cache).
 - 2026-09-13: Rust clippy/test no longer pass `--all-features` by default.

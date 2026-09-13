@@ -9,12 +9,12 @@ on:
     inputs:
       runner:
         description: Execution backend
-        required: false
-        default: github
+        required: true
+        default: velnor
         type: choice
         options:
-          - github
           - velnor
+          - github
           - both
       scope:
         description: Verification scope
@@ -42,7 +42,8 @@ permissions:
 jobs:
   plan:
     name: Planning
-    runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: [self-hosted, velnor-target-mvp]
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
       units: ${{ steps.plan.outputs.units }}
@@ -58,13 +59,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Set up Velnor workflow runtime
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8
-        with:
-          rev: 8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8
-      - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -78,25 +72,6 @@ jobs:
           if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
           velnor-workflow plan --config .github/ci/project.toml
 
-      - name: Prepare Velnor workflow runtime
-        shell: bash
-        env:
-          EXPECTED_REVISION: 8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8
-        run: |
-          set -euo pipefail
-          stage="$RUNNER_TEMP/velnor-workflow-runtime"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          install -m 0755 "$HOME/.cargo/bin/velnor-workflow" "$stage/velnor-workflow"
-          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
-          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
-      - name: Publish Velnor workflow runtime
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: velnor-workflow-runtime-8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/velnor-workflow-runtime
-          if-no-files-found: error
-          retention-days: 7
       - name: Publish Velnor CI selection
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -171,9 +146,9 @@ jobs:
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [plan, group-bun, group-docker, group-docs, group-opentofu, group-rust]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results
@@ -415,9 +390,9 @@ jobs:
           fi
   required:
     name: Required
-    if: ${{ always() }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [ci-required]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
     steps:
       - name: Mirror CI / Required

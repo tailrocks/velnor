@@ -81,9 +81,11 @@ pub(crate) fn resolve(
             "the lane matrix resolved to no lane job; at least one verification lane is required",
         ));
     }
-    if !jobs.iter().any(|job| job.lane == RunnerMode::Github) {
+    if !jobs.iter().any(|job| job.lane == RunnerMode::Github)
+        && config.runners != RunnerMode::Velnor
+    {
         return Err(GeneratorError::usage(
-            "the lane matrix must include the github lane; GitHub-hosted execution is the automatic default and cannot be omitted",
+            "the lane matrix must include the github lane unless `[workflow] runners = \"velnor\"`; GitHub-hosted execution is the omitted default",
         ));
     }
     // The self-hosted lane is emitted after the hosted lane, the order the
