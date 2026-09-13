@@ -1847,10 +1847,14 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let automatic = format!(
         "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
     );
-    let dispatch = format!(
+    let explicit_dispatch = format!(
         "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
-    value == format!("{automatic}||{dispatch}")
+    let default_dispatch = format!(
+        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
+    );
+    value == format!("{automatic}||{explicit_dispatch}")
+        || value == format!("{automatic}||{default_dispatch}")
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -2329,6 +2333,10 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    strip_inputs_unit_selector(value).or_else(|| strip_selected_units_selector(value))
+}
+
+fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
     let value = value.strip_prefix("inputs.unit=='")?;
     let separator = value.find("'&&(")?;
     let unit = &value[..separator];
@@ -2336,6 +2344,17 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
+}
+
+fn strip_selected_units_selector(value: &str) -> Option<&str> {
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = value.strip_prefix(PREFIX)?.strip_prefix(',')?;
+    let separator = rest.find(",')&&(")?;
+    let unit = &rest[..separator];
+    if !is_unit_id(unit) {
+        return None;
+    }
+    rest[separator + ",')&&(".len()..].strip_suffix(')')
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -3374,7 +3393,7 @@ jobs:
             "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
         );
         let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
-        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))";
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
         let root = policy_fixture(
             "velnor-pr-configured",
             "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
@@ -3411,7 +3430,7 @@ on:
   workflow_call:
 jobs:
   verify:
-    if: ${{{{ inputs.unit == 'rust-policy' && ({gate}) }}}}
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
     runs-on: {runner}
     steps:
       - run: true

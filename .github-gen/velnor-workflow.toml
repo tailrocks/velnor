@@ -3,10 +3,18 @@ schema = 1
 [generator]
 repository = "tailrocks/velnor"
 
-# Runner placement: the hosted image the GitHub lane pins, and the self-hosted
-# labels the trust-gated Velnor lane selects by.
+[scan]
+exclude = ["migrations/**"]
+
+# Runner placement: `runners` is the available backends. `automatic` is the
+# lanes that run on PR/push/schedule without a dispatch choice (omit infers
+# github when GitHub is available, otherwise the sole backend). Example:
+# runners = "both" and automatic = "github" auto-runs GitHub on PRs and keeps
+# Velnor dispatch-only; automatic = "both" auto-runs both on trusted events
+# so the lanes can be compared.
 [workflow]
-runners = "velnor"
+runners = "both"
+automatic = "both"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
@@ -3079,72 +3087,8 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 '''
 
 [[declare]]
-primitive = "static-workflow"
+primitive = "release-signer"
 file = "ci-release-package-signer.yml"
-
-[declare.args]
-template = '''
-name: Velnor release package signer
-
-# Callable-only by design: there is no push/schedule/dispatch trigger, so the
-# admitted source refs below are reachable exclusively through an explicit
-# `uses:` call from a workflow in this repository. A tag ref attests a stable
-# release build; refs/heads/main attests a rolling preview build. Anything else
-# is rejected before any artifact is downloaded or attested.
-on:
-  workflow_call:
-    inputs:
-      artifact-name:
-        required: true
-        type: string
-      subject-path:
-        required: true
-        type: string
-      source-ref:
-        required: true
-        type: string
-
-permissions: {}
-
-jobs:
-  attest:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      id-token: write
-      attestations: write
-      contents: read
-    steps:
-      - name: Admit immutable source
-        env:
-          ARTIFACT_NAME: ${{ inputs.artifact-name }}
-          SUBJECT_PATH: ${{ inputs.subject-path }}
-          SOURCE_REF: ${{ inputs.source-ref }}
-        run: |
-          set -euo pipefail
-          [[ "$SOURCE_REF" == refs/tags/v* || "$SOURCE_REF" == refs/heads/main ]]
-          [[ "$ARTIFACT_NAME" != */* && "$ARTIFACT_NAME" != *..* && -n "$ARTIFACT_NAME" ]]
-          [[ "$SUBJECT_PATH" != /* && "$SUBJECT_PATH" != *..* && -n "$SUBJECT_PATH" ]]
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: ${{ inputs.artifact-name }}
-          path: signer-input
-
-      - name: Bind checksum before attestation
-        env:
-          SUBJECT_PATH: ${{ inputs.subject-path }}
-        run: |
-          set -euo pipefail
-          ARTIFACT="signer-input/$SUBJECT_PATH"
-          test -f "$ARTIFACT"
-          sha256sum -- "$ARTIFACT" > SHA256SUMS
-          sha256sum --check --strict SHA256SUMS
-
-      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
-        with:
-          subject-path: signer-input/${{ inputs.subject-path }}
-'''
 
 # The cache-hygiene workflow is the generic maintenance family, stated
 # explicitly so the repository owns the decision.

@@ -124,6 +124,11 @@ struct WorkflowSection {
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
+    /// Lanes that run on `pull_request`/`push`/`schedule` without a dispatch choice.
+    /// Must be a subset of `runners`. Absent infers `github` when GitHub is
+    /// available, otherwise the sole configured backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<String>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
@@ -492,6 +497,11 @@ impl RepoGenerationConfig {
         self.workflow.runners.as_deref()
     }
 
+    /// The declared automatic lanes, if any.
+    pub(crate) fn automatic(&self) -> Option<&str> {
+        self.workflow.automatic.as_deref()
+    }
+
     /// The declared self-hosted runner labels.
     pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
         self.workflow.velnor_labels.as_deref()
@@ -733,6 +743,13 @@ fn validate_excludes(exclude: &[String]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn automatic_fits_runners(runners: &str, automatic: &str) -> bool {
+    match (runners, automatic) {
+        ("both", _) => true,
+        (runners, automatic) => runners == automatic,
+    }
+}
+
 fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if workflow.github_runner.as_deref().is_some_and(str::is_empty) {
         return Err(GeneratorError::usage(
@@ -744,6 +761,21 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     {
         return Err(GeneratorError::usage(format!(
             "[workflow] runners must be one of: github, velnor, both; found `{runners}`"
+        )));
+    }
+    if let Some(automatic) = workflow.automatic.as_deref()
+        && !matches!(automatic, "github" | "velnor" | "both")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic must be one of: github, velnor, both; found `{automatic}`"
+        )));
+    }
+    if let (Some(runners), Some(automatic)) =
+        (workflow.runners.as_deref(), workflow.automatic.as_deref())
+        && !automatic_fits_runners(runners, automatic)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] automatic = `{automatic}` is not available when runners = `{runners}`"
         )));
     }
     if let Some(labels) = &workflow.velnor_labels {
@@ -1298,6 +1330,33 @@ mod tests {
                 "unexpected error for {runners}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn workflow_automatic_must_be_a_subset_of_runners() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"github\"\n",
+        );
+        assert_eq!(config.automatic(), Some("github"));
+        must(config.validate(&[], &[]), "both+github automatic is valid");
+
+        let both = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"both\"\nautomatic = \"both\"\n",
+        );
+        assert_eq!(both.automatic(), Some("both"));
+        must(both.validate(&[], &[]), "both+both automatic is valid");
+
+        let error = must_fail(
+            config_for(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"github\"\nautomatic = \"velnor\"\n",
+            )
+            .validate(&[], &[]),
+            "github runners cannot enable velnor automatic",
+        );
+        assert!(
+            error.to_string().contains("[workflow] automatic"),
+            "{error}"
+        );
     }
 
     #[test]

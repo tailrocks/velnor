@@ -89,16 +89,37 @@ fn the_setup_action_is_owned_verbatim() {
 fn velnor_lane_uses_the_local_mb_boxington_backend() {
     let (_, workflow) = generated_files()
         .into_iter()
-        .find(|(name, _)| name == "ci-rust-velnor-workflow.yml")
-        .expect("the workflow crate unit renders a workflow");
-    assert!(
-        workflow.contains("backend: local"),
-        "velnor lane lost its local backend"
-    );
-    assert!(
-        workflow.contains("backend: github"),
-        "hosted lane lost the github backend"
-    );
+        .find(|(name, _)| name == "ci-unit-rust.yml")
+        .expect("the rust kind reusable renders a workflow");
+    let project = read(".github/ci/project.toml");
+    if project.contains("runners = \"velnor\"") {
+        assert!(
+            !workflow.contains("backend: github"),
+            "velnor-only surface must not emit a GitHub hosted backend"
+        );
+        assert!(
+            workflow.contains("backend: local"),
+            "velnor lane lost its local backend"
+        );
+    } else if project.contains("runners = \"github\"") {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
+        assert!(
+            !workflow.contains("backend: local"),
+            "github-only surface must not emit a Velnor local backend"
+        );
+    } else {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
+        assert!(
+            workflow.contains("backend: local"),
+            "velnor lane lost its local backend"
+        );
+    }
 }
 
 /// The regeneration gate stays wired: the workflow crate's own unit watches
