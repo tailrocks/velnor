@@ -236,7 +236,9 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ci_tasks: Option<Vec<String>>,
     /// Additional mise tool ids the unit's jobs install when the scanner
-    /// cannot observe a runtime-invoked tool.
+    /// cannot observe a runtime-invoked tool. Each id renders verbatim into
+    /// `install_args`, so it must equal a key the root `mise.lock` pins, bare
+    /// or backend-qualified exactly as the lock spells it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     mise_tools: Option<Vec<String>>,
 }
@@ -623,6 +625,7 @@ impl RepoGenerationConfig {
         &self,
         unit_ids: &[String],
         package_update_blocks: &[&str],
+        mise_lock_keys: &BTreeSet<String>,
     ) -> Result<(), GeneratorError> {
         let repository = self.generator.repository.as_deref().ok_or_else(|| {
             GeneratorError::usage(
@@ -640,7 +643,7 @@ impl RepoGenerationConfig {
             package_update_blocks,
         )?;
         validate_workflow_files(self.workflow.files.as_deref())?;
-        validate_units(&self.units)?;
+        validate_units(&self.units, mise_lock_keys)?;
         validate_unit_references(
             &self.units,
             self.workflow.version_bump_units.as_deref(),
@@ -916,32 +919,105 @@ fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorErro
     Ok(())
 }
 
-/// A mise tool id renders verbatim into a job's `install_args`, so it must be a
-/// backend-qualified plain id: no versions, whitespace, traversal, or shell
-/// metacharacters.
+/// A mise tool id renders verbatim into a job's `install_args`, so its shape
+/// must be a plain tool key: no versions, flags, whitespace, traversal, or
+/// shell metacharacters. This is the shape half of the contract only; whether
+/// the id names a locked tool is checked separately against the lock keys (see
+/// [`RepoGenerationConfig::validate`]).
+///
+/// The predicate mirrors `is_valid_install_arg_token` in
+/// `crates/velnor-runner/src/mise.rs` exactly, so an id the generator accepts
+/// can never fail the runner's shape check. The `backend:` prefix is optional:
+/// locks mix bare keys (`cargo-binstall`) and qualified keys
+/// (`aqua:nextest-rs/nextest/cargo-nextest`), and `mise --locked` requires the
+/// install args to equal the lock keys byte for byte.
 fn valid_mise_tool_id(value: &str) -> bool {
-    let Some((backend, path)) = value.split_once(':') else {
+    if value.is_empty() || value.len() > 200 {
         return false;
+    }
+    // Flags, version pins, URLs, and template/shell syntax are never tool keys.
+    if value.starts_with('-') || value.contains('@') || value.contains("://") {
+        return false;
+    }
+    // Filesystem paths (absolute, relative, home, traversal, Windows).
+    if value.starts_with('/')
+        || value.starts_with('.')
+        || value.starts_with('~')
+        || value.contains('\\')
+        || value.contains("..")
+    {
+        return false;
+    }
+    if value.starts_with(':') {
+        return false;
+    }
+    // Whitelist the character set. Anything else (whitespace already split off,
+    // plus `$`, backticks, quotes, `;`, `&`, `|`, `*`, `?`, parens, braces …)
+    // is rejected as a shell metacharacter.
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'+')
+    }) {
+        return false;
+    }
+    // Must carry at least one alphanumeric character.
+    value.bytes().any(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Location of the mise lockfile, relative to the repository root.
+pub(crate) const MISE_LOCK_PATH: &str = "mise.lock";
+
+/// Collect every tool key committed in a `mise.lock` (`[[tools.<key>]]`).
+/// Mirrors `lock_tool_keys` in `crates/velnor-runner/src/mise.rs`: strict TOML
+/// parsing (never hand-splitting), so quoted keys such as
+/// `[[tools."cargo:sccache"]]` resolve to the same key both sides check.
+///
+/// # Errors
+/// Returns a usage error when the lock text is not valid TOML.
+pub(crate) fn parse_mise_lock_keys(lock_toml: &str) -> Result<BTreeSet<String>, GeneratorError> {
+    let table: toml::Table = lock_toml.parse().map_err(|error| {
+        GeneratorError::usage(format!("parse lock TOML for committed tool keys: {error}"))
+    })?;
+    Ok(table
+        .get("tools")
+        .and_then(toml::Value::as_table)
+        .map(|tools| tools.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// Read the committed tool keys from the root `mise.lock`.
+///
+/// A missing lock is a valid outcome — the repository does not pin mise tools,
+/// so identity checking has nothing to check against and validation falls back
+/// to shape only. Only the root lock is consulted: a unit nested in a
+/// subdirectory with its own `mise.lock` is validated against the root keys,
+/// which may reject a tool its own lock pins (or admit one the root lock pins
+/// but its own does not). Per-unit locks are a known gap; the runner's own
+/// lock check stays the final gate.
+///
+/// # Errors
+/// Returns an I/O error when the lock cannot be read, and a usage error when
+/// it is not valid UTF-8 TOML.
+pub(crate) fn mise_lock_keys_for_root(root: &Path) -> Result<BTreeSet<String>, GeneratorError> {
+    let path = root.join(MISE_LOCK_PATH);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(GeneratorError::io("read mise.lock", &path, &error)),
     };
-    let path_segments = path.split('/').collect::<Vec<_>>();
-    !backend.is_empty()
-        && !path.is_empty()
-        && value.matches(':').count() == 1
-        && backend
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        && path_segments
-            .iter()
-            .all(|segment| !segment.is_empty() && *segment != "." && *segment != "..")
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
-        })
+    let text = String::from_utf8(bytes).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.lock {}: {error}", path.display()))
+    })?;
+    parse_mise_lock_keys(&text)
+        .map_err(|error| GeneratorError::usage(format!("{}: {error}", path.display())))
 }
 
 /// Unit rows either override a scanned unit by id or add one. Two rows for one
 /// id would make the effective contract depend on which one the reader trusts,
 /// so the second row is refused instead of merged.
-fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
+fn validate_units(
+    units: &[UnitSection],
+    mise_lock_keys: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
     for row in units {
         let id = row.id.as_deref().unwrap_or_default();
         if id.is_empty() {
@@ -986,7 +1062,21 @@ fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
             for tool in tools {
                 if !valid_mise_tool_id(tool) {
                     return Err(GeneratorError::usage(format!(
-                        "[[unit]] {id} declares mise tool {tool}, which is not a backend-qualified plain tool id; use ids such as github:owner/repo without versions, whitespace, traversal, or shell metacharacters"
+                        "[[unit]] {id} declares mise tool {tool}, which is not a plain tool id; use ids such as cargo-binstall or github:owner/repo without versions, flags, whitespace, traversal, or shell metacharacters"
+                    )));
+                }
+                // Shape is checked first so a compromised lock can never
+                // smuggle shell syntax into `install_args` through membership.
+                // An empty key set means the scan root has no mise.lock, so
+                // identity has nothing to check against and shape alone rules.
+                if !mise_lock_keys.is_empty() && !mise_lock_keys.contains(tool) {
+                    let known = mise_lock_keys
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(GeneratorError::usage(format!(
+                        "[[unit]] {id} declares mise tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {known}"
                     )));
                 }
                 if !seen.insert(tool) {
@@ -1341,7 +1431,7 @@ mod tests {
         let unit = unit_ids.first().cloned().unwrap_or_default();
         let config = config_for(&full_config(&unit));
         must(
-            config.validate(&unit_ids, &package_update_blocks()),
+            config.validate(&unit_ids, &package_update_blocks(), &BTreeSet::new()),
             "validate full config",
         );
         assert_eq!(config.schema, Some(1));
@@ -1379,7 +1469,7 @@ mod tests {
             ));
             assert_eq!(config.runners(), Some(runners));
             must(
-                config.validate(&[], &[]),
+                config.validate(&[], &[], &BTreeSet::new()),
                 "validate accepted workflow runner mode",
             );
         }
@@ -1403,7 +1493,7 @@ mod tests {
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"{runners}\"\n"
             ));
             let error = must_fail(
-                config.validate(&[], &[]),
+                config.validate(&[], &[], &BTreeSet::new()),
                 "invalid workflow runner mode must fail validation",
             );
             assert!(
@@ -1456,7 +1546,7 @@ mod tests {
         );
         assert_eq!(declared.macos_runner(), Some("macos-26"));
         must(
-            declared.validate(&[], &[]),
+            declared.validate(&[], &[], &BTreeSet::new()),
             "validate declared macos runner",
         );
     }
@@ -1467,7 +1557,7 @@ mod tests {
             "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"\"\n",
         );
         let error = must_fail(
-            config.validate(&[], &[]),
+            config.validate(&[], &[], &BTreeSet::new()),
             "empty macos_runner must fail validation",
         );
         assert!(
@@ -1551,7 +1641,9 @@ mod tests {
              [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
         );
         let error = must_some_error(
-            config.validate(&unit_ids, &package_update_blocks()).err(),
+            config
+                .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+                .err(),
             "unknown unit must fail",
         );
         assert!(error.contains("not-a-unit"), "error names the row: {error}");
@@ -1562,93 +1654,199 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    fn mise_tools_config(unit: &str, tools: &str) -> String {
+        format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
+        )
+    }
+
+    /// Lock keys mixing the bare and backend-qualified spellings real locks
+    /// carry, parsed through the same parser the scan uses.
+    fn mixed_lock_keys() -> BTreeSet<String> {
+        must(
+            parse_mise_lock_keys(
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n",
+            ),
+            "parse mixed lock fixture",
+        )
+    }
+
     #[test]
-    fn declared_mise_tools_require_unique_qualified_plain_ids() {
+    fn declared_mise_tools_match_lock_keys_by_exact_spelling() {
         let root = scanned_root("mise-tools");
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let unit = unit_ids.first().cloned().unwrap_or_default();
-        let valid = format!(
-            r#"schema = 1
-
-[generator]
-repository = "example/fixture"
-
-[[units]]
-id = "{unit}"
-mise_tools = ["github:open-telemetry/weaver", "aqua:nextest-rs/nextest/cargo-nextest"]
-"#
-        );
+        let keys = mixed_lock_keys();
+        // Bare and qualified ids validate when the lock pins that spelling.
         must(
-            config_for(&valid).validate(&unit_ids, &package_update_blocks()),
-            "qualified plain tool ids validate",
+            config_for(&mise_tools_config(
+                &unit,
+                "\"cargo-binstall\", \"github:open-telemetry/weaver\", \"aqua:nextest-rs/nextest/cargo-nextest\"",
+            ))
+            .validate(&unit_ids, &package_update_blocks(), &keys),
+            "lock-pinned bare and qualified tool ids validate",
         );
+        // A qualified id the lock pins only bare is the incident this check
+        // exists for: the generator used to mandate the qualified spelling the
+        // runner's own lock check then rejected.
         for rejected in [
-            "",
-            "weaver",
-            "github:open-telemetry/weaver@0.24.2",
-            "github:open-telemetry//weaver",
-            "github:../weaver",
-            "github:open-telemetry/weaver;touch",
+            "aqua:cargo-bins/cargo-binstall",
+            "cargo:open-telemetry/weaver",
+            "cargo:nonexistent-tool",
         ] {
-            let text = format!(
-                r#"schema = 1
-
-[generator]
-repository = "example/fixture"
-
-[[units]]
-id = "{unit}"
-mise_tools = ["{rejected}"]
-"#
-            );
             let error = must_some_error(
-                config_for(&text)
-                    .validate(&unit_ids, &package_update_blocks())
+                config_for(&mise_tools_config(&unit, &format!("\"{rejected}\"")))
+                    .validate(&unit_ids, &package_update_blocks(), &keys)
                     .err(),
-                "invalid mise tool must fail",
+                "unpinned mise tool must fail",
             );
             assert!(
-                error.contains("mise tool"),
-                "error names the mise tool contract: {error}"
+                error.contains("mise.lock does not pin"),
+                "error names the lock mismatch: {error}"
+            );
+            assert!(
+                error.contains("known keys: aqua:nextest-rs/nextest/cargo-nextest, cargo-binstall, github:open-telemetry/weaver"),
+                "error lists the known keys: {error}"
             );
         }
-        let empty = format!(
-            r#"schema = 1
-
-[generator]
-repository = "example/fixture"
-
-[[units]]
-id = "{unit}"
-mise_tools = []
-"#
+        // Without a lock there is no identity to check, so shape alone rules
+        // and either spelling validates.
+        must(
+            config_for(&mise_tools_config(
+                &unit,
+                "\"cargo-binstall\", \"aqua:cargo-bins/cargo-binstall\"",
+            ))
+            .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new()),
+            "any well-shaped tool ids validate without a lock",
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn misshapen_mise_tools_fail_regardless_of_lock() {
+        let root = scanned_root("mise-tools-shape");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let unit = unit_ids.first().cloned().unwrap_or_default();
+        for rejected in [
+            "",
+            "github:open-telemetry/weaver@0.24.2",
+            "github:../weaver",
+            "..",
+            "github:open-telemetry/weaver;touch",
+            "github:open-telemetry/weaver touch",
+            "-install",
+            "https://example.com/tool",
+            "github:open-telemetry\\\\weaver",
+            "~/weaver",
+            "/usr/bin/weaver",
+            ".weaver",
+            ":weaver",
+            "weaver$(touch)",
+        ] {
+            // Shape is checked before membership, so a lock can never launder
+            // shell syntax into `install_args`: the id fails with or without
+            // keys.
+            for keys in [mixed_lock_keys(), BTreeSet::new()] {
+                let error = must_some_error(
+                    config_for(&mise_tools_config(&unit, &format!("\"{rejected}\"")))
+                        .validate(&unit_ids, &package_update_blocks(), &keys)
+                        .err(),
+                    "misshapen mise tool must fail",
+                );
+                assert!(
+                    error.contains("not a plain tool id"),
+                    "error names the mise tool shape contract: {error}"
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_or_duplicate_mise_tools_fail() {
+        let root = scanned_root("mise-tools-empty-dup");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let unit = unit_ids.first().cloned().unwrap_or_default();
         let error = must_some_error(
-            config_for(&empty)
-                .validate(&unit_ids, &package_update_blocks())
+            config_for(&mise_tools_config(&unit, ""))
+                .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
                 .err(),
             "empty mise_tools must fail",
         );
         assert!(error.contains("empty mise_tools"), "{error}");
-        let duplicate = format!(
-            r#"schema = 1
-
-[generator]
-repository = "example/fixture"
-
-[[units]]
-id = "{unit}"
-mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
-"#
-        );
         let error = must_some_error(
-            config_for(&duplicate)
-                .validate(&unit_ids, &package_update_blocks())
-                .err(),
+            config_for(&mise_tools_config(
+                &unit,
+                "\"github:open-telemetry/weaver\", \"github:open-telemetry/weaver\"",
+            ))
+            .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+            .err(),
             "duplicate mise_tools must fail",
         );
         assert!(error.contains("more than once"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lock_key_parser_collects_bare_and_quoted_qualified_keys() {
+        let keys = must(
+            parse_mise_lock_keys(
+                "# @generated - this file is auto-generated by `mise lock`\n\n[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[tools.cargo-binstall.\"platforms.linux-x64\"]\nchecksum = \"sha256:abc\"\n\n[[tools.\"cargo:sccache\"]]\nversion = \"0.9.0\"\n\n[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\n",
+            ),
+            "parse mixed lock",
+        );
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec![
+                "aqua:nextest-rs/nextest/cargo-nextest".to_owned(),
+                "cargo-binstall".to_owned(),
+                "cargo:sccache".to_owned(),
+            ],
+            "quoted qualified keys resolve to their literal spelling"
+        );
+        let empty = must(parse_mise_lock_keys(""), "parse empty lock");
+        assert!(empty.is_empty(), "a lock without tools pins nothing");
+        let missing = must(
+            parse_mise_lock_keys("[settings]\nlockfile = true\n"),
+            "parse lock without tools table",
+        );
+        assert!(missing.is_empty(), "a lock without tools pins nothing");
+        let error = must_fail(
+            parse_mise_lock_keys("[[tools.unclosed\n"),
+            "invalid lock TOML must fail",
+        );
+        assert!(
+            error.to_string().contains("committed tool keys"),
+            "error names the lock contract: {error}"
+        );
+    }
+
+    #[test]
+    fn lock_key_reader_treats_a_missing_lock_as_unpinned() {
+        let root = scanned_root("mise-lock-missing");
+        let keys = must(mise_lock_keys_for_root(&root), "read missing lock");
+        assert!(keys.is_empty(), "a missing lock pins no keys");
+        must(
+            fs::write(root.join("mise.lock"), "[[tools.cargo-binstall]]\n"),
+            "write lock",
+        );
+        let keys = must(mise_lock_keys_for_root(&root), "read present lock");
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["cargo-binstall".to_owned()]
+        );
+        must(
+            fs::write(root.join("mise.lock"), "[[tools.unclosed\n"),
+            "write broken lock",
+        );
+        let error = must_fail(mise_lock_keys_for_root(&root), "broken lock must fail");
+        assert!(
+            error.to_string().contains("mise.lock"),
+            "error names the lock file: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1663,7 +1861,9 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
                  [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&unit_ids, &package_update_blocks()).err(),
+                config
+                    .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+                    .err(),
                 "declared file must fail validation",
             );
             assert!(
@@ -1677,7 +1877,7 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
         ));
         let error = must_some_error(
             separator
-                .validate(&unit_ids, &package_update_blocks())
+                .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
                 .err(),
             "backslash file name must fail validation",
         );
@@ -1701,7 +1901,9 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
                 "schema = 1\n\n[generator]\nrepository = \"{repository}\"\n"
             ));
             let error = must_some_error(
-                config.validate(&unit_ids, &package_update_blocks()).err(),
+                config
+                    .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+                    .err(),
                 "repository slug must fail validation",
             );
             assert!(
@@ -1719,7 +1921,9 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let config = config_for("schema = 1\n");
         let error = must_some_error(
-            config.validate(&unit_ids, &package_update_blocks()).err(),
+            config
+                .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+                .err(),
             "missing generator must fail",
         );
         assert!(error.contains("[generator] repository"), "{error}");
@@ -1737,7 +1941,7 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
         must(
-            opaque.validate(&unit_ids, &package_update_blocks()),
+            opaque.validate(&unit_ids, &package_update_blocks(), &BTreeSet::new()),
             "opaque args validate",
         );
         let float = config_for(
@@ -1746,7 +1950,9 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
              [declare.args]\nratio = 1.5\n",
         );
         let error = must_some_error(
-            float.validate(&unit_ids, &package_update_blocks()).err(),
+            float
+                .validate(&unit_ids, &package_update_blocks(), &BTreeSet::new())
+                .err(),
             "float args must fail",
         );
         assert!(error.contains("float"), "{error}");
@@ -1796,7 +2002,7 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
                  [workflow]\npackage_update_channels = {{{grants}}}\n"
             ));
             let error = must_some_error(
-                config.validate(&[], &blocks).err(),
+                config.validate(&[], &blocks, &BTreeSet::new()).err(),
                 "channel grants must fail validation",
             );
             assert!(
@@ -1815,7 +2021,10 @@ mise_tools = ["github:open-telemetry/weaver", "github:open-telemetry/weaver"]
                 "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\npackage_update_channels = {{{grants}}}\n"
             ));
-            must(config.validate(&[], &blocks), "channel grants validate");
+            must(
+                config.validate(&[], &blocks, &BTreeSet::new()),
+                "channel grants validate",
+            );
         }
     }
 

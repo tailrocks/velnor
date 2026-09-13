@@ -764,6 +764,9 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
             // A latched drain stops new capacity, never in-flight work: no
             // fresh permit may spawn a slot while the fleet is draining.
+            // Deliberately unconditional (no flag check): a marker present
+            // in state always gates new work, even with the flag off
+            // (fail-closed; see the controller's flag-off drain arm).
             let drain_active = state.drain_active;
             let slot = state.slot_mut(&slot_id);
             if generation < slot.generation
@@ -924,6 +927,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             // completion.
             // A latched drain stops new acquisitions, never in-flight work:
             // an already-intended job still resolves, owns, and completes.
+            // Deliberately unconditional (no flag check): fail-closed like
+            // the `PermitReserved` arm above.
             let drain_active = state.drain_active;
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
@@ -2366,6 +2371,14 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     // marker from state keeps a latched drain sticky across unrelated event
     // writes with no new event and no schema bump. Absent when inactive, so
     // pre-drain journals keep their exact meta shape.
+    //
+    // Mixed-version warning: this rewrite drops every `meta` key it does
+    // not know, and a pre-drain binary's `persist_state` does not know the
+    // drain key — any write by an older binary clears a latched marker
+    // (unlatches the drain). Forward tolerance is read-only: old binaries
+    // open drained journals fine but must not share one journal with a
+    // draining new binary across an upgrade. A cleared marker re-latches
+    // on the next flag-on drain edge that observes draining.
     let drain = state
         .drain_active
         .then(|| ("drain", format!("requested:{}", state.drain_version)));
@@ -3201,6 +3214,77 @@ mod tests {
             .unwrap();
         let error = journal.materialized_state().unwrap_err();
         assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persist_state_drops_unknown_meta_keys_on_apply() {
+        let (dir, mut journal) = open_tmp("drain-meta-apply-drops");
+        journal
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
+                [],
+            )
+            .unwrap();
+        journal.apply(Event::ControlLive).unwrap();
+        let raw: Option<String> = journal
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'future_key'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(raw, None);
+        // Known keys survive the same rewrite.
+        let live: String = journal
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'control_live'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, "1");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pre_drain_binary_write_clears_the_drain_marker() {
+        let (dir, mut journal) = open_tmp("drain-old-writer");
+        assert!(journal.set_drain(7).unwrap());
+        // A pre-drain binary's `persist_state` (see base 97281ce7) rewrites
+        // every `meta` row it knows and drops the drain key it cannot know.
+        // Replay that exact shape: keep all known rows, omit the marker.
+        let kept: Vec<(String, String)> = {
+            let mut statement = journal
+                .conn
+                .prepare("SELECT key, value FROM meta WHERE key != 'drain'")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        };
+        journal.conn.execute("DELETE FROM meta", []).unwrap();
+        for (key, value) in &kept {
+            journal
+                .conn
+                .execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                    params![key.as_str(), value.as_str()],
+                )
+                .unwrap();
+        }
+        // The marker is gone although no drain-clear path ran: mixed-version
+        // fleets sharing one journal can unlatch a drain mid-flight.
+        let state = journal.materialized_state().unwrap();
+        assert!(!state.drain_active);
+        assert_eq!(state.drain_version, 0);
+        assert_eq!(read_drain_state(&dir.join("journal.db")), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

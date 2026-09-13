@@ -241,8 +241,9 @@ impl TryFrom<&str> for JobState {
 ///
 /// Projection assert: the store's `project_job_transition` consults this
 /// table for every candidate edge, so the table stays the single source of
-/// edge legality while the `jobs.phase` column is only its materialized
-/// view.
+/// edge legality while the transition paths treat the `jobs.phase`
+/// column as only its materialized view (`record_job` still seeds `phase`
+/// verbatim out of band).
 #[must_use]
 pub fn transition_target(from: JobState, reason: EventReason) -> Option<JobState> {
     match (from, reason) {

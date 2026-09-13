@@ -1760,6 +1760,7 @@ mod tests {
             pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         }
     }
 

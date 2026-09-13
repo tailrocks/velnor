@@ -2586,7 +2586,10 @@ pub(crate) fn draining() -> bool {
 
 /// Lifecycle drain unification (steps 1-4), gated by `VELNOR_JOURNAL_DRAIN=1`
 /// and default off. With the flag off every reader below collapses to the
-/// static latch and the pre-unification path is byte-identical.
+/// static latch and the pre-unification path is behaviorally identical on
+/// marker-free journals. A latched marker still drains with the flag off
+/// (fail-closed): the flag gates the new signal legs and the edge write,
+/// never the durable marker itself.
 pub(crate) fn journal_drain_enabled() -> bool {
     std::env::var("VELNOR_JOURNAL_DRAIN").is_ok_and(|value| value == "1")
 }
@@ -2603,13 +2606,15 @@ static DRAIN_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
 
 /// Non-blocking journal-drain hint for slot and daemon poll boundaries.
 /// False with the flag off, on any read failure, or when no marker is
-/// latched; never blocks on a writer's lock.
+/// latched; never blocks on a writer's lock — or on the cache mutex: a
+/// contended cache degrades to a fresh zero-timeout read (and a skipped
+/// store), which is always safe because the cache is a pure TTL overlay.
 pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     if !journal_drain_enabled() {
         return false;
     }
     let now = Instant::now();
-    if let Ok(cache) = DRAIN_HINT_CACHE.lock()
+    if let Ok(cache) = DRAIN_HINT_CACHE.try_lock()
         && let Some((path, hint, at)) = cache.as_ref()
         && path == journal_path
         && now.duration_since(*at) < DRAIN_HINT_TTL
@@ -2618,7 +2623,7 @@ pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
     }
     let hint =
         velnor_control::journal::read_drain_state(journal_path).is_some_and(|state| state.active);
-    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+    if let Ok(mut cache) = DRAIN_HINT_CACHE.try_lock() {
         *cache = Some((journal_path.to_path_buf(), hint, now));
     }
     hint
@@ -2671,6 +2676,8 @@ fn controller_lifecycle_for_daemon(
 
 #[cfg(test)]
 pub(crate) fn reset_drain_hint_cache_for_tests() {
+    // Test-only: a blocking lock is fine here (and must not silently skip
+    // the reset). The production path above uses `try_lock` exclusively.
     if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
         *cache = None;
     }

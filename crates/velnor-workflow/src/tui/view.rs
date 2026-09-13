@@ -664,7 +664,7 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -754,6 +754,7 @@ mod tests {
             pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));
