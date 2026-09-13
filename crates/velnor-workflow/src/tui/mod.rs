@@ -999,6 +999,7 @@ mod tests {
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),
             release_enabled: true,
             release_reason: String::new(),

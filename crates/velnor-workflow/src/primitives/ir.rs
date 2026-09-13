@@ -674,6 +674,7 @@ pub(crate) fn render_retained_output_cache_note(
 pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
+    pub(crate) macos_runner: String,
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
@@ -716,15 +717,26 @@ fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
     extra_inputs: &str,
+    runners: RunnerMode,
 ) -> String {
+    // Both-mode aggregates name the manual lane selector `lanes`, the name
+    // the static release lane-admission idiom and the adopted estate surface
+    // already use; single-lane modes keep the historical `runner` input
+    // byte-identical.
+    let lane_input = if runners == RunnerMode::Both {
+        "      lanes:\n        description: velnor (default) | github | both\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n"
+    } else {
+        "      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n"
+    };
     format!(
-        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n{lane_input}      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
 fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
+    runners: RunnerMode,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => (
@@ -732,7 +744,7 @@ fn aggregate_triggers(
             "CI / PR",
             format!(
                 "on:\n  pull_request:\n{}",
-                workflow_dispatch_inputs("affected", default_branch, "")
+                workflow_dispatch_inputs("affected", default_branch, "", runners)
             ),
             "true",
         ),
@@ -742,7 +754,7 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs("full", default_branch, "")
+                workflow_dispatch_inputs("full", default_branch, "", runners)
             ),
             "true",
         ),
@@ -755,6 +767,7 @@ fn aggregate_triggers(
                     "full",
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
+                    runners,
                 )
             ),
             "true",
@@ -835,6 +848,7 @@ impl WorkflowIr {
         Self {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
+            macos_runner: config.macos_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
@@ -850,7 +864,7 @@ impl WorkflowIr {
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, self.runners);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -874,6 +888,9 @@ impl WorkflowIr {
             output.push('\n');
         }
         output.push_str("jobs:\n");
+        if self.runners == RunnerMode::Both {
+            self.render_lane_admission(&mut output);
+        }
         // Runner mode is global; only trusted-event jobs receive the extra
         // default-branch gate needed for Velnor execution.
         let trusted_event = kind != WorkflowKind::PullRequest;
@@ -959,11 +976,14 @@ impl WorkflowIr {
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch);
+            aggregate_triggers(kind, &self.default_branch, self.runners);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
         );
+        if self.runners == RunnerMode::Both {
+            self.render_lane_admission(&mut output);
+        }
         // The plan job is a contributed node: the aggregate composes the graph
         // the declared primitives built and renders no job of its own.
         let plan = nodes
@@ -1443,6 +1463,25 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_runtime_download(lane));
     }
 
+    /// The Both-mode lane-admission job, copied from the static release
+    /// lane-admission idiom: manual dispatch resolves the `lanes` input
+    /// (defaulting to Velnor, with GitHub selectable), automatic triggers
+    /// resolve the `VELNOR_AUTOMATIC_LANES` repository variable, and anything
+    /// else fails closed. The plan job needs this job, so an unadmitted lane
+    /// selection fails the run before any verification is scheduled.
+    ///
+    /// The automatic fallback is `both`, not the release idiom's `github`:
+    /// release admits only its GitHub lane, while CI automatic triggers keep
+    /// both lanes (the hosted job ungated, the Velnor job on its event gate),
+    /// so the resolved output must describe what actually runs.
+    pub(crate) fn render_lane_admission(&self, output: &mut String) {
+        let _ = writeln!(
+            output,
+            "  lane-admission:\n    name: Resolve CI lanes\n    runs-on: {}\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    outputs:\n      lanes: ${{{{ steps.route.outputs.lanes }}}}\n    steps:\n      - name: Validate requested lanes\n        id: route\n        env:\n          REQUESTED_LANES: ${{{{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'both' }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$REQUESTED_LANES\" in\n            velnor|github|both)\n              echo \"lanes=$REQUESTED_LANES\" >> \"$GITHUB_OUTPUT\"\n              ;;\n            *)\n              echo \"::error::invalid CI lane '$REQUESTED_LANES'; expected velnor, github, or both\" >&2\n              exit 1\n              ;;\n          esac",
+            self.runner_for(RunnerMode::Github)
+        );
+    }
+
     pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
         // The affected-plan primitive still supplies its historical hosted
         // argument. The resolved project lane owns the final control-plane
@@ -1474,9 +1513,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             ));
         }
         let base_sha = self.base_sha_expression();
+        // Both-mode aggregates resolve manual lane selection through the
+        // lane-admission job first; planning on an unadmitted selection must
+        // not schedule anything downstream.
+        let needs = if self.runners == RunnerMode::Both {
+            "    needs: [lane-admission]\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
@@ -1552,16 +1599,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
+        // The manual selector is `lanes` on Both-mode aggregates and `runner`
+        // everywhere else; the automatic arms below are identical in both
+        // spellings.
+        let input = if self.runners == RunnerMode::Both {
+            "lanes"
+        } else {
+            "runner"
+        };
         let dispatch = match lane {
             RunnerMode::Velnor => {
-                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
+                format!("github.event_name == 'workflow_dispatch' && (github.event.inputs.{input} == 'velnor' || github.event.inputs.{input} == 'both')")
             }
             RunnerMode::Github => {
-                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
+                format!("github.event_name == 'workflow_dispatch' && (github.event.inputs.{input} == 'github' || github.event.inputs.{input} == 'both')")
             }
-            RunnerMode::Both => {
-                "github.event_name == 'workflow_dispatch'"
-            }
+            RunnerMode::Both => "github.event_name == 'workflow_dispatch'".to_owned(),
         };
         let automatic = matches!(
             (self.runners, lane),
@@ -1572,7 +1625,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if automatic {
             format!("{} || ({dispatch})", self.automatic_event_expression())
         } else {
-            dispatch.to_owned()
+            dispatch
         }
     }
 
@@ -1753,7 +1806,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
         if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
-            return "macos-15".to_owned();
+            return yaml_scalar(&self.macos_runner);
         }
         self.runner_for(lane)
     }

@@ -641,6 +641,9 @@ pub struct ProjectConfig {
     pub(crate) default_branch: String,
     pub(crate) runners: RunnerMode,
     pub(crate) github_runner: String,
+    /// GitHub-hosted runner label for Apple (Swift/Xcode) lanes, which cannot
+    /// run on the default Linux label.
+    pub(crate) macos_runner: String,
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) release_enabled: bool,
     pub(crate) release_reason: String,
@@ -711,6 +714,7 @@ impl ProjectConfig {
         output.push('\n');
         output.push_str("[workflow]\n");
         write_toml_string(&mut output, "github_runner", &self.github_runner);
+        write_toml_string(&mut output, "macos_runner", &self.macos_runner);
         write_toml_array(&mut output, "velnor_labels", &self.velnor_labels);
         let generated_workflows = workflow_file_names(self);
         write_toml_array(&mut output, "files", &generated_workflows);
@@ -1388,6 +1392,10 @@ fn apply_generation_config(
     if let Some(runner) = generation.github_runner() {
         validate_config_text(runner, "[workflow] github_runner")?;
         runner.clone_into(&mut config.github_runner);
+    }
+    if let Some(runner) = generation.macos_runner() {
+        validate_config_text(runner, "[workflow] macos_runner")?;
+        runner.clone_into(&mut config.macos_runner);
     }
     if let Some(runners) = generation.runners() {
         config.runners = parse_runner_mode(runners)?;
@@ -3002,10 +3010,16 @@ fn generated_release(config: &ProjectConfig) -> Option<String> {
 }
 
 fn render_actionlint_config(config: &ProjectConfig) -> String {
+    let macos = config
+        .units
+        .iter()
+        .any(|unit| unit.kind == UnitKind::Swift)
+        .then_some(&config.macos_runner);
     let labels = config
         .velnor_labels
         .iter()
         .chain(std::iter::once(&config.github_runner))
+        .chain(macos)
         .filter(|label| !label.is_empty())
         .cloned()
         .collect::<BTreeSet<_>>();
@@ -3307,7 +3321,7 @@ fn report_unit_runners(config: &ProjectConfig, unit: &Unit) -> String {
     match config.runners {
         RunnerMode::Github => {
             if unit.kind == UnitKind::Swift {
-                "github: macos-15".to_owned()
+                format!("github: {}", config.macos_runner)
             } else {
                 format!("github: {}", config.github_runner)
             }
@@ -3324,7 +3338,10 @@ fn report_unit_runners(config: &ProjectConfig, unit: &Unit) -> String {
         }
         RunnerMode::Both => {
             if unit.kind == UnitKind::Swift {
-                "github: macos-15; velnor: skipped (Apple unit requires macOS)".to_owned()
+                format!(
+                    "github: {}; velnor: skipped (Apple unit requires macOS)",
+                    config.macos_runner
+                )
             } else {
                 format!(
                     "github: {}; velnor: {}",
@@ -7294,8 +7311,165 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
         assert!(crate_workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
         assert!(crate_workflow.contains("inputs:\n      unit:"));
-        assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
-        assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
+        assert!(crate_workflow.contains("github.event.inputs.lanes == 'velnor'"));
+        assert!(crate_workflow.contains("github.event.inputs.lanes == 'github'"));
+    }
+
+    #[test]
+    fn both_mode_aggregates_admit_dispatch_lanes_defaulting_to_velnor() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let generator = WorkflowIr::from_config(&config);
+        let aggregates = [
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+            generator.render(WorkflowKind::Main),
+        ];
+        for aggregate in &aggregates {
+            assert!(
+                aggregate.contains(
+                    "      lanes:\n        description: velnor (default) | github | both",
+                ),
+                "{aggregate}"
+            );
+            assert!(
+                aggregate.contains(
+                    "        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both",
+                ),
+                "{aggregate}"
+            );
+            assert!(!aggregate.contains("      runner:\n"), "{aggregate}");
+            assert!(
+                aggregate.contains("  lane-admission:\n    name: Resolve CI lanes"),
+                "{aggregate}"
+            );
+            assert!(
+                aggregate.contains("REQUESTED_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'both' }}"),
+                "{aggregate}"
+            );
+            assert!(aggregate.contains("velnor|github|both)"), "{aggregate}");
+            assert!(
+                aggregate.contains("::error::invalid CI lane"),
+                "{aggregate}"
+            );
+            assert!(
+                aggregate.contains("    needs: [lane-admission]"),
+                "{aggregate}"
+            );
+            let admission = must_some(aggregate.find("  lane-admission:"), "lane-admission job");
+            let plan = must_some(aggregate.find("  plan:"), "plan job");
+            assert!(admission < plan, "{aggregate}");
+        }
+        // Automatic triggers keep their current gating: the dispatch selector
+        // only narrows manual runs.
+        let rust_unit = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "Rust fixture unit",
+        );
+        let nested = generator.render_nested_unit(rust_unit, WorkflowKind::Main);
+        assert!(
+            nested.contains(
+                "github.event_name == 'pull_request' || (github.ref == 'refs/heads/main'"
+            ),
+            "{nested}"
+        );
+        assert!(
+            nested.contains("github.event.inputs.lanes == 'velnor'"),
+            "{nested}"
+        );
+        assert!(
+            nested.contains("github.event.inputs.lanes == 'github'"),
+            "{nested}"
+        );
+        assert!(!nested.contains("inputs.runner"), "{nested}");
+    }
+
+    #[test]
+    fn single_lane_modes_keep_the_runner_selector_without_admission() {
+        for runners in [RunnerMode::Github, RunnerMode::Velnor] {
+            let config = scanned_fixture(runners);
+            let generator = WorkflowIr::from_config(&config);
+            for aggregate in [
+                generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
+                generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+            ] {
+                assert!(
+                    aggregate.contains("      runner:\n        description: Execution backend"),
+                    "{aggregate}"
+                );
+                assert!(!aggregate.contains("lane-admission"), "{aggregate}");
+                assert!(!aggregate.contains("inputs.lanes"), "{aggregate}");
+            }
+            let rust_unit = must_some(
+                config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+                "Rust fixture unit",
+            );
+            let nested = generator.render_nested_unit(rust_unit, WorkflowKind::Main);
+            assert!(nested.contains("github.event.inputs.runner =="), "{nested}");
+            assert!(!nested.contains("inputs.lanes"), "{nested}");
+        }
+    }
+
+    #[test]
+    fn macos_runner_label_overrides_the_apple_lane() {
+        let root = temporary_repository("macos-runner");
+        must(
+            fs::create_dir_all(root.join("Sources/App")),
+            "create Swift sources",
+        );
+        must(
+            fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
+            "write Package.swift",
+        );
+        must(
+            fs::write(root.join("Package.resolved"), "{}\n"),
+            "write Package.resolved",
+        );
+        must(
+            fs::write(root.join("Sources/App/App.swift"), "import SwiftUI\n"),
+            "write Swift source",
+        );
+        let mut config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan Swift repository",
+        );
+        assert_eq!(config.macos_runner, "macos-15");
+        let swift = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift)
+                .cloned(),
+            "scanned Swift unit",
+        );
+        let default_surface =
+            WorkflowIr::from_config(&config).render_nested_unit(&swift, WorkflowKind::Main);
+        assert!(
+            default_surface.contains("runs-on: macos-15"),
+            "{default_surface}"
+        );
+        config.macos_runner = "macos-26".to_owned();
+        let custom =
+            WorkflowIr::from_config(&config).render_nested_unit(&swift, WorkflowKind::Main);
+        assert!(custom.contains("runs-on: macos-26"), "{custom}");
+        assert!(!custom.contains("macos-15"), "{custom}");
+        assert!(config.toml().contains("macos_runner = \"macos-26\""));
+        assert!(report_unit_runners(&config, &swift).contains("macos-26"));
+        let actionlint = render_actionlint_config(&config);
+        assert!(actionlint.contains("macos-26"), "{actionlint}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generation_config_macos_runner_reaches_the_apple_lane() {
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"macos-26\"\n";
+        let root = configured_repository("macos-runner-config", Some(config));
+        let scanned = must(
+            scan_target(&root, RunnerMode::Github, "main"),
+            "scan configured repository",
+        );
+        assert_eq!(scanned.config.macos_runner, "macos-26");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -7363,6 +7537,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             default_branch: "main".to_owned(),
             runners: RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "velnor".to_owned()],
             release_enabled: false,
             release_reason: String::new(),
