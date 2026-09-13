@@ -1,9 +1,12 @@
-//! Lifecycle drain unification: cross-handle (process-boundary) contracts.
+//! Lifecycle drain unification: cross-handle contracts.
 //!
 //! Each test opens the same SQLite file through two independent handles,
 //! which is the isolation boundary separate processes get (WAL plus
-//! immediate transactions). No environment flag is involved: the control
-//! crate gates on durable data, and the runner gates the readers.
+//! immediate transactions) — but both handles still live in one process.
+//! True process-boundary coverage is the stale-marker subprocess test in
+//! `velnor-runner/tests/journal_drain_default_off.rs`. No environment flag
+//! is involved: the control crate gates on durable data, and the runner
+//! gates the readers.
 
 #![allow(
     clippy::unwrap_used,

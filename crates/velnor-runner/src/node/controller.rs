@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -486,18 +486,25 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
         // Unified drain (flag-gated, default off): the signal latch, the
         // durable journal marker, or a fresh lifecycle `draining` desired
         // state all converge on the same child-drain exit. With the flag
-        // off this arm is dead and the static latch path below is
-        // byte-identical to before.
+        // off the static path is behaviorally identical on marker-free
+        // journals; a latched marker still drains (fail-closed, below).
         if crate::runner::journal_drain_enabled()
             && should_drain(crate::runner::draining(), &journal, lifecycle.as_ref())
         {
-            drain_edge(&mut journal, lifecycle.as_ref())?;
+            drain_edge(&mut journal, lifecycle.as_ref());
             drain_children(&journal, &mut slots, &mut jobs).await?;
             metrics.update(&slots, &jobs, last_reconcile_duration_ms);
             metrics.stop_and_publish().await?;
             return Ok(());
         }
-        if crate::runner::draining() {
+        // Fail-closed with the flag off: a marker latched by an earlier
+        // flag-on run is still a durable drain order, and the reducer
+        // already rejects new work against it unconditionally. The flag
+        // gates the new signal legs (fresh lifecycle desired, hint cache)
+        // and the edge write — never the marker itself.
+        if crate::runner::draining()
+            || (!crate::runner::journal_drain_enabled() && journal_marker_latched(&journal))
+        {
             drain_children(&journal, &mut slots, &mut jobs).await?;
             metrics.update(&slots, &jobs, last_reconcile_duration_ms);
             metrics.stop_and_publish().await?;
@@ -619,6 +626,32 @@ fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, 
     })
 }
 
+/// Durable marker leg of the drain signal, shared by the flag-on
+/// `should_drain` and the flag-off fail-closed arm. Unreadable is not a
+/// drain order here: a store or journal blip must not tear down
+/// supervision, while a marker any reader can see still does.
+fn journal_marker_latched(journal: &Journal) -> bool {
+    journal
+        .materialized_state()
+        .map(|state| state.drain_active)
+        .unwrap_or(false)
+}
+
+/// `should_drain` runs every loop cycle, so an instance whose ledger row
+/// is missing (or unreadable for any other reason) would spam one
+/// forensic line per cycle forever. The diagnosis logs once per process;
+/// the decision itself (not a drain order) is recomputed every cycle.
+static DRAIN_DESIRED_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn note_drain_desired_unreadable(instance: &str, error: &impl std::fmt::Debug) {
+    if DRAIN_DESIRED_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "forensics.lifecycle event=drain-desired-unreadable instance={instance} error={error:?}"
+    );
+}
+
 /// Unified drain signal: the process signal latch, the durable journal
 /// marker, or a store-read-through lifecycle desired state of `draining`.
 /// Unreadable inputs are not drain orders: a store or journal blip must not
@@ -627,11 +660,7 @@ fn should_drain(latch: bool, journal: &Journal, lifecycle: Option<&ActiveLifecyc
     if latch {
         return true;
     }
-    if journal
-        .materialized_state()
-        .map(|state| state.drain_active)
-        .unwrap_or(false)
-    {
+    if journal_marker_latched(journal) {
         return true;
     }
     let Some(lifecycle) = lifecycle else {
@@ -640,10 +669,7 @@ fn should_drain(latch: bool, journal: &Journal, lifecycle: Option<&ActiveLifecyc
     match lifecycle.service.desired_fresh(&lifecycle.instance) {
         Ok(fresh) => fresh.desired == "draining",
         Err(error) => {
-            eprintln!(
-                "forensics.lifecycle event=drain-desired-unreadable instance={} error={error:?}",
-                lifecycle.instance
-            );
+            note_drain_desired_unreadable(&lifecycle.instance, &error);
             false
         }
     }
@@ -653,18 +679,22 @@ fn should_drain(latch: bool, journal: &Journal, lifecycle: Option<&ActiveLifecyc
 /// marker when this controller is newly draining, and record the observed
 /// `draining` projection exactly once. Both writes are best-effort around
 /// the exit they precede: a failed write is forensic, never a reason to
-/// keep supervising through a drain.
-fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) -> anyhow::Result<()> {
-    let journal_active = journal.materialized_state()?.drain_active;
+/// keep supervising through a drain — and never a reason to skip the
+/// `drain_children` exit that follows.
+fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) {
+    let journal_active = match journal.materialized_state() {
+        Ok(state) => state.drain_active,
+        Err(error) => {
+            eprintln!("forensics.lifecycle event=drain-edge-unreadable error={error:?}");
+            false
+        }
+    };
     let fresh = lifecycle.as_ref().and_then(|lifecycle| {
         lifecycle
             .service
             .desired_fresh(&lifecycle.instance)
             .map_err(|error| {
-                eprintln!(
-                    "forensics.lifecycle event=drain-desired-unreadable instance={} error={error:?}",
-                    lifecycle.instance
-                );
+                note_drain_desired_unreadable(&lifecycle.instance, &error);
             })
             .ok()
     });
@@ -673,7 +703,14 @@ fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) -> any
         // latch-only drain with no ledger row still latches at version 1 so
         // slot readers observe one marker shape.
         let version = fresh.as_ref().map(|state| state.version).unwrap_or(1);
-        journal.set_drain(version)?;
+        match journal.set_drain(version) {
+            Ok(changed) => eprintln!(
+                "forensics.lifecycle event=drain-edge version={version} marker_changed={changed}"
+            ),
+            Err(error) => eprintln!(
+                "forensics.lifecycle event=drain-edge-unlatched version={version} error={error:?}"
+            ),
+        }
     }
     if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh)
         && fresh.observed != "draining"
@@ -690,7 +727,6 @@ fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) -> any
             lifecycle.instance
         );
     }
-    Ok(())
 }
 
 /// Stop controller-owned slots, waiters, and stale job workers when the daemon
@@ -3316,7 +3352,7 @@ mod tests {
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let lifecycle = drain_test_lifecycle(&dir, "primary", MutationKind::Drain);
 
-        drain_edge(&mut journal, Some(&lifecycle)).unwrap();
+        drain_edge(&mut journal, Some(&lifecycle));
         let state = journal.materialized_state().unwrap();
         assert!(state.drain_active);
         assert_eq!(state.drain_version, 2);
@@ -3331,7 +3367,7 @@ mod tests {
 
         // Edge-triggered: a second pass writes neither the marker nor the
         // observed projection again.
-        drain_edge(&mut journal, Some(&lifecycle)).unwrap();
+        drain_edge(&mut journal, Some(&lifecycle));
         let row = lifecycle
             .store
             .lifecycle_instance("primary")
@@ -3346,10 +3382,56 @@ mod tests {
         let dir = metrics_test_dir("drain-edge-static");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         journal.set_drain(9).unwrap();
-        drain_edge(&mut journal, None).unwrap();
+        drain_edge(&mut journal, None);
         let state = journal.materialized_state().unwrap();
         assert!(state.drain_active);
         assert_eq!(state.drain_version, 9);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_edge_write_failure_still_drains_children() {
+        let dir = metrics_test_dir("drain-edge-write-fails");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        // Fault injection: fail every `meta` write while reads keep
+        // working (`set_drain` writes `meta`; `materialized_state` and
+        // the `drain_children` job scan only read it).
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER drain_edge_test_block_meta_writes BEFORE INSERT ON meta
+                 BEGIN SELECT RAISE(ABORT, 'test write failure'); END;",
+            )
+            .unwrap();
+        assert!(journal.set_drain(2).is_err());
+
+        // The edge logs forensics and returns instead of propagating, so
+        // the caller still runs `drain_children` next — the same order as
+        // the loop top. No marker was latched: the write failed.
+        drain_edge(&mut journal, None);
+        assert!(!journal.materialized_state().unwrap().drain_active);
+
+        let child = || Command::new("sleep").arg("30").spawn().unwrap();
+        let mut slots = HashMap::from([(String::from("velnor-1"), child())]);
+        let mut jobs = HashMap::new();
+        drain_children(&journal, &mut slots, &mut jobs)
+            .await
+            .unwrap();
+        assert!(slots.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drain_edge_tolerates_an_unreadable_journal() {
+        let dir = metrics_test_dir("drain-edge-unreadable");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        rusqlite::Connection::open(dir.join("journal.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE meta")
+            .unwrap();
+        assert!(journal.materialized_state().is_err());
+        // Both the read and the latch write fail: forensics, then return.
+        drain_edge(&mut journal, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
