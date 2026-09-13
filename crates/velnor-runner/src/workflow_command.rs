@@ -453,6 +453,7 @@ fn push_command_failure(state: &mut StepCommandState, line: &str, message: Strin
         format!("Unable to process command '{line}' successfully."),
     );
     push_error(state, message);
+    state.command_failed = true;
 }
 
 fn is_registered_command(name: &str) -> bool {
@@ -465,8 +466,10 @@ fn is_registered_command(name: &str) -> bool {
 /// an environment. Upstream reads the `ACTIONS_STEP_DEBUG` server
 /// variable (`ExecutionContext.cs:1083-1086`); Velnor's runtime exports
 /// that variable as `RUNNER_DEBUG=1` (which also backs `runner.debug`),
-/// so either marker counts. A step-level `env:` entry only counts when
-/// it names `ACTIONS_STEP_DEBUG` itself.
+/// so either marker counts. Callers must pass the runner-authoritative
+/// snapshot (`immutable_env`), never workflow-writable env: a step-level
+/// `env:` entry or `GITHUB_ENV` write naming these markers must not flip
+/// debug rendering for later steps.
 pub(crate) fn step_debug_enabled(env: &BTreeMap<String, String>) -> bool {
     let value = |name: &str| env.get(name).map(String::as_str);
     convert_to_boolean(value("ACTIONS_STEP_DEBUG"))
@@ -491,14 +494,21 @@ pub(crate) fn rendered_output_lines(stdout: &str, stderr: &str, step_debug: bool
 /// step-debug (`ExecutionContext.cs:1083`) and `::echo::on|off` flips it
 /// (`EchoCommandExtension`). While on, every processed command line whose
 /// extension does not omit echo is written back to the log before it is
-/// processed (`ActionCommandManager.cs:128-132`).
+/// processed (`ActionCommandManager.cs:128-132`). The stop token tracks
+/// `::stop-commands::` independently of echo: the stop and resume lines
+/// are output unconditionally, and every other line while stopped falls
+/// through to the log verbatim.
 struct CommandEcho {
     on: bool,
+    stopped: Option<String>,
 }
 
 impl CommandEcho {
     fn new(step_debug: bool) -> Self {
-        Self { on: step_debug }
+        Self {
+            on: step_debug,
+            stopped: None,
+        }
     }
 
     /// Render one output line, tracking `::echo::on|off` state. Returns
@@ -524,6 +534,32 @@ impl CommandEcho {
         let keyword = command
             .split_once(' ')
             .map_or(command, |(keyword, _)| keyword);
+        // `ActionCommandManager.TryProcessCommand`: while stopped only the
+        // resume token is honored — output, not consumed — and every other
+        // line returns false, so `OutputManager` writes it verbatim. The
+        // stop line itself is likewise output (`context.Output(input)`),
+        // unconditionally in both cases.
+        //
+        // Simplification: the render pass has no opt-in policy, so it stops
+        // on any `::stop-commands::` line while the parse pass (which owns
+        // effects) still refuses invalid tokens. An invalid token therefore
+        // renders subsequent commands verbatim even though upstream consumes
+        // them — display-only, effects stay exact.
+        if self
+            .stopped
+            .as_deref()
+            .is_some_and(|token| keyword.eq_ignore_ascii_case(token))
+        {
+            self.stopped = None;
+            return vec![line.to_string()];
+        }
+        if self.stopped.is_some() {
+            return vec![line.to_string()];
+        }
+        if keyword.eq_ignore_ascii_case("stop-commands") {
+            self.stopped = Some(unescape_data(value));
+            return vec![line.to_string()];
+        }
         match keyword {
             "group" | "endgroup" => {
                 let marker = if keyword == "group" {
@@ -577,10 +613,20 @@ impl CommandEcho {
                 Vec::new()
             };
         }
+        if keyword.eq_ignore_ascii_case("add-mask") {
+            // `AddMaskCommandExtension` omits the generic echo (the raw
+            // line carries the secret) but emits a fixed masked line
+            // instead when echo is on — never the secret itself. A blank
+            // value warns in the parse pass and echoes nothing.
+            if self.on && !unescape_data(value).trim().is_empty() {
+                return vec!["::add-mask::***".to_string()];
+            }
+            return Vec::new();
+        }
         // `OmitEcho == false` extensions (`ActionCommandManager.cs`):
         // set-env, set-output, save-state, add-path, add-matcher,
-        // remove-matcher. add-mask omits echo (it carries a secret);
-        // stop-commands and unknown commands stay consumed as before.
+        // remove-matcher. stop-commands is handled in `render_line`
+        // (always output); unknown commands stay consumed as before.
         let echoed = self.on
             && matches!(
                 keyword.to_ascii_lowercase().as_str(),
@@ -1299,6 +1345,11 @@ mod tests {
         let bad = parse_for_test("::echo::maybe\n");
         assert_eq!(bad.error_count, 2);
         assert!(
+            bad.command_failed,
+            "a refused command fails the command result, which the executor merges into step failure"
+        );
+        assert!(!parse_for_test("::echo::on\n").command_failed);
+        assert!(
             bad.annotations
                 .iter()
                 .any(|annotation| annotation.message.contains("Invalid echo command value")),
@@ -1324,7 +1375,8 @@ mod tests {
 
     /// F7: `::debug::` renders only under step debug
     /// (`ExecutionContext.Debug` gates on `WriteDebug`), and step debug
-    /// turns echo on by default — while `add-mask` still never echoes.
+    /// turns echo on by default — while `add-mask` echoes only its fixed
+    /// masked line, never the secret.
     #[test]
     fn debug_lines_render_only_under_step_debug() {
         assert!(rendered_output_lines("::debug::secret detail\n", "", false).is_empty());
@@ -1334,7 +1386,10 @@ mod tests {
         );
         assert_eq!(
             rendered_output_lines("::set-output name=x::1\n::add-mask::s3cret\n", "", true),
-            vec!["::set-output name=x::1".to_string()]
+            vec![
+                "::set-output name=x::1".to_string(),
+                "::add-mask::***".to_string()
+            ]
         );
 
         let debug_env: BTreeMap<String, String> =
@@ -1344,5 +1399,55 @@ mod tests {
             [("RUNNER_DEBUG".to_string(), "1".to_string())].into();
         assert!(step_debug_enabled(&runner_debug_env));
         assert!(!step_debug_enabled(&BTreeMap::new()));
+    }
+
+    /// `AddMaskCommandExtension` emits `::add-mask::***` when echo is on
+    /// (the fixed masked line — the secret itself never renders), nothing
+    /// when echo is off, and nothing for a blank value (which warns in
+    /// the parse pass instead).
+    #[test]
+    fn add_mask_echoes_only_the_fixed_masked_line() {
+        assert_eq!(
+            rendered_output_lines("::echo::on\n::add-mask::s3cret\n", "", false),
+            vec!["::add-mask::***".to_string()]
+        );
+        assert!(
+            rendered_output_lines("::add-mask::s3cret\n", "", false).is_empty(),
+            "echo off consumes the mask silently"
+        );
+        assert!(
+            rendered_output_lines("::echo::on\n::add-mask::   \n", "", false)
+                .iter()
+                .all(|line| line != "::add-mask::***"),
+            "a blank mask value echoes nothing"
+        );
+        assert!(
+            !rendered_output_lines("::echo::on\n::add-mask::s3cret\n", "", false)
+                .iter()
+                .any(|line| line.contains("s3cret")),
+            "the secret itself never renders"
+        );
+    }
+
+    /// `TryProcessCommand` outputs the `::stop-commands::` line and the
+    /// resume line unconditionally, and every other line while stopped
+    /// falls through verbatim (`OutputManager.OnDataReceived`); nothing
+    /// is consumed until the resume token arrives.
+    #[test]
+    fn stop_commands_and_resume_output_input_verbatim() {
+        assert_eq!(
+            rendered_output_lines(
+                "::stop-commands::pause\n::add-mask::hidden\n::warning::muted\n::pause::\n::warning::heard\n",
+                "",
+                false,
+            ),
+            vec![
+                "::stop-commands::pause".to_string(),
+                "::add-mask::hidden".to_string(),
+                "::warning::muted".to_string(),
+                "::pause::".to_string(),
+                "##[warning]heard".to_string(),
+            ]
+        );
     }
 }
