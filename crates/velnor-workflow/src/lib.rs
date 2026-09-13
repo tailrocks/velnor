@@ -709,9 +709,7 @@ impl ProjectConfig {
         let _ = writeln!(output, "verified = {}", self.verified);
         write_toml_string(&mut output, "default_branch", &self.default_branch);
         write_toml_string(&mut output, "runners", self.runners.as_str());
-        // `automatic` is a generation-time lane policy. The pinned runtime
-        // that Planning downloads does not yet know the field, so it must not
-        // appear in this runtime contract.
+        write_toml_string(&mut output, "automatic", self.automatic.as_str());
         output.push('\n');
         output.push_str("[analysis]\n");
         write_toml_string(&mut output, "method", &self.analysis.method);
@@ -2735,9 +2733,9 @@ fn workflow_runtime_setup(lane: RunnerMode) -> String {
 
 /// Hosted runtime install. `uses:` is always [`VELNOR_WORKFLOW_SOURCE_REV`]:
 /// GitHub Actions rejects expressions in `uses:` versions (HTTP 422). `rev:` is
-/// `install_rev`. Planning calls [`workflow_runtime_setup`] and pins both to
-/// `SOURCE_REV`. Maintenance passes `${{ github.sha }}` so cache-plan installs
-/// HEAD while the action yaml stays the published pin.
+/// `install_rev`. Planning and Maintenance pass `${{ github.sha }}` so
+/// same-repo PR / default-branch push installs HEAD (the pin predates fields
+/// such as `automatic`) while the action yaml stays the published pin.
 fn workflow_runtime_setup_with_install_rev(lane: RunnerMode, install_rev: &str) -> String {
     if lane != RunnerMode::Github {
         return String::new();
@@ -5237,7 +5235,8 @@ mod tests {
             "scan fixture for hosted runtime setup",
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
-        let uses_line = setup_action_uses_line(&workflow);
+        let plan = yaml_job(&workflow, "plan");
+        let uses_line = setup_action_uses_line(plan);
         assert!(
             uses_line.contains(&format!("@{VELNOR_WORKFLOW_SOURCE_REV}")),
             "Planning uses the SOURCE_REV pin: {uses_line}"
@@ -5246,17 +5245,20 @@ mod tests {
             !uses_line.contains("github.sha"),
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"
         );
-        assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(
-            !workflow.contains(&format!(
+            plan.contains(&format!("rev: {}", github_expression("github.sha"))),
+            "Planning installs HEAD so plan understands automatic: {plan}"
+        );
+        assert!(
+            !plan.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")),
+            "Planning must not install the SOURCE_REV pin that predates automatic: {plan}"
+        );
+        assert!(
+            !plan.contains(&format!(
                 "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{}",
                 github_expression("github.sha")
             )),
-            "CI Planning must not resolve setup at HEAD: {workflow}"
-        );
-        assert!(
-            !workflow.contains("rev: ${{ github.sha }}"),
-            "CI Planning stays on the SOURCE_REV pin: {workflow}"
+            "CI Planning must not resolve setup at HEAD: {plan}"
         );
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
@@ -5291,7 +5293,12 @@ mod tests {
             maintenance.contains(&format!("rev: {head_rev}")),
             "maintenance must install HEAD runtime: {maintenance}"
         );
-        let planning = workflow_runtime_setup(RunnerMode::Github);
+        let config = must(
+            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Github, "main"),
+            "scan fixture for Planning HEAD install",
+        );
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+        let planning = yaml_job(&workflow, "plan");
         assert!(
             planning.contains(&format!(
                 "uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}"
@@ -5299,16 +5306,16 @@ mod tests {
             "Planning must pin setup to SOURCE_REV: {planning}"
         );
         assert!(
-            planning.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")),
-            "Planning must install SOURCE_REV runtime: {planning}"
+            planning.contains(&format!("rev: {head_rev}")),
+            "Planning must install HEAD runtime: {planning}"
         );
         assert!(
             !planning.contains(&format!("uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{head_rev}")),
             "Planning must not resolve setup at HEAD: {planning}"
         );
         assert!(
-            !planning.contains(&format!("rev: {head_rev}")),
-            "Planning stays on the SOURCE_REV pin: {planning}"
+            !planning.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")),
+            "Planning must not install the SOURCE_REV pin that predates automatic: {planning}"
         );
     }
 
@@ -8355,7 +8362,7 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_runtime_toml_omits_generation_only_automatic() {
+    fn planning_installs_head_so_runtime_toml_carries_automatic() {
         let mut config = scanned_fixture(RunnerMode::Both);
         config.automatic = RunnerMode::Both;
         let files = must(generated_files(&config), "generate");
@@ -8363,11 +8370,38 @@ channel = "stable"
             files.get(&PathBuf::from(".github/ci/project.toml")),
             "project.toml",
         );
-        assert!(
-            !project.contains("automatic"),
-            "pinned Planning runtimes reject unknown fields: {project}"
-        );
         assert!(project.contains("runners = \"both\""), "{project}");
+        assert!(project.contains("automatic = \"both\""), "{project}");
+        let main = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-main.yml")),
+            "ci-main.yml",
+        );
+        let plan = yaml_job(main, "plan");
+        let uses_line = setup_action_uses_line(plan);
+        assert!(
+            uses_line.contains(&format!("@{VELNOR_WORKFLOW_SOURCE_REV}")),
+            "Planning uses: stays SOURCE_REV: {uses_line}"
+        );
+        assert!(
+            !uses_line.contains("github.sha"),
+            "GitHub Actions forbids expressions in uses: versions: {uses_line}"
+        );
+        assert!(
+            plan.contains(&format!("rev: {}", github_expression("github.sha"))),
+            "Planning installs HEAD so plan understands automatic: {plan}"
+        );
+        assert!(
+            !plan.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")),
+            "Planning must not install the SOURCE_REV pin that predates automatic: {plan}"
+        );
+        let pr = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-pr.yml")),
+            "ci-pr.yml",
+        );
+        assert!(
+            !pr.contains("github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main'"),
+            "untrusted pull_request still does not auto-run on Velnor: {pr}"
+        );
     }
 
     #[test]

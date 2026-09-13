@@ -262,9 +262,18 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         "opt-in Velnor lane must admit pull_request: {unit}"
     );
     let project = fs::read_to_string(generated.output.join(".github/ci/project.toml")).unwrap();
+    assert!(project.contains("runners = \"both\""), "{project}");
+    assert!(project.contains("automatic = \"both\""), "{project}");
+    let main = generated.workflow("ci-main.yml");
     assert!(
-        !project.contains("automatic ="),
-        "pinned plan binaries reject unknown field automatic: {project}"
+        main.contains("rev: ${{ github.sha }}"),
+        "Planning installs HEAD so plan understands automatic: {main}"
+    );
+    assert!(
+        !main.contains(
+            "uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@${{ github.sha }}"
+        ),
+        "GitHub forbids expressions in uses: {main}"
     );
 }
 

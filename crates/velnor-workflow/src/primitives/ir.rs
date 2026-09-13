@@ -21,9 +21,10 @@ use crate::{
     nested_unit_workflow_file, rendered_cache_values, sidebar_group_name, stack_group_job_id,
     unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
-    workflow_selection_artifact_download, workflow_selection_artifact_upload, yaml_scalar,
-    CachePurpose, CacheSpec, ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind,
-    GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    workflow_runtime_setup_with_install_rev, workflow_selection_artifact_download,
+    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
+    RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
+    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
@@ -1510,7 +1511,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
         // Planning follows config.runners. Velnor uses the image-provided
-        // runtime. GitHub planning bootstraps the pinned runtime.
+        // runtime. GitHub planning pins `uses:` to SOURCE_REV and installs
+        // `${{ github.sha }}` so same-repo PR / default-branch push `plan`
+        // understands generation-time fields such as `automatic`.
         let runners = if self.runners == RunnerMode::Velnor {
             RunnerMode::Velnor
         } else {
@@ -1527,7 +1530,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_with_install_rev(
+                RunnerMode::Github,
+                &github_expression("github.sha"),
+            )
         };
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
