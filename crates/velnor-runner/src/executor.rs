@@ -4188,16 +4188,19 @@ where
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
             )?;
-            // Best-effort convergence, never job-failing: cap the
-            // workflow-minted builders in this scope/repository, and run the
-            // horizon pass when due so corpse-pinned and idle builders
+            // Cap the workflow-minted builders in this scope/tier/repository:
+            // per-victim failures are best-effort, but an over-cap group with
+            // no unclaimed victim fails setup loud — silently minting another
+            // daemon is how one job grew the fleet unbounded. The horizon
+            // pass stays best-effort so corpse-pinned and idle builders
             // converge on long-lived daemons without startup or doctor.
             let cap = crate::buildkit::enforce_builder_cap(
                 &run_root,
                 &state.trust_scope,
+                tier,
                 container.repository.as_deref(),
                 crate::buildkit::remove_builder,
-            );
+            )?;
             for failure in &cap.failures {
                 eprintln!("buildx setup: cap enforcement: {failure}");
             }
@@ -4206,6 +4209,13 @@ where
             {
                 for failure in &report.failures {
                     eprintln!("buildx setup: horizon reap: {failure}");
+                }
+                for claims in &report.unreadable_claims {
+                    eprintln!(
+                        "buildx setup: horizon reap: unreadable claim file {claims} pins its \
+                         builder as claimed; quiesce this daemon's jobs, delete the file, and \
+                         let the next claim recreate it"
+                    );
                 }
             }
         }
