@@ -38,7 +38,7 @@ const DOCKER_SEED_SNAPSHOT_NAMESPACE: &str = "velnor-docker-seed";
 /// unit it depends on. A change to any of them mints a new dependency segment,
 /// so the previous snapshot stays reachable as a fallback instead of a stale
 /// exact hit.
-fn snapshot_dependency_inputs<'a>(members: &[&'a Unit]) -> Vec<String> {
+fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
     let mut patterns = Vec::new();
     for member in members {
         patterns.extend(member.cache.as_ref().map_or_else(
@@ -85,7 +85,7 @@ fn closure_members<'a>(unit: &'a Unit, units: &'a [Unit]) -> Vec<&'a Unit> {
 /// context). Manifests, lockfiles, toolchain pins, and Cargo configuration are
 /// dependency inputs and ride the other segment; hashing them again here would
 /// cold-restart the closure on a metadata-only edit without advancing state.
-fn snapshot_state_files<'a>(members: &[&'a Unit], unit: &'a Unit) -> Vec<String> {
+fn snapshot_state_files(members: &[&Unit], unit: &Unit) -> Vec<String> {
     let mut files: Vec<String> = Vec::new();
     for member in members {
         if member.kind == UnitKind::Rust {
@@ -93,7 +93,9 @@ fn snapshot_state_files<'a>(members: &[&'a Unit], unit: &'a Unit) -> Vec<String>
         }
         for watched in &member.watch {
             let compiled_source = watched.ends_with("*.rs");
-            let dependency_input = watched.ends_with(".toml")
+            let dependency_input = std::path::Path::new(watched)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
                 || watched == "Cargo.lock"
                 || watched == "rust-toolchain"
                 || watched == ".cargo/**";
@@ -140,9 +142,11 @@ pub(crate) fn config_snapshot_identity(config: &ProjectConfig) -> (String, Strin
         toolchain: config_rust_toolchain(config),
         host_image: config.github_runner.clone(),
         linker: "mold".to_owned(),
-        rustflags: mise_present
-            .then(|| "-C link-arg=-fuse-ld=mold".to_owned())
-            .unwrap_or_default(),
+        rustflags: if mise_present {
+            "-C link-arg=-fuse-ld=mold".to_owned()
+        } else {
+            String::new()
+        },
         cargo_inputs: Vec::new(),
         recipe: Vec::new(),
     };
@@ -177,15 +181,16 @@ fn snapshot_compatibility(
         mbx_version: MR_BOXINGTON_VERSION.to_owned(),
         toolchain: unit.toolchain.clone(),
         host_image: ir.github_runner.clone(),
-        linker: ir
-            .tools
-            .contains(&ToolRequirement::Mold)
-            .then(|| "mold".to_owned())
-            .unwrap_or_default(),
-        rustflags: ir
-            .mise_present
-            .then(|| "-C link-arg=-fuse-ld=mold".to_owned())
-            .unwrap_or_default(),
+        linker: if ir.tools.contains(&ToolRequirement::Mold) {
+            "mold".to_owned()
+        } else {
+            String::new()
+        },
+        rustflags: if ir.mise_present {
+            "-C link-arg=-fuse-ld=mold".to_owned()
+        } else {
+            String::new()
+        },
         cargo_inputs: dependency_inputs.to_vec(),
         recipe: unit_commands(unit).cloned().collect(),
     }
@@ -630,8 +635,8 @@ fn render_mutable_mount_seed_collection(
         checks_env(unit),
         MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
     );
-    if cache_save && unit.cache.is_some() {
-        let (paths, _) = rendered_cache_values(unit.cache.as_ref().expect("checked above"));
+    if cache_save && let Some(cache) = unit.cache.as_ref() {
+        let (paths, _) = rendered_cache_values(cache);
         let (key, _) = unit_snapshot(ir, unit, DOCKER_SEED_SNAPSHOT_NAMESPACE);
         let _ = writeln!(
             output,

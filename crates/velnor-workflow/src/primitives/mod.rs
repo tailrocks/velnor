@@ -179,8 +179,9 @@ impl CacheBackend {
                     // The Rust-toolchain cache is generator-internal:
                     // `render_pinned_toolchain_steps` emits it directly and never
                     // hangs it off a unit's declared contract, so it cannot arrive
-                    // through this match. Refuse rather than silently enable it.
-                    None | Some(CachePurpose::Toolchains) => false,
+                    // through this match. Docker seeds render their own lifecycle.
+                    // Refuse rather than silently enable either non-generic cache.
+                    None | Some(CachePurpose::Toolchains | CachePurpose::DockerSeed) => false,
                     Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
                     Some(CachePurpose::Outputs) => {
                         !ir.uses_mr_boxington(unit)

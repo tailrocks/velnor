@@ -338,12 +338,14 @@ jobs:
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -478,12 +480,14 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -886,12 +890,14 @@ jobs:
           rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -1097,12 +1103,14 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:

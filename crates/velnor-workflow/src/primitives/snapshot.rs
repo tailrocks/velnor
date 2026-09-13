@@ -31,7 +31,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::RustToolchain;
+use crate::{CachePurpose, RustToolchain};
 
 /// The snapshot key schema. Bumping it abandons every previously saved
 /// snapshot: entries saved under an older schema are unreachable by design,
@@ -257,18 +257,58 @@ pub(crate) enum Tier {
     Rolling,
 }
 
+impl From<CachePurpose> for Tier {
+    fn from(purpose: CachePurpose) -> Self {
+        match purpose {
+            CachePurpose::CargoSources | CachePurpose::Toolchains => Self::Protected,
+            CachePurpose::DockerSeed => Self::Baseline,
+            CachePurpose::Generic | CachePurpose::Outputs => Self::Rolling,
+        }
+    }
+}
+
+/// How a purpose-qualified retention class recognizes an already-saved
+/// Actions-cache key. Matchers do not define the class; [`CachePurpose`] does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CacheKeyMatcher {
+    /// The key contains one generator-owned namespace fragment.
+    Contains(&'static str),
+    /// The anchored generic-CI namespace for Rust Cargo-source bundles:
+    /// `ci-<runner-os>-rust-...`, never the broad `ci-` prefix.
+    CiRustCargoSources,
+}
+
+impl CacheKeyMatcher {
+    fn matches(self, key: &str) -> bool {
+        match self {
+            Self::Contains(fragment) => key.contains(fragment),
+            Self::CiRustCargoSources => {
+                let Some(rest) = key.strip_prefix("ci-") else {
+                    return false;
+                };
+                let Some((runner_os, unit)) = rest.split_once('-') else {
+                    return false;
+                };
+                !runner_os.is_empty() && unit.starts_with("rust-")
+            }
+        }
+    }
+}
+
 /// One cache class of the retention policy.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub(crate) struct ClassPolicy {
     /// The class identifier the job summary records.
     pub(crate) id: &'static str,
-    /// How the class is treated by the global sweep.
-    pub(crate) tier: Tier,
-    /// The key fragments an entry must contain to belong to the class. First
-    /// match wins; an entry matching none is `unclassified` and is treated as
+    /// Why the class exists. This is the semantic identity that selects the
+    /// retention tier; markers only recognize the already-saved account entry.
+    pub(crate) purpose: CachePurpose,
+    /// The account-entry matchers for this purpose-based class. First match
+    /// wins; an entry matching none is `unclassified` and is treated as
     /// rolling state without a reservation, so nothing in the account is
     /// unreachable by retention.
-    pub(crate) markers: &'static [&'static str],
+    pub(crate) markers: &'static [CacheKeyMatcher],
     /// The bytes the class may hold. `0` reserves nothing.
     pub(crate) budget_bytes: u64,
     /// The generations of one variant class that survive. `0` bounds nothing.
@@ -303,29 +343,36 @@ impl RetentionPolicy {
             classes: vec![
                 ClassPolicy {
                     id: "toolchain-seeds",
-                    tier: Tier::Protected,
-                    markers: &["velnor-rustup-", "velnor-mold-"],
+                    purpose: CachePurpose::Toolchains,
+                    markers: &[
+                        CacheKeyMatcher::Contains("velnor-rustup-"),
+                        CacheKeyMatcher::Contains("velnor-mold-"),
+                    ],
                     budget_bytes: 2 * GIBIBYTE,
                     generation_bound: 0,
                 },
                 ClassPolicy {
                     id: "source-bundles",
-                    tier: Tier::Protected,
-                    markers: &["velnor-release-cargo-", "velnor-cargo-", "ci-"],
+                    purpose: CachePurpose::CargoSources,
+                    markers: &[
+                        CacheKeyMatcher::Contains("velnor-release-cargo-"),
+                        CacheKeyMatcher::Contains("velnor-cargo-"),
+                        CacheKeyMatcher::CiRustCargoSources,
+                    ],
                     budget_bytes: 3 * GIBIBYTE / 2,
                     generation_bound: 0,
                 },
                 ClassPolicy {
                     id: "docker-seed",
-                    tier: Tier::Baseline,
-                    markers: &["velnor-docker-seed-"],
+                    purpose: CachePurpose::DockerSeed,
+                    markers: &[CacheKeyMatcher::Contains("velnor-docker-seed-")],
                     budget_bytes: GIBIBYTE,
                     generation_bound: 1,
                 },
                 ClassPolicy {
                     id: "compiler-snapshots",
-                    tier: Tier::Rolling,
-                    markers: &["-mbx-v3-"],
+                    purpose: CachePurpose::Outputs,
+                    markers: &[CacheKeyMatcher::Contains("-mbx-v3-")],
                     budget_bytes: 7 * GIBIBYTE / 2,
                     generation_bound: 2,
                 },
@@ -371,6 +418,7 @@ struct Classified {
     /// unreadable timestamp is treated as producer-active: retention refuses
     /// to evict what it cannot age.
     age_seconds: i64,
+    purpose: CachePurpose,
     eligible: bool,
 }
 
@@ -431,14 +479,14 @@ fn classify(entries: &[CacheEntry], policy: &RetentionPolicy, now_epoch: i64) ->
                 class
                     .markers
                     .iter()
-                    .any(|marker| entry.key.contains(marker))
+                    .any(|matcher| matcher.matches(&entry.key))
             });
-            let (class_id, tier, budget_bytes, generation_bound) = class.map_or_else(
-                || ("unclassified", Tier::Rolling, 0, 0),
+            let (class_id, purpose, budget_bytes, generation_bound) = class.map_or_else(
+                || ("unclassified", CachePurpose::Generic, 0, 0),
                 |class| {
                     (
                         class.id,
-                        class.tier,
+                        class.purpose,
                         class.budget_bytes,
                         class.generation_bound,
                     )
@@ -451,7 +499,8 @@ fn classify(entries: &[CacheEntry], policy: &RetentionPolicy, now_epoch: i64) ->
                     && age_seconds >= i64::try_from(policy.producer_window_seconds).unwrap_or(0),
                 entry,
                 class: class_id.to_owned(),
-                tier,
+                tier: Tier::from(purpose),
+                purpose,
                 budget_bytes,
                 generation_bound,
                 generation,
@@ -703,6 +752,138 @@ mod tests {
         )
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need missing fixture data to name its omission"
+    )]
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
+
+    fn policy_class<'a>(policy: &'a RetentionPolicy, id: &str) -> &'a ClassPolicy {
+        must_some(
+            policy.classes.iter().find(|class| class.id == id),
+            "retention class exists",
+        )
+    }
+
+    #[test]
+    fn purpose_is_the_retention_identity_and_markers_only_match_entries() {
+        const HOUR: i64 = 3_600;
+        let policy = RetentionPolicy::default_policy();
+        let expected = [
+            ("toolchain-seeds", CachePurpose::Toolchains, Tier::Protected),
+            (
+                "source-bundles",
+                CachePurpose::CargoSources,
+                Tier::Protected,
+            ),
+            ("docker-seed", CachePurpose::DockerSeed, Tier::Baseline),
+            ("compiler-snapshots", CachePurpose::Outputs, Tier::Rolling),
+        ];
+        for (id, purpose, tier) in expected {
+            let class = policy_class(&policy, id);
+            assert_eq!(class.purpose, purpose, "{id}");
+            assert_eq!(Tier::from(class.purpose), tier, "{id}");
+        }
+
+        let entries = vec![
+            aged("toolchain", "velnor-rustup-Linux-X64-seed", 1, 30 * HOUR),
+            aged("sources", "ci-Linux-rust-unit-sources", 1, 30 * HOUR),
+            aged(
+                "docker",
+                docker_seed_key(&"d".repeat(64), 3).as_str(),
+                1,
+                30 * HOUR,
+            ),
+            aged(
+                "snapshots",
+                snapshot_key_of("rust-example", 4).as_str(),
+                1,
+                30 * HOUR,
+            ),
+            aged("unknown", "unrecognized-cache-entry", 1, 30 * HOUR),
+        ];
+        let classified = classify(&entries, &policy, NOW);
+        let actual = classified
+            .iter()
+            .map(|candidate| (candidate.class.as_str(), candidate.purpose, candidate.tier))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("toolchain-seeds", CachePurpose::Toolchains, Tier::Protected),
+                (
+                    "source-bundles",
+                    CachePurpose::CargoSources,
+                    Tier::Protected
+                ),
+                ("docker-seed", CachePurpose::DockerSeed, Tier::Baseline),
+                ("compiler-snapshots", CachePurpose::Outputs, Tier::Rolling),
+                ("unclassified", CachePurpose::Generic, Tier::Rolling),
+            ]
+        );
+    }
+
+    #[test]
+    fn rust_cargo_source_matching_is_anchored_and_purpose_qualified() {
+        let policy = RetentionPolicy::default_policy();
+        let generic_class = |key: &str| {
+            let entries = [aged("entry", key, 1, 0)];
+            let classified = classify(&entries, &policy, NOW);
+            (
+                classified[0].class.as_str().to_owned(),
+                classified[0].purpose,
+            )
+        };
+
+        assert!(CacheKeyMatcher::CiRustCargoSources.matches("ci-Linux-rust-unit-abc123"));
+        let source = generic_class("ci-Linux-rust-unit-abc123");
+        assert_eq!(source.0.as_str(), "source-bundles");
+        assert_eq!(source.1, CachePurpose::CargoSources);
+
+        for key in [
+            "ci-Linux-docs-docs-abc123",
+            "ci-Linux-bun-package-abc123",
+            "ci-Linux-opentofu-opentofu-abc123",
+            "prefix-ci-Linux-rust-unit-abc123",
+            "ci-Linux-rustlike-abc123",
+        ] {
+            assert!(
+                !CacheKeyMatcher::CiRustCargoSources.matches(key),
+                "generic key must not match the Rust Cargo-source matcher: {key}"
+            );
+            let actual = generic_class(key);
+            assert_eq!(
+                actual.0.as_str(),
+                "unclassified",
+                "generic key must remain generic: {key}"
+            );
+            assert_eq!(
+                actual.1,
+                CachePurpose::Generic,
+                "generic key must remain generic: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_seed_reservation_keeps_measured_evidence_headroom() {
+        // Measured live Docker-seed bytes: Actions cache `7634850138`, key
+        // `velnor-docker-seed-Linux-X64-37ff55...`,
+        // `size_in_bytes=527831088`. This is observed evidence, not the
+        // reservation; the policy retains 1 GiB so a larger valid seed need
+        // not be evicted merely to match one sample.
+        const MEASURED_DOCKER_SEED_BYTES: u64 = 527_831_088;
+        let policy = RetentionPolicy::default_policy();
+        let docker_seed = policy_class(&policy, "docker-seed");
+        assert_eq!(docker_seed.budget_bytes, GIBIBYTE);
+        assert!(MEASURED_DOCKER_SEED_BYTES < docker_seed.budget_bytes);
+    }
+
     fn facts(rustflags: &str) -> CompatibilityFacts {
         CompatibilityFacts {
             schema: SNAPSHOT_SCHEMA,
@@ -870,16 +1051,17 @@ mod tests {
     fn class_budgets_bound_each_class_without_touching_protected_space() {
         const HOUR: i64 = 3_600;
         let policy = RetentionPolicy::default_policy();
-        let class_budget = |id: &str| {
-            policy
-                .classes
-                .iter()
-                .find(|class| class.id == id)
-                .map(|class| class.budget_bytes)
-                .expect("class exists")
+        let class_budget = |id: &str| -> u64 {
+            must_some(
+                policy
+                    .classes
+                    .iter()
+                    .find(|class| class.id == id)
+                    .map(|class| class.budget_bytes),
+                "retention class exists",
+            )
         };
         let seed_budget = class_budget("toolchain-seeds");
-        let bundle_budget = class_budget("source-bundles");
         // Protected: one byte over its reservation, all older than the
         // producer window.
         let seeds = vec![aged(
@@ -946,7 +1128,6 @@ mod tests {
             ],
             "the bound is enforced before the class budget"
         );
-        let _ = (bundle_budget,);
     }
 
     #[test]
@@ -956,14 +1137,14 @@ mod tests {
         assert!(epoch_of("not-a-timestamp").is_none());
     }
 
+    fn docker_seed_key(hash: &str, state: u64) -> String {
+        format!("velnor-docker-seed-v3-1a2b3c4d5e6f-Linux-X64-{hash}-{state:064}")
+    }
+
     /// The §9.1 test-9 fixture: more than 100 entries across every class, the
     /// rolling classes over their budget and their generation bound, and the
-    /// account over its total. The plan must be one correct set of evictions
-    /// that preserves the protected classes and the newest generation of every
-    /// bounded variant class.
-    #[test]
-    fn planning_over_one_hundred_entries_is_one_correct_total() {
-        let policy = RetentionPolicy::default_policy();
+    /// account over its total.
+    fn over_one_hundred_entries() -> Vec<CacheEntry> {
         const HOUR: i64 = 3_600;
         let mut counter = 0usize;
         let mut entries: Vec<CacheEntry> = Vec::new();
@@ -1019,21 +1200,13 @@ mod tests {
         // one beyond its bound. The keys carry the two `hashFiles` segments the
         // grammar renders, which is what groups them into one variant class.
         push(
-            &format!(
-                "velnor-docker-seed-v3-1a2b3c4d5e6f-Linux-X64-{}-{}",
-                "b".repeat(64),
-                format!("{:064}", 1)
-            ),
+            docker_seed_key(&"b".repeat(64), 1).as_str(),
             400_000_000,
             40 * HOUR,
             &mut entries,
         );
         push(
-            &format!(
-                "velnor-docker-seed-v3-1a2b3c4d5e6f-Linux-X64-{}-{}",
-                "c".repeat(64),
-                format!("{:064}", 2)
-            ),
+            docker_seed_key(&"c".repeat(64), 2).as_str(),
             400_000_000,
             10 * HOUR,
             &mut entries,
@@ -1043,7 +1216,24 @@ mod tests {
             "the fixture must exceed one page: {}",
             entries.len()
         );
+        entries
+    }
 
+    fn id_of(entries: &[CacheEntry], predicate: impl Fn(&CacheEntry) -> bool) -> String {
+        entries
+            .iter()
+            .find(|entry| predicate(entry))
+            .map(|entry| entry.id.clone())
+            .unwrap_or_default()
+    }
+
+    /// The plan must be one correct set of evictions that preserves the
+    /// protected classes and the newest generation of every bounded variant
+    /// class.
+    #[test]
+    fn planning_over_one_hundred_entries_is_one_correct_total() {
+        let policy = RetentionPolicy::default_policy();
+        let entries = over_one_hundred_entries();
         let plan = plan_evictions(&entries, &policy, NOW);
         assert!(
             !plan.is_empty(),
@@ -1075,16 +1265,12 @@ mod tests {
             );
         }
         // The Docker seed keeps exactly one live generation: the older goes.
-        let seed_old = entries
-            .iter()
-            .find(|entry| entry.key.contains(&"b".repeat(64)))
-            .map(|entry| entry.id.clone())
-            .unwrap_or_default();
-        let seed_new = entries
-            .iter()
-            .find(|entry| entry.key.contains(&"c".repeat(64)))
-            .map(|entry| entry.id.clone())
-            .unwrap_or_default();
+        let seed_old = id_of(&entries, |entry| {
+            entry.key == docker_seed_key(&"b".repeat(64), 1)
+        });
+        let seed_new = id_of(&entries, |entry| {
+            entry.key == docker_seed_key(&"c".repeat(64), 2)
+        });
         assert!(
             ids.contains(&seed_old.as_str()),
             "the older Docker seed generation must go"
@@ -1094,16 +1280,10 @@ mod tests {
             "the live Docker seed generation must survive"
         );
         // Producer-active and unreadable entries are never selected.
-        let young = entries
-            .iter()
-            .find(|entry| entry.key == snapshot_key_of("rust-example", 200))
-            .map(|entry| entry.id.clone())
-            .unwrap_or_default();
-        let unreadable = entries
-            .iter()
-            .find(|entry| entry.id == "id-unreadable")
-            .map(|entry| entry.id.clone())
-            .unwrap_or_default();
+        let young = id_of(&entries, |entry| {
+            entry.key == snapshot_key_of("rust-example", 200)
+        });
+        let unreadable = id_of(&entries, |entry| entry.id == "id-unreadable");
         assert!(
             !ids.contains(&young.as_str()),
             "a producer-active entry must survive"

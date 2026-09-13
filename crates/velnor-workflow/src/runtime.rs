@@ -251,7 +251,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "cache-plan" => {
             let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
-            let mode = options.get("mode").map(String::as_str).unwrap_or("plan");
+            let mode = options.get("mode").map_or("plan", String::as_str);
             if !matches!(mode, "plan" | "budget") {
                 return Err(GeneratorError::usage(format!(
                     "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
@@ -262,7 +262,7 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
                 return Ok(true);
             }
             cache_plan(
-                options.get("entries").map(PathBuf::from),
+                options.get("entries").map(String::as_str),
                 options.get("now").map(String::as_str),
             )?;
             Ok(true)
@@ -287,17 +287,17 @@ struct CacheEntryRecord {
 /// verbatim and records every eviction's class and reason in the summary.
 ///
 /// `--now` pins the clock for tests; a live run uses the system clock.
-fn cache_plan(entries_path: Option<PathBuf>, now: Option<&str>) -> Result<(), GeneratorError> {
-    let entries_text = match &entries_path {
-        Some(path) => fs::read_to_string(path)
-            .map_err(|error| GeneratorError::io("read cache account snapshot", path, &error))?,
-        None => {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
-                GeneratorError::usage(format!("read cache account snapshot: {error}"))
-            })?;
-            text
-        }
+fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+    let entries_text = if let Some(path) = entries_path {
+        fs::read_to_string(path).map_err(|error| {
+            GeneratorError::io("read cache account snapshot", Path::new(path), &error)
+        })?
+    } else {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+            GeneratorError::usage(format!("read cache account snapshot: {error}"))
+        })?;
+        text
     };
     let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
         GeneratorError::usage(format!(
@@ -318,7 +318,8 @@ fn cache_plan(entries_path: Option<PathBuf>, now: Option<&str>) -> Result<(), Ge
         None => std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))?
-            .as_secs() as i64,
+            .as_secs()
+            .cast_signed(),
     };
     let plan = plan_evictions(&entries, &RetentionPolicy::default_policy(), now_epoch);
     let stdout = std::io::stdout();
