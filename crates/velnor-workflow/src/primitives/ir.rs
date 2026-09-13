@@ -535,17 +535,30 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
 /// the fetch is visible and measurable on its own. The fetch itself runs
 /// online (`preparation_env`, never `checks_env`) — it is the recovery path
 /// the offline restriction presumes already happened.
-pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) {
-    if !cargo_network_is_restricted(unit) {
+///
+/// Kind reusables share one YAML body across many units. Fetch the matrix
+/// unit's sources (`inputs.unit`), not the first scanned member's directory.
+pub(crate) fn render_cargo_source_preparation(output: &mut String, members: &[&Unit]) {
+    let fetch_members = members
+        .iter()
+        .copied()
+        .filter(|unit| cargo_network_is_restricted(unit))
+        .collect::<Vec<_>>();
+    if fetch_members.is_empty() {
         return;
     }
-    let change_dir = crate::shell_change_dir(&unit.root);
+    let mut cases = String::new();
+    for member in &fetch_members {
+        let _ = writeln!(
+            cases,
+            "            {}) root={} ;;",
+            crate::shell_quote(&member.id),
+            crate::shell_quote(&member.root)
+        );
+    }
     let _ = writeln!(
         output,
-        "      - name: Prepare Cargo sources\n        env:{}
-        run: |
-          set -euo pipefail
-          {change_dir}cargo fetch --locked",
+        "      - name: Prepare Cargo sources\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
         preparation_env()
     );
 }
@@ -1226,6 +1239,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// default contract the output is the surface the generator has always
     /// emitted for a unit.
     pub(crate) fn render_unit_surface(&self, unit: &Unit, contract: &UnitContract) -> String {
+        self.render_unit_surface_for_members(unit, contract, &[unit])
+    }
+
+    fn render_unit_surface_for_members(
+        &self,
+        unit: &Unit,
+        contract: &UnitContract,
+        members: &[&Unit],
+    ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
@@ -1236,7 +1258,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str("\njobs:\n");
         for job in &contract.lanes {
             if lane_supports_unit(job.lane, unit) {
-                self.render_lane_job(&mut output, *job, unit, contract);
+                self.render_lane_job(&mut output, *job, unit, contract, members);
             }
         }
         output
@@ -1265,9 +1287,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         };
         let mut unit = representative.clone();
         unit.cache = merged_kind_cache(&members);
-        self.render_unit_surface(
+        self.render_unit_surface_for_members(
             &unit,
             &self.default_unit_contract(&unit, true),
+            &members,
         )
     }
 
@@ -1299,6 +1322,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         job: LaneJob,
         unit: &Unit,
         contract: &UnitContract,
+        members: &[&Unit],
     ) {
         let lane = job.lane;
         let cache_save = job.cache_save && contract.cache_save;
@@ -1342,7 +1366,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 unit.kind.id_prefix()
             );
         }
-        render_cargo_source_preparation(output, unit);
+        render_cargo_source_preparation(output, members);
         let _ = writeln!(
             output,
             "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
@@ -1648,7 +1672,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     unit.id,
                 );
             }
-            render_cargo_source_preparation(output, unit);
+            render_cargo_source_preparation(output, &[unit]);
             let _ = writeln!(
                 output,
                 "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ needs.plan.outputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",

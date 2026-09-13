@@ -111,6 +111,41 @@ fn selection_artifact_sha_mismatch_fails_closed_with_both_sha_pairs() -> Result<
     Ok(())
 }
 
+#[test]
+fn empty_job_base_sha_consumes_the_plan_when_head_matches() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run("", PLAN_HEAD_SHA).output()?;
+    assert_success(&output);
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("selected.marker"))?,
+        "selected"
+    );
+    assert!(!fixture.root.join("git-was-resolved").exists());
+    Ok(())
+}
+
+#[test]
+fn empty_job_base_sha_fails_closed_when_head_mismatches() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run("", "other-head").output()?;
+    assert!(!output.status.success());
+    let output = output_text(&output);
+    assert!(output.contains("CI selection artifact does not match this job checkout"));
+    assert!(!fixture.root.join("selected.marker").exists());
+    Ok(())
+}
+
+#[test]
+fn mismatched_job_base_sha_fails_closed_when_head_matches() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new()?;
+    let output = fixture.run("wrong-base", PLAN_HEAD_SHA).output()?;
+    assert!(!output.status.success());
+    let output = output_text(&output);
+    assert!(output.contains("CI selection artifact does not match this job checkout"));
+    assert!(!fixture.root.join("selected.marker").exists());
+    Ok(())
+}
+
 fn assert_success(output: &Output) {
     assert!(output.status.success(), "{}", output_text(output));
 }

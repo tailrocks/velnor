@@ -201,3 +201,21 @@ fn unit_run_consumes_the_selection_artifact_not_a_hardcoded_id() {
     assert!(unit.contains("--unit \"$CI_UNIT_ID\""));
     assert!(!unit.contains("--unit crate00"));
 }
+
+#[test]
+fn kind_reusable_fetches_cargo_sources_for_the_matrix_unit() {
+    let root = unique_dir("kind-fetch");
+    write_rust_fixture(&root, 2);
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("case \"$CI_UNIT_ID\" in"),
+        "kind cargo fetch must select the matrix unit, not a baked representative: {unit}"
+    );
+    assert!(unit.contains("'rust-crate00') root='crates/crate00' ;;"));
+    assert!(unit.contains("'rust-crate01') root='crates/crate01' ;;"));
+    assert!(
+        !unit.contains("cd -- 'crates/crate00' && cargo fetch --locked"),
+        "must not fetch only the first scanned crate: {unit}"
+    );
+}
