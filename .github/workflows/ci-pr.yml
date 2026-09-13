@@ -4,6 +4,7 @@ run-name: CI / PR · ${{ github.event_name }} · ${{ github.ref_name }}
 
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
     inputs:
       runner:
