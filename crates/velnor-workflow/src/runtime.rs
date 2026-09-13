@@ -1390,19 +1390,87 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
     let parser = serde_yaml::ParserConfig::default()
         .duplicate_key_policy(serde_yaml::DuplicateKeyPolicy::Error);
     crate::POLICY_JOB_NAMES.iter().any(|name| {
-        let document = format!(
+        let hosted = format!(
             "jobs:\n{}",
             crate::inline_policy_job(name, trusted_revision)
         );
-        let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&document, &parser) else {
+        let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&hosted, &parser) else {
             return false;
         };
-        parsed
+        let Some(canonical) = parsed
             .get("jobs")
             .and_then(Value::as_mapping)
             .and_then(|jobs| jobs.get("policy"))
-            .is_some_and(|canonical| canonical == &Value::Mapping(job.to_owned()))
+        else {
+            return false;
+        };
+        if canonical == &Value::Mapping(job.to_owned()) {
+            return true;
+        }
+
+        // Velnor policy is intentionally a separate approved shape: it uses
+        // the local cache backend and a self-hosted runner, and the trusted
+        // event gate is mandatory. Runner labels and the default branch are
+        // repository configuration, so compare those two lane fields through
+        // the generic static-runner/trusted-gate validators below while the
+        // remaining job structure stays an exact generator comparison.
+        if !mapping_value(job, "if")
+            .and_then(Value::as_str)
+            .is_some_and(has_trusted_runner_gate)
+        {
+            return false;
+        }
+        if !is_static_self_hosted_runner(job) {
+            return false;
+        }
+
+        let canonical_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}\n";
+        let velnor = format!(
+            "jobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                name,
+                trusted_revision,
+                "[self-hosted, velnor]",
+                "local",
+                Some(canonical_gate),
+            )
+        );
+        let Ok(parsed) = serde_yaml::from_str_with_config::<Value>(&velnor, &parser) else {
+            return false;
+        };
+        let Some(canonical) = parsed
+            .get("jobs")
+            .and_then(Value::as_mapping)
+            .and_then(|jobs| jobs.get("policy"))
+        else {
+            return false;
+        };
+
+        strip_inline_policy_lane_fields(canonical)
+            == strip_inline_policy_lane_fields(&Value::Mapping(job.to_owned()))
     })
+}
+
+fn is_static_self_hosted_runner(job: &Mapping) -> bool {
+    let Some(runs_on) = mapping_value(job, "runs-on") else {
+        return false;
+    };
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(runs_on, None, &mut resolving);
+    analysis.self_hosted && !analysis.dynamic && !analysis.invalid
+}
+
+fn strip_inline_policy_lane_fields(value: &Value) -> Value {
+    let Some(mapping) = value.as_mapping() else {
+        return value.clone();
+    };
+    let mut stripped = Mapping::new();
+    for (key, value) in mapping {
+        if key != "if" && key != "runs-on" {
+            stripped.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Mapping(stripped)
 }
 
 /// Whether a job claims the inline policy transport. The first step's name is
@@ -1774,6 +1842,7 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
     );
     value == ci_gate
+        || value == format!("always()&&{ci_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
@@ -2771,6 +2840,50 @@ jobs:
             .replace("set -euo pipefail", "set -eo pipefail");
         let workflow = format!("name: Drifted\non: push\njobs:\n{drifted}");
         let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
+        assert!(!run_policy(root)?);
+
+        // Velnor policy uses the local cache backend and a trusted default-
+        // branch event gate, while preserving the same pinned revision.
+        let trusted_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}\n";
+        let workflow = format!(
+            "name: Velnor caller\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-runner]",
+                "local",
+                Some(trusted_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor", &workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        // The Velnor lane remains fail-closed for both revision drift and
+        // removal of its trusted-event gate.
+        let workflow = format!(
+            "name: Velnor wrong pin\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                "13f5567b0a5d2f61e9f47dcf11dc7d2f8b8d4a33",
+                "[self-hosted, example-runner]",
+                "local",
+                Some(trusted_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-wrong-pin", &workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+
+        let workflow = format!(
+            "name: Velnor untrusted\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-runner]",
+                "local",
+                Some("    if: ${{ github.event_name == 'push' }}\n"),
+            )
+        );
+        let root = policy_fixture("inline-velnor-untrusted", &workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }

@@ -384,6 +384,14 @@ fn selected_runner(config: &ProjectConfig) -> String {
     configured_runner(config, config.runners)
 }
 
+fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
+    if config.runners == RunnerMode::Velnor {
+        String::new()
+    } else {
+        workflow_runtime_setup(RunnerMode::Github)
+    }
+}
+
 fn release_lanes(config: &ProjectConfig, target: &str) -> Vec<(&'static str, String)> {
     let github = || yaml_scalar(release_runner(target));
     let velnor = || configured_runner(config, RunnerMode::Velnor);
@@ -489,7 +497,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         "      - name: Enforce workflow policy\n",
         &format!(
             "{}      - name: Enforce workflow policy\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
     )
     .replacen(
@@ -662,8 +670,12 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
+    );
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
     );
     output = output.replace(
         "run: velnor-workflow release verify-tag\n",
@@ -717,7 +729,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
     );
     output.push_str(
@@ -760,7 +772,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             "      - name: Set up sccache\n",
             &format!(
                 "{}      - name: Set up sccache\n",
-                workflow_runtime_setup(RunnerMode::Github)
+                workflow_runtime_setup_for_config(config)
             ),
         );
         let build = build.replace(
@@ -785,6 +797,10 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             config.default_branch
         );
     }
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
+    );
     output
         .replace(
             "name: ${{ matrix.target }}",
@@ -863,8 +879,12 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         "      - name: Enforce workflow policy\n",
         &format!(
             "{}      - name: Enforce workflow policy\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
+    );
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
     );
     output
 }
@@ -1024,13 +1044,36 @@ jobs:
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
-    MAINTENANCE_WORKFLOW.replace(
+    let mut output = MAINTENANCE_WORKFLOW
+        .replace("runs-on: ubuntu-24.04", &format!("runs-on: {}", selected_runner(config)))
+        .replace(
         "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
         &format!(
             "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
             config.default_branch
         ),
-    )
+        );
+    if config.runners == RunnerMode::Velnor {
+        let gate = format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            config.default_branch
+        );
+        output = output
+            .replace(
+                &format!(
+                    "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
+                    config.default_branch
+                ),
+                &format!(
+                    "if: ${{{{ {gate} && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}}}"
+                ),
+            )
+            .replace(
+                "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+                &format!("if: ${{{{ {gate} }}}}"),
+            );
+    }
+    output
 }
 
 #[cfg(test)]
@@ -1241,11 +1284,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "532e2c3e0b842ef84057030d1af74e8ae9e12e282b0b57b0719ba8d2e9ccf717",
+                "0ee555c5a52737ce0d9b0329ce4953c71f1a2811c37386b17bb1edd3fda4db8f",
             ),
             (
                 "preview.yml",
-                "2e9fbdd5575f49f983873d6101281d05aa721a2143c97d3b9904433660f7497e",
+                "01378eb561dd0970bdc5cccc00938a135e428a3aae32619e85da93dac60916a6",
             ),
             (
                 "maintenance.yml",
@@ -1298,6 +1341,29 @@ mod tests {
         }
         assert!(surface.added_files.is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn velnor_release_surfaces_have_no_hosted_runner_branch() {
+        let mut config = config(&["release.yml", "preview.yml"], Some(binary_spec()));
+        config.runners = RunnerMode::Velnor;
+        let Some(release) = config.release.as_ref() else {
+            panic!("release fixture must carry a release contract")
+        };
+        let rendered = [
+            super::render_release(&config, release),
+            super::render_preview(&config, Some(release)),
+        ];
+
+        for workflow in rendered {
+            assert!(workflow.contains("runs-on: [self-hosted, example-runner]"));
+            assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
+            assert!(!workflow.contains("github-hosted"), "{workflow}");
+        }
     }
 
     /// An incomplete contract omits the publisher exactly as the legacy path
