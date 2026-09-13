@@ -1098,7 +1098,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!("always() && {}", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -1452,13 +1452,27 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_runtime_download(lane));
     }
 
-    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
-        // Control-plane Planning publishes the SOURCE_REV runtime product; it
-        // cannot use the apt/image CLI (fleet 0.1.274 ≠ pin). Unit jobs stay
-        // on `config.runners`.
-        let runners = RunnerMode::Github;
-        let gate = String::new();
-        let runtime_setup = workflow_runtime_setup(RunnerMode::Github);
+    pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
+        // Planning follows the configured lane. Velnor uses the image-provided
+        // runtime, while an explicit GitHub lane bootstraps the pinned runtime.
+        let runners = if self.runners == RunnerMode::Velnor {
+            RunnerMode::Velnor
+        } else {
+            runners
+        };
+        let gate = if runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            self.trusted_runner_gate(runners, trusted)
+        };
+        let runtime_setup = if runners == RunnerMode::Velnor {
+            String::new()
+        } else {
+            workflow_runtime_setup(RunnerMode::Github)
+        };
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
@@ -2073,7 +2087,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
         }
         let gate = if runners == RunnerMode::Velnor && trusted {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!("always() && {}", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };

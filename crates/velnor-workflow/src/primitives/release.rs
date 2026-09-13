@@ -923,7 +923,7 @@ jobs:
   prune-pr-cache:
     name: Prune closed-PR cache
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
-    runs-on: ubuntu-24.04
+    runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
@@ -957,7 +957,7 @@ jobs:
   cache-budget:
     name: Cache retention
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-24.04
+    runs-on: __MAINTENANCE_CACHE_RUNNER__
     timeout-minutes: 10
     steps:
 VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
@@ -1064,25 +1064,47 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           fi
 "#;
 
-/// Maintenance is GitHub cache-API hygiene, not a Velnor job. It stays on the
-/// hosted image and always installs `setup-velnor-workflow`, even when CI
-/// lanes select `runners = "velnor"`.
 fn render_maintenance(config: &ProjectConfig) -> String {
+    let cache_lane = if config.runners == RunnerMode::Velnor {
+        RunnerMode::Velnor
+    } else {
+        RunnerMode::Github
+    };
+    let prune_gate = format!(
+        "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
+        config.default_branch
+    );
+    let cache_gate = if cache_lane == RunnerMode::Velnor {
+        format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            config.default_branch
+        )
+    } else {
+        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'".to_owned()
+    };
+    let setup = if cache_lane == RunnerMode::Github {
+        workflow_runtime_setup(RunnerMode::Github)
+    } else {
+        String::new()
+    };
+
     MAINTENANCE_WORKFLOW
+        .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
-            "VELNOR_RUNTIME_SETUP_STEPS",
-            &workflow_runtime_setup(RunnerMode::Github),
+            "__MAINTENANCE_PRUNE_RUNNER__",
+            &configured_runner(config, RunnerMode::Github),
         )
         .replace(
-            "runs-on: ubuntu-24.04",
-            &format!("runs-on: {}", yaml_scalar(&config.github_runner)),
+            "__MAINTENANCE_CACHE_RUNNER__",
+            &configured_runner(config, cache_lane),
         )
         .replace(
             "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
-            &format!(
-                "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
-                config.default_branch
-            ),
+            &format!("if: ${{{{ {prune_gate} }}}}"),
+        )
+        .replace(
+            "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+            &format!("if: ${{{{ {cache_gate} }}}}"),
         )
 }
 
@@ -1183,6 +1205,39 @@ mod tests {
             !workflow.contains("github.event_name == 'push'"),
             "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
         );
+    }
+
+    fn assert_maintenance_runner_split(workflow: &str, config: &ProjectConfig) {
+        let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let velnor = format!("runs-on: {}", configured_runner(config, RunnerMode::Velnor));
+        let runs_on: Vec<&str> = workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("runs-on:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            runs_on.as_slice(),
+            [hosted.as_str(), velnor.as_str()],
+            "only PR pruning is GitHub-hosted: {workflow}"
+        );
+        assert!(!workflow.contains("setup-velnor-workflow"));
+        let prune_if = format!(
+            "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
+            config.default_branch
+        );
+        assert!(
+            workflow.contains(&prune_if),
+            "closed-PR prune must stay live: {workflow}"
+        );
+        let cache_gate = format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            config.default_branch
+        );
+        assert!(
+            workflow.contains(&cache_gate),
+            "Velnor cache retention must stay on the trusted lane: {workflow}"
+        );
+        assert!(!workflow.contains("\n  push:"));
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
@@ -1439,12 +1494,12 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_stays_github_hosted_when_runners_are_velnor() {
+    fn maintenance_splits_prune_and_cache_when_runners_are_velnor() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.runners = RunnerMode::Velnor;
 
         let direct = super::render_maintenance(&cfg);
-        assert_maintenance_is_github_hosted(&direct, &cfg);
+        assert_maintenance_runner_split(&direct, &cfg);
 
         let root = scanned_root("maintenance-hosted");
         let surface = generate(&root, &cfg, None);
@@ -1453,8 +1508,18 @@ mod tests {
             generated.starts_with(crate::GENERATED_HEADER),
             "generated maintenance.yml must carry the header: {generated}"
         );
-        assert_maintenance_is_github_hosted(&generated, &cfg);
+        assert_maintenance_runner_split(&generated, &cfg);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maintenance_uses_configured_runners_for_all_hosted_modes() {
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
+            let mut cfg = config(&["maintenance.yml"], None);
+            cfg.runners = runners;
+            let workflow = super::render_maintenance(&cfg);
+            assert_maintenance_is_github_hosted(&workflow, &cfg);
+        }
     }
 
     #[test]
@@ -1465,7 +1530,7 @@ mod tests {
         cfg.default_branch = "trunk".to_owned();
 
         let workflow = super::render_maintenance(&cfg);
-        assert_maintenance_is_github_hosted(&workflow, &cfg);
+        assert_maintenance_runner_split(&workflow, &cfg);
         assert!(
             workflow.contains("runs-on: ubuntu-22.04"),
             "maintenance must honor config.github_runner: {workflow}"
