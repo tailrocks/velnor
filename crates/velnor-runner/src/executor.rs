@@ -167,11 +167,11 @@ fn link_command_kind(script: &str) -> Option<&'static str> {
         .next()
 }
 
-fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
+fn docker_lifecycle_guard(stage: &'static str) -> Result<crate::capacity::DockerLifecycleGuard> {
     let run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| std::env::temp_dir().join("velnor"));
-    crate::capacity::DockerLifecycleGuard::lock(&run_root)
+    crate::capacity::DockerLifecycleGuard::lock_for_stage(&run_root, stage)
 }
 
 // ANSI color helpers for Velnor-authored adapter output.
@@ -612,6 +612,34 @@ fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
     CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Best-effort reap of a stale map entry: SIGKILL, then `wait` so no
+/// zombie survives. Loud on failure but infallible — this runs where
+/// failing the caller's operation over a stale entry would be wrong.
+fn reap_spawned_child(child: &mut Child, pid: u32) {
+    let _ = child.kill();
+    if let Err(error) = child.wait() {
+        eprintln!("forensics.lifecycle event=spawned-child-reap-failed pid={pid} error={error:#}");
+    }
+}
+
+/// Direct `kill(pid, SIGTERM)` for a pid with no retained `Child` handle.
+///
+/// One syscall: no fork+exec of `kill(1)` per signal, no PATH lookup, no
+/// argv to smuggle through. ESRCH means already gone, which is success —
+/// the same contract as the cancel ladder's `signal_process_group`, and
+/// what lets a `stop_jailer` retry converge after the entry is dropped.
+fn signal_spawned_pid(pid: u32) -> Result<()> {
+    let raw = i32::try_from(pid).with_context(|| format!("pid {pid} out of range"))?;
+    let Some(target) = rustix::process::Pid::from_raw(raw) else {
+        bail!("refusing to signal pid 0");
+    };
+    match rustix::process::kill_process(target, rustix::process::Signal::TERM) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("kill {pid}: {error}")),
+    }
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
@@ -777,10 +805,17 @@ impl CommandRunner for ProcessCommandRunner {
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let pid = child.id();
-        spawned_children()
+        // A pid key must never silently drop a live handle: dropping a
+        // `Child` without `wait` leaks a zombie that holds its pid. Reap
+        // any stale entry first (defensive — a zombie holds its pid, so a
+        // collision already implies a prior leak).
+        if let Some(mut stale) = spawned_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pid, child);
+            .insert(pid, child)
+        {
+            reap_spawned_child(&mut stale, pid);
+        }
         Ok(SpawnedProcess { pid })
     }
 
@@ -790,22 +825,18 @@ impl CommandRunner for ProcessCommandRunner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&process.pid)
         {
-            child
-                .kill()
-                .with_context(|| format!("kill {}", process.pid))?;
+            // Wait on every path: a `kill` that fails because the child
+            // already exited still leaves a zombie until `wait` reaps it,
+            // and the old `?` between them leaked exactly that. The entry
+            // is already removed, so a retry falls through to the
+            // direct-signal path below and reports ESRCH as gone.
+            let _ = child.kill();
             child
                 .wait()
                 .with_context(|| format!("wait for {}", process.pid))?;
             return Ok(());
         }
-        let status = Command::new("kill")
-            .args(["-TERM", &process.pid.to_string()])
-            .status()
-            .with_context(|| format!("kill {}", process.pid))?;
-        if !status.success() {
-            bail!("kill {} exited {:?}", process.pid, status.code());
-        }
-        Ok(())
+        signal_spawned_pid(process.pid)
     }
 
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
@@ -1227,6 +1258,11 @@ pub enum ExecutableStep {
         inputs: BTreeMap<String, String>,
         env: Vec<(String, String)>,
         condition: Option<String>,
+        /// The umbrella step's own `continue-on-error`: it converts the
+        /// umbrella conclusion only, exactly like upstream's
+        /// `ApplyContinueOnError` on the composite step — never ORed into
+        /// the inner steps' flags.
+        continue_on_error: bool,
     },
     CompositeEnd {
         step_id: String,
@@ -1346,8 +1382,21 @@ struct CompositeFrame {
     warning_count: i32,
     notice_count: i32,
     summary: String,
-    /// Nested composite depth: only the outermost frame registers a step.
-    depth: usize,
+    /// The umbrella's own `continue-on-error` (from `CompositeStart`):
+    /// converts the umbrella conclusion at `CompositeEnd`, never the
+    /// inner steps'.
+    continue_on_error: bool,
+    /// True when the umbrella's OWN `if` could not be evaluated.
+    /// Upstream completes such a step as failed without ever running it
+    /// (`StepsRunner` bypasses `RunStepAsync`), so `continue-on-error`
+    /// — applied inside `RunStepAsync` — never converts it. Inner
+    /// failures, including inner condition errors, still convert.
+    condition_failed: bool,
+    /// Length of the job `results` vec when this composite started: the
+    /// `results[results_start..]` range is exactly this composite's own
+    /// step results, which an ignored umbrella conclusion converts so
+    /// the job-conclusion scan (which reads `results`) honors the flag.
+    results_start: usize,
 }
 
 impl CompositeFrame {
@@ -1399,20 +1448,51 @@ impl CompositeFrame {
     }
 
     /// The umbrella's own step result (F6): the exit code aggregated
-    /// from its inner steps, or skipped when the umbrella never ran. The
-    /// recorded `failure_ignored` is always false: when every inner
+    /// from its inner steps, or skipped when the umbrella never ran. A
+    /// standing failure converts to conclusion success only via the
+    /// umbrella's OWN `continue-on-error` (upstream
+    /// `ApplyContinueOnError` on the composite step): when every inner
     /// failure was ignored the exit code is already 0 (outcome success),
-    /// and when any failure stands the umbrella conclusion must stay
-    /// failure even if some other inner step was ignored.
+    /// and when any failure stands the umbrella conclusion stays failure
+    /// even if some other inner step was ignored. The umbrella's own
+    /// condition failure never converts (see `condition_failed`).
     fn umbrella_result(&self) -> StepExecutionResult {
         StepExecutionResult {
             exit_code: self.exit_code,
             state: StepCommandState::default(),
             skipped: self.skipped,
-            failure_ignored: false,
+            failure_ignored: self.exit_code != 0
+                && self.continue_on_error
+                && !self.condition_failed,
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    /// Fold a completed nested umbrella into its parent frame. Log
+    /// sections, masks, counts, and summary move verbatim (the nested
+    /// region is contiguous, so rendering is identical to appending
+    /// directly); the nested exit propagates by the same absorb rule — a
+    /// nested failure the nested umbrella ignored via its own
+    /// `continue-on-error` does not fail the parent.
+    fn merge_nested(&mut self, nested: CompositeFrame, nested_result: &StepExecutionResult) {
+        self.lines.extend(nested.lines);
+        self.masks.extend(nested.masks);
+        self.annotations.extend(nested.annotations);
+        self.telemetry.extend(nested.telemetry);
+        self.error_count += nested.error_count;
+        self.warning_count += nested.warning_count;
+        self.notice_count += nested.notice_count;
+        if !nested.summary.is_empty() {
+            if !self.summary.is_empty() {
+                self.summary.push('\n');
+            }
+            self.summary.push_str(&nested.summary);
+        }
+        if nested.exit_code != 0 && !nested_result.failure_ignored && self.exit_code == 0 {
+            self.exit_code = nested.exit_code;
+        }
+        self.failure_ignored |= nested.failure_ignored;
     }
 
     fn into_step_log(self, completed_at: &str) -> StepLog {
@@ -1569,7 +1649,9 @@ impl ExecutableStep {
 
     pub(crate) fn continue_on_error(&self) -> bool {
         match self {
-            ExecutableStep::CompositeStart { .. } => false,
+            ExecutableStep::CompositeStart {
+                continue_on_error, ..
+            } => *continue_on_error,
             ExecutableStep::CompositeEnd { .. } => false,
             ExecutableStep::Checkout(plan) => plan.continue_on_error,
             ExecutableStep::Script(step) => step.continue_on_error,
@@ -2214,12 +2296,17 @@ where
         // with the active token, so the current step's whole process tree is a
         // cancellation target without any call site naming it.
         let active_cancellation = crate::execution::cancel::set_active(self.cancellation.clone());
-        let mut step_error = None;
         // The single post-action stack, in registration (step) order; drained
         // LIFO below like upstream's `PostJobSteps`.
         let mut post_actions: Vec<PostAction> = Vec::new();
         let mut timeline_order = self.initial_order;
-        let mut composite_frame: Option<CompositeFrame> = None;
+        // One frame per open composite, outermost first. Only the
+        // outermost frame registers a timeline step; nested umbrellas are
+        // inner steps of their parent, so a nested End pops its frame and
+        // applies the nested umbrella result to the PARENT scope (after
+        // the pop, so it is not discarded with the nested scope) and
+        // merges the nested log into the parent frame.
+        let mut composite_frames: Vec<CompositeFrame> = Vec::new();
         // Lexical composite nesting depth. While `skip_depth` holds the
         // depth a skipped/failed umbrella started at, every step —
         // including nested composite boundaries, which only move this
@@ -2230,6 +2317,12 @@ where
         // (job/parent) scope while inner conditions keep their own.
         let mut composite_depth: usize = 0;
         let mut skip_depth: Option<usize> = None;
+        // Depth an embedded condition-eval error broke out of: upstream's
+        // composite loop `break`s on an unevaluable inner condition
+        // (`CompositeActionHandler.cs`) while the job continues, so the
+        // remaining inner steps of that composite skip but its outputs
+        // still process (the `CompositeOutputs` exemption below).
+        let mut break_depth: Option<usize> = None;
         for step in steps {
             match step {
                 ExecutableStep::CompositeStart {
@@ -2238,11 +2331,12 @@ where
                     inputs,
                     env,
                     condition,
+                    continue_on_error,
                 } => {
-                    // A nested boundary inside a skipped umbrella only
-                    // moves the lexical counter: no scope is pushed for
-                    // it, so its matching End must not pop either.
-                    if skip_depth.is_some() {
+                    // A nested boundary inside a skipped or broken umbrella
+                    // only moves the lexical counter: no scope is pushed
+                    // for it, so its matching End must not pop either.
+                    if skip_depth.is_some() || break_depth.is_some() {
                         composite_depth += 1;
                         continue;
                     }
@@ -2260,44 +2354,57 @@ where
                     // composite's own empty scope, so `if: failure()`
                     // never fired and `if: success()` never skipped here.
                     let frame_state = state.with_step_action(step_id);
-                    let nested = composite_frame.is_some();
+                    let nested = !composite_frames.is_empty();
                     let backend_step_id = github_backend_step_id(step_id);
-                    let verdict = match frame_state.resolve_expressions(display_name) {
-                        Err(error) => UmbrellaVerdict::EvalFailed {
-                            display: step_id.clone(),
-                            message: format!(
-                                "Step '{step_id}' display name could not be evaluated: {error}"
-                            ),
-                        },
-                        Ok(resolved_display) => {
-                            match frame_state.evaluate_condition(condition.as_deref()) {
-                                Ok(true) => UmbrellaVerdict::Run(resolved_display),
-                                Ok(false) => UmbrellaVerdict::Skip(resolved_display),
-                                // actions/runner fails the step when its
-                                // condition cannot be evaluated
-                                // (src/Runner.Worker/StepsRunner.cs:231-242).
-                                // The umbrella records the failure and its
-                                // inner steps skip; remaining job steps still
-                                // run. Breaking or returning here would drop
-                                // them and the post drain below.
-                                Err(error) => UmbrellaVerdict::EvalFailed {
-                                    message: format!(
-                                        "Step '{resolved_display}' condition could not be evaluated: {error}"
-                                    ),
-                                    display: resolved_display,
-                                },
-                            }
+                    // A display name that cannot be evaluated never fails
+                    // the step: upstream's `TryUpdateDisplayName` is
+                    // best-effort (`ActionRunner.cs`: the catch only
+                    // traces), so the raw name carries on into condition
+                    // evaluation and the run.
+                    let display = frame_state.resolve_expressions(display_name);
+                    let resolved_display = match &display {
+                        Ok(resolved_display) => resolved_display.clone(),
+                        Err(error) => {
+                            eprintln!(
+                                "Step '{step_id}' display name could not be evaluated ({error}); using the raw name"
+                            );
+                            display_name.clone()
                         }
+                    };
+                    let verdict = match frame_state.evaluate_condition(condition.as_deref()) {
+                        Ok(true) => UmbrellaVerdict::Run(resolved_display),
+                        Ok(false) => UmbrellaVerdict::Skip(resolved_display),
+                        // actions/runner fails the step when its
+                        // condition cannot be evaluated
+                        // (src/Runner.Worker/StepsRunner.cs:231-242).
+                        // The umbrella records the failure and its
+                        // inner steps skip; remaining job steps still
+                        // run. Breaking or returning here would drop
+                        // them and the post drain below.
+                        Err(error) => UmbrellaVerdict::EvalFailed {
+                            message: format!(
+                                "Step '{resolved_display}' condition could not be evaluated: {error}"
+                            ),
+                            display: resolved_display,
+                        },
                     };
                     state.push_composite(step_id);
                     let resume_depth = composite_depth;
                     composite_depth += 1;
+                    let results_start = results.len();
                     match verdict {
                         UmbrellaVerdict::Run(resolved_display) => {
                             if nested {
-                                if let Some(frame) = composite_frame.as_mut() {
-                                    frame.depth += 1;
-                                }
+                                composite_frames.push(CompositeFrame {
+                                    step_id: step_id.clone(),
+                                    backend_step_id,
+                                    display_name: resolved_display,
+                                    order: timeline_order,
+                                    started_at: unix_now_rfc3339(),
+                                    continue_on_error: *continue_on_error,
+                                    results_start,
+                                    ..CompositeFrame::default()
+                                });
                             } else {
                                 let started_at = self.emit_step_started(
                                     backend_step_id.clone(),
@@ -2307,13 +2414,15 @@ where
                                 let mut lines = vec![format!("##[group]{resolved_display}")];
                                 lines.extend(action_log_prelude(inputs, env, &frame_state));
                                 lines.push("##[endgroup]".to_string());
-                                composite_frame = Some(CompositeFrame {
+                                composite_frames.push(CompositeFrame {
                                     step_id: step_id.clone(),
                                     backend_step_id,
                                     display_name: resolved_display,
                                     order: timeline_order,
                                     started_at,
                                     lines,
+                                    continue_on_error: *continue_on_error,
+                                    results_start,
                                     ..CompositeFrame::default()
                                 });
                             }
@@ -2323,38 +2432,31 @@ where
                                 "forensics.lifecycle event=step-skipped step={resolved_display}"
                             );
                             skip_depth = Some(resume_depth);
-                            if nested {
-                                // A nested umbrella is an inner step of its
-                                // parent: record it skipped under its own id
-                                // like any skipped inner step.
-                                let result = StepExecutionResult {
-                                    exit_code: 0,
-                                    state: StepCommandState::default(),
-                                    skipped: true,
-                                    failure_ignored: false,
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                };
-                                state.apply(step_id, &result);
-                                if let Some(frame) = composite_frame.as_mut() {
-                                    frame.depth += 1;
-                                }
-                            } else {
-                                let started_at = self.emit_step_started(
-                                    backend_step_id.clone(),
-                                    &resolved_display,
+                            // A nested umbrella is an inner step of its
+                            // parent: the seeded frame applies skipped to
+                            // the parent scope at the nested End. Applying
+                            // here would land in the nested scope, which
+                            // the End then discards.
+                            let mut frame = CompositeFrame {
+                                step_id: step_id.clone(),
+                                backend_step_id,
+                                display_name: resolved_display,
+                                order: timeline_order,
+                                started_at: unix_now_rfc3339(),
+                                skipped: true,
+                                continue_on_error: *continue_on_error,
+                                results_start,
+                                ..CompositeFrame::default()
+                            };
+                            if !nested {
+                                frame.started_at = self.emit_step_started(
+                                    frame.backend_step_id.clone(),
+                                    &frame.display_name,
                                     &mut timeline_order,
                                 );
-                                composite_frame = Some(CompositeFrame {
-                                    step_id: step_id.clone(),
-                                    backend_step_id,
-                                    display_name: resolved_display,
-                                    order: timeline_order,
-                                    started_at,
-                                    skipped: true,
-                                    ..CompositeFrame::default()
-                                });
+                                frame.order = timeline_order;
                             }
+                            composite_frames.push(frame);
                         }
                         UmbrellaVerdict::EvalFailed { display, message } => {
                             eprintln!("{message}");
@@ -2367,77 +2469,94 @@ where
                                 stdout: String::new(),
                                 stderr: message.clone(),
                             };
+                            // The job must fail even though no inner
+                            // step ran: without this push the conclusion
+                            // scan finds no failure. The scope apply waits
+                            // for the End (see the Skip arm): applying here
+                            // would land in the discarded own scope.
+                            results.push(result.clone());
+                            let mut frame = CompositeFrame {
+                                step_id: step_id.clone(),
+                                backend_step_id,
+                                display_name: display.clone(),
+                                order: timeline_order,
+                                started_at: unix_now_rfc3339(),
+                                exit_code: 1,
+                                continue_on_error: *continue_on_error,
+                                condition_failed: true,
+                                results_start,
+                                ..CompositeFrame::default()
+                            };
                             if nested {
-                                // A nested umbrella is an inner step of its
-                                // parent: absorb the failure into the parent
-                                // frame and record it under the nested id,
-                                // like any inner condition failure.
-                                state.apply(step_id, &result);
-                                if let Some(frame) = composite_frame.as_mut() {
-                                    frame.depth += 1;
-                                    frame.append_inner(
-                                        &display,
-                                        &action_log_prelude(inputs, env, &frame_state),
-                                        &result,
-                                        state.step_debug(),
-                                    );
-                                }
-                            } else {
-                                let started_at = self.emit_step_started(
-                                    backend_step_id.clone(),
+                                frame.append_inner(
                                     &display,
+                                    &action_log_prelude(inputs, env, &frame_state),
+                                    &result,
+                                    state.step_debug(),
+                                );
+                            } else {
+                                frame.started_at = self.emit_step_started(
+                                    frame.backend_step_id.clone(),
+                                    &frame.display_name,
                                     &mut timeline_order,
                                 );
+                                frame.order = timeline_order;
                                 let mut lines = vec![format!("##[group]{display}")];
                                 lines.extend(action_log_prelude(inputs, env, &frame_state));
                                 lines.push("##[endgroup]".to_string());
                                 lines.push(message);
-                                composite_frame = Some(CompositeFrame {
-                                    step_id: step_id.clone(),
-                                    backend_step_id,
-                                    display_name: display,
-                                    order: timeline_order,
-                                    started_at,
-                                    lines,
-                                    exit_code: 1,
-                                    ..CompositeFrame::default()
-                                });
-                                // The job must fail even though no inner
-                                // step ran: without this push the
-                                // conclusion scan finds no failure.
-                                results.push(result);
+                                frame.lines = lines;
                             }
+                            composite_frames.push(frame);
                         }
                     }
                     continue;
                 }
                 ExecutableStep::CompositeEnd { step_id } => {
-                    // A nested End inside a skipped umbrella only moves the
-                    // lexical counter back: its Start pushed nothing, so
-                    // this pops nothing.
+                    // A nested End inside a skipped or broken umbrella only
+                    // moves the lexical counter back: its Start pushed
+                    // nothing, so this pops nothing.
                     composite_depth = composite_depth.saturating_sub(1);
-                    if skip_depth.is_some_and(|resume| composite_depth > resume) {
+                    if skip_depth.is_some_and(|resume| composite_depth > resume)
+                        || break_depth.is_some_and(|resume| composite_depth > resume)
+                    {
                         continue;
                     }
                     skip_depth = None;
+                    break_depth = None;
                     state.pop_composite(step_id);
-                    match composite_frame.as_mut() {
-                        Some(frame) if frame.depth > 0 => frame.depth -= 1,
-                        Some(_) => {
-                            if let Some(frame) = composite_frame.take() {
-                                // F6: the umbrella records its own
-                                // outcome/conclusion under its step id, so
-                                // later steps read
-                                // `steps.<umbrella>.outcome|conclusion`
-                                // instead of finding nothing.
-                                let umbrella = frame.umbrella_result();
-                                state.apply(step_id, &umbrella);
-                                let log = frame.into_step_log(&unix_now_rfc3339());
-                                self.emit_step_log(&log);
-                                step_logs.push(log);
+                    // F6: the umbrella records its own outcome/conclusion
+                    // under its step id, so later steps read
+                    // `steps.<umbrella>.outcome|conclusion` instead of
+                    // finding nothing. A nested umbrella is an inner step
+                    // of its parent: the pop above already removed the
+                    // nested scope, so this apply lands in the parent
+                    // scope and the merged exit fails the parent when the
+                    // nested umbrella failed.
+                    if let Some(mut frame) = composite_frames.pop() {
+                        let umbrella = frame.umbrella_result();
+                        frame.failure_ignored |= umbrella.failure_ignored;
+                        state.apply(step_id, &umbrella);
+                        // An ignored umbrella conclusion converts the
+                        // composite's own step results with it: without
+                        // this the job-conclusion scan (which reads
+                        // `results`, where the umbrella itself has no row)
+                        // would fail a job upstream passes. Inner
+                        // `steps.<id>` conclusions applied earlier stay
+                        // failure — upstream converts the composite
+                        // conclusion only.
+                        if umbrella.failure_ignored {
+                            for result in results.iter_mut().skip(frame.results_start) {
+                                result.failure_ignored = true;
                             }
                         }
-                        None => {}
+                        if let Some(parent) = composite_frames.last_mut() {
+                            parent.merge_nested(frame, &umbrella);
+                        } else {
+                            let log = frame.into_step_log(&unix_now_rfc3339());
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
                     }
                     continue;
                 }
@@ -2445,70 +2564,36 @@ where
                     if skip_depth.is_some() {
                         continue;
                     }
+                    // A broken composite skips its remaining inner steps,
+                    // but its outputs still process — upstream `break`s
+                    // the inner loop and then runs `ProcessOutputs`. Only
+                    // the breaking composite's own outputs step is
+                    // exempt: deeper (nested) outputs stay skipped, and a
+                    // skipped umbrella never reaches its outputs.
+                    if let Some(resume) = break_depth {
+                        let own_outputs = matches!(step, ExecutableStep::CompositeOutputs { .. })
+                            && composite_depth == resume + 1;
+                        if !own_outputs {
+                            continue;
+                        }
+                    }
                 }
             }
             let step_context_id = step.id().to_string();
             let step_backend_id = github_backend_step_id(&step_context_id);
             let step_state = state.with_step_action(&step_context_id);
             // Display names are resolved at the same execution boundary as
-            // the step. A malformed/evaluation failure must stop before the
-            // shell or action is dispatched; never carry raw template source
-            // into lifecycle or action execution. The failure still records
-            // a failed step and continues — returning here would drop the
-            // post drain below.
+            // the step, but a failure never fails the step: upstream's
+            // `TryUpdateDisplayName` is best-effort
+            // (`src/Runner.Worker/ActionRunner.cs`: the catch only
+            // traces), so the raw name carries on and the step runs.
             let display_name = match step_state.resolve_expressions(step.display_name()) {
                 Ok(display_name) => display_name,
                 Err(error) => {
-                    let display_name = step_context_id.clone();
-                    let message = format!(
-                        "Step '{display_name}' display name could not be evaluated: {error}"
+                    eprintln!(
+                        "Step '{step_context_id}' display name could not be evaluated ({error}); using the raw name"
                     );
-                    eprintln!("{message}");
-                    let reports = composite_frame.is_none() && step.reports_timeline_start();
-                    let mut failed_started_at = String::new();
-                    if reports {
-                        failed_started_at = self.emit_step_started(
-                            step_backend_id.clone(),
-                            &display_name,
-                            &mut timeline_order,
-                        );
-                    }
-                    let result = StepExecutionResult {
-                        exit_code: 1,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: String::new(),
-                        stderr: message,
-                    };
-                    if let Some(frame) = composite_frame.as_mut() {
-                        if step.reports_timeline_start() {
-                            frame.append_inner(
-                                &display_name,
-                                &step_log_prelude(step, &step_state),
-                                &result,
-                                state.step_debug(),
-                            );
-                        } else {
-                            frame.absorb(&result);
-                        }
-                    } else if reports {
-                        let log = step_log_with_name(
-                            &step_backend_id,
-                            &display_name,
-                            timeline_order,
-                            &failed_started_at,
-                            &unix_now_rfc3339(),
-                            &result,
-                            &step_log_prelude(step, &step_state),
-                            state.step_debug(),
-                        );
-                        self.emit_step_log(&log);
-                        step_logs.push(log);
-                    }
-                    state.apply(&step_context_id, &result);
-                    results.push(result);
-                    continue;
+                    step.display_name().to_string()
                 }
             };
             let condition_met = match step_state.evaluate_condition(step.condition()) {
@@ -2522,7 +2607,7 @@ where
                     let message =
                         format!("Step '{display_name}' condition could not be evaluated: {error}");
                     eprintln!("{message}");
-                    let reports = composite_frame.is_none() && step.reports_timeline_start();
+                    let reports = composite_frames.is_empty() && step.reports_timeline_start();
                     let mut failed_started_at = String::new();
                     if reports {
                         failed_started_at = self.emit_step_started(
@@ -2539,10 +2624,14 @@ where
                         stdout: String::new(),
                         stderr: message,
                     };
-                    if let Some(frame) = composite_frame.as_mut() {
+                    if let Some(frame) = composite_frames.last_mut() {
                         // An unevaluable inner condition still fails the
                         // composite: without the absorb the umbrella would
-                        // render exit 0 while the job fails.
+                        // render exit 0 while the job fails. It also
+                        // breaks the inner loop — upstream `break`s out of
+                        // the composite steps here
+                        // (`CompositeActionHandler.cs`) — while the job
+                        // itself continues below.
                         if step.reports_timeline_start() {
                             frame.append_inner(
                                 &display_name,
@@ -2553,6 +2642,7 @@ where
                         } else {
                             frame.absorb(&result);
                         }
+                        break_depth = Some(composite_depth.saturating_sub(1));
                     } else if reports {
                         let log = step_log_with_name(
                             &step_backend_id,
@@ -2576,7 +2666,7 @@ where
                 // Embedded composite steps never surface their own rows;
                 // a skipped one simply leaves no trace in the parent's log.
                 eprintln!("forensics.lifecycle event=step-skipped step={display_name}");
-                let reports = composite_frame.is_none() && step.reports_timeline_start();
+                let reports = composite_frames.is_empty() && step.reports_timeline_start();
                 let mut skipped_started_at = String::new();
                 if reports {
                     skipped_started_at = self.emit_step_started(
@@ -2636,7 +2726,7 @@ where
                 let message =
                     format!("Step '{display_name}' pre-condition could not be evaluated: {error}");
                 eprintln!("{message}");
-                let reports = composite_frame.is_none() && step.reports_timeline_start();
+                let reports = composite_frames.is_empty() && step.reports_timeline_start();
                 let mut failed_started_at = String::new();
                 if reports {
                     failed_started_at = self.emit_step_started(
@@ -2653,7 +2743,7 @@ where
                     stdout: String::new(),
                     stderr: message,
                 };
-                if let Some(frame) = composite_frame.as_mut() {
+                if let Some(frame) = composite_frames.last_mut() {
                     // An unevaluable inner pre-condition still fails the
                     // composite: without the absorb the umbrella would
                     // render exit 0 while the job fails.
@@ -2703,14 +2793,14 @@ where
                         condition: invocation.post_condition.clone(),
                         continue_on_error: *continue_on_error,
                         timeout_minutes: *timeout_minutes,
-                        umbrella_display: composite_frame
-                            .as_ref()
+                        umbrella_display: composite_frames
+                            .first()
                             .map(|frame| frame.display_name.clone()),
                     }));
                     post_registered = true;
                 }
                 let pre_step_id = uuid::Uuid::new_v4().to_string();
-                let pre_started_at = if composite_frame.is_none() {
+                let pre_started_at = if composite_frames.is_empty() {
                     self.emit_step_started(pre_step_id.clone(), &display_name, &mut timeline_order)
                 } else {
                     unix_now_rfc3339()
@@ -2777,7 +2867,7 @@ where
                 if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
                 }
-                if let Some(frame) = composite_frame.as_mut() {
+                if let Some(frame) = composite_frames.last_mut() {
                     frame.append_inner(
                         &display_name,
                         &step_log_prelude(step, &step_state),
@@ -2837,7 +2927,7 @@ where
                     post_registered = true;
                 }
                 let pre_step_id = uuid::Uuid::new_v4().to_string();
-                let pre_started_at = if composite_frame.is_none() {
+                let pre_started_at = if composite_frames.is_empty() {
                     self.emit_step_started(pre_step_id.clone(), &display_name, &mut timeline_order)
                 } else {
                     unix_now_rfc3339()
@@ -2888,7 +2978,7 @@ where
                 if failed && *continue_on_error && !state.is_cancelled() {
                     result.failure_ignored = true;
                 }
-                if let Some(frame) = composite_frame.as_mut() {
+                if let Some(frame) = composite_frames.last_mut() {
                     frame.append_inner(
                         &display_name,
                         &step_log_prelude(step, &step_state),
@@ -2940,8 +3030,8 @@ where
                     condition: invocation.post_condition.clone(),
                     continue_on_error: *continue_on_error,
                     timeout_minutes: *timeout_minutes,
-                    umbrella_display: composite_frame
-                        .as_ref()
+                    umbrella_display: composite_frames
+                        .first()
                         .map(|frame| frame.display_name.clone()),
                 }));
             }
@@ -2979,21 +3069,23 @@ where
                     condition: Some(condition.to_string()),
                     continue_on_error: *continue_on_error,
                     timeout_minutes: *timeout_minutes,
-                    umbrella_display: composite_frame
-                        .as_ref()
+                    umbrella_display: composite_frames
+                        .first()
                         .map(|frame| frame.display_name.clone()),
                 }));
             }
             let step_state = state.with_step_action(&step_context_id);
-            let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
+            let main_started_at = if composite_frames.is_empty() && step.reports_timeline_start() {
                 self.emit_step_started(step_backend_id.clone(), &display_name, &mut timeline_order)
             } else {
                 String::new()
             };
             // Live lines from embedded composite steps stream under the
-            // composite's registered step, not a step of their own.
+            // composite's registered step, not a step of their own: only
+            // the outermost frame registers, so nested frames stream
+            // under it too.
             let (live_step_id, live_display_name, live_order, live_started_at) =
-                match composite_frame.as_ref() {
+                match composite_frames.first() {
                     Some(frame) => (
                         frame.backend_step_id.clone(),
                         frame.display_name.clone(),
@@ -3124,14 +3216,14 @@ where
                         &env,
                         &mut self.deprecated_command_scope,
                     ));
-                    Ok(StepExecutionResult {
+                    Ok(apply_command_result(StepExecutionResult {
                         exit_code: step_result.code,
                         state: command_state,
                         skipped: false,
                         failure_ignored: false,
                         stdout: step_result.stdout,
                         stderr: step_result.stderr,
-                    })
+                    }))
                 }
                 ExecutableStep::JavaScript {
                     step_id,
@@ -3198,7 +3290,7 @@ where
                     if failed && step.continue_on_error() && !state.is_cancelled() {
                         result.failure_ignored = true;
                     }
-                    if let Some(frame) = composite_frame.as_mut() {
+                    if let Some(frame) = composite_frames.last_mut() {
                         // Bookkeeping steps (CompositeOutputs) contribute state
                         // but never a visible section — otherwise their raw
                         // step id leaks as a `##[group]<uuid>` header.
@@ -3241,7 +3333,7 @@ where
                     // condition is re-evaluated fresh, so `always()` cleanup
                     // still runs while ordinary steps skip; the job still
                     // fails, via the recorded failure in `results`. No
-                    // `step_error` is set: returning `Err` would discard the
+                    // error is returned: returning `Err` would discard the
                     // summary (and every cleanup log) the caller maps to a
                     // job-level error instead of a failed job.
                     //
@@ -3279,7 +3371,7 @@ where
                         stdout: String::new(),
                         stderr: format!("{error:#}"),
                     };
-                    if let Some(frame) = composite_frame.as_mut() {
+                    if let Some(frame) = composite_frames.last_mut() {
                         if step.reports_timeline_start() {
                             frame.append_inner(
                                 &display_name,
@@ -3320,15 +3412,29 @@ where
         self.live_step = None;
         // Defensive flush for a plan whose CompositeEnd never arrives: the
         // loop above no longer breaks, so a well-formed plan always closes
-        // its frame at the boundary. Flush (failed) instead of silently
-        // dropping the step from the UI, and still record the umbrella.
-        if let Some(mut frame) = composite_frame.take() {
+        // its frames at the boundary. Fold any nested frames into their
+        // parent, then flush (failed) instead of silently dropping the
+        // step from the UI, and still record the umbrella.
+        while composite_frames.len() > 1 {
+            let nested = composite_frames.pop().expect("nested frame");
+            let nested_result = nested.umbrella_result();
+            if let Some(parent) = composite_frames.last_mut() {
+                parent.merge_nested(nested, &nested_result);
+            }
+        }
+        if let Some(mut frame) = composite_frames.pop() {
             if frame.exit_code == 0 {
                 frame.exit_code = 1;
             }
             let umbrella = frame.umbrella_result();
+            frame.failure_ignored |= umbrella.failure_ignored;
             let umbrella_id = frame.step_id.clone();
             state.apply(&umbrella_id, &umbrella);
+            if umbrella.failure_ignored {
+                for result in results.iter_mut().skip(frame.results_start) {
+                    result.failure_ignored = true;
+                }
+            }
             let log = frame.into_step_log(&unix_now_rfc3339());
             self.emit_step_log(&log);
             step_logs.push(log);
@@ -3480,10 +3586,41 @@ where
                             executed_physical_actions += 1;
                             results.push(result);
                         }
+                        // A post that fails by throwing records a failed
+                        // post step and the drain CONTINUES with the
+                        // summary: returning `Err` would discard the
+                        // summary and every log recorded so far, mapping
+                        // a failed job to a job-level error instead.
                         Err(error) => {
-                            if step_error.is_none() {
-                                step_error = Some(error);
+                            eprintln!(
+                                "Post step '{js_post_name}' failed with an execution error: {error:#}"
+                            );
+                            let mut result = StepExecutionResult {
+                                exit_code: 1,
+                                state: StepCommandState::default(),
+                                skipped: false,
+                                failure_ignored: false,
+                                stdout: String::new(),
+                                stderr: format!("{error:#}"),
+                            };
+                            if post_action.continue_on_error {
+                                result.failure_ignored = true;
                             }
+                            let log = step_log_with_name(
+                                &js_post_step_id,
+                                &js_post_name,
+                                timeline_order,
+                                &js_post_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &javascript_post_log_prelude(&post_action.invocation, &state),
+                                state.step_debug(),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                            state.apply(&js_post_step_id, &result);
+                            executed_physical_actions += 1;
+                            results.push(result);
                         }
                     }
                     continue;
@@ -3538,10 +3675,39 @@ where
                             executed_physical_actions += 1;
                             results.push(result);
                         }
+                        // As the JavaScript post above: record the failed
+                        // post and continue the drain with the summary,
+                        // never `Err`.
                         Err(error) => {
-                            if step_error.is_none() {
-                                step_error = Some(error);
+                            eprintln!(
+                                "Post step '{docker_post_name}' failed with an execution error: {error:#}"
+                            );
+                            let mut result = StepExecutionResult {
+                                exit_code: 1,
+                                state: StepCommandState::default(),
+                                skipped: false,
+                                failure_ignored: false,
+                                stdout: String::new(),
+                                stderr: format!("{error:#}"),
+                            };
+                            if post_action.continue_on_error {
+                                result.failure_ignored = true;
                             }
+                            let log = step_log_with_name(
+                                &docker_post_step_id,
+                                &docker_post_name,
+                                timeline_order,
+                                &docker_post_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &docker_post_log_prelude(&post_action.invocation, &state),
+                                state.step_debug(),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                            state.apply(&docker_post_step_id, &result);
+                            executed_physical_actions += 1;
+                            results.push(result);
                         }
                     }
                     continue;
@@ -3589,7 +3755,6 @@ where
                 stdout: String::new(),
                 stderr: String::new(),
             };
-            let mut errored = false;
             for member in &group {
                 let result = self.execute_native_post_action(
                     container,
@@ -3626,16 +3791,47 @@ where
                         executed_physical_actions += 1;
                         results.push(result);
                     }
+                    // As the JavaScript/Docker posts above: a member that
+                    // fails by throwing folds a failed result into the
+                    // combined record and the drain continues with the
+                    // summary, never `Err`.
                     Err(error) => {
-                        errored = true;
-                        if step_error.is_none() {
-                            step_error = Some(error);
+                        eprintln!(
+                            "Post step '{}' failed with an execution error: {error:#}",
+                            member.display_name
+                        );
+                        let mut result = StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: String::new(),
+                            stderr: format!("{error:#}"),
+                        };
+                        if member.continue_on_error {
+                            result.failure_ignored = true;
                         }
+                        if umbrella_group {
+                            combined_lines.push(format!("##[group]Post {}", member.display_name));
+                            combined_lines
+                                .extend(native_post_log_prelude(&member.invocation, &state));
+                            combined_lines.push("##[endgroup]".to_string());
+                        }
+                        combined_lines.extend(rendered_output_lines(
+                            &result.stdout,
+                            &result.stderr,
+                            state.step_debug(),
+                        ));
+                        if !result.failure_ignored && combined.exit_code == 0 {
+                            combined.exit_code = result.exit_code;
+                        }
+                        combined.failure_ignored |= result.failure_ignored;
+                        combined.state.merge(result.state.clone());
+                        state.apply(&post_step_id, &result);
+                        executed_physical_actions += 1;
+                        results.push(result);
                     }
                 }
-            }
-            if errored && combined.exit_code == 0 {
-                combined.exit_code = 1;
             }
             let log = StepLog {
                 step_id: post_step_id.clone(),
@@ -3657,9 +3853,6 @@ where
             };
             self.emit_step_log(&log);
             step_logs.push(log);
-        }
-        if let Some(error) = step_error {
-            return Err(error);
         }
         Ok(JobExecutionSummary {
             job_outputs: evaluate_job_outputs(job_outputs, &state)?,
@@ -3751,14 +3944,14 @@ where
             &env,
             &mut self.deprecated_command_scope,
         ));
-        Ok(StepExecutionResult {
+        Ok(apply_command_result(StepExecutionResult {
             exit_code: step_result.code,
             state,
             skipped: false,
             failure_ignored: false,
             stdout: step_result.stdout,
             stderr: step_result.stderr,
-        })
+        }))
     }
 
     fn execute_checkout_step(
@@ -3896,14 +4089,14 @@ where
             &env,
             &mut self.deprecated_command_scope,
         ));
-        Ok(StepExecutionResult {
+        Ok(apply_command_result(StepExecutionResult {
             exit_code: step_result.code,
             state,
             skipped: false,
             failure_ignored: false,
             stdout: step_result.stdout,
             stderr: step_result.stderr,
-        })
+        }))
     }
 
     fn execute_native_action_in_started_container(
@@ -4066,13 +4259,11 @@ where
                         Ok(false)
                     }
                 };
-                let outcome = match (
-                    state.temp_host.as_deref(),
-                    crate::buildkit::claims_run_root(),
-                ) {
+                let run_root = crate::buildkit::claims_run_root();
+                let outcome = match (state.temp_host.as_deref(), run_root.as_ref()) {
                     (Some(_temp), Some(run_root)) => {
                         match crate::buildkit::release_and_stop_if_last(
-                            &run_root,
+                            run_root,
                             &name,
                             &container.name,
                             stop,
@@ -4123,6 +4314,41 @@ where
                     }
                     Some(_) => {
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
+                    }
+                }
+                // Holders remain: shrink the daemon ceiling for those that do,
+                // so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. Best-effort like the stop — sizing is
+                // an optimization, never a release failure — and skipped when
+                // the remaining holders cannot be counted. A final release
+                // resizes nothing: the daemon is stopped or already gone.
+                if matches!(outcome, Some(outcome) if !outcome.removed_last)
+                    && let Some(run_root) = run_root.as_ref()
+                    && let Some(remaining) = crate::buildkit::builder_holder_count(run_root, &name)
+                    && remaining > 0
+                {
+                    match container.buildkit_size(u32::try_from(remaining).unwrap_or(u32::MAX)) {
+                        Ok(size) if !size.is_empty() => {
+                            if let Err(error) = crate::buildkit::resize_builder_daemon(
+                                &name,
+                                size.cpu_milli,
+                                size.memory_bytes,
+                            ) {
+                                use std::fmt::Write as _;
+                                let _ = writeln!(
+                                    stderr,
+                                    "buildx post: resize of {name} failed ({error:#})"
+                                );
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            use std::fmt::Write as _;
+                            let _ = writeln!(
+                                stderr,
+                                "buildx post: resize of {name} skipped ({error:#})"
+                            );
+                        }
                     }
                 }
                 Ok(StepExecutionResult {
@@ -4677,6 +4903,13 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
+        // The holder count below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to count, so a created
+        // daemon is sized for this job alone and an existing daemon is left
+        // untouched — resizing it to a single share could throttle sharers
+        // this setup cannot see.
+        let mut holders: u32 = 1;
+        let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
             crate::buildkit::claims_run_root(),
@@ -4723,6 +4956,31 @@ where
                     );
                 }
             }
+            // Count after the claim above, so this job is included. The read
+            // only fails when the file this setup just wrote cannot be read
+            // back; a created daemon is then sized for this job alone rather
+            // than failing the step, while an existing daemon is left
+            // untouched — an uncounted resize could throttle unseen sharers.
+            match crate::buildkit::builder_holder_count(&run_root, &name) {
+                Some(count) => {
+                    holders = u32::try_from(count.max(1)).unwrap_or(1);
+                    holders_known = true;
+                }
+                None => {
+                    holders = 1;
+                }
+            }
+        }
+        // The derived slot budget sizes the daemon for its current holders.
+        // The static operator policy survives only as the total-absence
+        // fallback when the budget is unobservable: a budget that knows
+        // anything sizes the daemon, and mixing one invented dimension with
+        // one derived dimension would silently reintroduce the unsized
+        // daemon this replaces.
+        let buildkit_size = container.buildkit_size(holders)?;
+        let mut driver_opts = buildkit_size.driver_opts();
+        if driver_opts.is_empty() {
+            driver_opts = buildx_driver_resource_options(&container.resource_options)?;
         }
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -4745,7 +5003,23 @@ where
             self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
         let result = if inspect_result.code == 0 {
             let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.container_docker(container, &action_state, &use_args, None, timeout)?
+            let result =
+                self.container_docker(container, &action_state, &use_args, None, timeout)?;
+            // An existing daemon keeps whatever ceiling it was born with, so
+            // resize it for the counted holders present now. Best-effort: a
+            // wrong ceiling slows builds, it never breaks them, and the next
+            // setup converges it. Uncounted holders resize nothing.
+            if holders_known
+                && !buildkit_size.is_empty()
+                && let Err(error) = crate::buildkit::resize_builder_daemon(
+                    &name,
+                    buildkit_size.cpu_milli,
+                    buildkit_size.memory_bytes,
+                )
+            {
+                eprintln!("buildx setup: resize of {name}: {error:#}");
+            }
+            result
         } else {
             let mut args = vec![
                 "buildx".to_string(),
@@ -4756,9 +5030,8 @@ where
                 driver,
                 "--use".to_string(),
             ];
-            let resource_options = buildx_driver_resource_options(&container.resource_options)?;
-            if !resource_options.is_empty() {
-                args.extend(["--driver-opt".to_string(), resource_options.join(",")]);
+            if !driver_opts.is_empty() {
+                args.extend(["--driver-opt".to_string(), driver_opts.join(",")]);
             }
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
@@ -5127,7 +5400,7 @@ where
     }
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup")?;
         // Service containers hold endpoints on the job network. Remove them
         // BEFORE reclaiming job-owned resources: reclaim includes the network,
         // and `docker network rm` fails while an endpoint is still attached.
@@ -5163,7 +5436,7 @@ where
     /// volume. Keeping that delete on the slot's critical path turns the
     /// volume retry timeout into slot turnover latency.
     pub(crate) fn cleanup_without_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-without-buildkit")?;
         self.cleanup_without_buildkit_unlocked(container)
     }
 
@@ -5190,7 +5463,7 @@ where
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-services")?;
         self.cleanup_services_unlocked(container)
     }
 
@@ -5227,7 +5500,7 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-job-and-network")?;
         self.cleanup_job_and_network_without_buildkit_unlocked(container)
     }
 
@@ -5263,7 +5536,7 @@ where
     /// with the job's unique scope. Match that exact suffix, then remove the
     /// daemon together with its anonymous/named state volume.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard("cleanup-job-buildkit")?;
         self.cleanup_job_buildkit_unlocked(container)
     }
 
@@ -5424,7 +5697,7 @@ where
         if let Some(previous) = self.job_network_guard.take() {
             drop(previous);
         }
-        self.with_docker_lifecycle(|executor| {
+        self.with_docker_lifecycle("create-network", |executor| {
             executor.run_docker(&container.create_network_args())
         })?;
         // Own the network from creation to terminal cleanup. Dropping the
@@ -5439,13 +5712,13 @@ where
             // Service environment holds workflow credentials; start_args keeps
             // it in a mode-0600 env file instead of the world-readable argv.
             let prepared = service.start_args(&container.env_dir())?;
-            self.with_docker_lifecycle(|executor| {
+            self.with_docker_lifecycle("start-service", |executor| {
                 executor.run_docker_with_env(prepared.args(), prepared.process_env())
             })?;
             self.wait_for_service(service)?;
         }
         let prepared = container.start_args()?;
-        self.with_docker_lifecycle(|executor| {
+        self.with_docker_lifecycle("start-job", |executor| {
             executor.run_docker_with_env(prepared.args(), prepared.process_env())
         })?;
         // Docker accepts repeated network-shaped create options with behavior
@@ -5454,7 +5727,7 @@ where
         // can observe it. This also makes each workflow service key the exact
         // embedded-DNS alias on the per-job network.
         if !container.services.is_empty() {
-            self.with_docker_lifecycle(|executor| {
+            self.with_docker_lifecycle("reconcile-network", |executor| {
                 executor.run_docker(&container.disconnect_network_args())?;
                 executor.run_docker(&container.connect_network_args())?;
                 for service in &container.services {
@@ -5569,7 +5842,7 @@ where
     }
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
-        let Ok(_lifecycle) = docker_lifecycle_guard() else {
+        let Ok(_lifecycle) = docker_lifecycle_guard("cleanup-stale") else {
             return;
         };
         // Drop the lease before stale cleanup so an in-flight Engine request
@@ -5626,9 +5899,10 @@ where
 
     fn with_docker_lifecycle<T>(
         &mut self,
+        stage: &'static str,
         operation: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        let _lifecycle = docker_lifecycle_guard()?;
+        let _lifecycle = docker_lifecycle_guard(stage)?;
         operation(self)
     }
 
@@ -12460,10 +12734,12 @@ impl JobExecutionState {
     }
 
     /// Whether step-debug output (`::debug::` lines, command echo) is on
-    /// for this job's environment
-    /// (`workflow_command::step_debug_enabled`).
+    /// for this job. Upstream reads the server `Step_Debug` variable, so
+    /// this reads the runner-authoritative snapshot: the mutable env is
+    /// workflow-writable (`GITHUB_ENV` / `::set-env`), and letting a step
+    /// flip debug rendering for later steps would be a spoofing hole.
     fn step_debug(&self) -> bool {
-        step_debug_enabled(&self.env)
+        step_debug_enabled(&self.immutable_env)
     }
 
     /// Install the running job's cancellation.
@@ -13526,6 +13802,18 @@ fn parse_workflow_commands_from_output(
     state
 }
 
+/// Upstream `RunStepAsync` command-result merge
+/// (`CompositeActionHandler.cs` / `StepsRunner.cs`: "Merge execution
+/// context result with command result"): a workflow command that failed
+/// to process fails the step even when the process itself exited 0 —
+/// e.g. `::echo::maybe` in an otherwise green script.
+fn apply_command_result(mut result: StepExecutionResult) -> StepExecutionResult {
+    if result.state.command_failed && result.exit_code == 0 {
+        result.exit_code = 1;
+    }
+    result
+}
+
 fn prepare_github_event_path(
     temp_host: &Path,
     context_data: &[(String, Value)],
@@ -14090,6 +14378,46 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_reaps_drops_the_entry_and_treats_gone_as_gone() {
+        let mut runner = ProcessCommandRunner;
+        // `exec` so the shell's pid IS the sleeper: no orphaned grandchild
+        // outlives the kill.
+        let child = runner
+            .spawn("sh", &["-c".to_string(), "exec sleep 30".to_string()])
+            .unwrap();
+        assert!(spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&child.pid));
+        runner.kill(&child).unwrap();
+        assert!(
+            !spawned_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&child.pid),
+            "kill must drop the map entry"
+        );
+        // Reaped, not a zombie: `kill(pid, 0)` still succeeds for a zombie.
+        // SAFETY: signal 0 sends nothing; the pid was our child, just waited.
+        let probed = unsafe { libc::kill(child.pid as i32, 0) };
+        assert_eq!(probed, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        // Second kill takes the direct-signal fallback: already gone is Ok,
+        // so a `stop_jailer` retry converges instead of erroring forever.
+        runner.kill(&child).unwrap();
+        // A pid that can never exist exercises the same ESRCH arm.
+        runner
+            .kill(&SpawnedProcess {
+                pid: i32::MAX as u32,
+            })
+            .unwrap();
+    }
 
     #[test]
     fn native_input_lookup_is_case_insensitive() {
@@ -19077,12 +19405,34 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        assert!(calls.iter().any(|c| c
-            .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
-            && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
-            && c.contains(&format!(
-                "'--config' '/__t/buildkitd-config-{builder}.toml'"
-            ))));
+        // The derived slot budget sizes the daemon: recompute the size from
+        // the same host observation and require it on the create argv. The
+        // static `resource_options` survive only as the total-absence
+        // fallback when the budget is unobservable on this machine.
+        let size = spec.buildkit_size(1).unwrap();
+        let mut expected_opts = size.driver_opts();
+        if expected_opts.is_empty() {
+            expected_opts = buildx_driver_resource_options(&spec.resource_options).unwrap();
+        }
+        assert!(!expected_opts.is_empty());
+        let expected_driver_opt = expected_opts.join(",");
+        let create = calls
+            .iter()
+            .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
+            .expect("buildx create call");
+        assert!(
+            create.contains(&format!("'--driver-opt' '{expected_driver_opt}'")),
+            "derived budget must reach buildkitd, got: {create}"
+        );
+        assert!(create.contains(&format!(
+            "'--config' '/__t/buildkitd-config-{builder}.toml'"
+        )));
+        if !size.is_empty() {
+            assert!(
+                !create.contains("memory=12g"),
+                "derived budget wins over the static spelling, got: {create}"
+            );
+        }
         assert_eq!(
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
@@ -21581,6 +21931,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: Some("always()".into()),
+                continue_on_error: false,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "composite-first".into(),
@@ -21674,6 +22025,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: Some("failure()".into()),
+                continue_on_error: false,
             },
             script_step("inner1", "echo inner1", None),
             ExecutableStep::CompositeEnd {
@@ -21685,6 +22037,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: Some("success()".into()),
+                continue_on_error: false,
             },
             script_step("inner2", "echo inner2", None),
             ExecutableStep::CompositeEnd {
@@ -21766,6 +22119,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             script_step("inner", "echo inner", None),
             ExecutableStep::CompositeEnd {
@@ -21793,6 +22147,427 @@ fi"#
             "echo outcome=success conclusion=success\n"
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A nested End pops its frame and applies the nested umbrella result
+    /// to the PARENT scope: without the pop-then-apply the nested outcome
+    /// is discarded with the nested scope and parent `failure()` misses
+    /// the nested failure. Nested Skip and EvalFailed verdicts apply to
+    /// the parent scope the same way, and a failed nested umbrella pushes
+    /// to results like the outer one.
+    #[test]
+    fn nested_umbrella_applies_to_parent_scope() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let start = |step_id: &str, condition: Option<&str>| ExecutableStep::CompositeStart {
+            step_id: step_id.into(),
+            display_name: format!("Run {step_id}"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: condition.map(str::to_string),
+            continue_on_error: false,
+        };
+        let end = |step_id: &str| ExecutableStep::CompositeEnd {
+            step_id: step_id.into(),
+        };
+        let steps = vec![
+            start("outer", None),
+            start("inner-fail", None),
+            script_step("boom", "exit 1", None),
+            end("inner-fail"),
+            script_step("cleanup", "echo cleanup", Some("failure()")),
+            start("inner-skip", Some("false")),
+            script_step("skipped-inner", "echo skipped", None),
+            end("inner-skip"),
+            start("inner-evalfail", Some("noSuchFunction('x')")),
+            script_step("evalfail-inner", "echo evalfail", None),
+            end("inner-evalfail"),
+            end("outer"),
+            script_step(
+                "reader",
+                "echo fail=${{ steps.inner-fail.outcome }} skip=${{ steps.inner-skip.outcome }} eval=${{ steps.inner-evalfail.outcome }} evalcon=${{ steps.inner-evalfail.conclusion }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            temp.join("cleanup.sh").exists(),
+            "parent failure() must see the nested failure"
+        );
+        assert!(
+            !temp.join("skipped-inner.sh").exists(),
+            "skipped nested umbrella must not dispatch its inner steps"
+        );
+        assert!(
+            !temp.join("evalfail-inner.sh").exists(),
+            "failed nested umbrella must not dispatch its inner steps"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo fail=failure skip=skipped eval=failure evalcon=failure\n"
+        );
+        assert_eq!(summary.step_results.len(), 4);
+        assert_eq!(summary.step_results[2].exit_code, 1);
+        assert!(
+            summary.step_results[2]
+                .stderr
+                .contains("could not be evaluated"),
+            "failed nested umbrella pushes to results: {:?}",
+            summary.step_results[2].stderr
+        );
+        assert_eq!(summary.step_logs[0].display_name, "Run outer");
+        assert_eq!(summary.step_logs[0].exit_code, 1);
+        assert!(
+            summary.step_logs[0]
+                .lines
+                .iter()
+                .any(|line| line == "##[group]Run inner-evalfail"),
+            "nested sections merge into the parent log: {:?}",
+            summary.step_logs[0].lines
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// The umbrella's own `continue-on-error` converts the umbrella
+    /// conclusion only (upstream `ApplyContinueOnError`): inner steps
+    /// keep their own outcomes/conclusions and their own `failure()`
+    /// semantics, while the converted umbrella marks its own step
+    /// results so the job-conclusion scan honors the flag.
+    #[test]
+    fn umbrella_continue_on_error_converts_conclusion_not_inners() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "comp".into(),
+                display_name: "Run comp".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+            },
+            script_step("boom", "exit 1", None),
+            script_step("inner-cleanup", "echo cleanup", Some("failure()")),
+            ExecutableStep::CompositeEnd {
+                step_id: "comp".into(),
+            },
+            script_step(
+                "reader",
+                "echo outcome=${{ steps.comp.outcome }} conclusion=${{ steps.comp.conclusion }} boom=${{ steps.boom.conclusion }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            temp.join("inner-cleanup.sh").exists(),
+            "inner failure() must see the unconverted inner failure"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo outcome=failure conclusion=success boom=failure\n"
+        );
+        assert!(
+            summary
+                .step_results
+                .iter()
+                .all(|result| result.exit_code == 0 || result.failure_ignored),
+            "converted umbrella results must not trip the conclusion scan: {:?}",
+            summary.step_results
+        );
+        assert_eq!(summary.step_logs[0].display_name, "Run comp");
+        assert_eq!(summary.step_logs[0].exit_code, 1);
+        assert!(summary.step_logs[0].failure_ignored);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Upstream `break`s the composite inner loop on an unevaluable inner
+    /// condition (`CompositeActionHandler.cs`) and then runs
+    /// `ProcessOutputs` while the job continues: remaining inner steps
+    /// never dispatch, the outputs step still processes, and later job
+    /// steps still run.
+    #[test]
+    fn embedded_condition_error_breaks_inner_loop_but_runs_outputs() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "comp".into(),
+                display_name: "Run comp".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
+            script_step("never-runs", "echo never", None),
+            ExecutableStep::CompositeOutputs {
+                step_id: "comp-outputs".into(),
+                outputs: [("answer".to_string(), "42".to_string())].into(),
+                condition: Some("always()".to_string()),
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "comp".into(),
+            },
+            script_step("follower", "echo follower", Some("always()")),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            !temp.join("never-runs.sh").exists(),
+            "steps after the broken inner step must not dispatch"
+        );
+        assert!(
+            temp.join("follower.sh").exists(),
+            "the job continues after the broken composite"
+        );
+        assert_eq!(summary.step_results.len(), 3);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(
+            summary.step_results[1].state.outputs.get("answer"),
+            Some(&"42".to_string()),
+            "the composite outputs still process after the break"
+        );
+        assert_eq!(summary.step_results[2].exit_code, 0);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// The umbrella's own display name is best-effort like every other
+    /// step's (`TryUpdateDisplayName`): the raw name carries on into
+    /// condition evaluation and the run instead of failing the umbrella.
+    #[test]
+    fn umbrella_display_name_failure_carries_raw_name_and_runs() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "${{ noSuchFunction('x') }}".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            script_step("inner", "echo inner", None),
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            temp.join("inner.sh").exists(),
+            "best-effort umbrella display name must still run the composite"
+        );
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.step_results[0].exit_code, 0);
+        assert_eq!(summary.step_logs.len(), 1);
+        assert_eq!(
+            summary.step_logs[0].display_name,
+            "${{ noSuchFunction('x') }}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A post that fails by throwing records a failed post step and the
+    /// drain continues with the summary — it never returns `Err`, which
+    /// would discard the summary and every log recorded so far.
+    #[test]
+    fn throwing_post_records_failed_post_and_keeps_summary() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "action".into(),
+            display_name: "action".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: None,
+                pre_condition: None,
+                main_container_path: "/__a/_actions/acme_action/v1/main.js".into(),
+                post_container_path: Some("/__a/_actions/acme_action/v1/post.js".into()),
+                post_condition: Some("always()".into()),
+                action_container_path: "/__a/_actions/acme_action/v1".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerJobEngine::inert(MainActionErrorRunner {
+            calls: Vec::new(),
+            failure_marker: "/__a/_actions/acme_action/v1/post.js".into(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .expect("a throwing post must not fail the job call itself");
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 0);
+        assert_eq!(summary.step_results[1].exit_code, 1);
+        assert!(
+            summary.step_results[1]
+                .stderr
+                .contains("main action execution failed"),
+            "failed post reports the execution error: {:?}",
+            summary.step_results[1].stderr
+        );
+        let post = summary
+            .step_logs
+            .iter()
+            .find(|log| log.display_name == "Post action")
+            .expect("failed post must leave a step log");
+        assert_eq!(post.exit_code, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Upstream `RunStepAsync` merges the command result into the step
+    /// result: a workflow command that failed to process (e.g. an invalid
+    /// `::echo::` value) fails the step even when the process exited 0.
+    #[test]
+    fn command_result_merge_fails_step_on_command_failure() {
+        let failed_state = StepCommandState {
+            command_failed: true,
+            ..StepCommandState::default()
+        };
+        let failed = apply_command_result(StepExecutionResult {
+            exit_code: 0,
+            state: failed_state,
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        assert_eq!(failed.exit_code, 1);
+        let clean = apply_command_result(StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        assert_eq!(clean.exit_code, 0);
+        let already_failed = apply_command_result(StepExecutionResult {
+            exit_code: 3,
+            state: StepCommandState {
+                command_failed: true,
+                ..StepCommandState::default()
+            },
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        assert_eq!(already_failed.exit_code, 3);
+    }
+
+    /// Step debug follows the server variable only: `RUNNER_DEBUG` /
+    /// `ACTIONS_STEP_DEBUG` arriving through workflow-writable env
+    /// (`GITHUB_ENV` / `::set-env`) must not flip debug rendering for
+    /// later steps.
+    #[test]
+    fn step_debug_ignores_workflow_spoofed_env() {
+        let mut state = JobExecutionState::new(&[]);
+        assert!(!state.step_debug());
+        let mut spoof = StepCommandState::default();
+        spoof
+            .env
+            .insert("RUNNER_DEBUG".to_string(), "1".to_string());
+        spoof
+            .env
+            .insert("ACTIONS_STEP_DEBUG".to_string(), "true".to_string());
+        state.apply(
+            "spoofer",
+            &StepExecutionResult {
+                exit_code: 0,
+                state: spoof,
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        assert!(
+            !state.step_debug(),
+            "workflow-writable env must not enable step debug"
+        );
+        let server = JobExecutionState::new(&[("RUNNER_DEBUG".to_string(), "1".to_string())]);
+        assert!(server.step_debug());
     }
 
     #[test]
@@ -23091,11 +23866,12 @@ fi"#
         fs::remove_dir_all(temp).unwrap();
     }
 
-    /// F3: a display name that cannot be evaluated fails the step without
-    /// dispatching it — but records the failure and continues, so posts
-    /// registered by earlier steps still drain.
+    /// Upstream `TryUpdateDisplayName` is best-effort and never fails the
+    /// step (`ActionRunner.cs`): a display name that cannot be evaluated
+    /// carries the raw name and the step runs — while posts registered by
+    /// earlier steps still drain.
     #[test]
-    fn display_name_failure_records_step_and_drains_posts() {
+    fn display_name_failure_carries_raw_name_and_runs() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![
@@ -23148,21 +23924,26 @@ fi"#
             )
             .unwrap();
 
-        // The malformed display name records a failed step without
-        // dispatching anything for it...
+        // The malformed display name carries the raw name and the step
+        // runs instead of recording a failure...
         assert_eq!(summary.step_results.len(), 4);
-        assert_eq!(summary.step_results[1].exit_code, 1);
+        assert_eq!(summary.step_results[1].exit_code, 0);
         assert!(!summary.step_results[1].skipped);
         assert!(
-            summary.step_results[1]
-                .stderr
-                .contains("display name could not be evaluated"),
-            "failed step reports the display error: {:?}",
-            summary.step_results[1].stderr
+            temp.join("bad-display.sh").exists(),
+            "best-effort display name must still dispatch the step"
         );
         assert!(
-            !temp.join("bad-display.sh").exists(),
-            "undispatchable step must not reach the shell"
+            summary
+                .step_logs
+                .iter()
+                .any(|log| log.display_name == "${{ noSuchFunction('x') }}"),
+            "the step log carries the raw name: {:?}",
+            summary
+                .step_logs
+                .iter()
+                .map(|log| log.display_name.as_str())
+                .collect::<Vec<_>>()
         );
         // ...the follower still runs...
         assert!(!summary.step_results[2].skipped);
@@ -24480,6 +25261,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             script_step("bad-if", "echo bad", Some("noSuchFunction('a')")),
             ExecutableStep::CompositeEnd {
@@ -24543,6 +25325,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             ExecutableStep::JavaScript {
                 step_id: "guarded".into(),
@@ -27028,6 +27811,7 @@ fi"#
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "pages-artifact-1".into(),

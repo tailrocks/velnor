@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_DOCKER_LIFECYCLE_CONCURRENCY: usize = 2;
 const MAX_DOCKER_LIFECYCLE_CONCURRENCY: usize = 8;
 const DOCKER_LIFECYCLE_RETRY: Duration = Duration::from_millis(25);
+/// Waits at or above this line are operator-visible: dockerd's control plane
+/// turns an unbounded fan-out into 10–70s tail latency, so a wait past one
+/// second means a peer is holding every slot through a slow mutation.
+const DOCKER_LIFECYCLE_TELEMETRY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LeaseRecord {
@@ -270,30 +274,79 @@ impl FilesystemCoordinator {
     }
 }
 
+/// Default bound on the Docker lifecycle wait. Override with
+/// `VELNOR_DOCKER_LIFECYCLE_WAIT_SECS`. Floor is 1s. Past the bound the
+/// waiter proceeds WITHOUT a slot (degraded) rather than parking a
+/// teardown behind a stuck peer forever — and says so on stderr.
+pub const DEFAULT_DOCKER_LIFECYCLE_WAIT_SECS: u64 = 120;
+
+pub fn docker_lifecycle_wait_timeout() -> Duration {
+    let secs = std::env::var("VELNOR_DOCKER_LIFECYCLE_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DOCKER_LIFECYCLE_WAIT_SECS);
+    Duration::from_secs(secs.max(1))
+}
+
 /// Bounds Docker control-plane lifecycle mutations across daemon processes on
 /// one host. Job containers remain concurrent; create, start, and teardown
 /// bursts use two host-wide permits by default because dockerd's control
 /// plane turns an unbounded fan-out into 10–70s tail latency. Operators can
 /// tune the bound with `VELNOR_DOCKER_LIFECYCLE_CONCURRENCY` (1–8).
+///
+/// The wait for a permit is bounded by [`docker_lifecycle_wait_timeout`]:
+/// past the bound the guard degrades (no slot held) instead of parking the
+/// caller invisibly, and every slow or degraded acquire names its stage on
+/// stderr so a contended host is diagnosable from the daemon log.
 pub struct DockerLifecycleGuard {
-    _file: fs::File,
+    _file: Option<fs::File>,
+    // Test-only observability for the bound; production telemetry is the
+    // `forensics.docker_lifecycle` stderr line emitted on slow/degraded
+    // acquires.
+    _waited: Duration,
+    _degraded: bool,
 }
 
 impl DockerLifecycleGuard {
-    pub fn lock(run_root: &Path) -> Result<Self> {
+    pub fn lock_for_stage(run_root: &Path, stage: &str) -> Result<Self> {
         let concurrency = std::env::var("VELNOR_DOCKER_LIFECYCLE_CONCURRENCY")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| (1..=MAX_DOCKER_LIFECYCLE_CONCURRENCY).contains(value))
             .unwrap_or(DEFAULT_DOCKER_LIFECYCLE_CONCURRENCY);
-        Self::lock_with_concurrency(run_root, concurrency)
+        Self::lock_with_concurrency(
+            run_root,
+            concurrency,
+            stage,
+            docker_lifecycle_wait_timeout(),
+        )
     }
 
-    fn lock_with_concurrency(run_root: &Path, concurrency: usize) -> Result<Self> {
+    /// True when the acquire timed out and the caller proceeds without a
+    /// host-wide slot. Teardown still runs: a stuck peer must delay Docker
+    /// mutations, never wedge a slot's turnover.
+    #[cfg(test)]
+    pub fn degraded(&self) -> bool {
+        self._degraded
+    }
+
+    /// How long the acquire waited before a slot freed or the bound elapsed.
+    #[cfg(test)]
+    pub fn waited(&self) -> Duration {
+        self._waited
+    }
+
+    fn lock_with_concurrency(
+        run_root: &Path,
+        concurrency: usize,
+        stage: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         if concurrency == 0 {
             bail!("Docker lifecycle concurrency must be at least 1");
         }
         fs::create_dir_all(run_root)?;
+        let start = std::time::Instant::now();
         loop {
             for slot in 0..concurrency {
                 // Keep slot zero at the original path so an in-place upgrade
@@ -311,10 +364,36 @@ impl DockerLifecycleGuard {
                     .open(path)?;
                 match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
                 {
-                    Ok(()) => return Ok(Self { _file: file }),
+                    Ok(()) => {
+                        let waited = start.elapsed();
+                        if waited >= DOCKER_LIFECYCLE_TELEMETRY_AFTER {
+                            eprintln!(
+                                "forensics.docker_lifecycle event=acquired stage={stage} waited_ms={} slots={concurrency}",
+                                waited.as_millis(),
+                            );
+                        }
+                        return Ok(Self {
+                            _file: Some(file),
+                            _waited: waited,
+                            _degraded: false,
+                        });
+                    }
                     Err(rustix::io::Errno::WOULDBLOCK) => {}
                     Err(error) => return Err(error).context("lock Docker lifecycle coordinator"),
                 }
+            }
+            let waited = start.elapsed();
+            if waited >= timeout {
+                eprintln!(
+                    "forensics.docker_lifecycle event=degraded stage={stage} waited_ms={} slots={concurrency} timeout_ms={} reason=all slots contended past the bound; proceeding without a permit",
+                    waited.as_millis(),
+                    timeout.as_millis(),
+                );
+                return Ok(Self {
+                    _file: None,
+                    _waited: waited,
+                    _degraded: true,
+                });
             }
             std::thread::sleep(DOCKER_LIFECYCLE_RETRY);
         }
@@ -588,21 +667,44 @@ mod tests {
     #[test]
     fn docker_lifecycle_guard_bounds_cross_process_concurrency() {
         let root = root("docker-lifecycle");
-        let first = DockerLifecycleGuard::lock_with_concurrency(&root, 2).unwrap();
-        let second = DockerLifecycleGuard::lock_with_concurrency(&root, 2).unwrap();
+        let timeout = Duration::from_secs(30);
+        let first = DockerLifecycleGuard::lock_with_concurrency(&root, 2, "test", timeout).unwrap();
+        let second =
+            DockerLifecycleGuard::lock_with_concurrency(&root, 2, "test", timeout).unwrap();
+        assert!(!first.degraded());
+        assert!(!second.degraded());
         let (sender, receiver) = std::sync::mpsc::channel();
         let thread_root = root.clone();
         let handle = std::thread::spawn(move || {
-            let third = DockerLifecycleGuard::lock_with_concurrency(&thread_root, 2).unwrap();
-            sender.send(()).unwrap();
+            let third =
+                DockerLifecycleGuard::lock_with_concurrency(&thread_root, 2, "test", timeout)
+                    .unwrap();
+            sender.send(third.degraded()).unwrap();
             third
         });
 
         assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
         drop(first);
-        assert!(receiver.recv_timeout(Duration::from_secs(2)).is_ok());
+        assert!(!receiver.recv_timeout(Duration::from_secs(2)).unwrap());
         drop(second);
         drop(handle.join().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn docker_lifecycle_guard_degrades_past_the_bound_instead_of_parking() {
+        let root = root("docker-lifecycle-bound");
+        let timeout = Duration::from_secs(30);
+        let _first =
+            DockerLifecycleGuard::lock_with_concurrency(&root, 1, "test", timeout).unwrap();
+        // Zero bound: one contended sweep, then degrade. Deterministic —
+        // no sleep timing involved.
+        let waited =
+            DockerLifecycleGuard::lock_with_concurrency(&root, 1, "cleanup", Duration::ZERO)
+                .unwrap();
+        assert!(waited.degraded());
+        // No parking: a single contended sweep, no sleep on this path.
+        assert!(waited.waited() < Duration::from_secs(5));
         fs::remove_dir_all(root).unwrap();
     }
 

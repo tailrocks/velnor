@@ -96,6 +96,12 @@ pub enum Requirement {
     /// host credentials alone must not make an unimplemented driver appear
     /// runnable.
     VelnorJobDriver,
+    /// The benchmark contains the local Velnor job driver, which dispatches
+    /// a real job lifecycle on this host with no broker, no git remote, and
+    /// no credentials. Rows on this driver measure every Velnor-lane stage
+    /// really and leave the broker/remote stages unobserved, named in the
+    /// record notes — never zero-filled, never simulated.
+    VelnorJobLocalDriver,
     /// A Velnor runner registered against a GitHub repository.
     RegisteredRunner,
     /// Credentials able to dispatch a workflow and read its timeline.
@@ -115,6 +121,10 @@ pub enum Requirement {
 // This flips only when `drivers::build` contains the runner-owned dispatch
 // implementation. It is not an operator-provided host fact.
 const VELNOR_JOB_DRIVER_AVAILABLE: bool = false;
+// The local driver exists (`drivers::velnor_job`), so rows whose lifecycle
+// is measurable without a broker or a git remote run on any Docker host.
+// Like the remote flag, this is a property of the harness, not the host.
+const VELNOR_JOB_LOCAL_DRIVER_AVAILABLE: bool = true;
 
 impl Requirement {
     #[must_use]
@@ -123,6 +133,7 @@ impl Requirement {
             Self::DockerDaemon => "docker-daemon",
             Self::Buildx => "buildx",
             Self::VelnorJobDriver => "velnor-job-driver",
+            Self::VelnorJobLocalDriver => "velnor-job-local-driver",
             Self::RegisteredRunner => "registered-runner",
             Self::GithubCredentials => "github-credentials",
             Self::ActionsFixture => "actions-fixture",
@@ -222,6 +233,7 @@ impl Capabilities {
             Requirement::DockerDaemon => self.docker_daemon,
             Requirement::Buildx => self.buildx,
             Requirement::VelnorJobDriver => VELNOR_JOB_DRIVER_AVAILABLE,
+            Requirement::VelnorJobLocalDriver => VELNOR_JOB_LOCAL_DRIVER_AVAILABLE,
             Requirement::RegisteredRunner => self.registered_runner,
             Requirement::GithubCredentials => self.github_credentials,
             Requirement::ActionsFixture => self.actions_fixture,
@@ -291,6 +303,11 @@ const VELNOR_JOB: &[Requirement] = &[
     Requirement::DockerDaemon,
     Requirement::NetworkEgress,
 ];
+/// Rows the local driver measures on any Docker host: no broker, no git
+/// remote, no credentials. The lifecycle and persistent-host families live
+/// here; everything needing remote dispatch keeps `VELNOR_JOB`.
+const VELNOR_JOB_LOCAL: &[Requirement] =
+    &[Requirement::VelnorJobLocalDriver, Requirement::DockerDaemon];
 const CONTAINER: &[Requirement] = &[Requirement::DockerDaemon];
 const CONTAINER_ONLINE: &[Requirement] = &[Requirement::DockerDaemon, Requirement::NetworkEgress];
 /// The cargo fallback runs on the host with no container and no runner: it
@@ -317,13 +334,14 @@ macro_rules! scenarios {
 }
 
 scenarios! {
-    // Lifecycle: only a real job observes acquisition and admission, so these
-    // have no fallback by construction.
-    "lifecycle/stage-breakdown", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
-        "Full ready -> broker -> acquire -> admission -> capacity -> checkout -> docker -> first command -> completion -> teardown breakdown";
-    "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
+    // Lifecycle: the local driver dispatches a real job lifecycle on this
+    // host, so these run anywhere Docker does. Broker and remote stages
+    // stay unobserved until remote dispatch exists; the record notes say so.
+    "lifecycle/stage-breakdown", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
+        "Full ready -> admission -> capacity -> docker -> first command -> completion -> teardown breakdown; broker, acquisition and checkout need remote dispatch";
+    "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Stage breakdown while every configured slot is busy";
-    "lifecycle/trust-partition", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
+    "lifecycle/trust-partition", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Trust-partition cost: same workload as trusted vs fork-pr jobs; compare the admission, capacity and checkout stages of the two records";
 
     // Rust cache behaviour. These rows require a real Velnor job: host Cargo
@@ -383,17 +401,19 @@ scenarios! {
     "docker/testcontainers", Docker, VelnorJob, None, VELNOR_JOB, &[],
         "Job that starts containers of its own through a mounted Docker socket";
 
-    // Persistent host behaviour: these are properties of runner state across
-    // jobs and cannot be approximated without the runner.
-    "persistent-host/job-1", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
+    // Persistent host behaviour: properties of runner state across jobs. The
+    // local driver establishes the precondition really — N-1 unmeasured jobs
+    // before the measured Nth, a scoped owned-object GC for after-gc — so
+    // these run anywhere Docker does.
+    "persistent-host/job-1", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "First job on a freshly provisioned host";
-    "persistent-host/job-2", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
+    "persistent-host/job-2", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Second job; first to see any retained state";
-    "persistent-host/job-10", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
+    "persistent-host/job-10", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Tenth job; steady-state cache behaviour";
-    "persistent-host/job-100", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
+    "persistent-host/job-100", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Hundredth job; accumulation, leak and fragmentation behaviour";
-    "persistent-host/after-gc", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
+    "persistent-host/after-gc", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "First job after a full disk and image garbage collection";
 
     // Fault scenarios: the preferred driver injects into a real job, but the
@@ -533,12 +553,23 @@ mod tests {
         assert_eq!(driver, Driver::DockerDirect);
         assert!(missing_for_preferred.contains(&Requirement::RegisteredRunner));
 
-        // Persistent-host scenarios have no honest fallback and must stay unrun.
+        // Persistent-host rows run on the local driver: no broker, no git
+        // remote, no credentials — Docker alone establishes them.
         let host = find("persistent-host/job-100").expect("scenario");
-        assert!(matches!(
+        assert_eq!(
             host.runnability(capabilities),
-            Runnability::Unrunnable { .. }
-        ));
+            Runnability::Preferred {
+                driver: Driver::VelnorJob,
+            }
+        );
+        // Without Docker even the local driver has nothing to dispatch to.
+        let host = find("persistent-host/job-1").expect("scenario");
+        assert_eq!(
+            host.runnability(Capabilities::default()),
+            Runnability::Unrunnable {
+                missing: vec![Requirement::DockerDaemon],
+            }
+        );
     }
 
     #[test]
@@ -624,21 +655,32 @@ mod tests {
     }
 
     #[test]
-    fn the_trust_partition_row_needs_a_real_job() {
+    fn lifecycle_rows_run_on_the_local_driver() {
+        // The local driver is the real job now: trusted and untrusted
+        // workloads really execute, so the row needs Docker, not a broker.
         let capabilities = Capabilities {
             docker_daemon: true,
             rust_toolchain: true,
             ..Capabilities::default()
         };
-        let scenario = find("lifecycle/trust-partition").expect("scenario");
-        assert!(matches!(
-            scenario.runnability(capabilities),
-            Runnability::Unrunnable { .. }
-        ));
+        for id in [
+            "lifecycle/stage-breakdown",
+            "lifecycle/concurrent-slots",
+            "lifecycle/trust-partition",
+        ] {
+            let scenario = find(id).expect("scenario");
+            assert_eq!(
+                scenario.runnability(capabilities),
+                Runnability::Preferred {
+                    driver: Driver::VelnorJob,
+                },
+                "{id}"
+            );
+        }
     }
 
     #[test]
-    fn a_fully_capable_host_reports_unimplemented_job_driver() {
+    fn a_fully_capable_host_runs_local_rows_and_reports_remote_driver_missing() {
         let capabilities = Capabilities {
             docker_daemon: true,
             buildx: true,
@@ -651,11 +693,21 @@ mod tests {
             linux_host: true,
         };
         for scenario in MATRIX {
+            let local = matches!(scenario.family, Family::Lifecycle | Family::PersistentHost);
             match scenario.runnability(capabilities) {
+                Runnability::Preferred { driver } => {
+                    assert!(
+                        local,
+                        "{} must not claim unimplemented driver {driver:?} is runnable",
+                        scenario.id
+                    );
+                    assert_eq!(driver, Driver::VelnorJob, "{}", scenario.id);
+                }
                 Runnability::Degraded {
                     driver,
                     missing_for_preferred,
                 } => {
+                    assert!(!local, "{} must run preferred", scenario.id);
                     assert_eq!(driver, Driver::DockerDirect, "{}", scenario.id);
                     assert_eq!(
                         missing_for_preferred,
@@ -665,16 +717,11 @@ mod tests {
                     );
                 }
                 Runnability::Unrunnable { missing } => {
+                    assert!(!local, "{} must run preferred", scenario.id);
                     assert_eq!(
                         missing,
                         vec![Requirement::VelnorJobDriver],
                         "{}",
-                        scenario.id
-                    );
-                }
-                Runnability::Preferred { driver } => {
-                    panic!(
-                        "{} must not claim unimplemented driver {driver:?} is runnable",
                         scenario.id
                     );
                 }

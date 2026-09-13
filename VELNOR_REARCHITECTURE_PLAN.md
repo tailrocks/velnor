@@ -6253,7 +6253,78 @@ Gates observed in this worktree (base `4e67b6fa`, branch
 --locked --all-features --package velnor-runner` 1924 passed, 0 failed,
 1 skipped (2 new tests).
 
-## 113. R0-secc: checkout symlink containment + concurrency F1–F3 (service ladder, job wall clock, bounded terminal uploads) — 2026-09-13
+## 113. R0-sem fast-follow: nested-scope corrections to F1–F7 — 2026-09-13
+
+Nine review corrections to #699 (branch `r0-sem-corr` from
+`origin/main` at `f841ced2`), each verified against upstream
+`actions/runner` `main`:
+
+- **Nested composite umbrellas.** Nested `CompositeStart` only bumped a
+  depth counter and nested `End` only decremented it, so nested outcomes
+  were never applied and parent `failure()` missed nested failures.
+  The single frame + counter is now a frame stack: every evaluated
+  umbrella pushes a frame, inner steps absorb into the innermost one,
+  and a nested `End` pops, applies the nested umbrella result to the
+  parent scope (the pop already removed the nested scope), and merges
+  the nested log into the parent frame. Nested Skip and EvalFailed are
+  seeded frames applied the same way at the nested `End` (applying at
+  `Start` would land in the discarded own scope); a failed nested
+  umbrella also pushes to results so the conclusion scan sees it.
+- **Umbrella `continue-on-error`.** `CompositeStart` carries the
+  umbrella's own flag; the planner no longer ORs the parent flag into
+  inner steps (upstream `ApplyContinueOnError` converts the umbrella
+  conclusion only). At `End` the ignored umbrella conclusion converts
+  the composite's own `results` range with it, so the job-conclusion
+  scan honors the flag while inner `steps.<id>` conclusions stay
+  failure. The umbrella's own condition failure never converts
+  (upstream completes it without running `RunStepAsync`).
+- **Embedded condition-eval break.** An unevaluable inner `if` now
+  breaks the inner loop (remaining inners skip) while the composite
+  outputs still process and the job continues — upstream
+  `CompositeActionHandler` `break` + `ProcessOutputs`.
+- **Display-name best-effort.** Step and umbrella display-name failures
+  carry the raw name and run instead of recording a failed step
+  (upstream `TryUpdateDisplayName` catch only traces).
+- **Post drain.** A throwing JS/Docker/native post records a failed
+  post step and the drain continues with the summary; the drain never
+  returns `Err` (the old `step_error` is gone).
+- **Command-result merge.** A failed workflow command sets
+  `StepCommandState::command_failed` (upstream `CommandResult`), merged
+  into step failure at the script/JS/Docker result sites — an invalid
+  `::echo::` value fails an otherwise green step.
+- **`add-mask` echo.** With echo on, `add-mask` emits the fixed
+  `::add-mask::***` line (upstream `AddMaskCommandExtension`), never
+  the secret; the old never-echoes test expectation is fixed.
+- **`stop-commands`/resume.** The stop and resume lines output input
+  unconditionally and other lines while stopped fall through verbatim
+  (upstream `TryProcessCommand` + `OutputManager`), instead of always
+  being consumed. The render pass has no opt-in policy, so it stops on
+  any stop line while the parse pass (which owns effects) still refuses
+  invalid tokens — display-only simplification, noted in code.
+- **Step debug source.** `step_debug()` reads `immutable_env` (the
+  server `Step_Debug` snapshot) instead of workflow-writable env, which
+  a step could spoof via `GITHUB_ENV` / `::set-env`.
+
+Tests: 9 new (nested-umbrella parent-scope, umbrella
+continue-on-error, inner-loop break + outputs, umbrella raw display,
+throwing post, command-result merge, step-debug spoof, add-mask echo,
+stop/resume render) plus 4 contract updates (display-name
+best-effort, 2 composite-expansion no-OR, add-mask echo expectation).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets --locked` zero warnings; strict
+clippy clean on runner (`--all-targets -D warnings`); serial runner
+lib 1846 passed, 0 failed, 1 ignored; serial runner lib with
+`test-support` 1900 passed, 0 failed, 1 ignored.
+
+Out of scope, noted for follow-up: a nested umbrella's own condition
+error breaks only the nested region in Velnor while upstream breaks
+the parent loop (the failure still records in the parent scope and the
+job still fails either way); `steps` context stays job-global, so a
+job-level implicit `success()` after an ignored umbrella failure still
+reads the unconverted inner failure.
+
+## 114. R0-secc: checkout symlink containment + concurrency F1–F3 (service ladder, job wall clock, bounded terminal uploads) — 2026-09-13
 
 Base `origin/main` at `f841ced2` (post-#699). Four small verifier FAILs, one
 fix each:

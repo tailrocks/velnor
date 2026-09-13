@@ -7772,32 +7772,64 @@ fn start_broker_cancellation_poll(
 /// Evictions are counted: on the cancel path the mirror (fed by the lossy
 /// bounded channel) is the persisted log's only source, so silent loss
 /// there would be GitHub-visible data loss with no marker.
+///
+/// Records are shared by `Arc`, not cloned per chunk: the publisher moves
+/// each received `StepLog` into one `Arc`, hands the mirror a cheap
+/// reference bump, and keeps the same `Arc` for masking and upload. The
+/// mirror therefore retains ~one reference per record instead of a second
+/// full copy of every chunk.
+///
+/// The publisher locks this behind a `std::sync::Mutex` on a tokio worker,
+/// so the critical section must stay O(1): the byte size is computed BEFORE
+/// locking and stored per record (eviction subtracts it, never rescans),
+/// leaving an Arc bump plus integer math under the lock — no clone, no
+/// string scan, no syscall. That hold is nanoseconds and never parks the
+/// executor, which is why a `std` mutex (rather than an async one) stays
+/// correct here.
 #[derive(Debug, Default)]
 struct StreamedStepLogMirror {
-    logs: VecDeque<StepLog>,
+    logs: VecDeque<MirroredStepLog>,
     bytes: u64,
     evicted: u64,
 }
 
+/// One mirrored record: shared ownership plus the byte size computed
+/// before the mirror lock was taken, so eviction accounting never scans.
+#[derive(Debug, Clone)]
+struct MirroredStepLog {
+    log: Arc<StepLog>,
+    bytes: u64,
+}
+
 impl StreamedStepLogMirror {
-    fn push(&mut self, log: StepLog) {
-        let size = step_log_mirror_bytes(&log);
+    /// Push a record whose `bytes` were computed before locking (see the
+    /// struct docs): nothing under this call may clone or scan the payload.
+    fn push(&mut self, log: Arc<StepLog>, bytes: u64) {
         while !self.logs.is_empty()
             && (self.logs.len() >= STREAMED_STEP_LOG_MIRROR_MAX_LOGS
-                || self.bytes.saturating_add(size) > STREAMED_STEP_LOG_MIRROR_MAX_BYTES)
+                || self.bytes.saturating_add(bytes) > STREAMED_STEP_LOG_MIRROR_MAX_BYTES)
         {
             if let Some(evicted) = self.logs.pop_front() {
-                self.bytes = self.bytes.saturating_sub(step_log_mirror_bytes(&evicted));
+                self.bytes = self.bytes.saturating_sub(evicted.bytes);
                 self.evicted = self.evicted.saturating_add(1);
             }
         }
-        self.bytes = self.bytes.saturating_add(size);
-        self.logs.push_back(log);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.logs.push_back(MirroredStepLog { log, bytes });
     }
 
     fn take_logs(&mut self) -> Vec<StepLog> {
         self.bytes = 0;
-        std::mem::take(&mut self.logs).into_iter().collect()
+        std::mem::take(&mut self.logs)
+            .into_iter()
+            .map(|entry| {
+                // Cancel path only, after the publishers drained: the mirror
+                // holds the last reference, so this moves without cloning.
+                // The clone arm is a cold-path fallback that cannot trigger
+                // once the publisher task (the only other owner) has exited.
+                Arc::try_unwrap(entry.log).unwrap_or_else(|shared| (*shared).clone())
+            })
+            .collect()
     }
 
     /// Records evicted oldest-first past the caps. Read after the step-log
@@ -7805,6 +7837,15 @@ impl StreamedStepLogMirror {
     /// line and the cancel-path truncation marker.
     fn evicted(&self) -> u64 {
         self.evicted
+    }
+
+    /// Test-only shorthand: wrap, measure, and push. Production must
+    /// measure before locking (see the struct docs), never in here.
+    #[cfg(test)]
+    fn push_owned(&mut self, log: StepLog) {
+        let log = Arc::new(log);
+        let bytes = step_log_mirror_bytes(&log);
+        self.push(log, bytes);
     }
 
     #[cfg(test)]
@@ -8019,10 +8060,15 @@ fn start_step_log_publisher(
             let mut processed = Vec::with_capacity(logs.len());
             let mut live_batches = Vec::new();
             for log in logs {
+                // Move into one shared record: the mirror gets an Arc bump,
+                // not a full clone, and the scan runs BEFORE the lock so the
+                // critical section stays O(1) on this tokio worker.
+                let log = Arc::new(log);
+                let size = step_log_mirror_bytes(&log);
                 streamed_step_logs
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(log.clone());
+                    .push(Arc::clone(&log), size);
                 let masker = job_masks.with_extra(&log.masks);
                 let lines = mask_log_lines_with(&log.lines, &masker);
                 let line_count = lines.len() as i64;
@@ -8179,7 +8225,7 @@ type FeedWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct ProcessedStepLog {
-    log: StepLog,
+    log: Arc<StepLog>,
     lines: Vec<String>,
     /// `GITHUB_STEP_SUMMARY` content after the same masker that scrubs the
     /// step log has been applied. The unmasked `log.summary` must never reach
@@ -10999,14 +11045,20 @@ fn ordered_executable_steps(
                     // every inner condition re-evaluated it in the
                     // composite scope, where `failure()`/`success()` read
                     // the wrong status.
+                    //
+                    // Likewise the step's own `continue-on-error` belongs
+                    // to the umbrella alone: upstream applies it to the
+                    // composite step's conclusion
+                    // (`ApplyContinueOnError`), never ORed into the inner
+                    // steps' flags.
                     let umbrella_condition = step.condition.as_deref();
-                    let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
                     ordered.push(ExecutableStep::CompositeStart {
                         step_id: plan.step_id.clone(),
                         display_name: action_step_display_name(step),
                         inputs: plan.inputs.clone(),
                         env: crate::script_step::step_environment(step)?,
                         condition: umbrella_condition.map(ToOwned::to_owned),
+                        continue_on_error: crate::script_step::step_continue_on_error(step),
                     });
                     let Some(metadata) = metadata else {
                         ordered.push(ExecutableStep::CompositeEnd {
@@ -11018,8 +11070,7 @@ fn ordered_executable_steps(
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
                         match invocation {
-                            CompositeActionInvocation::Script(mut script) => {
-                                script.continue_on_error |= parent_continue_on_error;
+                            CompositeActionInvocation::Script(script) => {
                                 ordered.push(ExecutableStep::Script(script));
                             }
                             CompositeActionInvocation::Repository(plan) => {
@@ -11028,7 +11079,6 @@ fn ordered_executable_steps(
                                     &plan,
                                     job,
                                     workspace_host,
-                                    parent_continue_on_error,
                                     "",
                                 )? {
                                     continue;
@@ -11049,7 +11099,6 @@ fn ordered_executable_steps(
                                     job,
                                     workspace_host,
                                     actions_host,
-                                    parent_continue_on_error,
                                     "",
                                 )?;
                             }
@@ -11098,7 +11147,6 @@ fn ordered_executable_steps(
                     plan,
                     job,
                     workspace_host,
-                    false,
                     &step_display_name,
                 )? {
                     continue;
@@ -11120,7 +11168,6 @@ fn ordered_executable_steps(
                     job,
                     workspace_host,
                     actions_host,
-                    false,
                     &step_display_name,
                 )?;
             }
@@ -11138,7 +11185,6 @@ fn append_resolved_action_steps(
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
-    parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<()> {
     // Planning consumes the admission graph and never re-resolves identity here:
@@ -11146,7 +11192,12 @@ fn append_resolved_action_steps(
     // and `execute_script_job_inner` cross-checked every materialized action
     // against the graph. An unknown action that still reaches this point is a
     // hard failure below, not a permissive fallback.
-    let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
+    //
+    // Each step carries its OWN `continue-on-error` only: a composite
+    // umbrella's flag converts the umbrella conclusion in the executor
+    // (upstream `ApplyContinueOnError`) and is never ORed into inner
+    // steps here.
+    let continue_on_error = action.plan.continue_on_error;
     let Some(adapter) =
         crate::manifest::find(&action.plan.repository).map(|capability| capability.adapter)
     else {
@@ -11200,9 +11251,11 @@ fn append_resolved_action_steps(
             timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionAdapter::Composite => {
-            // The nested umbrella carries its own `if` only; the executor
-            // evaluates it in the parent composite scope and the verdict
-            // gates the nested inner steps (see the local-action arm).
+            // The nested umbrella carries its own `if` and its own
+            // `continue-on-error` only; the executor evaluates the `if` in
+            // the parent composite scope and the verdict gates the nested
+            // inner steps (see the local-action arm), while the flag
+            // converts the nested umbrella conclusion only.
             let action_condition = action.plan.condition.clone();
             let composite_display = if display_name.is_empty() {
                 format!("Run {}@{}", action.plan.repository, action.plan.git_ref)
@@ -11215,11 +11268,11 @@ fn append_resolved_action_steps(
                 inputs: action.plan.inputs.clone(),
                 env: action.plan.env.clone(),
                 condition: action_condition.clone(),
+                continue_on_error,
             });
             for invocation in action.composite_invocations("/__w", actions_host)? {
                 match invocation {
-                    CompositeActionInvocation::Script(mut script) => {
-                        script.continue_on_error |= continue_on_error;
+                    CompositeActionInvocation::Script(script) => {
                         ordered.push(ExecutableStep::Script(script));
                     }
                     CompositeActionInvocation::Repository(plan) => {
@@ -11228,7 +11281,6 @@ fn append_resolved_action_steps(
                             &plan,
                             job,
                             workspace_host,
-                            continue_on_error,
                             "",
                         )? {
                             continue;
@@ -11249,7 +11301,6 @@ fn append_resolved_action_steps(
                             job,
                             workspace_host,
                             actions_host,
-                            continue_on_error,
                             "",
                         )?;
                     }
@@ -11278,7 +11329,6 @@ fn append_native_action_step_from_plan(
     plan: &RepositoryActionPlan,
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
-    parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<bool> {
     let Some(invocation) = native_invocation_from_plan(plan)? else {
@@ -11293,9 +11343,7 @@ fn append_native_action_step_from_plan(
             display_name_token: None,
             enabled: true,
             condition: plan.condition.clone(),
-            continue_on_error: Some(Value::Bool(
-                parent_continue_on_error || plan.continue_on_error,
-            )),
+            continue_on_error: Some(Value::Bool(plan.continue_on_error)),
             timeout_in_minutes: plan.timeout_minutes.map(Value::from),
             context_name: Some(plan.step_id.clone()),
             reference: Some(ActionStepDefinitionReference {
@@ -11322,7 +11370,7 @@ fn append_native_action_step_from_plan(
         display_name: display_name.to_string(),
         invocation,
         condition: plan.condition.clone(),
-        continue_on_error: parent_continue_on_error || plan.continue_on_error,
+        continue_on_error: plan.continue_on_error,
         timeout_minutes: plan.timeout_minutes,
     });
     Ok(true)
@@ -20251,10 +20299,19 @@ runs:
 
         assert_eq!(ordered.len(), 4);
         assert!(matches!(ordered[0], ExecutableStep::Script(_)));
-        assert!(matches!(
-            &ordered[1],
-            ExecutableStep::CompositeStart { step_id, .. } if step_id == "aggregate"
-        ));
+        let ExecutableStep::CompositeStart {
+            step_id,
+            continue_on_error: umbrella_continue_on_error,
+            ..
+        } = &ordered[1]
+        else {
+            panic!("local composite should open with an umbrella step")
+        };
+        assert_eq!(step_id, "aggregate");
+        // The umbrella carries the step's own `continue-on-error`; inner
+        // steps keep their own flags (upstream applies the parent flag to
+        // the umbrella conclusion only, never ORed into inners).
+        assert!(*umbrella_continue_on_error);
         let ExecutableStep::Script(step) = &ordered[2] else {
             panic!("local composite should expand to script step")
         };
@@ -20267,7 +20324,7 @@ runs:
             step.condition.as_deref(),
             Some("github.event_name != 'schedule'")
         );
-        assert!(step.continue_on_error);
+        assert!(!step.continue_on_error);
         assert!(matches!(
             &ordered[3],
             ExecutableStep::CompositeEnd { step_id } if step_id == "aggregate"
@@ -20569,10 +20626,16 @@ runs:
         .unwrap();
 
         assert_eq!(ordered.len(), 3);
-        assert!(matches!(
-            &ordered[0],
-            ExecutableStep::CompositeStart { step_id, .. } if step_id == "docs"
-        ));
+        let ExecutableStep::CompositeStart {
+            step_id: umbrella_id,
+            continue_on_error: umbrella_continue_on_error,
+            ..
+        } = &ordered[0]
+        else {
+            panic!("local composite should open with an umbrella step")
+        };
+        assert_eq!(umbrella_id, "docs");
+        assert!(*umbrella_continue_on_error);
         let ExecutableStep::Native {
             step_id,
             invocation,
@@ -20590,7 +20653,9 @@ runs:
         // umbrella's `github.event_name == 'push'` gates it in the
         // executor instead of being re-tested in the composite scope.
         assert_eq!(condition.as_deref(), None);
-        assert!(*continue_on_error);
+        // The parent flag converts the umbrella conclusion only — it is
+        // never ORed into the inner native step's own flag.
+        assert!(!*continue_on_error);
         assert!(matches!(
             &ordered[2],
             ExecutableStep::CompositeEnd { step_id } if step_id == "docs"
@@ -22599,7 +22664,7 @@ runs:
     fn streamed_step_log_mirror_evicts_oldest_at_entry_cap() {
         let mut mirror = StreamedStepLogMirror::default();
         for index in 0..STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 10 {
-            mirror.push(partial_step_log(&format!("step-{index}"), &["line"], ""));
+            mirror.push_owned(partial_step_log(&format!("step-{index}"), &["line"], ""));
         }
         assert_eq!(mirror.len(), STREAMED_STEP_LOG_MIRROR_MAX_LOGS);
         // Every eviction is counted for the forensics line and the
@@ -22624,7 +22689,7 @@ runs:
         for index in 0..100 {
             let mut log = partial_step_log(&format!("step-{index}"), &[], "");
             log.lines = vec![big_line.clone()];
-            mirror.push(log);
+            mirror.push_owned(log);
         }
         assert!(mirror.bytes() <= STREAMED_STEP_LOG_MIRROR_MAX_BYTES);
         assert!(mirror.len() < 100);
@@ -22640,13 +22705,36 @@ runs:
         let mut mirror = StreamedStepLogMirror::default();
         let mut log = partial_step_log("huge", &[], "");
         log.lines = vec!["x".repeat(STREAMED_STEP_LOG_MIRROR_MAX_BYTES as usize + 1)];
-        mirror.push(log);
+        mirror.push_owned(log);
         // One record is retained alone: the same record is inherently
         // retained in `ScriptJobResult`, so keeping one copy in the mirror
         // adds no new wedge vector — while dropping it would lose the
         // cancel-path log without bounding anything further.
         assert_eq!(mirror.len(), 1);
         assert_eq!(mirror.take_logs()[0].step_id, "huge");
+    }
+
+    #[test]
+    fn streamed_step_log_mirror_shares_records_without_cloning_payload() {
+        // The publisher hands the mirror an Arc bump per chunk — never a
+        // full StepLog clone — with the byte size measured before locking.
+        let mut mirror = StreamedStepLogMirror::default();
+        let log = Arc::new(partial_step_log("step-1", &["a", "b"], ""));
+        let bytes = step_log_mirror_bytes(&log);
+        mirror.push(Arc::clone(&log), bytes);
+        // Exactly two owners: this handle (the publisher side) plus the
+        // mirror. A clone-per-chunk mirror would hold a second payload
+        // instead of sharing this one.
+        assert_eq!(Arc::strong_count(&log), 2);
+        assert_eq!(mirror.bytes(), bytes);
+        drop(log);
+        // Last owner is the mirror, so take moves the record out.
+        let logs = mirror.take_logs();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].step_id, "step-1");
+        assert_eq!(logs[0].lines, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(mirror.len(), 0);
+        assert_eq!(mirror.bytes(), 0);
     }
 
     #[tokio::test]
@@ -22705,7 +22793,7 @@ runs:
             mirror
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(partial_step_log(&format!("step-{index}"), &["line"], ""));
+                .push_owned(partial_step_log(&format!("step-{index}"), &["line"], ""));
         }
         drain_step_publishers(
             timeline,
@@ -22759,10 +22847,12 @@ runs:
             log.lines = vec![format!("soak line {index}")];
             sender.send_best_effort(log.clone());
             // Same push the log publisher performs per streamed record.
+            let log = Arc::new(log);
+            let size = step_log_mirror_bytes(&log);
             mirror
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(log);
+                .push(Arc::clone(&log), size);
         }
         let elapsed = started.elapsed();
         let mirror_guard = mirror
