@@ -5,9 +5,8 @@ use crate::{GeneratorError, RunnerMode};
 
 /// Render the `plan:` job.
 ///
-/// Control-plane Planning publishes the SOURCE_REV runtime product; it cannot
-/// use the apt/image CLI (fleet 0.1.274 ≠ pin). Unit jobs stay on
-/// `config.runners`.
+/// Velnor Planning runs the checked-in runtime from the Velnor image; an
+/// explicitly selected GitHub lane bootstraps the pinned hosted runtime.
 pub(crate) struct AffectedPlan;
 
 impl Primitive for AffectedPlan {
