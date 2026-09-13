@@ -405,6 +405,10 @@ pub(crate) fn preparation_env() -> String {
     env
 }
 
+fn mise_auto_install_env() -> &'static str {
+    "\n          MISE_AUTO_INSTALL: \"false\"\n          MISE_EXEC_AUTO_INSTALL: \"false\"\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\""
+}
+
 /// Env for the steps that run Cargo and repository commands, on both lanes:
 /// the `CARGO_NET_OFFLINE` restriction for lockfile-pinned units, and the
 /// suppression of every mise auto-install path. Verification must consume only
@@ -413,14 +417,43 @@ pub(crate) fn preparation_env() -> String {
 /// the whole-configured-toolset materialisation a minimal provision list
 /// exists to prevent.
 pub(crate) fn checks_env(unit: &Unit) -> String {
+    checks_env_for_members(unit, &[unit])
+}
+
+fn checks_env_for_members(unit: &Unit, members: &[&Unit]) -> String {
     let mut env = String::new();
-    if cargo_network_is_restricted(unit) {
+    let restricted = members
+        .iter()
+        .copied()
+        .filter(|member| cargo_network_is_restricted(member))
+        .count();
+    // Mixed kind groups cannot bake CARGO_NET_OFFLINE: deny/audit members
+    // resolve advisory databases on the network. Restricted members export
+    // it from the run script instead.
+    if restricted == members.len() && cargo_network_is_restricted(unit) {
         env.push_str("\n          CARGO_NET_OFFLINE: \"true\"");
     }
-    env.push_str("\n          MISE_AUTO_INSTALL: \"false\"");
-    env.push_str("\n          MISE_EXEC_AUTO_INSTALL: \"false\"");
-    env.push_str("\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\"");
+    env.push_str(mise_auto_install_env());
     env
+}
+
+fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
+    let restricted = members
+        .iter()
+        .copied()
+        .filter(|member| cargo_network_is_restricted(member))
+        .collect::<Vec<_>>();
+    if restricted.is_empty() || restricted.len() == members.len() {
+        return String::new();
+    }
+    let pattern = restricted
+        .iter()
+        .map(|member| crate::shell_quote(&member.id))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "          case \"$CI_UNIT_ID\" in\n            {pattern}) export CARGO_NET_OFFLINE=true ;;\n          esac\n"
+    )
 }
 
 /// Every command the unit runs, on either lane: the scan-derived base
@@ -539,22 +572,26 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
 /// Kind reusables share one YAML body across many units. Fetch the matrix
 /// unit's sources (`inputs.unit`), not the first scanned member's directory.
 pub(crate) fn render_cargo_source_preparation(output: &mut String, members: &[&Unit]) {
-    let fetch_members = members
-        .iter()
-        .copied()
-        .filter(|unit| cargo_network_is_restricted(unit))
-        .collect::<Vec<_>>();
-    if fetch_members.is_empty() {
+    if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
     let mut cases = String::new();
-    for member in &fetch_members {
-        let _ = writeln!(
-            cases,
-            "            {}) root={} ;;",
-            crate::shell_quote(&member.id),
-            crate::shell_quote(&member.root)
-        );
+    for member in members {
+        if cargo_network_is_restricted(member) {
+            let _ = writeln!(
+                cases,
+                "            {}) root={} ;;",
+                crate::shell_quote(&member.id),
+                crate::shell_quote(&member.root)
+            );
+        } else {
+            // deny/audit/publish resolve their own inputs; skip fetch.
+            let _ = writeln!(
+                cases,
+                "            {}) exit 0 ;;",
+                crate::shell_quote(&member.id)
+            );
+        }
     }
     let _ = writeln!(
         output,
@@ -1361,7 +1398,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
-        self.render_tool_provisioning(output, lane, unit, cache_save);
+        self.render_tool_provisioning_for_members(output, lane, unit, members, cache_save);
         let seed = contract.mutable_mount_seed;
         if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_restore(output, self, unit);
@@ -1383,11 +1420,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         render_cargo_source_preparation(output, members);
+        let check_name = if members.len() > 1 {
+            "${{ inputs.unit }}".to_owned()
+        } else {
+            yaml_scalar(&unit.label)
+        };
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base-sha || github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ inputs.head-sha || github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
-            yaml_scalar(&unit.label),
-            checks_env(unit),
+            "      - name: Run {check_name} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base-sha || github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ inputs.head-sha || github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n{}          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            checks_env_for_members(unit, members),
+            cargo_offline_run_prelude(members),
         );
         render_phase_report_step(
             output,
@@ -1838,13 +1880,31 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         unit: &Unit,
         cache_save: bool,
     ) {
+        self.render_tool_provisioning_for_members(output, lane, unit, &[unit], cache_save);
+    }
+
+    fn render_tool_provisioning_for_members(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        unit: &Unit,
+        members: &[&Unit],
+        cache_save: bool,
+    ) {
         // The Velnor job image is the toolchain boundary for self-hosted jobs.
         // Hosted setup actions either are not admitted by Velnor or would
         // redundantly download tools already pinned in that image. Keep
         // transport/setup actions lane-specific instead of rendering one
         // action surface and hoping the runner can ignore the other lane.
         let github_lane = lane == RunnerMode::Github;
-        let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        let mut tools = BTreeSet::new();
+        for member in members {
+            tools.extend(Self::tools_for_unit(
+                member,
+                self.mise_present,
+                self.mr_boxington,
+            ));
+        }
         if github_lane && let Some(toolchain) = &unit.toolchain {
             self.render_rust_toolchain_steps(output, toolchain, cache_save);
         }
@@ -1853,8 +1913,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             // Rust repository without a pin, and rustup provisions exactly
             // that pin in the steps above. Mise contributes only the tools
             // the unit's own commands name.
-            let mise_tools = mise_tool_ids(unit);
-            let invokes_mise = commands_invoke_mise(unit);
+            let mut mise_tools = Vec::new();
+            for member in members {
+                for id in mise_tool_ids(member) {
+                    if !mise_tools.contains(&id) {
+                        mise_tools.push(id);
+                    }
+                }
+            }
+            let invokes_mise = members.iter().copied().any(commands_invoke_mise);
             if !mise_tools.is_empty() {
                 let _ = writeln!(
                     output,

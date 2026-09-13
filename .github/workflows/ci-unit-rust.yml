@@ -82,6 +82,11 @@ jobs:
           path: |
             ~/.rustup
           key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Set up Mise tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: aqua:nextest-rs/nextest/cargo-nextest
+          cache: true
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
@@ -162,6 +167,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$CI_UNIT_ID" in
+            'rust-policy') exit 0 ;;
             'rust-unit-collector') root='tools/unit-collector' ;;
             'rust-velnor-bench') root='crates/velnor-bench' ;;
             'rust-velnor-client') root='crates/velnor-client' ;;
@@ -180,7 +186,7 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
-      - name: Run "Rust dependency policy" checks
+      - name: Run ${{ inputs.unit }} checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
           CI_UNIT_ID: ${{ inputs.unit }}
@@ -193,6 +199,9 @@ jobs:
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
         run: |
           set -o pipefail
+          case "$CI_UNIT_ID" in
+            'rust-unit-collector' | 'rust-velnor-bench' | 'rust-velnor-client' | 'rust-velnor-control' | 'rust-velnor-model' | 'rust-velnor-render' | 'rust-velnor-runner' | 'rust-velnor-tools' | 'rust-velnor-workflow' | 'rust-velnor-workflow-contract' | 'rust-velnorctl' | 'rust-production-topology') export CARGO_NET_OFFLINE=true ;;
+          esac
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
           velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?

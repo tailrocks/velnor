@@ -252,6 +252,32 @@ fn generated_velnor_first_surface_passes_policy() {
 }
 
 #[test]
+fn kind_rust_reusable_fetches_every_member_and_installs_nextest() {
+    let root = unique_dir("kind-tools");
+    write_rust_fixture(&root, 2);
+    fs::create_dir_all(root.join(".config")).unwrap();
+    fs::write(root.join(".config/nextest.toml"), "[profile.default]\n").unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("cargo fetch --locked"),
+        "kind reusable must fetch Cargo sources: {unit}"
+    );
+    assert!(
+        unit.contains("aqua:nextest-rs/nextest/cargo-nextest") || unit.contains("tool: nextest"),
+        "kind reusable must provision nextest when any member runs it: {unit}"
+    );
+    assert!(
+        unit.contains("            'rust-crate00') root='crates/crate00' ;;"),
+        "fetch case must include every crate member: {unit}"
+    );
+    assert!(
+        unit.contains("            'rust-crate01') root='crates/crate01' ;;"),
+        "fetch case must include every crate member: {unit}"
+    );
+}
+
+#[test]
 fn github_only_projects_omit_self_hosted_unit_jobs() {
     let root = unique_dir("github-only");
     write_rust_fixture(&root, 2);

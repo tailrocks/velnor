@@ -8379,6 +8379,57 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
+    fn kind_reusable_unions_member_tools_and_covers_every_fetch_unit() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        config.units[rust_index].pinned_lockfile = true;
+        let toolchain = config.units[rust_index].toolchain.clone();
+        config.units.push(Unit {
+            id: "rust-dependency-policy".to_owned(),
+            label: "Rust dependency policy".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.toml".to_owned()],
+            pr_commands: vec!["cargo +nightly deny check".to_owned()],
+            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            toolchain,
+        });
+        let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust);
+        assert!(
+            kind.contains("            'rust-dependency-policy') exit 0 ;;"),
+            "kind fetch must skip deny/audit members, not fail closed: {kind}"
+        );
+        assert!(kind.contains("          cargo fetch --locked"));
+        assert!(kind.contains("unknown unit for cargo fetch"));
+        assert!(
+            kind.contains("tool: cargo-deny"),
+            "kind reusable must provision cargo-deny for the policy member"
+        );
+        assert!(
+            kind.contains("export CARGO_NET_OFFLINE=true"),
+            "restricted matrix units must opt into offline at run time"
+        );
+        assert!(
+            !kind.contains("CARGO_NET_OFFLINE: \"true\""),
+            "baked offline env would break deny members that share the kind body"
+        );
+    }
+
+    #[test]
     fn units_without_a_root_lockfile_neither_fetch_nor_verify_offline() {
         let root = temporary_repository("no-lockfile");
         must(
