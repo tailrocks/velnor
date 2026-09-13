@@ -175,46 +175,139 @@ impl Drop for EngineTestGuard {
     }
 }
 
+/// Test guard that simulates an unbuildable engine runtime: every facade
+/// query falls back to the CLI. Hold alongside an [`EngineTestGuard`] so
+/// the metrics serial lock keeps parallel tests off the process-global flag.
+#[cfg(test)]
+pub(crate) struct FailRuntimeBuildGuard;
+
+#[cfg(test)]
+impl FailRuntimeBuildGuard {
+    pub(crate) fn inject() -> Self {
+        FAIL_RUNTIME_BUILD.store(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailRuntimeBuildGuard {
+    fn drop(&mut self) {
+        FAIL_RUNTIME_BUILD.store(0, Ordering::Relaxed);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sync/async bridge
 // ---------------------------------------------------------------------------
 
-static ENGINE_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+static ENGINE_RUNTIME: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+static FAIL_RUNTIME_BUILD: AtomicU8 = AtomicU8::new(0);
 
 /// Runtime for API calls issued where no runtime is current: the dedicated
 /// job execution thread is a plain OS thread (`runner.rs`
 /// `run_on_job_execution_thread`). One slot process runs one job, so at most
 /// the job thread and one maintenance thread block here concurrently; two
 /// workers keep either from queueing behind the other outside its budget.
-fn engine_runtime() -> &'static tokio::runtime::Runtime {
-    ENGINE_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("velnor-engine-api")
-            .enable_all()
-            .build()
-            .expect("engine api runtime builds")
-    })
+///
+/// Fallible on purpose: a runtime that cannot build (thread or fd
+/// exhaustion on a sick host) must route the query to the CLI fallback,
+/// never panic the job thread. The first build's outcome is cached, so a
+/// sick host stays on the CLI without rebuilding per query.
+fn engine_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    #[cfg(test)]
+    if FAIL_RUNTIME_BUILD.load(Ordering::Relaxed) != 0 {
+        return None;
+    }
+    ENGINE_RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("velnor-engine-api")
+                .enable_all()
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 /// Drive one Engine future from the synchronous facade.
 ///
-/// Inside the main multi-thread runtime (async control-plane contexts)
-/// this blocks the worker without stalling the scheduler; anywhere else it
-/// uses the dedicated runtime above. `block_in_place` panics on a
-/// current-thread runtime, but production runs exactly one runtime and it is
-/// multi-thread (`main.rs` `build_runtime`), while unit tests reach the
-/// facade from synchronous contexts with the API path off unless an
-/// `EngineTestGuard` is held — and the guard is only ever held on a
-/// synchronous test thread.
-pub(crate) fn block_on_engine<F>(future: F) -> F::Output
+/// * Inside the main multi-thread runtime (async control-plane contexts),
+///   this blocks the worker without stalling the scheduler.
+/// * Inside a current-thread runtime (`#[tokio::test]` today; any embedded
+///   single-thread context tomorrow), `block_in_place` would panic and the
+///   current thread is already inside a runtime, so the future is driven on
+///   a helper thread where no runtime is current.
+/// * Anywhere else, the dedicated runtime above drives it.
+///
+/// `None` is a dead driver — unbuildable runtime or a failed helper thread —
+/// and the facade answers it with the CLI fallback, exactly like any other
+/// API failure.
+pub(crate) fn block_on_engine<F>(future: F) -> Option<F::Output>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+            return Some(tokio::task::block_in_place(|| handle.block_on(future)));
+        }
+        return drive_on_helper_thread(future);
+    }
+    Some(engine_runtime()?.block_on(future))
+}
+
+/// Drive `future` on the dedicated runtime from a scope-borrowed helper
+/// thread. A panicking helper joins as an error, never propagates: the
+/// facade falls back to the CLI.
+fn drive_on_helper_thread<F>(future: F) -> Option<F::Output>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let runtime = engine_runtime()?;
+    std::thread::scope(|scope| scope.spawn(|| runtime.block_on(future)).join().ok())
+}
+
+/// Poll interval for the cancellation race: a cancelled job abandons the
+/// socket wait within this bound instead of riding the API budget.
+const CANCEL_POLL: Duration = Duration::from_millis(10);
+
+/// Drive `future` unless the active job cancels first: `None` is the
+/// cancelled leg winning, and the facade answers it with the CLI fallback —
+/// the same spawn-and-ladder-kill the CLI path has always run under cancel,
+/// so cancellation keeps its historical shape. Without an active token
+/// (maintenance/host path) this is a direct await with zero overhead.
+pub(crate) async fn cancel_race<F>(future: F) -> Option<F::Output>
 where
     F: std::future::Future,
 {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        return tokio::task::block_in_place(|| handle.block_on(future));
+    let token = crate::execution::cancel::active();
+    let Some(token) = token else {
+        return Some(future.await);
+    };
+    if token.is_cancelled() {
+        return None;
     }
-    engine_runtime().block_on(future)
+    tokio::select! {
+        biased;
+        output = future => Some(output),
+        () = wait_cancelled(token) => None,
+    }
+}
+
+/// Resolve when `token` fires. Polling, because the token is a level flag,
+/// not a waker — and a 10 ms sleep is nothing next to a socket wait.
+async fn wait_cancelled(token: crate::execution::cancel::JobCancellation) {
+    loop {
+        tokio::time::sleep(CANCEL_POLL).await;
+        if token.is_cancelled() {
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +328,12 @@ pub(crate) enum EngineFaultKind {
     TooLarge,
     Json,
     Schema,
+    /// The driver itself was dead: the dedicated runtime could not build,
+    /// or the helper thread for a current-thread context failed.
+    Runtime,
+    /// The active job cancelled during the socket wait; the CLI fallback is
+    /// the same spawn-and-ladder-kill the CLI path always ran under cancel.
+    Cancelled,
 }
 
 impl std::fmt::Display for EngineFaultKind {
@@ -248,6 +347,8 @@ impl std::fmt::Display for EngineFaultKind {
             Self::TooLarge => "too-large",
             Self::Json => "json",
             Self::Schema => "schema",
+            Self::Runtime => "runtime",
+            Self::Cancelled => "cancelled",
         };
         formatter.write_str(label)
     }
@@ -271,7 +372,7 @@ pub(crate) enum EngineError {
 }
 
 impl EngineError {
-    fn fault(op: DockerOp, fault: (EngineFaultKind, String)) -> Self {
+    pub(crate) fn fault(op: DockerOp, fault: (EngineFaultKind, String)) -> Self {
         Self::Fault {
             op,
             kind: fault.0,
@@ -302,6 +403,8 @@ impl EngineError {
                 EngineFaultKind::TooLarge => "too-large",
                 EngineFaultKind::Json => "json",
                 EngineFaultKind::Schema => "schema",
+                EngineFaultKind::Runtime => "runtime",
+                EngineFaultKind::Cancelled => "cancelled",
             },
         }
     }
@@ -855,8 +958,11 @@ fn parse_container(value: &serde_json::Value) -> FaultResult<EngineContainer> {
 /// `docker port` prints: one mapping per binding, IPv6 hosts bracketed
 /// (`[::]:41062`, proven by the facade's live fixture). Exposed-but-
 /// unpublished ports (`null` bindings) are skipped exactly as the CLI omits
-/// them, and an absent `Ports` object reads as no bindings. Sorted for
-/// determinism: the CLI prints in daemon order, callers consume a set.
+/// them, and an absent `Ports` object reads as no bindings. Sorted in the
+/// shared order ([`super::client::sort_port_mappings`]): the daemon prints
+/// `docker port` in its own numeric order while JSON maps iterate sorted,
+/// so unsorted projections would disagree and `service_context`'s
+/// first-wins pick per container port could differ by transport.
 fn parse_inspect_ports(value: &serde_json::Value) -> FaultResult<Vec<super::client::PortMapping>> {
     let Some(ports) = value.pointer("/NetworkSettings/Ports") else {
         return Ok(Vec::new());
@@ -889,9 +995,7 @@ fn parse_inspect_ports(value: &serde_json::Value) -> FaultResult<Vec<super::clie
             });
         }
     }
-    mappings.sort_by(|a, b| {
-        (&a.container_port, &a.host_address).cmp(&(&b.container_port, &b.host_address))
-    });
+    super::client::sort_port_mappings(&mut mappings);
     Ok(mappings)
 }
 
@@ -1511,6 +1615,41 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind(), Some(EngineFaultKind::TooLarge));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_context_drives_through_a_helper_thread() {
+        // `block_in_place` panics on this flavor; the facade must not.
+        let mock = MockEngine::serve(|_| json_response(inspect_body()), 1);
+        let client = EngineClient::new(mock.socket.clone());
+        let container = block_on_engine(client.inspect_container("svc", BUDGET))
+            .expect("helper thread drives the future")
+            .expect("mock serves inspect");
+        assert!(container.running);
+        assert_eq!(container.readiness_word(), "healthy");
+    }
+
+    #[test]
+    fn cli_and_api_projections_agree_on_live_multiport_order() {
+        // `docker create -p 9090 -p 10000`, Engine 29.4.0, both documents
+        // verbatim (the container id is elided: the parser reads it but the
+        // order skew lives in Ports). The daemon prints `docker port` in
+        // numeric port order — the 9090 group first — while the inspect
+        // document's Ports object arrives lexicographic — 10000 first. The
+        // transports agree only because both projections sort.
+        let cli_text = "9090/tcp -> 0.0.0.0:41895\n\
+             9090/tcp -> [::]:41895\n\
+             10000/tcp -> 0.0.0.0:41896\n\
+             10000/tcp -> [::]:41896\n";
+        let document: serde_json::Value = serde_json::from_str(
+            r#"{"Id":"live-multiport-probe","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z"},"NetworkSettings":{"Ports":{"10000/tcp":[{"HostIp":"0.0.0.0","HostPort":"41896"},{"HostIp":"::","HostPort":"41896"}],"9090/tcp":[{"HostIp":"0.0.0.0","HostPort":"41895"},{"HostIp":"::","HostPort":"41895"}]}}}"#,
+        )
+        .unwrap();
+        let cli = super::super::client::parse_port_mappings(cli_text);
+        let api = parse_container(&document).unwrap().ports;
+        assert_eq!(cli.len(), 4);
+        assert_eq!(api.len(), 4);
+        assert_eq!(cli, api, "transports must project identical mappings");
     }
 
     #[tokio::test]
