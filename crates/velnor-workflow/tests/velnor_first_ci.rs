@@ -197,6 +197,10 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         pr.contains("github.event_name == 'pull_request'"),
         "opt-in automatic PR must admit pull_request: {pr}"
     );
+    assert!(
+        pr.contains("always() && (github.event_name == 'pull_request'"),
+        "ci-required must parenthesize the control-plane gate so policy can strip always(): {pr}"
+    );
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
         unit.contains("github.event_name == 'pull_request'"),

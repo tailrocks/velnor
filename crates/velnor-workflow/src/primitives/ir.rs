@@ -1140,7 +1140,10 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && {}", self.velnor_control_plane_expression())
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
@@ -2156,7 +2159,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
         }
         let gate = if runners == RunnerMode::Velnor && trusted {
-            format!("always() && {}", self.velnor_control_plane_expression())
+            format!(
+                "always() && ({})",
+                self.velnor_control_plane_expression()
+            )
         } else {
             "always()".to_owned()
         };
