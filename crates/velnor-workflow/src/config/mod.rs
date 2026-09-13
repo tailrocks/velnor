@@ -121,6 +121,9 @@ struct GeneratorSection {
 struct WorkflowSection {
     /// GitHub-hosted runner label for hosted lanes.
     github_runner: Option<String>,
+    /// Generated runner lanes. Absent keeps the generator's current default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runners: Option<String>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
@@ -459,6 +462,11 @@ impl RepoGenerationConfig {
         self.workflow.github_runner.as_deref()
     }
 
+    /// The declared generated runner lanes, if any.
+    pub(crate) fn runners(&self) -> Option<&str> {
+        self.workflow.runners.as_deref()
+    }
+
     /// The declared self-hosted runner labels.
     pub(crate) fn velnor_labels(&self) -> Option<&[String]> {
         self.workflow.velnor_labels.as_deref()
@@ -701,6 +709,13 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
         return Err(GeneratorError::usage(
             "[workflow] github_runner must not be empty",
         ));
+    }
+    if let Some(runners) = workflow.runners.as_deref()
+        && !matches!(runners, "github" | "velnor" | "both")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] runners must be one of: github, velnor, both; found `{runners}`"
+        )));
     }
     if let Some(labels) = &workflow.velnor_labels {
         if labels.is_empty() {
@@ -1023,6 +1038,17 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
+        match result {
+            Ok(_) => panic!("{context}"),
+            Err(error) => error,
+        }
+    }
+
     /// A scanned throwaway repository: the only way to obtain a real shape.
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1157,6 +1183,61 @@ mod tests {
         let channel = canonical.find("\"channel\"").unwrap_or_default();
         let targets = canonical.find("\"targets\"").unwrap_or_default();
         assert!(args_position < channel && channel < targets);
+    }
+
+    #[test]
+    fn workflow_runners_accepts_lowercase_modes() {
+        for runners in ["github", "velnor", "both"] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"{runners}\"\n"
+            ));
+            assert_eq!(config.runners(), Some(runners));
+            must(
+                config.validate(&[], &[]),
+                "validate accepted workflow runner mode",
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_runners_is_optional_without_changing_canonical_shape() {
+        let config = config_for("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n");
+        assert_eq!(config.runners(), None);
+        let canonical = must(
+            config.canonical_json(),
+            "canonicalize default workflow config",
+        );
+        assert!(!canonical.contains("\"runners\""), "{canonical}");
+    }
+
+    #[test]
+    fn workflow_runners_rejects_unknown_or_non_lowercase_modes() {
+        for runners in ["GitHub", "VELNOR", "Both", "hosted"] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nrunners = \"{runners}\"\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[]),
+                "invalid workflow runner mode must fail validation",
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("[workflow] runners must be one of"),
+                "unexpected error for {runners}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_runners_keeps_unknown_fields_denied() {
+        let error = must_fail(
+            toml::from_str::<RepoGenerationConfig>(
+                "schema = 1\n\n[workflow]\nrunner = \"velnor\"\n",
+            ),
+            "unknown workflow fields must be rejected",
+        );
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 
     #[test]

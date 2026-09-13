@@ -1024,13 +1024,36 @@ jobs:
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
-    MAINTENANCE_WORKFLOW.replace(
+    let mut output = MAINTENANCE_WORKFLOW
+        .replace("runs-on: ubuntu-24.04", &format!("runs-on: {}", selected_runner(config)))
+        .replace(
         "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
         &format!(
             "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
             config.default_branch
         ),
-    )
+        );
+    if config.runners == RunnerMode::Velnor {
+        let gate = format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            config.default_branch
+        );
+        output = output
+            .replace(
+                &format!(
+                    "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
+                    config.default_branch
+                ),
+                &format!(
+                    "if: ${{{{ {gate} && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}}}"
+                ),
+            )
+            .replace(
+                "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+                &format!("if: ${{{{ {gate} }}}}"),
+            );
+    }
+    output
 }
 
 #[cfg(test)]
