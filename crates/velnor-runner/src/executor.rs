@@ -13745,12 +13745,14 @@ pub(crate) fn timeout_command_result(
     }
 }
 
-/// Best-effort `docker kill` for an exec/run target whose deadline expired.
-/// An exec'd process outlives its client connection, so killing the client
-/// alone orphans the step's process tree — the container must die. Shared
-/// by the CLI watchdog and the Engine-API exec router so both legs kill
-/// the same way; failures are ignored (a gone container needs no kill),
-/// and the spawn bypasses the runner metrics exactly like the watchdog's.
+/// Best-effort `docker kill` for an exec/run target whose deadline expired,
+/// CLI watchdog only. An exec'd process outlives its client connection, so
+/// when the watchdog resolved a target name the container dies with the
+/// orphaned step process. For real script-step exec argv the parser resolves
+/// no name (the `--` separator), so only the client dies and the container
+/// survives — the Engine-API expiry matches that by never killing. Failures
+/// are ignored (a gone container needs no kill), and the spawn bypasses the
+/// runner metrics exactly like the watchdog's.
 pub(crate) fn kill_container_best_effort(container: &str) {
     let kill_args = vec!["kill".to_string(), container.to_string()];
     let mut docker = Command::new("docker");
@@ -14794,6 +14796,31 @@ mod tests {
             Some("velnor-node-action-velnor-job-1")
         );
         assert_eq!(docker_timeout_container_name("git", &args), None);
+    }
+
+    #[test]
+    fn docker_timeout_container_name_yields_none_for_separator_script_exec() {
+        // The real script-step argv (`DockerOperands` emits `--` before the
+        // container operand): the parser hits the separator and resolves no
+        // target, so the watchdog kills only the docker client and the
+        // container survives — the behavior the API leg's `Expired` arm
+        // matches by never killing.
+        let args = [
+            "exec",
+            "--workdir",
+            "/__w",
+            "--env-file",
+            "/tmp/velnor-env-x",
+            "--",
+            "velnor-job-1",
+            "sh",
+            "-e",
+            "/__t/step.sh",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        assert_eq!(docker_timeout_container_name("docker", &args), None);
     }
 
     #[test]
