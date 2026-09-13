@@ -6394,9 +6394,19 @@ one focused correction each:
   `create_dir_all(destination)` — the destination exists by then, so this
   canonicalizes the destination itself rather than an ancestor — before the
   first `git init`. The pre-check stays as a fail-fast. An fd-based
-  (`O_NOFOLLOW`/`openat2`) pin was considered and rejected: git is
-  path-based, so no fd survives into its writes; the re-assert shrinks the
-  window from minutes to microseconds instead. `download_repository_actions`
+  (`O_NOFOLLOW`/`openat2`) pin for the git writes was considered and
+  rejected: git is path-based, so no fd survives into its writes. Residual,
+  stated honestly: each re-assert bounds its window to the gap between that
+  check and its phase rather than the minutes of network fetch, but a swap
+  landing exactly inside such a gap still redirects that phase — the windows
+  are narrowed, not closed. (Second-round hardening, same branch: creation
+  is check-first and ancestor-pinned via `NoFollowDestinationDir` so a
+  swapped tree creates nothing outside; containment is re-asserted before
+  every write phase — fetch/hydration, checkout, clean/reset, credential
+  persist; cleanup gates the canonicalized `.git` dir as well as the
+  destination, before both the git invocation and the scrub, with the gate
+  above the journal release; the reaper skips journal entries whose config
+  path is not an absolute `<workspace>/.git/config`.) `download_repository_actions`
   threads its `actions_host` root through as the action-bundle workspace.
   `cleanup_checkout_credentials` takes the workspace too and gates the `git
   config --unset-all` with the same containment — after the `.git`
