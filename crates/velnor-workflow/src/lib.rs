@@ -724,6 +724,14 @@ impl ProjectConfig {
         write_toml_string(&mut output, "github_runner", &self.github_runner);
         write_toml_string(&mut output, "macos_runner", &self.macos_runner);
         write_toml_array(&mut output, "velnor_labels", &self.velnor_labels);
+        if let Some(group) = &self.velnor_runner_group {
+            write_toml_string(&mut output, "velnor_runner_group", group);
+        }
+        let _ = writeln!(
+            output,
+            "pull_request_on_velnor = {}",
+            self.pull_request_on_velnor
+        );
         let generated_workflows = workflow_file_names(self);
         write_toml_array(&mut output, "files", &generated_workflows);
         if !self.notes.is_empty() {
@@ -1408,6 +1416,13 @@ fn apply_generation_config(
     if let Some(runners) = generation.runners() {
         config.runners = parse_runner_mode(runners)?;
     }
+    if let Some(automatic) = generation.automatic() {
+        let _ = parse_runner_mode(automatic).map_err(|error| {
+            GeneratorError::usage(format!(
+                "[workflow] automatic must be one of: github, velnor, both; found `{automatic}` ({error})"
+            ))
+        })?;
+    }
     if let Some(labels) = generation.velnor_labels() {
         if labels.is_empty() {
             return Err(GeneratorError::usage(
@@ -1420,6 +1435,7 @@ fn apply_generation_config(
         config.velnor_labels = labels.to_vec();
     }
     if let Some(group) = generation.velnor_runner_group() {
+        validate_config_text(group, "[workflow] velnor_runner_group")?;
         config.velnor_runner_group = Some(group.to_owned());
     }
     if let Some(pull_request_on_velnor) = generation.pull_request_on_velnor() {
@@ -1450,8 +1466,36 @@ fn apply_generation_config(
     apply_release(config, generation.release());
     apply_unit_rows(config, generation.units());
     read_static_files(config, generation.static_files(), root)?;
+    validate_velnor_pull_request_contract(config)?;
     refresh_mr_boxington_note(config);
     config.declared_surface = true;
+    Ok(())
+}
+
+fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    if !config.pull_request_on_velnor {
+        return Ok(());
+    }
+    if config.runners == RunnerMode::Github {
+        return Err(GeneratorError::usage(
+            "[workflow] pull_request_on_velnor requires the Velnor runner lane",
+        ));
+    }
+    let labels = config
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !estate::approved_velnor_runner_contract_matches(
+        &labels,
+        config.velnor_runner_group.as_deref(),
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] pull_request_on_velnor requires the exact approved Velnor runner contract: group `{}` and labels {:?}",
+            estate::approved_velnor_runner_group(),
+            estate::approved_velnor_runner_labels()
+        )));
+    }
     Ok(())
 }
 
@@ -2743,24 +2787,6 @@ fn workflow_runtime_setup_with_install_rev(lane: RunnerMode, install_rev: &str) 
     }
     format!(
         "      - name: Set up Velnor workflow runtime\n        if: ${{{{ runner.environment == 'github-hosted' }}}}\n        uses: {VELNOR_WORKFLOW_SETUP_ACTION}@{VELNOR_WORKFLOW_SOURCE_REV}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={VELNOR_POLICY_WORKFLOW_REV}\" >> \"$GITHUB_ENV\"\n"
-    )
-}
-
-fn workflow_runtime_download(lane: RunnerMode) -> String {
-    if lane == RunnerMode::Github {
-        format!(
-            "      - name: Download Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: .velnor-workflow-runtime\n      - name: Verify Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          manifest=.velnor-workflow-runtime/manifest.json\n          jq -e --arg revision \"$EXPECTED_REVISION\" --arg repository \"$GITHUB_REPOSITORY\" --arg platform \"${{RUNNER_OS}}-${{RUNNER_ARCH}}\" --arg run_id \"$GITHUB_RUN_ID\" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test(\"^[0-9]+$\")) and .job_id != \"\" and (.binary_sha256 | test(\"^[0-9a-f]{{64}}$\"))' \"$manifest\" >/dev/null\n          expected=\"$(jq -er '.binary_sha256' \"$manifest\")\"\n          actual=\"$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{{print $1}}')\"\n          [[ \"$actual\" == \"$expected\" ]] || {{ echo \"::error::runtime digest mismatch\" >&2; exit 1; }}\n      - name: Add Velnor workflow runtime to PATH\n        shell: bash\n        run: |\n          set -euo pipefail\n          install -Dm0755 .velnor-workflow-runtime/velnor-workflow \"$HOME/.cargo/bin/velnor-workflow\"\n          echo \"$HOME/.cargo/bin\" >> \"$GITHUB_PATH\"\n",
-            ActionPin::DownloadArtifact.reference()
-        )
-    } else {
-        String::new()
-    }
-}
-
-fn workflow_runtime_artifact_upload() -> String {
-    format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          install -m 0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
-        ActionPin::UploadArtifact.reference()
     )
 }
 
@@ -5254,15 +5280,9 @@ mod tests {
             !workflow.contains("rev: ${{ github.sha }}"),
             "CI Planning stays on the SOURCE_REV pin: {workflow}"
         );
-        assert!(workflow.contains("name: Publish Velnor workflow runtime"));
-        assert!(workflow.contains("name: Download Velnor workflow runtime"));
-        assert!(workflow.contains("name: Verify Velnor workflow runtime"));
-        assert!(workflow.contains(".run_id == $run_id"));
-        assert!(workflow.contains(".platform == $platform"));
-        assert!(workflow.contains("runtime digest mismatch"));
-        assert!(workflow.contains("name: velnor-workflow-runtime-"));
-        assert!(workflow.contains("${{ runner.os }}-${{ runner.arch }}"));
-        assert!(workflow.contains("manifest.json"));
+        assert!(!workflow.contains("Publish Velnor workflow runtime"));
+        assert!(!workflow.contains("Download Velnor workflow runtime"));
+        assert!(!workflow.contains("Verify Velnor workflow runtime"));
         assert!(!workflow.contains("cargo install --locked --git"));
     }
 
@@ -5320,36 +5340,6 @@ mod tests {
         assert!(!workflow.contains("name: Prepare Velnor workflow runtime"));
         assert!(!workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(!workflow.contains("name: Download Velnor workflow runtime"));
-    }
-
-    #[test]
-    fn runtime_lane_consumes_platform_qualified_verified_products() {
-        let mut output = String::new();
-        WorkflowIr::render_workflow_runtime_download(&mut output, RunnerMode::Github);
-        assert!(output.contains(
-            &format!(
-                "name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-$EYES_OS-$EYES_ARCH"
-            )
-            .replace("$EYES_OS", "${{ runner.os }}")
-            .replace("$EYES_ARCH", "${{ runner.arch }}")
-        ));
-        assert!(output.contains("GITHUB_RUN_ID"));
-        assert!(output.contains(".run_id == $run_id"));
-        assert!(output.contains(".revision == $revision"));
-        assert!(output.contains(".platform == $platform"));
-        assert!(output.contains("runtime digest mismatch"));
-        assert!(!output.contains(".head_sha == $revision"));
-        assert!(!output.contains(".head_branch == $head_branch"));
-        assert!(!output.contains("conclusion == \"success\""));
-        assert!(!output.contains("path: ~/.cargo/bin/velnor-workflow\n          if-no-files-found"));
-
-        let publish = workflow_runtime_artifact_upload();
-        assert!(publish.contains("name: Prepare Velnor workflow runtime"));
-        assert!(publish.contains("manifest.json"));
-        assert!(publish.contains("binary_sha256"));
-        assert!(publish.contains("head_branch"));
-        assert!(publish.contains("${{ runner.os }}-${{ runner.arch }}"));
-        assert!(publish.contains("name: Publish Velnor workflow runtime"));
     }
 
     #[test]
@@ -6660,12 +6650,8 @@ channel = "stable"
         );
         let surface = ir.render_nested_unit(rust, WorkflowKind::PullRequest);
         assert!(
-            surface.contains("name: Download Velnor workflow runtime"),
-            "Linux jobs keep downloading the plan artifact: {surface}"
-        );
-        assert!(
-            !surface.contains("name: Set up Velnor workflow runtime"),
-            "Linux jobs must not source-build: {surface}"
+            surface.contains("name: Set up Velnor workflow runtime"),
+            "Linux jobs must bootstrap the pinned runtime directly: {surface}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -7662,7 +7648,7 @@ channel = "stable"
     }
 
     #[test]
-    fn generated_maintenance_stays_github_hosted_when_runners_are_velnor() {
+    fn generated_maintenance_splits_prune_and_cache_when_runners_are_velnor() {
         let config = scanned_fixture(RunnerMode::Velnor);
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -7670,6 +7656,7 @@ channel = "stable"
             "generated maintenance.yml",
         );
         let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let velnor = fixture_lane_selector();
         let runs_on: Vec<&str> = workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
@@ -7677,52 +7664,40 @@ channel = "stable"
             .collect();
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), hosted.as_str()],
-            "both maintenance jobs must stay GitHub-hosted: {workflow}"
+            [hosted.as_str(), velnor.as_str()],
+            "only PR pruning is GitHub-hosted: {workflow}"
+        );
+        assert!(!workflow.contains("setup-velnor-workflow"));
+        assert!(
+            workflow.contains("velnor-workflow cache-plan"),
+            "maintenance must use the generated cache planner: {workflow}"
         );
         assert!(
-            workflow.contains("setup-velnor-workflow"),
-            "maintenance must install the hosted workflow runtime: {workflow}"
+            workflow.contains("github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')"),
+            "closed-PR prune must stay live: {workflow}"
         );
-        assert_maintenance_setup_uses_literal_source_rev(workflow);
         let cache_budget = yaml_job(workflow, "cache-budget");
         assert!(
             cache_budget.contains("name: Cache retention"),
             "cache-budget is Cache retention: {cache_budget}"
         );
         assert!(
-            cache_budget.contains("runs-on: ubuntu-24.04"),
-            "Cache retention stays GitHub-hosted ubuntu-24.04: {cache_budget}"
+            cache_budget.contains(velnor.as_str()),
+            "Cache retention stays on the Velnor lane: {cache_budget}"
         );
-        assert!(
-            !workflow.contains("[self-hosted,"),
-            "maintenance must not select the Velnor lane: {workflow}"
-        );
-        for label in &config.velnor_labels {
-            if label == "self-hosted" {
-                continue;
-            }
-            assert!(
-                !workflow.contains(label.as_str()),
-                "maintenance must not name Velnor label `{label}`: {workflow}"
-            );
-        }
+        assert!(!cache_budget.contains("setup-velnor-workflow"));
         assert!(
             workflow.contains(
-                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
             ),
-            "cache retention must keep schedule and dispatch: {workflow}"
-        );
-        assert!(
-            !workflow.contains("github.event_name == 'push'"),
-            "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
+            "cache retention must stay on the trusted Velnor lane: {workflow}"
         );
         assert!(!workflow.contains("\n  push:"));
     }
 
     #[test]
-    fn generated_maintenance_keeps_hosted_lanes_for_every_runner_mode() {
-        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+    fn generated_maintenance_keeps_hosted_lanes_for_github_and_both() {
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
             let config = scanned_fixture(runners);
             let files = must(generated_files(&config), "generate");
             let workflow = must_some(
@@ -8494,7 +8469,7 @@ channel = "stable"
         assert!(!velnor.contains("backend: github"));
         assert!(velnor.contains(&fixture_lane_selector()));
         assert!(velnor.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))"
         ));
         assert!(velnor.contains("github.event_name == 'workflow_dispatch'"));
 
@@ -8502,7 +8477,7 @@ channel = "stable"
             .render(WorkflowKind::PullRequest);
         assert!(velnor_pr.contains("on:\n  pull_request:"));
         assert!(velnor_pr.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))"
         ));
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));

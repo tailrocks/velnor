@@ -6,10 +6,13 @@ repository = "tailrocks/velnor"
 # Runner placement: the hosted image the GitHub lane pins, and the self-hosted
 # labels the trust-gated Velnor lane selects by.
 [workflow]
-runners = "velnor"
+runners = "both"
+automatic = "both"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
+velnor_runner_group = "velnor-trusted"
+pull_request_on_velnor = true
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 # Release contract: the reviewed publisher renders `release.yml` verbatim

@@ -128,6 +128,11 @@ struct WorkflowSection {
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
+    /// Automatic event placement. Kept explicit in the repository-owned
+    /// contract even when the generated runtime derives its gates from the
+    /// runner and pull-request settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    automatic: Option<String>,
     /// Velnor runner labels for self-hosted lanes. A surface that renders
     /// self-hosted jobs without them is a configuration error, never an empty
     /// `runs-on`.
@@ -499,6 +504,10 @@ impl RepoGenerationConfig {
     /// The declared generated runner lanes, if any.
     pub(crate) fn runners(&self) -> Option<&str> {
         self.workflow.runners.as_deref()
+    }
+
+    pub(crate) fn automatic(&self) -> Option<&str> {
+        self.workflow.automatic.as_deref()
     }
 
     /// The declared self-hosted runner labels.

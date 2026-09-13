@@ -185,8 +185,8 @@ jobs:
 
   velnor-docs:
     name: "Velnor / docs"
-    if: ${{ inputs.unit == 'docs' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ inputs.unit == 'docs' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
+    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
     timeout-minutes: 45
