@@ -425,6 +425,11 @@ struct Classified {
 }
 
 /// Seconds of the POSIX epoch, or `None` when the timestamp is unreadable.
+///
+/// After `ss`, an optional `.` and one or more ASCII digits may precede `Z`
+/// or `±HH:MM`. GitHub's cache API emits that fractional form
+/// (`2026-09-13T17:30:16.329079Z`); the fraction is skipped, age is whole
+/// seconds, and extra non-whitespace after the timezone is refused.
 fn epoch_of(created_at: &str) -> Option<i64> {
     let bytes = created_at.as_bytes();
     if bytes.len() < 20 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
@@ -444,13 +449,25 @@ fn epoch_of(created_at: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let (offset_seconds, rest) = match bytes[19] {
-        b'Z' => (0, 20),
-        b'+' | b'-' => {
-            let sign = if bytes[19] == b'+' { 1 } else { -1 };
-            let hours = number(20..22)?;
-            let minutes = number(23..25)?;
-            (sign * (hours * 3600 + minutes * 60), 25)
+    let mut index = 19usize;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let digits = bytes[index..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 {
+            return None;
+        }
+        index += digits;
+    }
+    let (offset_seconds, rest) = match bytes.get(index).copied() {
+        Some(b'Z') => (0, index + 1),
+        Some(sign @ (b'+' | b'-')) => {
+            let sign = if sign == b'+' { 1 } else { -1 };
+            let hours = number(index + 1..index + 3)?;
+            let minutes = number(index + 4..index + 6)?;
+            (sign * (hours * 3600 + minutes * 60), index + 6)
         }
         _ => return None,
     };
@@ -874,6 +891,17 @@ mod tests {
         clippy::panic,
         reason = "tests need missing fixture data to name its omission"
     )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "tests need missing fixture data to name its omission"
+    )]
     fn must_some<T>(value: Option<T>, context: &str) -> T {
         match value {
             Some(value) => value,
@@ -1250,9 +1278,74 @@ mod tests {
 
     #[test]
     fn unreadable_ages_are_producer_active() {
-        assert!(epoch_of("2026-09-01T00:00:00Z").is_some());
-        assert!(epoch_of("2026-09-01T00:00:00+02:00").is_some());
+        must_some(epoch_of("2026-09-01T00:00:00Z"), "whole-second Z");
+        must_some(epoch_of("2026-09-01T00:00:00+02:00"), "numeric offset");
         assert!(epoch_of("not-a-timestamp").is_none());
+        assert!(epoch_of("2026-09-13T17:30:16.Z").is_none());
+        assert!(epoch_of("2026-09-13T17:30:16.329079Zx").is_none());
+    }
+
+    /// GitHub's cache API emits fractional `created_at` (`…16.329079Z`). A
+    /// parser that stops at index 19 treats `.` as unreadable, ages the entry
+    /// at `-1`, and the maintenance plan stays empty.
+    #[test]
+    fn github_fractional_created_at_ages_mbx_generations() {
+        const GITHUB: &str = "2026-09-13T17:30:16.329079Z";
+        let created = must_some(epoch_of(GITHUB), "GitHub Actions cache created_at");
+        assert_eq!(
+            created,
+            must_some(epoch_of("2026-09-13T17:30:16Z"), "whole-second form")
+        );
+        assert_eq!(
+            created,
+            must_some(
+                epoch_of("2026-09-13T17:30:16.329079+00:00"),
+                "fractional offset form"
+            )
+        );
+
+        let policy = RetentionPolicy::default_policy();
+        let window = must(
+            i64::try_from(policy.producer_window_seconds),
+            "producer window fits i64",
+        );
+        // Three generations of one `-mbx-v3-` variant, GitHub-shaped stamps,
+        // all just past the 2h producer window and within two hours of each
+        // other. Bound is 2: the oldest goes. Maintenance 34773651873 left
+        // `plan.json` `[]` because none of these stamps parsed.
+        let now = created + window + 90 * 60;
+        let key = |state: u8| {
+            format!(
+                "velnor-release-mbx-v3-1a2b3c4d5e6f-Linux-X64-guest-x86_64-{}-{:064}",
+                "a".repeat(64),
+                state
+            )
+        };
+        let entries = [
+            entry("old", key(1).as_str(), 100_000_000, GITHUB),
+            entry(
+                "mid",
+                key(2).as_str(),
+                100_000_000,
+                "2026-09-13T18:10:00.1Z",
+            ),
+            entry(
+                "new",
+                key(3).as_str(),
+                100_000_000,
+                "2026-09-13T18:45:16.999Z",
+            ),
+        ];
+        let plan = plan_evictions(&entries, &policy, now);
+        let eviction = must_some(plan.first(), "oldest generation is evicted");
+        assert_eq!(plan.len(), 1, "{plan:?}");
+        assert_eq!(eviction.id, "old");
+        assert_eq!(eviction.reason, EvictionReason::GenerationBeyondBound);
+        assert!(
+            plan.iter()
+                .all(|eviction| eviction.id != "mid" && eviction.id != "new"),
+            "the bound keeps the two newer generations: {plan:?}"
+        );
     }
 
     fn docker_seed_key(hash: &str, state: u64) -> String {
