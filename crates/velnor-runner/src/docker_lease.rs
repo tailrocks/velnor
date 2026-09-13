@@ -181,9 +181,18 @@ impl DockerLeasePolicy {
         if segments.as_slice() == ["images", "json"] && matches!(method.as_str(), "GET" | "HEAD") {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
         }
-        if segments.len() == 3
-            && segments[0] == "images"
-            && segments[2] == "json"
+        // Image names may contain slashes (`moby/buildkit:tag`). Match
+        // `/images/<ref>/json` by first/last segment, not a fixed length.
+        if segments.first() == Some(&"images")
+            && segments.last() == Some(&"json")
+            && segments.len() >= 3
+            && matches!(method.as_str(), "GET" | "HEAD")
+        {
+            return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
+        }
+        // `GET /containers/json` is docker ps. Do not treat `json` as an id;
+        // that answers "foreign Container resource json" for every list.
+        if segments.as_slice() == ["containers", "json"]
             && matches!(method.as_str(), "GET" | "HEAD")
         {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
@@ -1476,7 +1485,8 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
     reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
     for (key, value) in host_config {
         let unsafe_control = match key.to_ascii_lowercase().as_str() {
-            "pidmode" | "ipcmode" | "networkmode" | "cgroupnsmode" | "usernsmode" | "utsmode" => {
+            "networkmode" => !is_guest_network_mode(value),
+            "pidmode" | "ipcmode" | "cgroupnsmode" | "usernsmode" | "utsmode" => {
                 !is_default_mode(value)
             }
             "privileged" => match value {
@@ -1518,6 +1528,18 @@ fn is_default_mode(value: &Value) -> bool {
     })
 }
 
+/// Guest-isolated Docker network modes. `host` and `container:<id>` stay
+/// host-control denies. Live backend-parity uses `--network none`.
+fn is_guest_network_mode(value: &Value) -> bool {
+    value.as_str().is_some_and(|mode| {
+        let mode = mode.trim();
+        mode.is_empty()
+            || mode.eq_ignore_ascii_case("default")
+            || mode.eq_ignore_ascii_case("none")
+            || mode.eq_ignore_ascii_case("bridge")
+    })
+}
+
 fn value_is_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1525,7 +1547,9 @@ fn value_is_present(value: &Value) -> bool {
         Value::String(value) => !value.trim().is_empty(),
         Value::Array(values) => !values.is_empty(),
         Value::Object(object) => !object.is_empty(),
-        Value::Number(_) => true,
+        // API 1.55 CLI serializes unused numeric HostConfig fields as 0
+        // (live: `BlkioWeight: 0`). Zero grants no host control.
+        Value::Number(value) => !value.as_f64().is_some_and(|number| number == 0.0),
     }
 }
 
@@ -3544,14 +3568,75 @@ mod tests {
     #[test]
     fn container_create_tolerates_empty_unknown_hostconfig_defaults() {
         // Live API 1.55 CLI default serialization: unknown HostConfig fields
-        // arrive as empty defaults and grant no host control.
+        // arrive as empty defaults and grant no host control. Observed on
+        // sentry 0.1.274~preview.47: `BlkioWeight: 0` denied create.
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[]}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"NetworkMode":"none","AutoRemove":true}}"#,
         );
         assert!(policy.authorize(&request).is_ok());
+    }
+
+    #[test]
+    fn container_create_nonzero_blkio_weight_is_lease_deny() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioWeight":100}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("nonzero BlkioWeight is host IO control");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("create denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("BlkioWeight"));
+    }
+
+    #[test]
+    fn container_create_host_network_mode_stays_lease_deny() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"NetworkMode":"host"}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("NetworkMode host remains host control");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("create denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("NetworkMode"));
+    }
+
+    #[test]
+    fn containers_json_list_is_daemon_read_not_foreign_id_json() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request("GET", "/v1.55/containers/json?all=1", b"");
+        assert_eq!(
+            policy.authorize(&request).unwrap(),
+            AuthorizedDockerRoute::DaemonRead
+        );
+    }
+
+    #[test]
+    fn namespaced_image_inspect_is_daemon_read() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "GET",
+            "/v1.55/images/moby/buildkit:buildx-stable-1/json",
+            b"",
+        );
+        assert_eq!(
+            policy.authorize(&request).unwrap(),
+            AuthorizedDockerRoute::DaemonRead
+        );
     }
 
     #[test]
