@@ -22,7 +22,7 @@ pub mod slot;
 pub mod watchdog;
 
 pub use canary::{run as run_canary, CanaryArgs, CanaryReport};
-pub use controller::{run as run_controller, ControllerArgs};
+pub use controller::{run as run_controller, ControllerArgs, ControllerLifecycle};
 pub use guardian::{run as run_guardian, GuardianArgs};
 pub use job::{run as run_job, JobArgs};
 pub use slot::{run as run_slot, SlotArgs};

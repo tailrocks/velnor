@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velnor_model::{
@@ -129,6 +129,13 @@ pub struct FleetState {
     pub github_reachable: bool,
     pub routing_valid: bool,
     pub runner_group_valid: bool,
+    /// Latched fleet drain request (`meta[drain]`, never an `Event`: older
+    /// binaries ignore the unknown meta key, so drain state is forward
+    /// compatible without a schema bump or vocabulary change).
+    pub drain_active: bool,
+    /// Lifecycle resource version that requested the drain. Observability
+    /// only; staleness is settled by the lifecycle ledger, not this value.
+    pub drain_version: u64,
     pub desired_ready: u32,
     pub canary: CanaryStatus,
     pub package_generation: u64,
@@ -155,6 +162,8 @@ impl Default for FleetState {
             github_reachable: false,
             routing_valid: false,
             runner_group_valid: false,
+            drain_active: false,
+            drain_version: 0,
             desired_ready: 0,
             canary: CanaryStatus::Unknown,
             package_generation: 0,
@@ -753,9 +762,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             let routing = state.routing_valid && state.runner_group_valid;
             let admission_blocked = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
+            // A latched drain stops new capacity, never in-flight work: no
+            // fresh permit may spawn a slot while the fleet is draining.
+            let drain_active = state.drain_active;
             let slot = state.slot_mut(&slot_id);
             if generation < slot.generation
                 || admission_blocked
+                || drain_active
                 || (generation == slot.generation && slot.phase == SlotPhase2::Fenced)
             {
                 rejected = true;
@@ -909,9 +922,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             // to be accepted — while the job row it creates is deliberately
             // provisional: it is not proof of ownership and cannot back a
             // completion.
+            // A latched drain stops new acquisitions, never in-flight work:
+            // an already-intended job still resolves, owns, and completes.
+            let drain_active = state.drain_active;
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
                 || slot.phase != SlotPhase2::Ready
+                || drain_active
                 || state.jobs.iter().any(|job| job.job_id == job_id)
             {
                 rejected = true;
@@ -1712,6 +1729,80 @@ impl Journal {
             .filter(OutboxRecord::is_pending)
             .collect())
     }
+
+    /// Latch the fleet drain request at `version`. Idempotent: re-setting the
+    /// effective value is a no-op, and the recorded version never regresses.
+    ///
+    /// This is a direct `meta` write in its own immediate transaction, never a
+    /// new `Event` variant: older binaries must keep opening (and ignoring)
+    /// this state, and the event vocabulary is frozen for drain purposes.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn set_drain(&mut self, version: u64) -> StoreResult<bool> {
+        let transaction = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<String> = transaction
+            .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let effective = existing
+            .as_deref()
+            .and_then(parse_drain_value)
+            .map(|state| state.version.max(version))
+            .unwrap_or(version);
+        let value = format!("requested:{effective}");
+        if existing.as_deref() == Some(value.as_str()) {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        transaction.execute(
+            "INSERT INTO meta (key, value) VALUES ('drain', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![value],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+}
+
+/// Durable fleet drain request read without a journal handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainState {
+    /// Always true: absence of the marker is `None`, not inactive.
+    pub active: bool,
+    /// Lifecycle resource version that requested the drain.
+    pub version: u64,
+}
+
+/// Read the latched drain marker with a throwaway read-only connection.
+///
+/// One `SELECT` on `meta` with a zero busy timeout: slot and daemon poll
+/// boundaries call this and must never block on a writer's lock. Any failure
+/// (missing file, lock contention, corrupt payload) is `None`, never an
+/// error: readers treat an unreadable marker as no drain order.
+#[must_use]
+pub fn read_drain_state(path: &Path) -> Option<DrainState> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(Duration::ZERO).ok()?;
+    let value: String = conn
+        .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .ok()??;
+    parse_drain_value(&value)
+}
+
+/// Parse one `meta[drain]` value (`requested:{version}`).
+fn parse_drain_value(value: &str) -> Option<DrainState> {
+    let version = value.strip_prefix("requested:")?.parse::<u64>().ok()?;
+    Some(DrainState {
+        active: true,
+        version,
+    })
 }
 
 fn is_transient_contention(error: &StoreError) -> bool {
@@ -1894,6 +1985,24 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
     state.package_generation = meta_u64(&meta, "package_generation")?;
     state.package_apt_version = meta.get("package_apt_version").cloned().unwrap_or_default();
     state.capacity_invalid = meta_bool(&meta, "capacity_invalid")?;
+    // Absent on every journal written before drain unification: not draining.
+    // Unknown sibling keys are ignored by construction (each key is read by
+    // name), but a malformed `drain` value fails closed like any other
+    // materialized field: it is evidence from a writer this binary cannot
+    // interpret, not an instruction to run.
+    match meta.get("drain") {
+        None => {
+            state.drain_active = false;
+            state.drain_version = 0;
+        }
+        Some(value) => match parse_drain_value(value) {
+            Some(drain) => {
+                state.drain_active = true;
+                state.drain_version = drain.version;
+            }
+            None => return Err(invalid_materialized("drain", value)),
+        },
+    }
 
     let mut statement = conn.prepare(
         "SELECT slot_id, generation, phase, permit_held, routing_valid,
@@ -2252,7 +2361,15 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             (state.capacity_declared as u8).to_string(),
         ),
     ];
-    for (key, value) in meta {
+    // Every `apply` loads the materialized state (drain included) under the
+    // same immediate transaction it persists under, so re-emitting the drain
+    // marker from state keeps a latched drain sticky across unrelated event
+    // writes with no new event and no schema bump. Absent when inactive, so
+    // pre-drain journals keep their exact meta shape.
+    let drain = state
+        .drain_active
+        .then(|| ("drain", format!("requested:{}", state.drain_version)));
+    for (key, value) in meta.into_iter().chain(drain) {
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)",
             params![key, value],
@@ -3020,6 +3137,260 @@ mod tests {
             .outbox
             .into_iter()
             .find(|row| row.job_id == job(job_name))
+    }
+
+    #[test]
+    fn set_drain_round_trips_through_materialized_state() {
+        let (dir, mut journal) = open_tmp("drain-round-trip");
+        let before = journal.materialized_state().unwrap();
+        assert!(!before.drain_active);
+        assert_eq!(before.drain_version, 0);
+
+        assert!(journal.set_drain(3).unwrap());
+        let raw: Option<String> = journal
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'drain'", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .unwrap();
+        assert_eq!(raw.as_deref(), Some("requested:3"));
+
+        let after = journal.materialized_state().unwrap();
+        assert!(after.drain_active);
+        assert_eq!(after.drain_version, 3);
+        // No event was written: the drain marker is meta-only by design.
+        assert_eq!(event_count(&journal), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn set_drain_is_idempotent_and_monotonic() {
+        let (dir, mut journal) = open_tmp("drain-idempotent");
+        assert!(journal.set_drain(3).unwrap());
+        assert!(!journal.set_drain(3).unwrap());
+        assert!(journal.set_drain(9).unwrap());
+        // A stale writer never regresses the latched version.
+        assert!(!journal.set_drain(4).unwrap());
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 9);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn materialized_state_tolerates_unknown_meta_keys_and_rejects_malformed_drain() {
+        let (dir, journal) = open_tmp("drain-meta-tolerance");
+        journal
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('future_key', 'anything')",
+                [],
+            )
+            .unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert!(!state.drain_active);
+
+        journal
+            .conn
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('drain', 'bogus')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        let error = journal.materialized_state().unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn read_drain_state_returns_none_on_missing_locked_or_corrupt() {
+        let missing = std::env::temp_dir().join(format!(
+            "velnor-journal-drain-missing-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(read_drain_state(&missing), None);
+
+        let (dir, mut journal) = open_tmp("drain-read-none");
+        assert!(journal.set_drain(5).unwrap());
+        let path = dir.join("journal.db");
+        assert_eq!(
+            read_drain_state(&path),
+            Some(DrainState {
+                active: true,
+                version: 5
+            })
+        );
+
+        // A writer holding an exclusive lock makes the zero-timeout read
+        // report no marker instead of blocking. Exercised on a rollback-mode
+        // fixture: WAL snapshot readers never block on a writer, which is
+        // exactly why the production read needs no wait there either.
+        let locked_path = dir.join("locked.db");
+        {
+            let setup = Connection::open(&locked_path).unwrap();
+            setup
+                .execute_batch(
+                    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                     INSERT INTO meta (key, value) VALUES ('drain', 'requested:11');",
+                )
+                .unwrap();
+        }
+        let blocker = Connection::open(&locked_path).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(read_drain_state(&locked_path), None);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            read_drain_state(&locked_path),
+            Some(DrainState {
+                active: true,
+                version: 11
+            })
+        );
+
+        let garbage = dir.join("garbage.db");
+        std::fs::write(&garbage, b"not a sqlite database").unwrap();
+        assert_eq!(read_drain_state(&garbage), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reducer_rejects_new_permits_and_acquisitions_when_draining() {
+        let (dir, mut journal) = open_tmp("drain-reducer-gate");
+        prime_ready(&mut journal, "s-1");
+        let g = r#gen();
+        // Second slot without re-declaring capacity: `prime_ready` pins
+        // `DesiredCapacity { ready: 1 }`, and two slots past a declared one
+        // is the contaminated-capacity shape that must fail closed.
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        let s2 = slot("s-2");
+        for event in [
+            Event::PermitReserved {
+                slot_id: s2.clone(),
+                generation: g,
+            },
+            Event::ExecutorProven {
+                slot_id: s2.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: s2.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: s2.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: s2.clone(),
+                generation: g,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        for id in ["s-1", "s-2"] {
+            assert!(
+                !journal
+                    .apply(Event::ReadyAttempt {
+                        slot_id: slot(id),
+                        generation: g,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+        // Intended before the drain: in-flight work must still resolve, own,
+        // and complete after the marker latches.
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("s-1"),
+                    job_id: job("job-1"),
+                    generation: g,
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.set_drain(2).unwrap());
+
+        // s-3 never had a permit and s-2 sits Ready with no job: both
+        // rejections isolate the drain gate from occupancy or fencing.
+        assert!(
+            journal
+                .apply(Event::PermitReserved {
+                    slot_id: slot("s-3"),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot("s-2"),
+                    job_id: job("job-2"),
+                    generation: g,
+                    message_id: "msg-2".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id: job("job-1"),
+                    acquired_job_id: job("job-1-real"),
+                    plan_id: "plan-1".into(),
+                    generation: g,
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("job-1-real"),
+                    slot_id: slot("s-1"),
+                    attempt: 1,
+                    generation: g,
+                    worker: "worker-1".into(),
+                    accepted_unix: 1,
+                })
+                .unwrap()
+                .rejected
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drain_marker_survives_unrelated_event_applies() {
+        let (dir, mut journal) = open_tmp("drain-sticky");
+        assert!(journal.set_drain(7).unwrap());
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 7);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Burn the durable attempt budget the way the controller does.
