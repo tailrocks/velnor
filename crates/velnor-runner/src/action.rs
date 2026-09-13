@@ -67,6 +67,14 @@ pub struct ActionRuns {
     pub image: Option<String>,
     #[serde(default)]
     pub entrypoint: Option<String>,
+    /// Docker-action pre/post entrypoints (`runs.pre-entrypoint` /
+    /// `runs.post-entrypoint`): upstream runs them as the Pre/Post stage
+    /// with the same image and args
+    /// (`ContainerActionHandler.cs: RunAsync(stage)`).
+    #[serde(default, rename = "pre-entrypoint", alias = "preEntrypoint")]
+    pub pre_entrypoint: Option<String>,
+    #[serde(default, rename = "post-entrypoint", alias = "postEntrypoint")]
+    pub post_entrypoint: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -645,6 +653,15 @@ pub struct DockerActionInvocation {
     pub env: Vec<(String, String)>,
     pub entrypoint: Option<String>,
     pub args: Vec<String>,
+    /// `runs.pre-entrypoint` / `runs.post-entrypoint`, rendered against
+    /// the action scope like the main entrypoint. A docker pre/post runs
+    /// the same image and args with the stage entrypoint substituted
+    /// (`ContainerActionHandler.cs:116-123`).
+    pub pre_entrypoint: Option<String>,
+    pub post_entrypoint: Option<String>,
+    /// `runs.pre-if` / `runs.post-if`, shared with the node lifecycle.
+    pub pre_condition: Option<String>,
+    pub post_condition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -799,6 +816,13 @@ impl ResolvedAction {
             .iter()
             .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
             .collect::<Result<Vec<_>>>()?;
+        let render_stage_entrypoint = |value: Option<&String>| {
+            value
+                .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
+                .transpose()
+        };
+        let pre_entrypoint = render_stage_entrypoint(self.metadata.runs.pre_entrypoint.as_ref())?;
+        let post_entrypoint = render_stage_entrypoint(self.metadata.runs.post_entrypoint.as_ref())?;
 
         Ok(DockerActionInvocation {
             image,
@@ -809,6 +833,10 @@ impl ResolvedAction {
             env,
             entrypoint,
             args,
+            pre_entrypoint,
+            post_entrypoint,
+            pre_condition: self.metadata.runs.pre_if.clone(),
+            post_condition: self.metadata.runs.post_if.clone(),
         })
     }
 
@@ -1934,6 +1962,34 @@ runs:
         );
         assert_eq!(metadata.runs.entrypoint.as_deref(), Some("/entrypoint.sh"));
         assert_eq!(metadata.runs.args, vec!["${{ inputs.image }}"]);
+    }
+
+    /// F4: docker `runs.pre-entrypoint` / `runs.post-entrypoint` (plus
+    /// their `pre-if` / `post-if` conditions) parse — serde drops
+    /// misspelled keys silently, so pin the wire names.
+    #[test]
+    fn parses_docker_action_pre_post_entrypoints() {
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: docker
+  image: Dockerfile
+  pre-entrypoint: /setup.sh
+  entrypoint: /main.sh
+  post-entrypoint: /cleanup.sh
+  pre-if: success()
+  post-if: always()
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.runs.pre_entrypoint.as_deref(), Some("/setup.sh"));
+        assert_eq!(
+            metadata.runs.post_entrypoint.as_deref(),
+            Some("/cleanup.sh")
+        );
+        assert_eq!(metadata.runs.pre_if.as_deref(), Some("success()"));
+        assert_eq!(metadata.runs.post_if.as_deref(), Some("always()"));
     }
 
     #[test]
