@@ -63,7 +63,7 @@ pub fn observe(op: DockerOp, elapsed: Duration, exit_code: i32, timed_out: bool)
     );
 }
 
-/// Record one query served by the Engine API: no process was spawned, so
+/// Record one call served by the Engine API: no process was spawned, so
 /// `invocations` is untouched and this is the counter that rises instead.
 /// The per-class API latency is the migrated-calls comparison against the
 /// CLI histogram above; only successful servings land here, so the number
@@ -147,7 +147,7 @@ pub struct Snapshot {
     pub failures: u64,
     /// One entry per class that occurred, in [`DockerOp::ALL`] order.
     pub classes: Vec<ClassTotal>,
-    /// Queries served by the Engine API without spawning a process.
+    /// Calls served by the Engine API without spawning a process.
     pub api_calls: u64,
     /// API attempts that fell back to the CLI (each cost one subprocess,
     /// counted in `invocations` by the CLI call that follows).

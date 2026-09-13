@@ -14,14 +14,15 @@
 //!   `execution/unix_api.rs` precedent shows hand-rolled socket HTTP is this
 //!   codebase's established shape; this module is its async Engine sibling.
 //!
-//! Endpoint coverage is read-only control-plane plus the idempotent
-//! container-lifecycle mutations: `version`, `info`, container inspect,
-//! image inspect, network inspect, the filtered container/network/volume
-//! lists, and container start/stop/remove. Paths are unversioned, which is
-//! the negotiation: the daemon serves its native schema, nothing pins an
-//! old API version, and any schema drift surfaces as an [`EngineError`]
-//! that the facade answers with its CLI fallback — never as a misread
-//! value.
+//! Endpoint coverage is read-only control-plane, the idempotent
+//! container-lifecycle mutations, and one payload call: `version`, `info`,
+//! container inspect, image inspect, network inspect, the filtered
+//! container/network/volume lists, container start/stop/remove, and
+//! `exec_create`/`exec_start`/exec-inspect for run steps in containers.
+//! Paths are unversioned, which is the negotiation: the daemon serves its
+//! native schema, nothing pins an old API version, and any schema drift
+//! surfaces as an [`EngineError`] that the facade answers with its CLI
+//! fallback — never as a misread value.
 //!
 //! The mutations are safe under the fallback contract because they are
 //! idempotent: a timed-out API attempt that the daemon did act on is
@@ -30,6 +31,18 @@
 //! container reads as already-removed on both legs). Non-idempotent
 //! mutations (create, run) can never share this contract: a fallback
 //! after an ambiguous timeout could act twice.
+//!
+//! Exec is the deliberate exception, scoped to the script-step path. A
+//! fallback after the exec'd process started re-runs the step —
+//! unavoidable, since only the rerun reproduces the CLI leg's bytes — so
+//! the safe cases (create refused, start never connected: the process
+//! provably never ran) and the rerun cases (ambiguous start, mid-stream
+//! fault, lost exit code) share one contract: ANY API error falls back,
+//! every fallback is telemetry-visible with its fault label, and a future
+//! slice may narrow the rerun cases to surface instead. The step deadline
+//! never falls back: an expired API exec synthesizes the CLI watchdog's
+//! own 124 result (same message, same partial streams) after killing the
+//! container the same way, so expiry is identical, not retried.
 //!
 //! Transport rules, all load-bearing for the "identical results" guarantee:
 //!
@@ -634,25 +647,52 @@ impl EngineClient {
         op: DockerOp,
         budget: Duration,
     ) -> EngineResult<(u16, Vec<u8>)> {
+        self.request_with_body(method, path, None, op, budget).await
+    }
+
+    /// One request with an optional JSON body. `None` sends the historical
+    /// header sets byte-identically (see [`Self::request`]); `Some` declares
+    /// `Content-Type: application/json` with the exact length. The exec
+    /// calls are the only bodied requests: create and start carry their
+    /// documents, and the start response is hijacked (raw multiplexed
+    /// stream, never framed), so it bypasses [`read_response`] via
+    /// [`Self::exec_stream`].
+    async fn request_with_body(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        op: DockerOp,
+        budget: Duration,
+    ) -> EngineResult<(u16, Vec<u8>)> {
         let socket = self.socket.clone();
         let method = method.to_string();
         let path = path.to_string();
+        let body = body.map(<[u8]>::to_vec);
         let attempt = async move {
             let mut stream = tokio::net::UnixStream::connect(&socket)
                 .await
                 .map_err(|error| (EngineFaultKind::Connect, error.to_string()))?;
-            let request = if method == "GET" {
-                format!(
+            let head = match (method.as_str(), body.as_ref()) {
+                (_, Some(body)) => format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                ),
+                ("GET", None) => format!(
                     "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
-                )
-            } else {
-                format!(
+                ),
+                (_, None) => format!(
                     "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
+                ),
             };
-            tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
+            tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
                 .await
                 .map_err(|error| (EngineFaultKind::Write, error.to_string()))?;
+            if let Some(body) = &body {
+                tokio::io::AsyncWriteExt::write_all(&mut stream, body)
+                    .await
+                    .map_err(|error| (EngineFaultKind::Write, error.to_string()))?;
+            }
             read_response(&mut stream).await
         };
         match tokio::time::timeout(budget, attempt).await {
@@ -863,6 +903,172 @@ impl EngineClient {
             _ => Err(status_fault(op, status)),
         }
     }
+
+    /// `POST /containers/{name}/exec`: create the exec instance for one
+    /// script step, returning its id. The document mirrors the CLI leg's
+    /// flags exactly — no `-i` (stdin closed), no `-t` (multiplexed
+    /// stream), no `-d` (attached), no `--user`/`--privileged` (the
+    /// container default) — and `Env`/`WorkingDir`/`Cmd` carry the same
+    /// values the CLI leg puts on argv, JSON-encoded instead of
+    /// env-filed. 201 carries the id; anything else (404 included) is an
+    /// API error the CLI fallback re-derives into the step's own failure.
+    pub(crate) async fn exec_create(
+        &self,
+        container: &str,
+        config: &ExecConfig,
+        budget: Duration,
+    ) -> EngineResult<String> {
+        let op = DockerOp::Payload;
+        let path = format!("/containers/{}/exec", encode_segment(container));
+        let env: Vec<String> = config
+            .env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        let document = serde_json::json!({
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "Tty": false,
+            "Cmd": config.cmd,
+            "Env": env,
+            "WorkingDir": config.workdir,
+        });
+        let body = serde_json::to_vec(&document)
+            .map_err(|error| EngineError::fault(op, (EngineFaultKind::Json, error.to_string())))?;
+        let (status, response) = self
+            .request_with_body("POST", &path, Some(&body), op, budget)
+            .await?;
+        if status != 201 {
+            return Err(status_fault(op, status));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&response)
+            .map_err(|error| EngineError::fault(op, (EngineFaultKind::Json, error.to_string())))?;
+        require_str(&value, "/Id")
+            .map(str::to_string)
+            .map_err(|fault| EngineError::fault(op, fault))
+    }
+
+    /// `POST /exec/{id}/start` with `Detach:false, Tty:false`, streaming the
+    /// hijacked multiplexed output into `output` (live lines to `on_line`)
+    /// until the daemon closes. 200 plus a close-delimited raw stream is
+    /// the live shape; anything else is an API error. No budget here: the
+    /// caller wraps [`Self::exec_run`] in the step deadline, and the
+    /// buffers are caller-owned so an abandoned stream keeps its partial
+    /// lines for the 124 synthesis.
+    async fn exec_stream(
+        &self,
+        id: &str,
+        op: DockerOp,
+        output: &mut ExecOutput,
+        on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    ) -> EngineResult<()> {
+        use tokio::io::AsyncReadExt as _;
+        let socket = self.socket.clone();
+        let path = format!("/exec/{id}/start");
+        let body: &[u8] = br#"{"Detach":false,"Tty":false}"#;
+        let mut stream = tokio::net::UnixStream::connect(&socket)
+            .await
+            .map_err(|error| {
+                EngineError::fault(op, (EngineFaultKind::Connect, error.to_string()))
+            })?;
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut stream, head.as_bytes())
+            .await
+            .map_err(|error| EngineError::fault(op, (EngineFaultKind::Write, error.to_string())))?;
+        tokio::io::AsyncWriteExt::write_all(&mut stream, body)
+            .await
+            .map_err(|error| EngineError::fault(op, (EngineFaultKind::Write, error.to_string())))?;
+        let (response, first_bytes) = read_head(&mut stream)
+            .await
+            .map_err(|fault| EngineError::fault(op, fault))?;
+        if response.status != 200 {
+            return Err(status_fault(op, response.status));
+        }
+        // Hijacked: whatever framing the head declares, the rest is the raw
+        // multiplexed stream until EOF — never content-length, never chunked.
+        let mut demux = Demux::default();
+        drain_frames(&mut demux, &first_bytes, op, output, on_line)?;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = stream.read(&mut chunk).await.map_err(|error| {
+                EngineError::fault(op, (EngineFaultKind::Read, error.to_string()))
+            })?;
+            if read == 0 {
+                break;
+            }
+            drain_frames(&mut demux, &chunk[..read], op, output, on_line)?;
+        }
+        if !demux.is_drained() {
+            return Err(EngineError::fault(
+                op,
+                (
+                    EngineFaultKind::Framing,
+                    "exec stream closed inside a multiplexed frame".to_string(),
+                ),
+            ));
+        }
+        output.finish(on_line);
+        Ok(())
+    }
+
+    /// `GET /exec/{id}/json` after the stream closed: the exit code the CLI
+    /// leg reports as the `docker exec` status. A null code (still running)
+    /// after EOF is skew — the daemon sets it before closing — and falls
+    /// back; the daemon normalizes to eight bits (live: `exit 300` reads
+    /// 44 on both transports), and the low-byte conversion matches the
+    /// CLI's own process-exit truncation for every value regardless.
+    pub(crate) async fn exec_inspect(&self, id: &str, budget: Duration) -> EngineResult<i32> {
+        let op = DockerOp::Payload;
+        let path = format!("/exec/{id}/json");
+        let (status, response) = self.request("GET", &path, op, budget).await?;
+        if status != 200 {
+            return Err(status_fault(op, status));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&response)
+            .map_err(|error| EngineError::fault(op, (EngineFaultKind::Json, error.to_string())))?;
+        let Some(code) = value.pointer("/ExitCode") else {
+            return Err(EngineError::fault(op, schema_missing("/ExitCode")));
+        };
+        if code.is_null() {
+            return Err(EngineError::fault(
+                op,
+                (
+                    EngineFaultKind::Schema,
+                    "exec still running after its stream closed".to_string(),
+                ),
+            ));
+        }
+        let Some(code) = code.as_i64() else {
+            return Err(EngineError::fault(op, schema_missing("/ExitCode integer")));
+        };
+        Ok(i32::from(code as u8))
+    }
+
+    /// One script step end to end: create, stream, exit code. Create and
+    /// inspect run under the capped API budget; the stream phase is
+    /// unbounded here and the caller MUST wrap this future in the step
+    /// deadline (plus the cancellation race), exactly as the facade's exec
+    /// router does. `output` accumulates the demuxed streams with the CLI
+    /// runner's own line semantics, so whatever survives an abandoned
+    /// stream is byte-identical to what the CLI leg streamed that far.
+    pub(crate) async fn exec_run(
+        &self,
+        container: &str,
+        config: &ExecConfig,
+        deadline: Duration,
+        output: &mut ExecOutput,
+        on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    ) -> EngineResult<i32> {
+        let op = DockerOp::Payload;
+        let budget = api_budget(deadline);
+        let id = self.exec_create(container, config, budget).await?;
+        self.exec_stream(&id, op, output, on_line).await?;
+        self.exec_inspect(&id, budget).await
+    }
 }
 
 /// A daemon non-success status as an API error: the code only, never the
@@ -895,6 +1101,190 @@ impl ListFilter {
         let document = serde_json::json!({ "label": [format!("{key}={value}")] });
         encode_segment(&document.to_string())
     }
+}
+
+/// What one script step runs: the argv, the ordered environment, and the
+/// working directory. Built at the executor's script-step call site from
+/// the same values the CLI leg puts on argv — the only transport
+/// difference is JSON encoding instead of env files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExecConfig {
+    pub cmd: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub workdir: String,
+}
+
+/// Incremental parser for the daemon's multiplexed exec stream: an 8-byte
+/// header (`stream-id`, three zero bytes, big-endian payload length)
+/// followed by the payload, stream 1 for stdout and 2 for stderr. Pure
+/// over pushed bytes — frames split across socket reads reassemble here —
+/// so every framing edge is a unit case, not a socket dance.
+#[derive(Debug, Default)]
+struct Demux {
+    pending: Vec<u8>,
+}
+
+/// One demuxed frame: the stream id (1 stdout, 2 stderr) plus its payload.
+type Frame = (u8, Vec<u8>);
+
+impl Demux {
+    /// Feed newly read bytes, returning every complete frame. A short
+    /// header or payload waits for the next push; anything else is skew
+    /// the CLI fallback re-derives. Single frames are capped at
+    /// [`MAX_BODY_BYTES`]: the daemon writes copy-sized frames, so a
+    /// larger declaration is corruption, not output.
+    fn push(&mut self, bytes: &[u8]) -> FaultResult<Vec<Frame>> {
+        const HEADER: usize = 8;
+        self.pending.extend_from_slice(bytes);
+        let mut frames = Vec::new();
+        loop {
+            if self.pending.len() < HEADER {
+                return Ok(frames);
+            }
+            let stream = self.pending[0];
+            if stream != 1 && stream != 2 {
+                return Err((
+                    EngineFaultKind::Framing,
+                    format!("unknown multiplexed stream {stream}"),
+                ));
+            }
+            let size = u32::from_be_bytes([
+                self.pending[4],
+                self.pending[5],
+                self.pending[6],
+                self.pending[7],
+            ]) as usize;
+            if size > MAX_BODY_BYTES {
+                return Err((
+                    EngineFaultKind::TooLarge,
+                    format!("multiplexed frame declares {size} payload bytes"),
+                ));
+            }
+            if self.pending.len() < HEADER + size {
+                return Ok(frames);
+            }
+            frames.push((stream, self.pending[HEADER..HEADER + size].to_vec()));
+            self.pending.drain(..HEADER + size);
+        }
+    }
+
+    /// True when no partial frame survives: the stream must end on a frame
+    /// boundary, and a close anywhere else is corruption, not output.
+    fn is_drained(&self) -> bool {
+        self.pending.is_empty()
+    }
+}
+
+/// Feed `bytes` through the demuxer into the accumulator, frame by frame.
+fn drain_frames(
+    demux: &mut Demux,
+    bytes: &[u8],
+    op: DockerOp,
+    output: &mut ExecOutput,
+    on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+) -> EngineResult<()> {
+    let frames = demux
+        .push(bytes)
+        .map_err(|fault| EngineError::fault(op, fault))?;
+    for (stream, payload) in frames {
+        output.push_frame(stream, &payload, on_line);
+    }
+    Ok(())
+}
+
+/// The demuxed streams of one exec, accumulated with the CLI runner's own
+/// line semantics ([`crate::executor`] `stream_reader`, mirrored
+/// exactly): each stream splits on `\n` independently, one trailing `\r`
+/// is stripped per line, lines decode lossy UTF-8, every emitted line is
+/// appended with a `\n` terminator whether the process printed one or
+/// not, and a nonempty tail without a trailing newline still emits. Live
+/// lines reach `on_line` per stream as they complete; only the
+/// cross-stream interleave differs from the CLI leg (daemon frame order
+/// instead of two racing pipe readers), which was already racy there.
+#[derive(Debug, Default)]
+pub(crate) struct ExecOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pending_stdout: Vec<u8>,
+    pending_stderr: Vec<u8>,
+}
+
+impl ExecOutput {
+    fn push_frame(
+        &mut self,
+        stream: u8,
+        payload: &[u8],
+        on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    ) {
+        let (pending, sink, which) = if stream == 1 {
+            (
+                &mut self.pending_stdout,
+                &mut self.stdout,
+                crate::executor::CommandStream::Stdout,
+            )
+        } else {
+            (
+                &mut self.pending_stderr,
+                &mut self.stderr,
+                crate::executor::CommandStream::Stderr,
+            )
+        };
+        pending.extend_from_slice(payload);
+        // Single pass: every byte is scanned and copied once, and the
+        // consumed prefix drains once. Draining per line is quadratic in
+        // the line count — a megabyte of short lines took twelve seconds.
+        let mut start = 0;
+        while let Some(relative) = pending[start..].iter().position(|byte| *byte == b'\n') {
+            let end = start + relative;
+            let mut line = pending[start..end].to_vec();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            emit_exec_line(&mut *sink, &mut *on_line, which, &line);
+            start = end + 1;
+        }
+        pending.drain(..start);
+    }
+
+    /// Flush each stream's unterminated tail, if any: a final line without
+    /// its newline, exactly as the CLI leg's reader emits it.
+    fn finish(&mut self, on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send)) {
+        for (pending, sink, which) in [
+            (
+                &mut self.pending_stdout,
+                &mut self.stdout,
+                crate::executor::CommandStream::Stdout,
+            ),
+            (
+                &mut self.pending_stderr,
+                &mut self.stderr,
+                crate::executor::CommandStream::Stderr,
+            ),
+        ] {
+            if pending.is_empty() {
+                continue;
+            }
+            let mut line: Vec<u8> = std::mem::take(pending);
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            emit_exec_line(&mut *sink, &mut *on_line, which, &line);
+        }
+    }
+}
+
+/// One completed line into the sink and the live callback: lossy text,
+/// always newline-terminated in the accumulation.
+fn emit_exec_line(
+    sink: &mut String,
+    on_line: &mut (dyn FnMut(crate::executor::CommandStream, &str) + Send),
+    which: crate::executor::CommandStream,
+    line: &[u8],
+) {
+    let line = String::from_utf8_lossy(line);
+    sink.push_str(&line);
+    sink.push('\n');
+    on_line(which, &line);
 }
 
 type EngineResult<T> = Result<T, EngineError>;
@@ -969,14 +1359,15 @@ fn parse_head(head: &[u8]) -> FaultResult<ResponseHead> {
     })
 }
 
-/// Read one full response: head plus exactly its body. Bodies are capped at
-/// [`MAX_BODY_BYTES`]; chunked framing (what the live daemon sends) is
-/// slurped under the same cap and decoded from memory by [`decode_chunked`].
-async fn read_response(stream: &mut tokio::net::UnixStream) -> FaultResult<(u16, Vec<u8>)> {
+/// Read one response head, returning it with the bytes already read past
+/// it. Shared by framed responses ([`read_response`]) and the hijacked
+/// exec stream, where the trailing bytes are the first multiplexed output,
+/// not a framed body.
+async fn read_head(stream: &mut tokio::net::UnixStream) -> FaultResult<(ResponseHead, Vec<u8>)> {
     use tokio::io::AsyncReadExt as _;
     let mut buffer = Vec::with_capacity(8 * 1024);
     let mut chunk = [0_u8; 8192];
-    let (head, body_start) = loop {
+    loop {
         if buffer.len() > MAX_HEAD_BYTES {
             return Err((
                 EngineFaultKind::TooLarge,
@@ -984,7 +1375,7 @@ async fn read_response(stream: &mut tokio::net::UnixStream) -> FaultResult<(u16,
             ));
         }
         if let Some(end) = header_end(&buffer) {
-            break (parse_head(&buffer[..end])?, end);
+            return Ok((parse_head(&buffer[..end])?, buffer[end..].to_vec()));
         }
         let read = stream
             .read(&mut chunk)
@@ -994,7 +1385,17 @@ async fn read_response(stream: &mut tokio::net::UnixStream) -> FaultResult<(u16,
             return Err((EngineFaultKind::Read, "eof before response head".into()));
         }
         buffer.extend_from_slice(&chunk[..read]);
-    };
+    }
+}
+
+/// Read one full response: head plus exactly its body. Bodies are capped at
+/// [`MAX_BODY_BYTES`]; chunked framing (what the live daemon sends) is
+/// slurped under the same cap and decoded from memory by [`decode_chunked`].
+async fn read_response(stream: &mut tokio::net::UnixStream) -> FaultResult<(u16, Vec<u8>)> {
+    use tokio::io::AsyncReadExt as _;
+    let (head, mut buffer) = read_head(stream).await?;
+    let mut chunk = [0_u8; 8192];
+    let body_start = 0;
     // Chunked wins over a declared length when both are present (RFC 9112:
     // a sender must not generate both, a recipient must ignore the length).
     if head.chunked {
@@ -1522,6 +1923,24 @@ pub(crate) mod mock {
                     break;
                 }
             }
+            // Bodied requests (exec create/start): read exactly the
+            // declared body so handlers can pin the document. The client
+            // always writes head and body before reading, and the 10 s
+            // read timeout above bounds this either way.
+            let head_end = buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap_or(buffer.len());
+            if let Some(length) = content_length_of(&buffer[..head_end]) {
+                while buffer.len() < head_end + length {
+                    let read = stream.read(&mut chunk)?;
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+            }
             let head = String::from_utf8_lossy(&buffer).into_owned();
             let response = handler(&head);
             stream.write_all(&response)?;
@@ -1574,6 +1993,43 @@ pub(crate) mod mock {
         )
         .into_bytes()
     }
+
+    /// Declared request body length, if the head carries one.
+    fn content_length_of(head: &[u8]) -> Option<usize> {
+        let text = std::str::from_utf8(head).ok()?;
+        for line in text.lines().skip(1) {
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-length")
+            {
+                return value.trim().parse::<usize>().ok();
+            }
+        }
+        None
+    }
+
+    /// One multiplexed exec frame: stream id (1 stdout, 2 stderr), three
+    /// zero bytes, big-endian length, payload. The live daemon's shape.
+    pub(crate) fn exec_frame(stream: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![stream, 0, 0, 0];
+        frame.extend_from_slice(
+            &u32::try_from(payload.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    /// Live `POST /exec/{id}/start` head, Engine 29.4.0 verbatim (header
+    /// order included), plus the given multiplexed payload. Note what is
+    /// missing: no length, no chunked — the hijacked stream is
+    /// close-delimited.
+    pub(crate) fn start_response(payload: &[u8]) -> Vec<u8> {
+        let mut response = b"HTTP/1.1 200 OK\r\nApi-Version: 1.54\r\nConnection: close\r\nContent-Type: application/vnd.docker.raw-stream\r\nDocker-Experimental: true\r\nOstype: linux\r\nServer: Docker/29.4.0 (linux)\r\n\r\n"
+            .to_vec();
+        response.extend_from_slice(payload);
+        response
+    }
 }
 
 #[cfg(test)]
@@ -1587,7 +2043,9 @@ pub(crate) mod mock {
     reason = "tests may panic"
 )]
 mod tests {
-    use super::mock::{close_delimited, error_response, json_response, status_response};
+    use super::mock::{
+        close_delimited, error_response, exec_frame, json_response, start_response, status_response,
+    };
     use super::*;
     use std::sync::Arc;
 
@@ -2279,5 +2737,365 @@ mod tests {
         assert!(engine_api_enabled(), "env 1 enables even in tests");
         unsafe { std::env::remove_var("VELNOR_DOCKER_ENGINE_API") };
         assert!(!engine_api_enabled(), "test default is off");
+    }
+
+    // ------------------------------------------------------------------
+    // Exec: demux, line semantics, create/stream/inspect
+    // ------------------------------------------------------------------
+    //
+    // Every fixture is Engine 29.4.0 verbatim: the create 201, the start
+    // head plus multiplexed frames, and the inspect document are byte
+    // captures from the live probes behind this slice.
+
+    /// The live `sh -c 'echo out; echo err >&2; exit 3'` stream: stderr
+    /// first (daemon scheduling), then stdout — interleave the parser
+    /// must not depend on.
+    fn live_out_err_stream() -> Vec<u8> {
+        let mut stream = exec_frame(2, b"err\n");
+        stream.extend_from_slice(&exec_frame(1, b"out\n"));
+        stream
+    }
+
+    fn test_exec_config() -> ExecConfig {
+        ExecConfig {
+            cmd: vec!["sh".into(), "-e".into(), "/__t/step.sh".into()],
+            env: vec![("A".into(), "1".into()), ("A".into(), "2".into())],
+            workdir: "/__w".into(),
+        }
+    }
+
+    #[test]
+    fn demux_reassembles_frames_split_at_any_point() {
+        // The live multi-line frame: two lines in nine payload bytes.
+        let live = exec_frame(1, b"A=2\n/tmp\n");
+        assert_eq!(
+            &live,
+            &[1, 0, 0, 0, 0, 0, 0, 9, b'A', b'=', b'2', b'\n', b'/', b't', b'm', b'p', b'\n']
+                .as_slice()
+        );
+        let mut bytes = live.clone();
+        bytes.extend_from_slice(&exec_frame(2, b"err\n"));
+        for width in [1, 3, 7, 8, 9, 17, 64] {
+            let mut demux = Demux::default();
+            let mut frames = Vec::new();
+            for chunk in bytes.chunks(width) {
+                frames.extend(demux.push(chunk).unwrap());
+            }
+            assert!(demux.is_drained(), "width {width}");
+            assert_eq!(
+                frames,
+                vec![(1, b"A=2\n/tmp\n".to_vec()), (2, b"err\n".to_vec())],
+                "width {width}"
+            );
+        }
+        // An empty push is a no-op, not an error.
+        let mut demux = Demux::default();
+        assert!(demux.push(&[]).unwrap().is_empty());
+        assert!(demux.is_drained());
+    }
+
+    #[test]
+    fn demux_rejects_unknown_streams_and_absurd_sizes() {
+        for stream in [0, 3, 255] {
+            let mut demux = Demux::default();
+            let (kind, _) = demux.push(&exec_frame(stream, b"x")).unwrap_err();
+            assert_eq!(kind, EngineFaultKind::Framing, "stream {stream}");
+        }
+        // A huge declaration is TooLarge before it ever buffers.
+        let mut demux = Demux::default();
+        let (kind, _) = demux
+            .push(&[1, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF])
+            .unwrap_err();
+        assert_eq!(kind, EngineFaultKind::TooLarge);
+        // A short header waits for more bytes instead of erroring.
+        let mut demux = Demux::default();
+        assert!(demux.push(&[1, 0, 0]).unwrap().is_empty());
+        assert!(!demux.is_drained());
+    }
+
+    #[test]
+    fn exec_output_matches_stream_reader_line_semantics() {
+        use crate::executor::CommandStream;
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        let mut on_line = |stream: CommandStream, line: &str| {
+            lines.push((stream, line.to_string()));
+        };
+        // CRLF strips, unterminated tails emit with a terminator appended.
+        output.push_frame(1, b"a\r\nb", &mut on_line);
+        output.push_frame(2, b"\xff\n", &mut on_line);
+        // Empty payloads and empty lines are not lines.
+        output.push_frame(1, b"", &mut on_line);
+        output.finish(&mut on_line);
+        assert_eq!(output.stdout, "a\nb\n");
+        assert_eq!(output.stderr, "�\n");
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stdout, "a".to_string()),
+                (CommandStream::Stderr, "�".to_string()),
+                (CommandStream::Stdout, "b".to_string()),
+            ]
+        );
+
+        // Inner carriage returns survive; a trailing CR without LF strips
+        // at EOF, exactly as the CLI leg's reader does.
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        let mut on_line = |stream: CommandStream, line: &str| {
+            lines.push((stream, line.to_string()));
+        };
+        output.push_frame(1, b"a\rb\nx\r", &mut on_line);
+        output.finish(&mut on_line);
+        assert_eq!(output.stdout, "a\rb\nx\n");
+        assert_eq!(lines.len(), 2);
+
+        // Silence stays silent: no bytes, no lines, empty strings.
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        output.finish(&mut |stream: CommandStream, line: &str| {
+            lines.push((stream, line.to_string()));
+        });
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exec_create_posts_json_and_reads_201_id() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = Arc::clone(&seen);
+        let mock = MockEngine::serve(
+            move |request| {
+                seen_server.lock().unwrap().push(request.to_string());
+                error_response(
+                    "201 Created",
+                    r#"{"Id":"bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e"}"#,
+                )
+            },
+            1,
+        );
+        let id = EngineClient::new(mock.socket.clone())
+            .exec_create("velnor-job-1", &test_exec_config(), BUDGET)
+            .await
+            .unwrap();
+        assert_eq!(
+            id,
+            "bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e"
+        );
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let (head, body) = seen[0].split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.starts_with("POST /containers/velnor-job-1/exec HTTP/1.1\r\n"),
+            "{head}"
+        );
+        assert!(head.contains("Content-Type: application/json"), "{head}");
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "AttachStdin": false,
+                "AttachStdout": true,
+                "AttachStderr": true,
+                "Tty": false,
+                "Cmd": ["sh", "-e", "/__t/step.sh"],
+                "Env": ["A=1", "A=2"],
+                "WorkingDir": "/__w",
+            }),
+            "{body}"
+        );
+
+        // A missing container is a Status error with the document hidden;
+        // the CLI fallback re-derives the step's own failure.
+        let mock = MockEngine::serve(
+            |_| {
+                error_response(
+                    "404 Not Found",
+                    r#"{"message":"No such container: velnor-job-1"}"#,
+                )
+            },
+            1,
+        );
+        let error = EngineClient::new(mock.socket.clone())
+            .exec_create("velnor-job-1", &test_exec_config(), BUDGET)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Status));
+        assert!(!format!("{error}").contains("No such"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn exec_run_streams_live_shaped_output_and_exit_code() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_server = Arc::clone(&seen);
+        let mock = MockEngine::serve(
+            move |request| {
+                let line = request.lines().next().unwrap_or("").to_string();
+                seen_server.lock().unwrap().push(line);
+                if request.contains("POST /containers/") {
+                    error_response(
+                        "201 Created",
+                        r#"{"Id":"bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e"}"#,
+                    )
+                } else if request.contains("POST /exec/") {
+                    start_response(&live_out_err_stream())
+                } else {
+                    json_response(
+                        r#"{"ID":"bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e","Running":false,"ExitCode":3,"ProcessConfig":{"tty":false,"entrypoint":"sh","arguments":["-c","echo out"],"privileged":false},"OpenStdin":false,"OpenStderr":true,"OpenStdout":true}"#,
+                    )
+                }
+            },
+            3,
+        );
+        let client = EngineClient::new(mock.socket.clone());
+        let mut output = ExecOutput::default();
+        let mut lines = Vec::new();
+        let code = client
+            .exec_run(
+                "velnor-job-1",
+                &test_exec_config(),
+                Duration::from_secs(30),
+                &mut output,
+                &mut |stream: crate::executor::CommandStream, line: &str| {
+                    lines.push((stream, line.to_string()));
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 3);
+        assert_eq!(output.stdout, "out\n");
+        assert_eq!(output.stderr, "err\n");
+        // Live lines arrive in daemon frame order: stderr first here.
+        assert_eq!(
+            lines,
+            vec![
+                (crate::executor::CommandStream::Stderr, "err".to_string()),
+                (crate::executor::CommandStream::Stdout, "out".to_string()),
+            ]
+        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            *seen,
+            vec![
+                "POST /containers/velnor-job-1/exec HTTP/1.1".to_string(),
+                "POST /exec/bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e/start HTTP/1.1"
+                    .to_string(),
+                "GET /exec/bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e/json HTTP/1.1"
+                    .to_string(),
+            ]
+        );
+        for line in seen.iter() {
+            assert!(!line.contains("/v1."), "no pinned old version: {line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_run_truncated_stream_is_framing() {
+        let mock = MockEngine::serve(
+            |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else {
+                    // Header promises nine payload bytes, the daemon closes
+                    // after two: corruption, not output.
+                    let mut partial = start_response(&[]);
+                    partial.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 9, b'A', b'=']);
+                    partial
+                }
+            },
+            2,
+        );
+        let error = EngineClient::new(mock.socket.clone())
+            .exec_run(
+                "velnor-job-1",
+                &test_exec_config(),
+                Duration::from_secs(30),
+                &mut ExecOutput::default(),
+                &mut |_: crate::executor::CommandStream, _: &str| {},
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Framing));
+    }
+
+    #[tokio::test]
+    async fn exec_inspect_reads_exit_code_and_rejects_skew() {
+        // Live shape, exit 7.
+        let mock = MockEngine::serve(
+            |_| json_response(r#"{"ID":"0acf6f0b9066","Running":false,"ExitCode":7}"#),
+            1,
+        );
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .exec_inspect("0acf6f0b9066", BUDGET)
+                .await
+                .unwrap(),
+            7
+        );
+        // The daemon normalizes to eight bits (live: `exit 300` reads 44
+        // on both transports); the conversion matches the CLI's process
+        // exit truncation for any value regardless.
+        let mock = MockEngine::serve(|_| json_response(r#"{"Running":false,"ExitCode":300}"#), 1);
+        assert_eq!(
+            EngineClient::new(mock.socket.clone())
+                .exec_inspect("abc", BUDGET)
+                .await
+                .unwrap(),
+            44
+        );
+        // Null after EOF means still running: skew, fall back.
+        let mock = MockEngine::serve(|_| json_response(r#"{"Running":true,"ExitCode":null}"#), 1);
+        let error = EngineClient::new(mock.socket.clone())
+            .exec_inspect("abc", BUDGET)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Schema));
+        // A missing code is skew too.
+        let mock = MockEngine::serve(|_| json_response(r#"{"Running":false}"#), 1);
+        let error = EngineClient::new(mock.socket.clone())
+            .exec_inspect("abc", BUDGET)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Some(EngineFaultKind::Schema));
+    }
+
+    #[tokio::test]
+    async fn exec_run_streams_large_output_without_a_cap() {
+        // Step output is unbounded on the CLI leg (the runner accumulates
+        // full strings), so the stream carries no cap either: 1 MB per
+        // stream, newline-terminated, must arrive byte-identical.
+        let stdout_payload = "y\n".repeat(500_000);
+        let stderr_payload = "z\n".repeat(100_000);
+        let mut stream = exec_frame(1, stdout_payload.as_bytes());
+        stream.extend_from_slice(&exec_frame(2, stderr_payload.as_bytes()));
+        let mock = MockEngine::serve(
+            move |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else if request.contains("POST /exec/") {
+                    start_response(&stream)
+                } else {
+                    json_response(r#"{"Running":false,"ExitCode":0}"#)
+                }
+            },
+            3,
+        );
+        let mut output = ExecOutput::default();
+        let mut live = 0_usize;
+        let code = EngineClient::new(mock.socket.clone())
+            .exec_run(
+                "velnor-job-1",
+                &test_exec_config(),
+                Duration::from_secs(60),
+                &mut output,
+                &mut |_: crate::executor::CommandStream, _: &str| live += 1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(output.stdout, stdout_payload);
+        assert_eq!(output.stderr, stderr_payload);
+        assert_eq!(live, 600_000);
     }
 }

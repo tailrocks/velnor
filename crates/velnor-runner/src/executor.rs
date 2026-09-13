@@ -3131,13 +3131,36 @@ where
                     };
                     let step_timeout =
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes);
-                    let step_result = self.runner.run_streaming_timeout_with_env(
-                        "docker",
+                    // Engine-API fast path for run steps in containers: the
+                    // same command, environment, and workdir the CLI leg
+                    // below receives, served with zero subprocesses when
+                    // the daemon answers. Any API failure (or a non-host
+                    // runner) runs the historical CLI call unchanged.
+                    let exec_config = crate::docker::engine::ExecConfig {
+                        cmd: plan.shell.command_args(&plan.script_container_path),
+                        env: container.script_exec_env(&env),
+                        workdir: plan.working_directory_container.clone(),
+                    };
+                    let route = crate::docker::Docker::job(&mut self.runner).try_exec_script(
+                        &container.name,
                         exec_args.args(),
-                        exec_args.process_env(),
+                        &exec_config,
                         step_timeout,
                         &mut on_output,
-                    )?;
+                    );
+                    let step_result = match route {
+                        crate::docker::client::ScriptExecRoute::Served(result)
+                        | crate::docker::client::ScriptExecRoute::Expired(result) => result,
+                        crate::docker::client::ScriptExecRoute::UseCli => {
+                            self.runner.run_streaming_timeout_with_env(
+                                "docker",
+                                exec_args.args(),
+                                exec_args.process_env(),
+                                step_timeout,
+                                &mut on_output,
+                            )?
+                        }
+                    };
                     if let (Some(compiler), Some(compile_started), Some(telemetry)) =
                         (compiler, compile_started, self.lifecycle_telemetry.as_ref())
                     {
@@ -13697,7 +13720,7 @@ fn effective_step_timeout(
 /// workflow exceeding its own `timeout-minutes`, and says so: reporting the
 /// workflow message for a wedged daemon sent operators looking at the wrong
 /// thing.
-fn timeout_command_result(
+pub(crate) fn timeout_command_result(
     op: Option<crate::docker::DockerOp>,
     deadline: Duration,
     stdout: String,
@@ -13722,6 +13745,20 @@ fn timeout_command_result(
     }
 }
 
+/// Best-effort `docker kill` for an exec/run target whose deadline expired.
+/// An exec'd process outlives its client connection, so killing the client
+/// alone orphans the step's process tree — the container must die. Shared
+/// by the CLI watchdog and the Engine-API exec router so both legs kill
+/// the same way; failures are ignored (a gone container needs no kill),
+/// and the spawn bypasses the runner metrics exactly like the watchdog's.
+pub(crate) fn kill_container_best_effort(container: &str) {
+    let kill_args = vec!["kill".to_string(), container.to_string()];
+    let mut docker = Command::new("docker");
+    if configure_host_docker_command(&mut docker, "docker", &kill_args).is_ok() {
+        let _ = docker.args(&kill_args).status();
+    }
+}
+
 fn spawn_docker_timeout_watchdog(
     program: &str,
     args: &[String],
@@ -13740,11 +13777,7 @@ fn spawn_docker_timeout_watchdog(
         if watchdog_cancelled.recv_timeout(timeout).is_err() {
             timed_out_thread.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Some(container_name) = container_name {
-                let kill_args = vec!["kill".to_string(), container_name];
-                let mut docker = Command::new("docker");
-                if configure_host_docker_command(&mut docker, "docker", &kill_args).is_ok() {
-                    let _ = docker.args(&kill_args).status();
-                }
+                kill_container_best_effort(&container_name);
             }
             let _ = Command::new("/bin/kill")
                 .args(["-KILL", &child_pid.to_string()])
