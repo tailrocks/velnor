@@ -714,6 +714,14 @@ impl ProjectConfig {
         output.push_str("[workflow]\n");
         write_toml_string(&mut output, "github_runner", &self.github_runner);
         write_toml_array(&mut output, "velnor_labels", &self.velnor_labels);
+        if let Some(group) = &self.velnor_runner_group {
+            write_toml_string(&mut output, "velnor_runner_group", group);
+        }
+        let _ = writeln!(
+            output,
+            "pull_request_on_velnor = {}",
+            self.pull_request_on_velnor
+        );
         let generated_workflows = workflow_file_names(self);
         write_toml_array(&mut output, "files", &generated_workflows);
         if !self.notes.is_empty() {
@@ -1436,8 +1444,36 @@ fn apply_generation_config(
     apply_release(config, generation.release());
     apply_unit_rows(config, generation.units());
     read_static_files(config, generation.static_files(), root)?;
+    validate_velnor_pull_request_contract(config)?;
     refresh_mr_boxington_note(config);
     config.declared_surface = true;
+    Ok(())
+}
+
+fn validate_velnor_pull_request_contract(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    if !config.pull_request_on_velnor {
+        return Ok(());
+    }
+    if config.runners == RunnerMode::Github {
+        return Err(GeneratorError::usage(
+            "[workflow] pull_request_on_velnor requires the Velnor runner lane",
+        ));
+    }
+    let labels = config
+        .velnor_labels
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if !estate::approved_velnor_runner_contract_matches(
+        &labels,
+        config.velnor_runner_group.as_deref(),
+    ) {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] pull_request_on_velnor requires the exact approved Velnor runner contract: group `{}` and labels {:?}",
+            estate::approved_velnor_runner_group(),
+            estate::approved_velnor_runner_labels()
+        )));
+    }
     Ok(())
 }
 
@@ -2619,7 +2655,7 @@ fn control_plane_runner(config: &ProjectConfig) -> String {
 
 fn control_plane_trusted_gate(default_branch: &str) -> String {
     format!(
-        "    if: ${{{{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}}}\n"
+        "    if: ${{{{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{default_branch}' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')) }}}}\n"
     )
 }
 
@@ -5204,15 +5240,16 @@ mod tests {
     }
 
     #[test]
-    fn velnor_runtime_does_not_publish_an_orphan_artifact() {
+    fn velnor_control_plane_uses_hosted_runtime_artifact() {
         let config = must(
             scan_repository_with_default_branch(&fixture_root(), RunnerMode::Velnor, "main"),
             "scan fixture for Velnor runtime handoff",
         );
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
 
-        assert!(!workflow.contains("name: Prepare Velnor workflow runtime"));
-        assert!(!workflow.contains("name: Publish Velnor workflow runtime"));
+        assert!(workflow.contains("runs-on: ubuntu-24.04"));
+        assert!(workflow.contains("name: Prepare Velnor workflow runtime"));
+        assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(!workflow.contains("name: Download Velnor workflow runtime"));
     }
 
@@ -5251,7 +5288,10 @@ mod tests {
         let action = declared_setup_action();
         assert!(action.contains("same-repository PRs may bootstrap"));
         assert!(action.contains(
-            "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
+            "CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+        ));
+        assert!(!action.contains(
+            "(github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))"
         ));
         let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
         assert!(action.contains(&expected_source));
@@ -5268,12 +5308,22 @@ mod tests {
     #[test]
     fn setup_action_forks_cannot_source_bootstrap() {
         let action = declared_setup_action();
-        assert!(action.contains("CONTROLLED_BOOTSTRAP:"));
-        assert!(
-            action.contains("source recovery is default-branch-push or same-repository-PR only")
+        let bootstrap = must_some(
+            action
+                .lines()
+                .find(|line| line.contains("CONTROLLED_BOOTSTRAP:")),
+            "CONTROLLED_BOOTSTRAP expression",
         );
+        assert!(bootstrap.contains("github.event_name == 'schedule'"));
+        assert!(bootstrap.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(bootstrap
+            .contains("github.event.pull_request.head.repo.full_name == github.repository"));
+        assert!(!bootstrap.contains("pull_request_target"));
+        assert!(action.contains(
+            "source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only"
+        ));
         assert!(
-            action.contains("github.event.pull_request.head.repo.full_name == github.repository")
+            !action.contains("source recovery is default-branch-push or same-repository-PR only")
         );
         assert!(!action.contains("pull_request_target"));
     }
@@ -7848,7 +7898,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!velnor.contains("backend: github"));
         assert!(velnor.contains(&fixture_lane_selector()));
         assert!(velnor.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))"
         ));
         assert!(velnor.contains("github.event_name == 'workflow_dispatch'"));
 
@@ -7856,7 +7906,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .render(WorkflowKind::PullRequest);
         assert!(velnor_pr.contains("on:\n  pull_request:"));
         assert!(velnor_pr.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))"
         ));
         assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));

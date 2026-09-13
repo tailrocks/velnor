@@ -61,14 +61,45 @@ fn write_rust_fixture(root: &Path, crates: usize) {
     fs::write(root.join("Cargo.toml"), workspace).unwrap();
     fs::write(root.join("Cargo.lock"), "version = 3\n").unwrap();
     fs::create_dir_all(root.join(".github-gen")).unwrap();
+    let approved_runner_fields = approved_runner_fields();
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
-        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n",
+        format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\n{approved_runner_fields}\n"
+        ),
     )
     .unwrap();
 }
 
+fn approved_runner_fields() -> String {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::read_to_string(repository_root.join(".github-gen/velnor-workflow.toml"))
+        .unwrap()
+        .lines()
+        .filter(|line| {
+            line.trim_start().starts_with("velnor_labels =")
+                || line.trim_start().starts_with("velnor_runner_group =")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn generate(root: &Path) -> Generated {
+    let outcome = generate_result(root);
+    assert!(
+        outcome.status.success(),
+        "generation failed:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    Generated {
+        output: root.parent().unwrap().join(format!(
+            "{}-out",
+            root.file_name().and_then(|name| name.to_str()).unwrap()
+        )),
+    }
+}
+
+fn generate_result(root: &Path) -> std::process::Output {
     let output = root.parent().unwrap().join(format!(
         "{}-out",
         root.file_name().and_then(|name| name.to_str()).unwrap()
@@ -87,12 +118,7 @@ fn generate(root: &Path) -> Generated {
         ])
         .output()
         .expect("run velnor-workflow");
-    assert!(
-        outcome.status.success(),
-        "generation failed:\n{}",
-        String::from_utf8_lossy(&outcome.stderr)
-    );
-    Generated { output }
+    outcome
 }
 
 fn unique_reusable_calls(workflow: &str) -> BTreeSet<&str> {
@@ -116,13 +142,13 @@ fn pull_request_plan_and_required_are_not_main_only() {
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
     assert!(
-        pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"),
+        pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))"),
         "self-hosted PR jobs must carry the trusted main-only expression: {pr}"
     );
     assert!(!pr.contains("github.event_name == 'pull_request'"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
-    assert!(pr.contains("runs-on: [self-hosted, example-runner]"));
+    assert!(pr.contains("runs-on: { group:"));
 }
 
 #[test]
@@ -131,7 +157,7 @@ fn automatic_pr_does_not_schedule_github_hosted_unit_jobs() {
     write_rust_fixture(&root, 2);
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
-    assert!(unit.contains("runs-on: [self-hosted, example-runner]"));
+    assert!(unit.contains("runs-on: { group:"));
     assert!(unit.contains("runs-on: ubuntu-24.04"));
     assert!(
         unit.contains("github.event.inputs.runner == 'github'"),
@@ -188,7 +214,10 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     write_rust_fixture(&root, 2);
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
-        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
+        format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\n{}\npull_request_on_velnor = true\n",
+            approved_runner_fields()
+        ),
     )
     .unwrap();
     let generated = generate(&root);
@@ -197,6 +226,8 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         pr.contains("github.event_name == 'pull_request'"),
         "opt-in automatic PR must admit pull_request: {pr}"
     );
+    assert!(pr.contains("github.event_name == 'workflow_dispatch'"));
+    assert!(pr.contains("github.ref == 'refs/heads/main'"));
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(
         unit.contains("github.event_name == 'pull_request'"),
@@ -206,6 +237,22 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         pr.contains("unset CI_SCOPE_OVERRIDE"),
         "empty dispatch scope must not be passed as a CI scope: {pr}"
     );
+}
+
+#[test]
+fn pull_request_on_velnor_rejects_arbitrary_runner_contract() {
+    let root = unique_dir("pr-on-velnor-rejects-runner");
+    write_rust_fixture(&root, 2);
+    let config_path = root.join(".github-gen/velnor-workflow.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config = config.replace("velnor_labels = [", "velnor_labels = [\"example-runner\", ");
+    config.push_str("pull_request_on_velnor = true\n");
+    fs::write(config_path, config).unwrap();
+
+    let outcome = generate_result(&root);
+    assert!(!outcome.status.success());
+    assert!(String::from_utf8_lossy(&outcome.stderr)
+        .contains("pull_request_on_velnor requires the exact approved Velnor runner contract"));
 }
 
 #[test]

@@ -207,7 +207,7 @@ jobs:
   velnor-opentofu:
     name: "Velnor / opentofu"
     if: ${{ inputs.unit == 'opentofu' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
       TF_PLUGIN_CACHE_DIR: ~/.terraform.d/plugin-cache

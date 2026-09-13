@@ -170,9 +170,9 @@ jobs:
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
+    if: ${{ always() && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}
     needs: [plan, group-bun, group-docker, group-docs, group-opentofu, group-rust]
-    runs-on: [self-hosted, velnor-target-mvp]
+    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results

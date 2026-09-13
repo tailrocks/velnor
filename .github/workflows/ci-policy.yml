@@ -15,8 +15,8 @@ permissions:
 jobs:
   policy:
     name: Policy
-    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')) }}
+    runs-on: { group: velnor-trusted, labels: [self-hosted, velnor-target-mvp] }
     timeout-minutes: 10
     permissions:
       contents: read

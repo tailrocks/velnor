@@ -1144,10 +1144,7 @@ impl WorkflowIr {
 
     pub(crate) fn render_nightly_alert(&self, output: &mut String) {
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                self.default_branch
-            )
+            format!("always() && ({})", self.trusted_event_expression())
         } else {
             "always()".to_owned()
         };
@@ -1489,9 +1486,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_selection_artifact_upload());
     }
 
-    pub(crate) fn render_policy(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
+    pub(crate) fn render_policy(&self, output: &mut String, runners: RunnerMode, _trusted: bool) {
         if runners == RunnerMode::Velnor {
-            let gate = self.trusted_runner_gate(runners, trusted);
+            let gate = format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            );
             output.push_str(&crate::inline_policy_job_for_lane(
                 "Advisory policy",
                 VELNOR_POLICY_WORKFLOW_REV,
@@ -1517,8 +1517,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn trusted_event_expression(&self) -> String {
         format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            self.default_branch
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({}))",
+            self.default_branch,
+            self.velnor_dispatch_selection_expression()
+        )
+    }
+
+    fn velnor_dispatch_selection_expression(&self) -> String {
+        "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')".to_owned()
+    }
+
+    fn velnor_dispatch_expression(&self) -> String {
+        format!(
+            "github.ref == 'refs/heads/{}' && ({})",
+            self.default_branch,
+            self.velnor_dispatch_selection_expression()
         )
     }
 
@@ -1538,14 +1551,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
         let dispatch = match lane {
-            RunnerMode::Velnor => {
-                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
-            }
+            RunnerMode::Velnor => self.velnor_dispatch_expression(),
             RunnerMode::Github => {
-                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
+                "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')".to_owned()
             }
             RunnerMode::Both => {
-                "github.event_name == 'workflow_dispatch'"
+                "github.event_name == 'workflow_dispatch'".to_owned()
             }
         };
         let automatic = matches!(
@@ -1556,7 +1567,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         if automatic {
             if lane == RunnerMode::Velnor {
-                self.velnor_lane_event_expression(dispatch)
+                self.velnor_lane_event_expression(&dispatch)
             } else {
                 format!("{} || ({dispatch})", self.automatic_event_expression())
             }
@@ -1568,8 +1579,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     fn velnor_control_plane_expression(&self) -> String {
         if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
             format!(
-                "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
-                self.default_branch
+                "{} || ({})",
+                self.automatic_event_expression(),
+                self.velnor_dispatch_expression()
             )
         } else {
             self.trusted_event_expression()
@@ -1580,10 +1592,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         if self.pull_request_on_velnor == VelnorPullRequest::Automatic {
             format!("{} || ({dispatch})", self.automatic_event_expression())
         } else {
-            format!(
-                "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
-                self.default_branch
-            )
+            self.trusted_event_expression()
         }
     }
 
@@ -1609,7 +1618,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(self.trusted_event_expression());
+        let condition = Some(self.lane_event_expression(RunnerMode::Velnor));
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,
