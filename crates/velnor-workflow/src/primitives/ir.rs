@@ -1355,14 +1355,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
             self.pins.checkout
         );
-        if lane == RunnerMode::Github && unit.kind == UnitKind::Swift {
-            // Apple jobs run on macOS, where the Linux-built plan artifact
-            // has no product: install the runtime through the setup action
-            // instead of downloading the plan artifact.
-            Self::render_workflow_runtime_setup(output, lane);
-        } else {
-            Self::render_workflow_runtime_download(output, lane);
-        }
+        self.render_unit_runtime(output, lane, unit);
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
@@ -1463,6 +1456,20 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_workflow_runtime_download(output: &mut String, lane: RunnerMode) {
         output.push_str(&workflow_runtime_download(lane));
+    }
+
+    fn render_unit_runtime(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
+        if lane != RunnerMode::Github {
+            return;
+        }
+        // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
+        // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
+        // cannot consume a Linux-built plan artifact even when Planning is hosted.
+        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+            Self::render_workflow_runtime_setup(output, lane);
+        } else {
+            Self::render_workflow_runtime_download(output, lane);
+        }
     }
 
     pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
@@ -1731,14 +1738,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
                 self.pins.checkout,
             );
-            if lane == RunnerMode::Github && unit.kind == UnitKind::Swift {
-                // Apple jobs run on macOS, where the Linux-built plan
-                // artifact has no product: install the runtime through the
-                // setup action instead of downloading the plan artifact.
-                Self::render_workflow_runtime_setup(output, lane);
-            } else {
-                Self::render_workflow_runtime_download(output, lane);
-            }
+            self.render_unit_runtime(output, lane, unit);
             output.push_str(&workflow_selection_artifact_download(None));
             self.render_tool_provisioning(output, lane, unit, cache_save);
             if CacheBackend::Detected.enables_actions_cache(self, unit)
