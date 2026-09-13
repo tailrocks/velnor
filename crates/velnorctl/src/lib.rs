@@ -369,7 +369,7 @@ impl From<&str> for CommandError {
 
 impl From<anyhow::Error> for CommandError {
     fn from(error: anyhow::Error) -> Self {
-        Self::operation(error.to_string())
+        Self::operation(format!("{error:#}"))
     }
 }
 
@@ -518,10 +518,10 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
-            if args.json {
+            if args.json || globals.output_format().is_machine() {
                 return status_health_json(&args);
             }
-            run_runtime(velnor_runner::args::Command::Status((*args).into())).await
+            run_status(velnor_runner::args::Command::Status((*args).into())).await
         }
         Command::Daemon(args) => runtime::run_daemon((*args).clone())
             .await
@@ -1337,7 +1337,15 @@ fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
     let config_dir = args.config_dir.clone().unwrap_or_else(|| dir.clone());
     let execution = velnor_runner::execution::load_execution_file(&config_dir, None)
         .or_else(|_| velnor_runner::execution::load_execution_file(&dir, None))
-        .map_err(|error| CommandError::operation(error.to_string()))?;
+        .map_err(|error| {
+            if error.is_missing_file() {
+                CommandError::unavailable(format!(
+                    "{error}; pass --config-dir pointing at a configured runner directory"
+                ))
+            } else {
+                CommandError::operation(error.to_string())
+            }
+        })?;
     let mut document = match Journal::open(dir.join("journal.db")) {
         Ok(journal) => journal
             .load_state()
@@ -1359,11 +1367,37 @@ fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
 }
 
 async fn run_runtime(command: velnor_runner::args::Command) -> Result<(), CommandError> {
+    run_runtime_inner(command).await?;
+    Ok(())
+}
+
+async fn run_runtime_inner(command: velnor_runner::args::Command) -> anyhow::Result<()> {
     runtime::enforce_admission()?;
     let log_dir = runtime::telemetry_dir(&command);
     runtime::init_telemetry(log_dir.as_deref());
-    runtime::dispatch(command).await?;
-    Ok(())
+    runtime::dispatch(command).await
+}
+
+/// Human `status` keeps the failure class honest: a status read is an
+/// inspection, so a missing file means the inspected resource is absent
+/// ([`ExitClass::Unavailable`]), never a failed operation.
+async fn run_status(command: velnor_runner::args::Command) -> Result<(), CommandError> {
+    run_runtime_inner(command).await.map_err(map_status_error)
+}
+
+fn map_status_error(error: anyhow::Error) -> CommandError {
+    let not_found = error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    });
+    if not_found {
+        CommandError::unavailable(format!(
+            "{error:#}; pass --config-dir pointing at a configured runner directory"
+        ))
+    } else {
+        CommandError::from(error)
+    }
 }
 
 /// Derive the machine-readable schema document from the live clap command
@@ -1499,5 +1533,111 @@ mod tests {
     fn remove_without_target_selector_remains_valid() {
         validate_remove_target_selectors(&globals_with_repo(None))
             .expect("valid remove behavior must remain available");
+    }
+
+    fn globals_with_output(output: OutputArg) -> GlobalArgs {
+        GlobalArgs {
+            context: None,
+            output,
+            instance: None,
+            repo: None,
+            selector: None,
+            field_selector: None,
+            since: None,
+            timeout: None,
+            no_color: false,
+            verbose: 0,
+        }
+    }
+
+    fn scratch_dir(label: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "velnorctl-status-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create scratch dir");
+        path
+    }
+
+    #[test]
+    fn anyhow_chain_survives_command_error_conversion() {
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "runner.json inner cause",
+        ))
+        .context("read daemon slot-1 status");
+        let converted = CommandError::from(error);
+        assert_eq!(converted.class, ExitClass::Operation);
+        assert!(
+            converted.message.contains("read daemon slot-1 status"),
+            "{}",
+            converted.message
+        );
+        assert!(
+            converted.message.contains("runner.json inner cause"),
+            "{}",
+            converted.message
+        );
+    }
+
+    #[test]
+    fn status_not_found_maps_to_unavailable_with_config_dir_hint() {
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory",
+        ))
+        .context("read /tmp/velnor-test/runner.json");
+        let mapped = map_status_error(error);
+        assert_eq!(mapped.class, ExitClass::Unavailable);
+        assert_eq!(mapped.reason, "resource.not_found");
+        assert!(mapped.message.contains("runner.json"), "{}", mapped.message);
+        assert!(
+            mapped.message.contains("--config-dir"),
+            "{}",
+            mapped.message
+        );
+    }
+
+    #[test]
+    fn status_non_not_found_stays_operation_with_full_chain() {
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))
+        .context("outer layer");
+        let mapped = map_status_error(error);
+        assert_eq!(mapped.class, ExitClass::Operation);
+        assert!(mapped.message.contains("outer layer"), "{}", mapped.message);
+        assert!(mapped.message.contains("denied"), "{}", mapped.message);
+    }
+
+    #[tokio::test]
+    async fn status_output_json_routes_to_machine_health_path() {
+        if std::path::Path::new("/etc/velnor/execution.toml").exists() {
+            return;
+        }
+        let dir = scratch_dir("o-json-empty");
+        let cli = Cli {
+            globals: globals_with_output(OutputArg::Json),
+            command: Command::Status(Box::new(runtime::StatusArgs {
+                config_dir: Some(dir.clone()),
+                slots: 1,
+                check_target_mvp: false,
+                json: false,
+                state_dir: None,
+            })),
+        };
+        let error = execute(cli).await.expect_err("empty config dir must fail");
+        let missing = dir.join("execution.toml").display().to_string();
+        assert_eq!(error.class, ExitClass::Unavailable);
+        assert!(error.message.contains(&missing), "{}", error.message);
+        assert!(error.message.contains("--config-dir"), "{}", error.message);
+        let envelope = serde_json::to_string(&error.envelope()).expect("envelope JSON");
+        assert!(envelope.contains(&missing), "{envelope}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -325,6 +325,74 @@ fn status_json_health_vector_keys_are_stable() {
     assert_ne!(first["state"], "ready");
 }
 
+#[test]
+fn status_output_json_flag_routes_to_machine_health_vector() {
+    let dir = tempfile_dir("status-o-json");
+    std::fs::write(
+        std::path::Path::new(&dir).join("execution.toml"),
+        "[execution]\nbackend = \"docker\"\n",
+    )
+    .unwrap();
+    let output = run(&[
+        "status",
+        "-o",
+        "json",
+        "--config-dir",
+        &dir,
+        "--state-dir",
+        &dir,
+    ]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let document: serde_json::Value =
+        serde_json::from_str(text(&output.stdout).trim()).expect("machine JSON on stdout");
+    for required in velnor_model::HealthDocument::REQUIRED_KEYS {
+        assert!(
+            document.get(required).is_some(),
+            "{required} missing from {document}"
+        );
+    }
+}
+
+#[test]
+fn status_output_json_with_empty_config_dir_reports_machine_envelope() {
+    if std::path::Path::new("/etc/velnor/execution.toml").exists() {
+        return;
+    }
+    let dir = tempfile_dir("status-o-json-empty");
+    let output = run(&["status", "-o", "json", "--config-dir", &dir]);
+    assert_eq!(code(&output), 4, "{}", text(&output.stderr));
+    let stderr = text(&output.stderr);
+    let envelope: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("machine envelope JSON");
+    assert_eq!(envelope["class"], "UNAVAILABLE", "{envelope}");
+    assert_eq!(envelope["code"], 4, "{envelope}");
+    let remediation = envelope["remediation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(remediation.contains(&dir), "{remediation}");
+    assert!(remediation.contains("--config-dir"), "{remediation}");
+}
+
+#[test]
+fn status_human_with_empty_config_dir_reports_unavailable_with_path() {
+    let dir = tempfile_dir("status-human-empty");
+    let output = std::process::Command::new(bin())
+        .args(["status", "--config-dir", &dir])
+        .env_remove("CLICOLOR")
+        .env_remove("VELNOR_CAPABILITY_VALIDATION")
+        .env_remove("VELNOR_SKIP_CAPABILITY_VALIDATION")
+        .env_remove("VELNOR_DIAGNOSTIC_NODE_SIDECAR")
+        .output()
+        .expect("spawn velnorctl");
+    assert_eq!(code(&output), 4, "{}", text(&output.stderr));
+    let stderr = text(&output.stderr);
+    assert!(stderr.starts_with("error:"), "{stderr}");
+    assert!(stderr.contains(&dir), "{stderr}");
+    assert!(stderr.contains("runner.json"), "{stderr}");
+    assert!(stderr.contains("--config-dir"), "{stderr}");
+}
+
 fn clap_command_paths() -> Vec<Vec<String>> {
     fn walk(cmd: &clap::Command, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
         let mut subs: Vec<&clap::Command> = cmd
