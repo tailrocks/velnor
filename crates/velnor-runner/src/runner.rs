@@ -7594,6 +7594,7 @@ struct JobCancellationWatch {
 /// job's own service list, deregistered on drop, never leaked. They must
 /// NOT live in the poller task, which breaks right after `request()` on
 /// broker-driven cancel paths — before `Forced` escalation runs.
+#[must_use = "owned-container guards deregister on drop; hold them at job scope"]
 fn register_owned_containers(
     cancellation: &crate::execution::cancel::JobCancellation,
     job_container_name: &str,
@@ -20219,6 +20220,16 @@ jobs:
         assert_eq!(
             token.reason(),
             Some(crate::execution::cancel::CancelReason::ServerRequested)
+        );
+        // The poller task has exited; the service registration must have
+        // survived it — this pins the job-scope `_owned_containers` binding
+        // in `handle_job_request` that this test mirrors.
+        assert!(
+            token
+                .target_keys()
+                .contains(&"container:velnor-service-1-postgres".to_string()),
+            "service registration must survive poller task exit: {:?}",
+            token.target_keys()
         );
 
         token.force();
