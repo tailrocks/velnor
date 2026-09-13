@@ -83,22 +83,43 @@ fn the_setup_action_is_owned_verbatim() {
     assert!(installed.contains("name: Set up Velnor workflow runtime"));
 }
 
-/// The self-hosted lane pins its Mr. Boxington backend to `local`, and the
-/// hosted lane keeps `github`: backend selection is per lane, never global.
+/// Hosted Rust verification uses the GitHub Mr. Boxington backend. A Velnor
+/// lane, when generated, pins `local` instead of sharing the hosted backend.
 #[test]
-fn velnor_lane_uses_the_local_mb_boxington_backend() {
+fn hosted_lane_uses_the_github_mb_boxington_backend() {
     let (_, workflow) = generated_files()
         .into_iter()
         .find(|(name, _)| name == "ci-unit-rust.yml")
         .expect("the rust kind reusable renders a workflow");
-    assert!(
-        workflow.contains("backend: local"),
-        "velnor lane lost its local backend"
-    );
-    assert!(
-        workflow.contains("backend: github"),
-        "hosted lane lost the github backend"
-    );
+    let project = read(".github/ci/project.toml");
+    if project.contains("runners = \"velnor\"") {
+        assert!(
+            !workflow.contains("backend: github"),
+            "velnor-only surface must not emit a GitHub hosted backend"
+        );
+        assert!(
+            workflow.contains("backend: local"),
+            "velnor lane lost its local backend"
+        );
+    } else if project.contains("runners = \"github\"") {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
+        assert!(
+            !workflow.contains("backend: local"),
+            "github-only surface must not emit a Velnor local backend"
+        );
+    } else {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
+        assert!(
+            workflow.contains("backend: local"),
+            "velnor lane lost its local backend"
+        );
+    }
 }
 
 /// The regeneration gate stays wired: the workflow crate's own unit watches

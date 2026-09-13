@@ -456,12 +456,10 @@ fn analyze_rust_manifests(
             // the flag nextest exits nonzero on an empty collection, failing
             // test-less crates that fmt and clippy accept.
             format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} --all-features {package_selector} --no-tests pass"
+                "{command_prefix}cargo nextest run {cargo_lock_flag} {package_selector} --no-tests pass"
             )
         } else {
-            format!(
-                "{command_prefix}cargo test {cargo_lock_flag} --all-features {package_selector}"
-            )
+            format!("{command_prefix}cargo test {cargo_lock_flag} {package_selector}")
         };
         let commands = vec![
             format!(
@@ -469,7 +467,7 @@ fn analyze_rust_manifests(
                 shell_quote("Cargo.toml")
             ),
             format!(
-                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets --all-features {package_selector} -- -D warnings"
+                "{command_prefix}cargo clippy {cargo_lock_flag} --no-deps --all-targets {package_selector} -- -D warnings"
             ),
             test_command,
         ];

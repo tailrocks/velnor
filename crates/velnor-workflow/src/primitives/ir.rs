@@ -21,9 +21,10 @@ use crate::{
     nested_unit_workflow_file, rendered_cache_values, sidebar_group_name, stack_group_job_id,
     unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
-    workflow_selection_artifact_download, workflow_selection_artifact_upload, yaml_scalar,
-    CachePurpose, CacheSpec, ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind,
-    GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    workflow_runtime_setup_with_install_rev, workflow_selection_artifact_download,
+    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, ProjectConfig,
+    RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
+    OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
@@ -686,6 +687,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) runners: RunnerMode,
+    pub(crate) automatic: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
     /// never provides the Rust toolchain (rustup owns that), it only
@@ -731,18 +733,19 @@ fn workflow_dispatch_inputs(
     default_branch: &str,
     extra_inputs: &str,
     runners: RunnerMode,
+    automatic: RunnerMode,
 ) -> String {
-    // Both-mode aggregates name the manual lane selector `lanes`, the name
-    // the static release lane-admission idiom and the adopted estate surface
-    // already use; single-lane modes keep the historical `runner` input
-    // byte-identical.
-    let lane_input = if runners == RunnerMode::Both {
-        "      lanes:\n        description: velnor (default) | github | both\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n"
-    } else {
-        "      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n"
+    let (required, default_runner, options) = match runners {
+        RunnerMode::Github => ("false", "github", "          - github\n"),
+        RunnerMode::Velnor => ("true", "velnor", "          - velnor\n"),
+        RunnerMode::Both => (
+            "false",
+            automatic.as_str(),
+            "          - github\n          - velnor\n          - both\n",
+        ),
     };
     format!(
-        "  workflow_dispatch:\n    inputs:\n{lane_input}      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
+        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: {required}\n        default: {default_runner}\n        type: choice\n        options:\n{options}      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n      base_sha:\n        description: Git ref or SHA used as the affected-selection base\n        required: false\n        default: refs/heads/{default_branch}\n        type: string\n{extra_inputs}"
     )
 }
 
@@ -750,14 +753,15 @@ fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
     runners: RunnerMode,
+    automatic: RunnerMode,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI",
             "CI / PR",
             format!(
-                "on:\n  pull_request:\n{}",
-                workflow_dispatch_inputs("affected", default_branch, "", runners)
+                "on:\n  pull_request:\n  merge_group:\n{}",
+                workflow_dispatch_inputs("affected", default_branch, "", runners, automatic)
             ),
             "true",
         ),
@@ -767,7 +771,7 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs("full", default_branch, "", runners)
+                workflow_dispatch_inputs("full", default_branch, "", runners, automatic)
             ),
             "true",
         ),
@@ -781,6 +785,7 @@ fn aggregate_triggers(
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
                     runners,
+                    automatic,
                 )
             ),
             "true",
@@ -897,6 +902,7 @@ impl WorkflowIr {
                 VelnorPullRequest::TrustedOnly
             },
             runners: config.runners,
+            automatic: config.automatic,
             tools,
             mise_present,
             mr_boxington,
@@ -908,7 +914,7 @@ impl WorkflowIr {
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+            aggregate_triggers(kind, &self.default_branch, self.runners, self.automatic);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -932,9 +938,6 @@ impl WorkflowIr {
             output.push('\n');
         }
         output.push_str("jobs:\n");
-        if self.runners == RunnerMode::Both {
-            self.render_lane_admission(&mut output);
-        }
         // Runner mode is global; every self-hosted job receives the
         // default-branch trusted-event gate needed for Velnor execution.
         let trusted_event = kind != WorkflowKind::PullRequest;
@@ -1017,21 +1020,17 @@ impl WorkflowIr {
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+            aggregate_triggers(kind, &self.default_branch, self.runners, self.automatic);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
         );
-        if self.runners == RunnerMode::Both {
-            self.render_lane_admission(&mut output);
-        }
-        // The plan job is a contributed node: the aggregate composes the graph
-        // the declared primitives built and renders no job of its own.
-        let plan = nodes
-            .iter()
-            .find_map(GraphNode::plan_job)
-            .unwrap_or_default();
-        output.push_str(plan);
+        // Planning follows config.runners. A Velnor-configured repository
+        // keeps plan on the image runtime for every aggregate. GitHub-default
+        // and both-mode repositories plan on GitHub-hosted runners.
+        let mut plan = String::new();
+        self.render_plan(&mut plan, self.runners, self.runners == RunnerMode::Velnor);
+        output.push_str(&plan);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(
                 &mut output,
@@ -1159,11 +1158,9 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         needs.extend(units);
-        let if_condition = if self.runners == RunnerMode::Velnor {
-            format!(
-                "always() && ({})",
-                self.velnor_control_plane_expression()
-            )
+        let display_name = check_name;
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -1171,9 +1168,9 @@ impl WorkflowIr {
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  {check_name}:\n    name: {check_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
             needs.join(", "),
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         if simulate_failure {
             let simulate = github_expression("inputs.simulate_failure");
@@ -1205,10 +1202,22 @@ impl WorkflowIr {
                 "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
             );
         }
+        if check_name == "ci-required" {
+            let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+                format!("always() && ({})", self.velnor_control_plane_expression())
+            } else {
+                "always()".to_owned()
+            };
+            let _ = writeln!(
+                output,
+                "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                self.runner_for(self.control_plane_lane())
+            );
+        }
     }
 
     pub(crate) fn render_nightly_alert(&self, output: &mut String) {
-        let if_condition = if self.runners == RunnerMode::Velnor {
+        let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
             format!(
                 "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
                 self.default_branch
@@ -1219,7 +1228,7 @@ impl WorkflowIr {
         let _ = writeln!(
             output,
             "  nightly-alert:\n    name: Nightly red-to-signal\n    if: ${{{{ {if_condition} }}}}\n    needs: [nightly-required]\n    runs-on: {}\n    permissions:\n      contents: read\n      issues: write\n    steps:\n      - name: Open or update nightly failure signal\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          NIGHTLY_RESULT: ${{{{ needs.nightly-required.result }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          if [[ \"$NIGHTLY_RESULT\" == success ]]; then\n            exit 0\n          fi\n          echo \"::error::nightly-required failed: $NIGHTLY_RESULT\"\n          existing=\"$(gh api \"repos/$GITHUB_REPOSITORY/issues?state=open\" --jq '.[] | select(.title == \"Nightly CI red\") | .number' | sed -n '1p')\"\n          body=\"nightly-required result: $NIGHTLY_RESULT\nRun: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"\n          if [[ -n \"$existing\" ]]; then\n            gh api --method PATCH \"repos/$GITHUB_REPOSITORY/issues/$existing\" -f body=\"$body\" >/dev/null\n          else\n            gh api --method POST \"repos/$GITHUB_REPOSITORY/issues\" -f title='Nightly CI red' -f body=\"$body\" >/dev/null\n          fi",
-            self.runner_for(self.runners)
+            self.runner_for(self.control_plane_lane())
         );
         let bad_body = r#"          body="nightly-required result: $NIGHTLY_RESULT
 Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
@@ -1235,13 +1244,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// seed lifecycle rendered for it exactly as a declared pipeline would —
     /// the default contract defaults the lane surface, never the cache
     /// transport a unit declared.
-    #[expect(
-        clippy::unused_self,
-        reason = "unit contracts stay on WorkflowIr so callers keep one render environment"
-    )]
     pub(crate) fn default_unit_contract(&self, unit: &Unit, cache_save: bool) -> UnitContract {
         UnitContract {
-            lanes: Self::default_lane_jobs(cache_save),
+            lanes: Self::default_lane_jobs(self.runners, cache_save),
             timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
             cache: CacheBackend::Detected,
             cache_save,
@@ -1252,22 +1257,33 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
-    /// The lane jobs a nested unit workflow emits: the hosted lane saves the
-    /// cache and is untrusted. Velnor jobs are trusted-event-only because they
-    /// execute on the self-hosted runner pool.
-    pub(crate) fn default_lane_jobs(cache_save: bool) -> Vec<LaneJob> {
-        vec![
-            LaneJob {
+    /// The lane jobs a nested unit workflow emits. GitHub is the omitted
+    /// default. Velnor-configured repositories emit only the Velnor lane.
+    pub(crate) fn default_lane_jobs(runners: RunnerMode, cache_save: bool) -> Vec<LaneJob> {
+        match runners {
+            RunnerMode::Github => vec![LaneJob {
                 lane: RunnerMode::Github,
                 cache_save,
                 trusted: false,
-            },
-            LaneJob {
+            }],
+            RunnerMode::Velnor => vec![LaneJob {
                 lane: RunnerMode::Velnor,
                 cache_save: false,
                 trusted: true,
-            },
-        ]
+            }],
+            RunnerMode::Both => vec![
+                LaneJob {
+                    lane: RunnerMode::Github,
+                    cache_save,
+                    trusted: false,
+                },
+                LaneJob {
+                    lane: RunnerMode::Velnor,
+                    cache_save: false,
+                    trusted: true,
+                },
+            ],
+        }
     }
 
     /// Render one unit's reusable workflow surface.
@@ -1417,7 +1433,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         let _ = writeln!(
             output,
-            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
+            "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n          ref: ${{{{ inputs.head_sha }}}}",
             self.pins.checkout
         );
         self.render_unit_runtime(output, lane, unit);
@@ -1446,10 +1462,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         render_cargo_source_preparation(output, unit);
-        let unit_id_value = input_unit.map_or_else(
-            || "${{ inputs.unit }}".to_owned(),
-            ToOwned::to_owned,
-        );
+        let unit_id_value =
+            input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
         let _ = writeln!(
             output,
             "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
@@ -1528,25 +1542,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_runtime_download(lane));
     }
 
-    /// The Both-mode lane-admission job, copied from the static release
-    /// lane-admission idiom: manual dispatch resolves the `lanes` input
-    /// (defaulting to Velnor, with GitHub selectable), automatic triggers
-    /// resolve the `VELNOR_AUTOMATIC_LANES` repository variable, and anything
-    /// else fails closed. The plan job needs this job, so an unadmitted lane
-    /// selection fails the run before any verification is scheduled.
-    ///
-    /// The automatic fallback is `both`, not the release idiom's `github`:
-    /// release admits only its GitHub lane, while CI automatic triggers keep
-    /// both lanes (the hosted job ungated, the Velnor job on its event gate),
-    /// so the resolved output must describe what actually runs.
-    pub(crate) fn render_lane_admission(&self, output: &mut String) {
-        let _ = writeln!(
-            output,
-            "  lane-admission:\n    name: Resolve CI lanes\n    runs-on: {}\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    outputs:\n      lanes: ${{{{ steps.route.outputs.lanes }}}}\n    steps:\n      - name: Validate requested lanes\n        id: route\n        env:\n          REQUESTED_LANES: ${{{{ github.event_name == 'workflow_dispatch' && inputs.lanes || vars.VELNOR_AUTOMATIC_LANES || 'both' }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          case \"$REQUESTED_LANES\" in\n            velnor|github|both)\n              echo \"lanes=$REQUESTED_LANES\" >> \"$GITHUB_OUTPUT\"\n              ;;\n            *)\n              echo \"::error::invalid CI lane '$REQUESTED_LANES'; expected velnor, github, or both\" >&2\n              exit 1\n              ;;\n          esac",
-            self.runner_for(RunnerMode::Github)
-        );
-    }
-
     fn render_unit_runtime(&self, output: &mut String, lane: RunnerMode, unit: &Unit) {
         if lane != RunnerMode::Github {
             return;
@@ -1554,33 +1549,45 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // Velnor Planning does not publish a SOURCE_REV product. Manual GitHub
         // dispatch jobs bootstrap the pinned runtime themselves. Apple jobs
         // cannot consume a Linux-built plan artifact even when Planning is hosted.
-        if self.runners == RunnerMode::Velnor || unit.kind == UnitKind::Swift {
+        if self.control_plane_lane() != RunnerMode::Github
+            || self.runners == RunnerMode::Velnor
+            || unit.kind == UnitKind::Swift
+        {
             Self::render_workflow_runtime_setup(output, lane);
         } else {
             Self::render_workflow_runtime_download(output, lane);
         }
     }
 
-    pub(crate) fn render_plan(&self, output: &mut String, runners: RunnerMode, trusted: bool) {
-        // Planning follows the configured lane. Velnor uses the image-provided
-        // runtime, while an explicit GitHub lane bootstraps the pinned runtime.
-        let runners = if self.runners == RunnerMode::Velnor {
-            RunnerMode::Velnor
-        } else {
-            runners
-        };
+    fn control_plane_lane(&self) -> RunnerMode {
+        match self.automatic {
+            RunnerMode::Velnor => RunnerMode::Velnor,
+            RunnerMode::Github | RunnerMode::Both => RunnerMode::Github,
+        }
+    }
+
+    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
+        // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
+        // the control plane off GitHub-hosted runners. `automatic = both`
+        // plans on GitHub so this repository can compare lanes. GitHub
+        // planning pins `uses:` to SOURCE_REV and installs `${{ github.sha }}`
+        // so same-repo `plan` understands generation-time fields.
+        let runners = self.control_plane_lane();
         let gate = if runners == RunnerMode::Velnor {
             format!(
                 "    if: ${{{{ {} }}}}\n",
                 self.velnor_control_plane_expression()
             )
         } else {
-            self.trusted_runner_gate(runners, trusted)
+            String::new()
         };
         let runtime_setup = if runners == RunnerMode::Velnor {
             String::new()
         } else {
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_with_install_rev(
+                RunnerMode::Github,
+                &github_expression("github.sha"),
+            )
         };
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
@@ -1598,17 +1605,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             ));
         }
         let base_sha = self.base_sha_expression();
-        // Both-mode aggregates resolve manual lane selection through the
-        // lane-admission job first; planning on an unadmitted selection must
-        // not schedule anything downstream.
-        let needs = if self.runners == RunnerMode::Both {
-            "    needs: [lane-admission]\n"
-        } else {
-            ""
-        };
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,
@@ -1655,7 +1654,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn automatic_event_expression(&self) -> String {
         format!(
-            "github.event_name == 'pull_request' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            "github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
             self.default_branch
         )
     }
@@ -1668,37 +1667,40 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
-        // The manual selector is `lanes` on Both-mode aggregates and `runner`
-        // everywhere else; the automatic arms below are identical in both
-        // spellings.
-        let input = if self.runners == RunnerMode::Both {
-            "lanes"
+        let omitted_github = matches!(self.automatic, RunnerMode::Github | RunnerMode::Both);
+        let omitted_velnor = matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both);
+        let dispatch_github = if omitted_github {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
         } else {
-            "runner"
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
         };
-        let dispatch = match lane {
-            RunnerMode::Velnor => {
-                format!("github.event_name == 'workflow_dispatch' && (github.event.inputs.{input} == 'velnor' || github.event.inputs.{input} == 'both')")
-            }
+        let dispatch_velnor = if omitted_velnor {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
+        } else {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
+        };
+        match lane {
             RunnerMode::Github => {
-                format!("github.event_name == 'workflow_dispatch' && (github.event.inputs.{input} == 'github' || github.event.inputs.{input} == 'both')")
+                if matches!(self.automatic, RunnerMode::Github | RunnerMode::Both) {
+                    format!(
+                        "{} || ({dispatch_github})",
+                        self.automatic_event_expression()
+                    )
+                } else {
+                    dispatch_github.to_owned()
+                }
+            }
+            RunnerMode::Velnor => {
+                if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
+                    self.velnor_lane_event_expression(dispatch_velnor)
+                } else {
+                    format!(
+                        "github.ref == 'refs/heads/{}' && {dispatch_velnor}",
+                        self.default_branch
+                    )
+                }
             }
             RunnerMode::Both => "github.event_name == 'workflow_dispatch'".to_owned(),
-        };
-        let automatic = matches!(
-            (self.runners, lane),
-            (RunnerMode::Velnor, RunnerMode::Velnor)
-                | (RunnerMode::Github, RunnerMode::Github)
-                | (RunnerMode::Both, RunnerMode::Velnor | RunnerMode::Github)
-        );
-        if automatic {
-            if lane == RunnerMode::Velnor {
-                self.velnor_lane_event_expression(&dispatch)
-            } else {
-                format!("{} || ({dispatch})", self.automatic_event_expression())
-            }
-        } else {
-            dispatch
         }
     }
 
@@ -1746,7 +1748,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(self.trusted_event_expression());
+        let condition = Some(self.lane_event_expression(RunnerMode::Velnor));
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,
@@ -2202,7 +2204,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         trusted: bool,
         include_policy: bool,
     ) {
-        let check_name = "ci-required";
+        let display_name = "ci-required";
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
@@ -2224,11 +2226,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 job_checks.push((unit.id.clone(), id, lane == RunnerMode::Velnor && !trusted));
             }
         }
-        let gate = if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "always() && ({})",
-                self.velnor_control_plane_expression()
-            )
+        let gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -2236,9 +2235,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
+            "  ci-required:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
-            self.runner_for(runners),
+            self.runner_for(self.control_plane_lane()),
         );
         for job in needs
             .iter()
@@ -2261,5 +2260,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
             );
         }
+        let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
+            format!("always() && ({})", self.velnor_control_plane_expression())
+        } else {
+            "always()".to_owned()
+        };
+        let _ = writeln!(
+            output,
+            "  required:\n    name: Required\n    if: ${{{{ {required_gate} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            self.runner_for(self.control_plane_lane())
+        );
     }
 }
