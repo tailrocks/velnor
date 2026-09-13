@@ -206,6 +206,32 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
         pr.contains("unset CI_SCOPE_OVERRIDE"),
         "empty dispatch scope must not be passed as a CI scope: {pr}"
     );
+    let plan = pr
+        .split("\n  plan:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  group-").next())
+        .unwrap_or(&pr);
+    assert!(
+        plan.contains("runs-on: [self-hosted, example-runner]"),
+        "opt-in Planning must run on the Velnor lane: {plan}"
+    );
+    assert!(
+        !plan.contains("runs-on: ubuntu-24.04"),
+        "opt-in Planning must not use GitHub-hosted runners: {plan}"
+    );
+    assert!(
+        !plan.contains("name: Publish Velnor workflow runtime"),
+        "Velnor Planning must not publish a runtime artifact: {plan}"
+    );
+    let github = unit.split("runs-on: ubuntu-24.04").nth(1).unwrap_or(&unit);
+    assert!(
+        github.contains("setup-velnor-workflow"),
+        "manual GitHub units must bootstrap the pinned runtime: {github}"
+    );
+    assert!(
+        !github.contains("name: Download Velnor workflow runtime"),
+        "manual GitHub units must not expect a Planning runtime artifact: {github}"
+    );
 }
 
 #[test]
