@@ -1487,7 +1487,11 @@ fn inject_job_cgroup_parent_value(
             bail!("Docker container create HostConfig must be an object, got {other}");
         }
     };
-    reject_unsafe_nested_host_controls(&host_config, owned_volume_names)?;
+    let image = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Image"))
+        .and_then(|(_, value)| value.as_str());
+    reject_unsafe_nested_host_controls(&host_config, owned_volume_names, image)?;
     if let Some(alias) = host_config
         .keys()
         .find(|key| key.as_str() != "CgroupParent" && key.eq_ignore_ascii_case("CgroupParent"))
@@ -1536,6 +1540,7 @@ fn reject_unsafe_volume_create_value(value: &Value) -> Result<()> {
 fn reject_unsafe_nested_host_controls(
     host_config: &Map<String, Value>,
     _owned_volume_names: &BTreeSet<String>,
+    image: Option<&str>,
 ) -> Result<()> {
     reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
     for (key, value) in host_config {
@@ -1544,9 +1549,12 @@ fn reject_unsafe_nested_host_controls(
             "pidmode" | "ipcmode" | "cgroupnsmode" | "usernsmode" | "utsmode" => {
                 !is_default_mode(value)
             }
+            // Live docker/build-push-action starts BuildKit with Privileged.
+            // That is nested engine bootstrap, not a general guest escape.
+            // Any other image stays denied.
             "privileged" => match value {
                 Value::Null | Value::Bool(false) => false,
-                Value::Bool(true) => true,
+                Value::Bool(true) => !is_buildkit_image(image),
                 _ => true,
             },
             "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
@@ -1605,6 +1613,14 @@ fn is_default_mode(value: &Value) -> bool {
 
 /// Guest-isolated Docker network modes. `host` and `container:<id>` stay
 /// host-control denies. Live backend-parity uses `--network none`.
+fn is_buildkit_image(image: Option<&str>) -> bool {
+    image.is_some_and(|image| {
+        let image = image.to_ascii_lowercase();
+        let name = image.rsplit('/').next().unwrap_or(&image);
+        name.starts_with("buildkit") || image.contains("/buildkit:") || image.ends_with("/buildkit")
+    })
+}
+
 fn is_guest_network_mode(value: &Value) -> bool {
     value.as_str().is_some_and(|mode| {
         let mode = mode.trim();
@@ -4046,10 +4062,23 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"Privileged":true,"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_privileged_stays_denied_except_buildkit() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let error = policy
+            .authorize(&api_request(
+                "POST",
+                "/v1.43/containers/create?name=job-container",
+                br#"{"Image":"busybox:1.36","HostConfig":{"Privileged":true}}"#,
+            ))
+            .expect_err("privileged busybox is host control");
+        assert!(error.to_string().contains("Privileged"), "{error:#}");
     }
 
     #[test]
