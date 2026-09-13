@@ -108,7 +108,12 @@ runs:
         # caller fails every foreign consumer while resolving identically
         # for self builds. The pinned full SHA keeps the build
         # content-addressed under the controlled-bootstrap gate above.
-        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL \
+        # Build outside the caller checkout without its flags: unit jobs
+        # export RUSTFLAGS for their own builds (the Linux mold link arg),
+        # which macOS runners cannot link, and a caller .cargo/config.toml
+        # must not shape foreign code either.
+        cd "$RUNNER_TEMP"
+        env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
           cargo install --locked --git https://github.com/tailrocks/velnor.git \
             --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
         runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
