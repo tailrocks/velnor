@@ -1697,6 +1697,11 @@ mod tests {
             pgid: 4242,
             label: "late-step".into(),
         });
+        // `request` starts the detached ladder thread, which can claim the
+        // late target before this thread's inline pass runs. Both passes
+        // append to the same outcomes log, so wait for the entry rather than
+        // asserting the inline pass won the race.
+        wait_for_outcomes(&token, 1);
         assert_eq!(
             token
                 .outcomes()
@@ -1722,6 +1727,9 @@ mod tests {
             "a service container must outlive a cancellation request"
         );
         token.force();
+        // The detached pass can still be alive here and claim the service
+        // container first; the escalation outcome lands in the same log.
+        wait_for_outcomes(&token, 2);
         assert_eq!(
             token
                 .outcomes()
