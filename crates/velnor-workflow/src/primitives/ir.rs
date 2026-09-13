@@ -681,6 +681,7 @@ pub(crate) fn render_retained_output_cache_note(
 pub(crate) struct WorkflowIr {
     pub(crate) default_branch: String,
     pub(crate) github_runner: String,
+    pub(crate) macos_runner: String,
     pub(crate) velnor_labels: Vec<String>,
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
@@ -891,6 +892,7 @@ impl WorkflowIr {
         Self {
             default_branch: config.default_branch.clone(),
             github_runner: config.github_runner.clone(),
+            macos_runner: config.macos_runner.clone(),
             velnor_labels: config.velnor_labels.clone(),
             ci_required: config.ci_required,
             velnor_runner_group: velnor_runner_group(config).map(str::to_owned),
@@ -1158,10 +1160,7 @@ impl WorkflowIr {
         needs.extend(units);
         let display_name = check_name;
         let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "always() && ({})",
-                self.velnor_control_plane_expression()
-            )
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -1205,10 +1204,7 @@ impl WorkflowIr {
         }
         if check_name == "ci-required" {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-                format!(
-                    "always() && ({})",
-                    self.velnor_control_plane_expression()
-                )
+                format!("always() && ({})", self.velnor_control_plane_expression())
             } else {
                 "always()".to_owned()
             };
@@ -1368,9 +1364,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_workflow_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        // Mold is Linux-only: Apple jobs run on macOS, where the link arg
+        // fails every cargo build in the job.
+        let mold = self.mise_present && unit.kind != UnitKind::Swift;
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
+            || mold
         {
             output.push_str("\nenv:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -1378,7 +1377,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "  CARGO_INCREMENTAL: \"0\"\n  RUSTC_WRAPPER: sccache\n  SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if mold {
                 output.push_str("  RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
@@ -1463,10 +1462,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         render_cargo_source_preparation(output, unit);
-        let unit_id_value = input_unit.map_or_else(
-            || "${{ inputs.unit }}".to_owned(),
-            ToOwned::to_owned,
-        );
+        let unit_id_value =
+            input_unit.map_or_else(|| "${{ inputs.unit }}".to_owned(), ToOwned::to_owned);
         let _ = writeln!(
             output,
             "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {unit_id_value}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
@@ -1506,9 +1503,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn render_job_env(&self, output: &mut String, unit: &Unit) {
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
+        // Mold is Linux-only: Apple jobs run on macOS, where the link arg
+        // fails every cargo build in the job.
+        let mold = self.mise_present && unit.kind != UnitKind::Swift;
         if tools.contains(&ToolRequirement::Sccache)
             || tools.contains(&ToolRequirement::OpenTofu)
-            || self.mise_present
+            || mold
         {
             output.push_str("    env:\n");
             if tools.contains(&ToolRequirement::Sccache) {
@@ -1516,7 +1516,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                     "      CARGO_INCREMENTAL: \"0\"\n      RUSTC_WRAPPER: sccache\n      SCCACHE_GHA_ENABLED: \"true\"\n",
                 );
             }
-            if self.mise_present {
+            if mold {
                 output.push_str("      RUSTFLAGS: \"-C link-arg=-fuse-ld=mold\"\n");
             }
             if tools.contains(&ToolRequirement::OpenTofu) {
@@ -1906,7 +1906,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn runner_for_unit(&self, lane: RunnerMode, unit: &Unit) -> String {
         if unit.kind == UnitKind::Swift && lane == RunnerMode::Github {
-            return "macos-15".to_owned();
+            return yaml_scalar(&self.macos_runner);
         }
         self.runner_for(lane)
     }
@@ -1965,6 +1965,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 tools.insert(ToolRequirement::DockerBuildx);
             }
             UnitKind::Swift | UnitKind::Docs => {}
+        }
+        // Declared tools provision through mise whatever the kind: the scan
+        // cannot see tools a test invokes at runtime, so the repository
+        // declares them and the job installs them. Versions always resolve
+        // from the repository's mise manifest, never ad hoc.
+        if mise_present && !unit.mise_tools.is_empty() {
+            tools.insert(ToolRequirement::Mise);
         }
         tools
     }
@@ -2220,10 +2227,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
         }
         let gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "always() && ({})",
-                self.velnor_control_plane_expression()
-            )
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };
@@ -2257,10 +2261,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             );
         }
         let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!(
-                "always() && ({})",
-                self.velnor_control_plane_expression()
-            )
+            format!("always() && ({})", self.velnor_control_plane_expression())
         } else {
             "always()".to_owned()
         };

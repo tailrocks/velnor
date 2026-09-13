@@ -738,6 +738,7 @@ mod tests {
             runners: crate::RunnerMode::Github,
             automatic: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
+            macos_runner: "macos-15".to_owned(),
             velnor_labels: Vec::new(),
             release_enabled: false,
             release_reason: "not configured".to_owned(),

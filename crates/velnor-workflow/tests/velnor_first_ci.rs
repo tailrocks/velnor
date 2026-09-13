@@ -415,7 +415,8 @@ fn kind_reusable_caller_is_one_call_per_kind() {
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
-        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml").count(),
+        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
+            .count(),
         1
     );
     assert!(!pr.contains("strategy:"));
@@ -436,7 +437,8 @@ fn kind_reusable_jobs_are_linear_in_units_not_a_matrix_product() {
     assert_eq!(unit.matches("name: \"GitHub / rust-crate").count(), 8);
     let pr = generated.workflow("ci-pr.yml");
     assert_eq!(
-        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml").count(),
+        pr.matches("uses: ./.github/workflows/ci-unit-rust.yml")
+            .count(),
         1
     );
 }
