@@ -316,29 +316,21 @@ pub enum ActorPhase {
     Registered,
     Ready,
     Assigned,
-    Starting,
     Running,
     Completing,
-    Retiring,
-    Degraded,
     Fenced,
-    Quarantined,
 }
 
 impl ActorPhase {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 8] = [
         Self::Absent,
         Self::Provisioning,
         Self::Registered,
         Self::Ready,
         Self::Assigned,
-        Self::Starting,
         Self::Running,
         Self::Completing,
-        Self::Retiring,
-        Self::Degraded,
         Self::Fenced,
-        Self::Quarantined,
     ];
 
     #[must_use]
@@ -349,13 +341,9 @@ impl ActorPhase {
             Self::Registered => "registered",
             Self::Ready => "ready",
             Self::Assigned => "assigned",
-            Self::Starting => "starting",
             Self::Running => "running",
             Self::Completing => "completing",
-            Self::Retiring => "retiring",
-            Self::Degraded => "degraded",
             Self::Fenced => "fenced",
-            Self::Quarantined => "quarantined",
         }
     }
 
