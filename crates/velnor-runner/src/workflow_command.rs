@@ -198,6 +198,7 @@ fn parse_workflow_commands_with_policy(
             "add-matcher" | "remove-matcher" => {
                 reject_problem_matcher(&mut state, line, &command_name);
             }
+            "echo" => process_echo(&mut state, line, &command),
             // group/endgroup/debug render in place via
             // executor::rendered_output_line — no state to record here.
             "error" => {
@@ -403,6 +404,39 @@ fn reject_problem_matcher(state: &mut StepCommandState, line: &str, command: &st
     );
 }
 
+/// `EchoCommandExtension.ProcessCommand` (@397b032,
+/// src/Runner.Worker/ActionCommandManager.cs:809-834).
+///
+/// `::echo::on|off` (trimmed, case-insensitive) flips command echoing,
+/// which only affects rendering — `rendered_output_lines` tracks the
+/// same state while rendering — so a valid value records nothing here.
+/// An empty or invalid value throws upstream, which the command manager
+/// turns into two step errors and a failed command result.
+fn process_echo(state: &mut StepCommandState, line: &str, command: &WorkflowCommand<'_>) {
+    if command.value.is_empty() {
+        // `ArgUtil.NotNullOrEmpty(command.Data, "value")`.
+        push_command_failure(
+            state,
+            line,
+            "Value cannot be null. (Parameter 'value')".to_string(),
+        );
+        return;
+    }
+    if !matches!(
+        command.value.trim().to_ascii_uppercase().as_str(),
+        "ON" | "OFF"
+    ) {
+        push_command_failure(
+            state,
+            line,
+            format!(
+                "Invalid echo command value. Possible values can be: 'on', 'off'. Current value is: '{}'.",
+                command.value
+            ),
+        );
+    }
+}
+
 fn blocked_set_env_name(name: &str) -> Option<&'static str> {
     SET_ENV_BLOCK_LIST
         .iter()
@@ -425,6 +459,144 @@ fn is_registered_command(name: &str) -> bool {
     REGISTERED_COMMANDS
         .iter()
         .any(|command| command.eq_ignore_ascii_case(name))
+}
+
+/// Whether step-debug output (`::debug::` lines, command echo) is on for
+/// an environment. Upstream reads the `ACTIONS_STEP_DEBUG` server
+/// variable (`ExecutionContext.cs:1083-1086`); Velnor's runtime exports
+/// that variable as `RUNNER_DEBUG=1` (which also backs `runner.debug`),
+/// so either marker counts. A step-level `env:` entry only counts when
+/// it names `ACTIONS_STEP_DEBUG` itself.
+pub(crate) fn step_debug_enabled(env: &BTreeMap<String, String>) -> bool {
+    let value = |name: &str| env.get(name).map(String::as_str);
+    convert_to_boolean(value("ACTIONS_STEP_DEBUG"))
+        || value("RUNNER_DEBUG").is_some_and(|value| value == "1")
+}
+
+/// Render process output for the uploaded blob the way actions/runner
+/// does: grouping/annotation workflow commands become `##[...]` markers
+/// at their original position, state-changing commands are consumed
+/// invisibly unless echo is on, `::debug::` renders only under step
+/// debug, and everything else (including user ANSI) passes verbatim.
+pub(crate) fn rendered_output_lines(stdout: &str, stderr: &str, step_debug: bool) -> Vec<String> {
+    let mut echo = CommandEcho::new(step_debug);
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .flat_map(|line| echo.render_line(line, step_debug))
+        .collect()
+}
+
+/// `IExecutionContext.EchoOnActionCommand`: upstream initializes it to
+/// step-debug (`ExecutionContext.cs:1083`) and `::echo::on|off` flips it
+/// (`EchoCommandExtension`). While on, every processed command line whose
+/// extension does not omit echo is written back to the log before it is
+/// processed (`ActionCommandManager.cs:128-132`).
+struct CommandEcho {
+    on: bool,
+}
+
+impl CommandEcho {
+    fn new(step_debug: bool) -> Self {
+        Self { on: step_debug }
+    }
+
+    /// Render one output line, tracking `::echo::on|off` state. Returns
+    /// zero, one, or two lines: with echo on, an echoed command
+    /// contributes its raw input line plus its normal rendering (upstream
+    /// outputs the input first, then processes).
+    fn render_line(&mut self, line: &str, step_debug: bool) -> Vec<String> {
+        // `ActionCommand.TryParseV2` trims leading whitespace before
+        // testing for the `::` keyword
+        // (src/Runner.Common/ActionCommand.cs:61-66), and
+        // `OutputManager.OnDataReceived` returns without emitting the
+        // line once a command is recognized
+        // (src/Runner.Worker/Handlers/OutputManager.cs:80-91). Matching
+        // on the untrimmed line let an indented command be processed and
+        // still echoed into the log.
+        let Some(rest) = line.trim_start().strip_prefix("::") else {
+            return vec![line.to_string()];
+        };
+        let Some((command, value)) = rest.split_once("::") else {
+            // Not a complete workflow command; GitHub passes such lines through.
+            return vec![line.to_string()];
+        };
+        let keyword = command
+            .split_once(' ')
+            .map_or(command, |(keyword, _)| keyword);
+        match keyword {
+            "group" | "endgroup" => {
+                let marker = if keyword == "group" {
+                    format!("##[group]{value}")
+                } else {
+                    "##[endgroup]".to_string()
+                };
+                // `GroupingCommandExtension.OmitEcho == false`: with echo
+                // on the raw input line is written first, then the marker.
+                if self.on {
+                    vec![line.to_string(), marker]
+                } else {
+                    vec![marker]
+                }
+            }
+            // `IssueCommandExtension.OmitEcho == true`: the marker only,
+            // never the raw line.
+            "error" | "warning" | "notice" => vec![format!("##[{keyword}]{value}")],
+            // `DebugCommandExtension` calls `context.Debug`, which writes
+            // only when step debug is on
+            // (`ExecutionContext.cs:1525`), and omits echo — so without
+            // step debug the line vanishes.
+            "debug" => {
+                if step_debug {
+                    vec![format!("##[debug]{value}")]
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => self.render_state_command(line, keyword, value),
+        }
+    }
+
+    /// A state-changing (or `echo`) command line: consumed invisibly
+    /// unless echo is on and the command does not omit echo.
+    fn render_state_command(&mut self, line: &str, keyword: &str, value: &str) -> Vec<String> {
+        if keyword.eq_ignore_ascii_case("echo") {
+            // The flip applies AFTER the current line is judged:
+            // `::echo::off` is itself echoed (echo is still on), while
+            // `::echo::on` is consumed (echo is still off). An invalid
+            // value keeps the state; the parse pass reports it.
+            let was_on = self.on;
+            match unescape_data(value).trim().to_ascii_uppercase().as_str() {
+                "ON" => self.on = true,
+                "OFF" => self.on = false,
+                _ => {}
+            }
+            return if was_on {
+                vec![line.to_string()]
+            } else {
+                Vec::new()
+            };
+        }
+        // `OmitEcho == false` extensions (`ActionCommandManager.cs`):
+        // set-env, set-output, save-state, add-path, add-matcher,
+        // remove-matcher. add-mask omits echo (it carries a secret);
+        // stop-commands and unknown commands stay consumed as before.
+        let echoed = self.on
+            && matches!(
+                keyword.to_ascii_lowercase().as_str(),
+                "set-env"
+                    | "set-output"
+                    | "save-state"
+                    | "add-path"
+                    | "add-matcher"
+                    | "remove-matcher"
+            );
+        if echoed {
+            vec![line.to_string()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 fn push_error(state: &mut StepCommandState, message: String) {
@@ -1104,5 +1276,73 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "2k parses of a 1k-line mixed output took {elapsed:?}",
         );
+    }
+
+    /// F7: `::echo::on|off` (trimmed, case-insensitive) is honored —
+    /// valid values flip rendering echo, empty/invalid values fail the
+    /// command exactly like upstream (`EchoCommandExtension`).
+    #[test]
+    fn echo_command_toggles_rendering_and_rejects_bad_values() {
+        assert_eq!(parse_for_test("::echo::on\n").error_count, 0);
+        assert_eq!(parse_for_test("::echo::  OFF  \n").error_count, 0);
+
+        let empty = parse_for_test("::echo::\n");
+        assert_eq!(empty.error_count, 2);
+        assert!(
+            empty
+                .annotations
+                .iter()
+                .any(|annotation| annotation.message.contains("Parameter 'value'")),
+            "empty echo names its missing value: {:?}",
+            empty.annotations
+        );
+        let bad = parse_for_test("::echo::maybe\n");
+        assert_eq!(bad.error_count, 2);
+        assert!(
+            bad.annotations
+                .iter()
+                .any(|annotation| annotation.message.contains("Invalid echo command value")),
+            "invalid echo is refused loudly: {:?}",
+            bad.annotations
+        );
+
+        // While echo is on, echoed command lines surface raw; the flip
+        // applies after the current line is judged, so `::echo::on` is
+        // consumed while `::echo::off` is itself echoed.
+        assert_eq!(
+            rendered_output_lines(
+                "::echo::on\n::set-output name=x::1\n::echo::off\n::set-output name=y::2\n",
+                "",
+                false,
+            ),
+            vec![
+                "::set-output name=x::1".to_string(),
+                "::echo::off".to_string()
+            ]
+        );
+    }
+
+    /// F7: `::debug::` renders only under step debug
+    /// (`ExecutionContext.Debug` gates on `WriteDebug`), and step debug
+    /// turns echo on by default — while `add-mask` still never echoes.
+    #[test]
+    fn debug_lines_render_only_under_step_debug() {
+        assert!(rendered_output_lines("::debug::secret detail\n", "", false).is_empty());
+        assert_eq!(
+            rendered_output_lines("::debug::secret detail\n", "", true),
+            vec!["##[debug]secret detail".to_string()]
+        );
+        assert_eq!(
+            rendered_output_lines("::set-output name=x::1\n::add-mask::s3cret\n", "", true),
+            vec!["::set-output name=x::1".to_string()]
+        );
+
+        let debug_env: BTreeMap<String, String> =
+            [("ACTIONS_STEP_DEBUG".to_string(), "true".to_string())].into();
+        assert!(step_debug_enabled(&debug_env));
+        let runner_debug_env: BTreeMap<String, String> =
+            [("RUNNER_DEBUG".to_string(), "1".to_string())].into();
+        assert!(step_debug_enabled(&runner_debug_env));
+        assert!(!step_debug_enabled(&BTreeMap::new()));
     }
 }

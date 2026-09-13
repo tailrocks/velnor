@@ -10937,14 +10937,23 @@ fn ordered_executable_steps(
                     let (plan, metadata) = local_iter
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
-                    let parent_condition = step.condition.as_deref();
+                    // The step's own `if` belongs to the umbrella alone:
+                    // the executor evaluates it in the enclosing scope and
+                    // the verdict gates the inner steps, exactly like
+                    // upstream (`step.Condition = stepData.Condition` —
+                    // `CompositeActionHandler.cs` never re-tests the parent
+                    // inside its children). ANDing the parent text into
+                    // every inner condition re-evaluated it in the
+                    // composite scope, where `failure()`/`success()` read
+                    // the wrong status.
+                    let umbrella_condition = step.condition.as_deref();
                     let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
                     ordered.push(ExecutableStep::CompositeStart {
                         step_id: plan.step_id.clone(),
                         display_name: action_step_display_name(step),
                         inputs: plan.inputs.clone(),
                         env: crate::script_step::step_environment(step)?,
-                        condition: parent_condition.map(ToOwned::to_owned),
+                        condition: umbrella_condition.map(ToOwned::to_owned),
                     });
                     let Some(metadata) = metadata else {
                         ordered.push(ExecutableStep::CompositeEnd {
@@ -10957,10 +10966,6 @@ fn ordered_executable_steps(
                     {
                         match invocation {
                             CompositeActionInvocation::Script(mut script) => {
-                                script.condition = combine_conditions(
-                                    parent_condition,
-                                    script.condition.as_deref(),
-                                );
                                 script.continue_on_error |= parent_continue_on_error;
                                 ordered.push(ExecutableStep::Script(script));
                             }
@@ -10970,7 +10975,6 @@ fn ordered_executable_steps(
                                     &plan,
                                     job,
                                     workspace_host,
-                                    parent_condition,
                                     parent_continue_on_error,
                                     "",
                                 )? {
@@ -10992,16 +10996,22 @@ fn ordered_executable_steps(
                                     job,
                                     workspace_host,
                                     actions_host,
-                                    parent_condition,
                                     parent_continue_on_error,
                                     "",
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
+                                // Upstream maps composite outputs
+                                // unconditionally once the composite ran
+                                // (`ProcessOutputs` after `RunStepsAsync`),
+                                // so the outputs step runs even when the
+                                // composite failed. A skipped umbrella never
+                                // reaches it: the executor skips the whole
+                                // region.
                                 ordered.push(ExecutableStep::CompositeOutputs {
                                     step_id: outputs.step_id,
                                     outputs: outputs.outputs,
-                                    condition: parent_condition.map(ToOwned::to_owned),
+                                    condition: Some("always()".to_string()),
                                 });
                             }
                         }
@@ -11035,7 +11045,6 @@ fn ordered_executable_steps(
                     plan,
                     job,
                     workspace_host,
-                    None,
                     false,
                     &step_display_name,
                 )? {
@@ -11058,7 +11067,6 @@ fn ordered_executable_steps(
                     job,
                     workspace_host,
                     actions_host,
-                    None,
                     false,
                     &step_display_name,
                 )?;
@@ -11077,7 +11085,6 @@ fn append_resolved_action_steps(
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
-    parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<()> {
@@ -11118,7 +11125,7 @@ fn append_resolved_action_steps(
                 step_id: action.plan.step_id.clone(),
                 display_name: display_name.to_string(),
                 invocation,
-                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+                condition: action.plan.condition.clone(),
                 continue_on_error,
                 timeout_minutes: action.plan.timeout_minutes,
             });
@@ -11127,7 +11134,7 @@ fn append_resolved_action_steps(
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
             invocation: action.docker_invocation(actions_host)?,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            condition: action.plan.condition.clone(),
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
         }),
@@ -11135,13 +11142,15 @@ fn append_resolved_action_steps(
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
             invocation: action.javascript_invocation(actions_host)?,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            condition: action.plan.condition.clone(),
             continue_on_error,
             timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionAdapter::Composite => {
-            let action_condition =
-                combine_conditions(parent_condition, action.plan.condition.as_deref());
+            // The nested umbrella carries its own `if` only; the executor
+            // evaluates it in the parent composite scope and the verdict
+            // gates the nested inner steps (see the local-action arm).
+            let action_condition = action.plan.condition.clone();
             let composite_display = if display_name.is_empty() {
                 format!("Run {}@{}", action.plan.repository, action.plan.git_ref)
             } else {
@@ -11157,10 +11166,6 @@ fn append_resolved_action_steps(
             for invocation in action.composite_invocations("/__w", actions_host)? {
                 match invocation {
                     CompositeActionInvocation::Script(mut script) => {
-                        script.condition = combine_conditions(
-                            action_condition.as_deref(),
-                            script.condition.as_deref(),
-                        );
                         script.continue_on_error |= continue_on_error;
                         ordered.push(ExecutableStep::Script(script));
                     }
@@ -11170,7 +11175,6 @@ fn append_resolved_action_steps(
                             &plan,
                             job,
                             workspace_host,
-                            action_condition.as_deref(),
                             continue_on_error,
                             "",
                         )? {
@@ -11192,16 +11196,18 @@ fn append_resolved_action_steps(
                             job,
                             workspace_host,
                             actions_host,
-                            action_condition.as_deref(),
                             continue_on_error,
                             "",
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
+                        // Unconditional once the composite ran, like
+                        // upstream's `ProcessOutputs` (see the
+                        // local-action arm).
                         ordered.push(ExecutableStep::CompositeOutputs {
                             step_id: outputs.step_id,
                             outputs: outputs.outputs,
-                            condition: action_condition.clone(),
+                            condition: Some("always()".to_string()),
                         });
                     }
                 }
@@ -11219,7 +11225,6 @@ fn append_native_action_step_from_plan(
     plan: &RepositoryActionPlan,
     job: &AgentJobRequestMessage,
     workspace_host: &std::path::Path,
-    parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
 ) -> Result<bool> {
@@ -11234,7 +11239,7 @@ fn append_native_action_step_from_plan(
             display_name: Some(display_name.to_string()),
             display_name_token: None,
             enabled: true,
-            condition: combine_conditions(parent_condition, plan.condition.as_deref()),
+            condition: plan.condition.clone(),
             continue_on_error: Some(Value::Bool(
                 parent_continue_on_error || plan.continue_on_error,
             )),
@@ -11263,36 +11268,11 @@ fn append_native_action_step_from_plan(
         step_id: plan.step_id.clone(),
         display_name: display_name.to_string(),
         invocation,
-        condition: combine_conditions(parent_condition, plan.condition.as_deref()),
+        condition: plan.condition.clone(),
         continue_on_error: parent_continue_on_error || plan.continue_on_error,
         timeout_minutes: plan.timeout_minutes,
     });
     Ok(true)
-}
-
-fn combine_conditions(parent: Option<&str>, child: Option<&str>) -> Option<String> {
-    match (
-        parent.filter(|value| !value.trim().is_empty()),
-        child.filter(|value| !value.trim().is_empty()),
-    ) {
-        (Some(parent), Some(child)) => Some(format!(
-            "${{{{ ({}) && ({}) }}}}",
-            strip_condition_expression(parent),
-            strip_condition_expression(child)
-        )),
-        (Some(parent), None) => Some(parent.to_string()),
-        (None, Some(child)) => Some(child.to_string()),
-        (None, None) => None,
-    }
-}
-
-fn strip_condition_expression(condition: &str) -> &str {
-    condition
-        .trim()
-        .strip_prefix("${{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .map(str::trim)
-        .unwrap_or_else(|| condition.trim())
 }
 
 fn job_work_dir(
@@ -20177,9 +20157,12 @@ runs:
         };
         assert_eq!(step.id, "aggregate-1");
         assert!(step.script.contains("echo \"CI\""));
+        // F1: inner steps carry their own `if` only; the umbrella verdict
+        // (`always()` here) gates them in the executor instead of being
+        // re-tested in the composite scope.
         assert_eq!(
             step.condition.as_deref(),
-            Some("${{ (always()) && (github.event_name != 'schedule') }}")
+            Some("github.event_name != 'schedule'")
         );
         assert!(step.continue_on_error);
         assert!(matches!(
@@ -20500,7 +20483,10 @@ runs:
         assert_eq!(step_id, "docs-1");
         assert_eq!(invocation.adapter, crate::action::NativeActionAdapter::Mise);
         assert_eq!(invocation.inputs["github_token"], "ghs_token");
-        assert_eq!(condition.as_deref(), Some("github.event_name == 'push'"));
+        // F1: the inner step carries its own `if` (none here) only; the
+        // umbrella's `github.event_name == 'push'` gates it in the
+        // executor instead of being re-tested in the composite scope.
+        assert_eq!(condition.as_deref(), None);
         assert!(*continue_on_error);
         assert!(matches!(
             &ordered[2],

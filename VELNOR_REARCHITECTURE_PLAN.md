@@ -6147,3 +6147,74 @@ strict clippy clean on bench and on runner with `test-support`
 serial runner lib 1775 passed, 0 failed, 1 ignored (1772 + 3 new); serial
 runner lib with `test-support` 1820 passed, 0 failed, 1 ignored
 (1817 + 3 new).
+
+## 111. R0-sem: runner semantic parity F1–F7 (umbrella scope, loop control, docker lifecycle, outcomes, commands) — 2026-09-13
+
+Seven semantic FAILs against upstream `actions/runner` (StepsRunner.cs,
+ActionRunner.cs, SuccessFunction.cs, ContainerActionHandler.cs,
+ActionCommandManager.cs, CompositeActionHandler.cs — all verified live
+against `main`), fixed on branch `r0-sem-f1f7` from base `4e67b6fa`
+(post-#678):
+
+- **F1 — umbrella `if` evaluated in composite scope.** `CompositeStart`
+  pushed the composite scope *before* evaluating the umbrella's own
+  display name/`if`, so `success()`/`failure()` read the empty composite
+  scope instead of `job.status`. The verdict now evaluates pre-push (job
+  scope for outer, parent scope for nested — nested verdicts were
+  previously ignored entirely) and gates inner steps via skip-to-`End`
+  in the executor. Structural companion: `runner.rs` no longer ANDs the
+  parent condition text into inner/nested/`CompositeOutputs` conditions
+  (`combine_conditions` deleted) — upstream assigns inner steps their
+  own condition only (`step.Condition = stepData.Condition`), and
+  re-testing the parent in the composite scope reads the wrong status.
+  `CompositeOutputs` is now unconditional (`always()`), matching
+  upstream's `ProcessOutputs` after `RunStepsAsync`.
+- **F2 — exception `break` dropped remaining mains.** The main-step `Err`
+  arm did `step_error = Some; break`. Upstream `RunStepAsync` catches,
+  records, and continues. The arm now records the failed result (error
+  text in stderr) and continues; the job still fails via the conclusion
+  scan, and `always()` mains still run.
+- **F3 — early returns bypassed the post drain.** Pre-step `Err`
+  (`return Err`), display-name `?`, and `CompositeStart` `?`/`break`
+  paths now record a failed step and continue/skip-to-`End`, so
+  registered posts always drain and remaining steps still run.
+- **F4 — docker pre/post-entrypoint unsupported.** `ActionRuns` parses
+  `runs.pre-entrypoint`/`runs.post-entrypoint` (+ shared `pre-if`/
+  `post-if`); `DockerActionInvocation` carries them; the executor runs
+  the pre stage (same image/args, substituted entrypoint), registers
+  the post (`PostAction::Docker`), and drains it as its own step.
+- **F5 — killed-step outcome was `failure`, not `cancelled`.**
+  New `StepOutcome::Cancelled` (`"cancelled"`) recorded via
+  `apply_cancelled` in both cancellation arms; never converted by
+  `continue-on-error`, never counted as failure by status functions.
+- **F6 — umbrella outcome/conclusion never recorded.**
+  `CompositeEnd` (and the defensive unbalanced-plan flush) applies the
+  frame-aggregated umbrella result under the umbrella step id, so
+  `steps.<umbrella>.outcome|conclusion` resolve for later steps.
+- **F7 — `echo` ignored, `debug` ungated.** `::echo::on|off` validates
+  (empty/invalid values fail the command upstream-exact) and drives
+  render echo; `::debug::` renders only under step debug
+  (`ACTIONS_STEP_DEBUG` truthy or `RUNNER_DEBUG=1`, which the runtime
+  already exports from the server variable and which backs
+  `runner.debug`). Echo defaults to step-debug, matching upstream's
+  `EchoOnActionCommand` init; `add-mask`/issue commands never echo.
+
+Tests: 9 new (F1, F2 rewrite, F3, F4 executor + serde guard, F5, F6,
+F7 parse/render + debug gate) plus 4 contract updates (2 composite
+expansion, 2 cache-glob `Err`→recorded-failure). FAIL-before proven on
+base `4e67b6fa`: the 6 base-runnable tests fail there and pass here
+(F4×2 + F7-render are new-API and fail by construction on base).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets --locked` zero warnings; strict
+clippy clean on runner (`--all-targets -D warnings`); serial runner
+lib 1825 passed, 0 failed, 1 ignored. (Parallel runs show pre-existing
+timing flakes in untouched `checkout`/`git_mirror`/`node::cleanup`
+tests, failing identically on the base commit.)
+
+Out of scope, noted for follow-up: failed-pre + `continue-on-error`
+skips main (upstream runs it, since the pre conclusion converts to
+success); `steps` context is job-global rather than composite-scoped;
+`::stop-commands::`/resume lines stay consumed instead of echoing
+unconditionally; live-streamed log lines are raw (ungated `::debug::`
+in the live mirror only — the persisted log is gated).
