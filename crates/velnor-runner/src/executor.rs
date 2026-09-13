@@ -8,6 +8,9 @@ use crate::{
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{JobContainerSpec, Shell},
+    docker::client::{
+        classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
+    },
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::{
@@ -5676,6 +5679,25 @@ where
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _span = tracing::info_span!("job-container-boot").entered();
+        // The retry decision derives from the typed category attached at the
+        // docker boundary, never from error text (GOAL 31). Every failure
+        // still tidies partial state first; only the retry decision below is
+        // category-driven. Idempotence per category:
+        //
+        // * Transient (daemon restart / transport break): re-running start
+        //   after stale cleanup re-creates the same names. The previous
+        //   attempt's network guard is retired before recreate, so a retry
+        //   cannot orphan or double-own it. Safe to repeat with backoff.
+        // * Conflict (leftover object owned by another writer): the stale
+        //   cleanup removes the conflicting object, then exactly one retry.
+        //   A second conflict proves the conflict is not stale leftovers.
+        // * Terminal (same inputs fail identically, or an error the docker
+        //   boundary never classified): fail fast, no retry.
+        //
+        // Bounds: attempts per category plus an overall deadline backstop for
+        // slow attempts. Each attempt additionally runs under its own
+        // per-class docker deadline.
+        let deadline = Instant::now() + DOCKER_START_RETRY_DEADLINE;
         let mut attempt = 1_u32;
         loop {
             let Err(error) = self.start_job_environment_once(container) else {
@@ -5683,25 +5705,24 @@ where
             };
             self.cleanup_stale(container);
 
-            // A daemon/containerd restart briefly returns transport and shim
-            // errors for every `docker run`. The historical single immediate
-            // retry always landed inside the same restart window, turning a
-            // healthy workflow into a permanent pre-execution rejection.
-            // Retry only this closed transient class with bounded backoff.
-            // Every other failure retains the one stale-resource retry.
-            let transient = docker_start_error_is_transient(&error);
-            let max_attempts = if transient { 5 } else { 2 };
-            if attempt >= max_attempts {
+            let category = docker_error_category(&error);
+            let (max_attempts, delay) = match category {
+                DockerErrorCategory::Terminal => return Err(error),
+                DockerErrorCategory::Conflict => {
+                    (DOCKER_START_CONFLICT_MAX_ATTEMPTS, Duration::ZERO)
+                }
+                DockerErrorCategory::Transient => (
+                    DOCKER_START_TRANSIENT_MAX_ATTEMPTS,
+                    docker_start_retry_delay(attempt),
+                ),
+            };
+            if attempt >= max_attempts || Instant::now() >= deadline {
                 return Err(error);
             }
-            let delay = if transient {
-                docker_start_retry_delay(attempt)
-            } else {
-                Duration::ZERO
-            };
             eprintln!(
-                "Docker job environment start failed (attempt {attempt}/{max_attempts}); \
-                 removed stale resources; retrying in {}ms: {error:#}",
+                "Docker job environment start failed ({category:?}; attempt \
+                 {attempt}/{max_attempts}); removed stale resources; retrying \
+                 in {}ms: {error:#}",
                 delay.as_millis()
             );
             if !delay.is_zero() {
@@ -5827,15 +5848,19 @@ where
             let resolver = self
                 .runner
                 .run("docker", &container.resolver_state_args())?;
-            bail!(
-                "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
-                service.network_alias,
-                container.name,
-                lookup.code,
-                lookup.stderr.trim(),
-                network.stdout.trim(),
-                resolver.stdout.trim()
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
+                    service.network_alias,
+                    container.name,
+                    lookup.code,
+                    lookup.stderr.trim(),
+                    network.stdout.trim(),
+                    resolver.stdout.trim()
+                ),
+                &lookup.stderr,
+            )
+            .into());
         }
         Ok(())
     }
@@ -5897,14 +5922,18 @@ where
         let result = self.runner.run("docker", args.args())?;
         fs::remove_file(&marker).ok();
         if result.code != 0 {
-            bail!(
-                "Docker daemon cannot see Velnor bind-mounted work directories. \
-                 Expected host temp '{}' to appear at '/__t' in container '{}'. \
-                 Use a local Docker daemon or set --work-dir/--config-dir to a path visible to the daemon. stderr: {}",
-                container.temp_host.display(),
-                container.name,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "Docker daemon cannot see Velnor bind-mounted work directories. \
+                     Expected host temp '{}' to appear at '/__t' in container '{}'. \
+                     Use a local Docker daemon or set --work-dir/--config-dir to a path visible to the daemon. stderr: {}",
+                    container.temp_host.display(),
+                    container.name,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(())
     }
@@ -5955,12 +5984,16 @@ where
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
         let result = self.runner.run("docker", args)?;
         if result.code != 0 {
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -5989,12 +6022,16 @@ where
     ) -> Result<CommandResult> {
         let result = self.runner.run_with_env("docker", args, env)?;
         if result.code != 0 {
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -6011,18 +6048,25 @@ where
             // container removal does not cause the slot to cycle unnecessarily.
             // A bounded timeout (Created/removing BuildKit) is the same class:
             // job teardown proceeds; doctor/boot retry until the object is gone.
-            if result.code == 124
-                || (result.stderr.contains("removal of container")
-                    && result.stderr.contains("is already in progress"))
-            {
+            // The tolerance is the Conflict category narrowed to the in-progress
+            // needles: a stderr that also matches Transient (daemon down
+            // mid-removal) surfaces instead of masking as success.
+            let removal_in_flight = result.stderr.contains("removal of container")
+                && result.stderr.contains("is already in progress")
+                && classify_docker_stderr(&result.stderr) == DockerErrorCategory::Conflict;
+            if result.code == 124 || removal_in_flight {
                 return Ok(result);
             }
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -6074,20 +6118,16 @@ fn resolve_checkout_plan_expressions(
     Ok(plan)
 }
 
-fn docker_start_error_is_transient(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    [
-        "failed to create ttrpc connection",
-        "error reading from server: eof",
-        "unexpected eof",
-        "connection reset by peer",
-        "cannot connect to the docker daemon",
-        "is the docker daemon running",
-        "transport is closing",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
+/// Transient start failures retry with backoff: a daemon/containerd restart
+/// briefly fails every `docker` invocation, and the backoff sleeps outlast
+/// the restart window instead of landing inside it.
+const DOCKER_START_TRANSIENT_MAX_ATTEMPTS: u32 = 5;
+/// Conflicting leftover state gets one stale cleanup plus a single retry.
+const DOCKER_START_CONFLICT_MAX_ATTEMPTS: u32 = 2;
+/// Overall start-retry budget. Backoff sleeps total at most 15s and each
+/// attempt runs under its own per-class docker deadline; 60s is headroom,
+/// not a target — the attempts bound normally binds first.
+const DOCKER_START_RETRY_DEADLINE: Duration = Duration::from_secs(60);
 
 fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
     Duration::from_secs(1_u64 << failed_attempt.saturating_sub(1).min(3))
@@ -15556,6 +15596,61 @@ mod tests {
         }
     }
 
+    /// [`RecordingRunner`] that also scripts stderr per recorded call, for
+    /// retry-category tests: the docker boundary classifies on stderr, so a
+    /// retry test must pin the failure shape, not just the exit code. Entry
+    /// `i` overrides the stderr of the i-th recorded call (the unrecorded
+    /// mise-seed probe consumes neither a code nor a stderr); calls past the
+    /// script keep the inner empty stderr.
+    struct StderrScriptRunner {
+        inner: RecordingRunner,
+        stderrs: Vec<String>,
+    }
+
+    impl StderrScriptRunner {
+        fn scripted(codes: Vec<i32>, stderrs: Vec<&str>) -> Self {
+            Self {
+                inner: RecordingRunner {
+                    calls: Vec::new(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                    codes,
+                },
+                stderrs: stderrs.into_iter().map(str::to_string).collect(),
+            }
+        }
+
+        fn script_stderr(&mut self, result: &mut CommandResult) {
+            if !self.stderrs.is_empty() {
+                result.stderr = self.stderrs.remove(0);
+            }
+        }
+    }
+
+    impl CommandRunner for StderrScriptRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let expanded = crate::execution::expand_env_file_args(args);
+            let mut result = self.inner.run(program, args)?;
+            // Mirror the inner seed-probe short-circuit: the probe consumes
+            // no code, so it must consume no stderr either.
+            if !is_seed_probe(&expanded) {
+                self.script_stderr(&mut result);
+            }
+            Ok(result)
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            let mut result = self.inner.run_with_env(program, args, env)?;
+            self.script_stderr(&mut result);
+            Ok(result)
+        }
+    }
+
     #[derive(Default)]
     struct BuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
@@ -20690,19 +20785,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::inert(RecordingRunner {
-            calls: Vec::new(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        });
+        // The stale network left by a previous attempt is a boundary
+        // conflict: cleanup removes it, then the single retry succeeds.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec!["Error response from daemon: network with name \"net\" already exists"],
+        ));
 
         let results = executor
             .execute_steps(&container(&temp), &steps, &temp)
             .unwrap();
 
         assert_eq!(results.len(), 1);
-        let calls = &executor.runner().calls;
+        let calls = &executor.runner().inner.calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
@@ -20733,19 +20828,28 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn start_job_double_failure_cleans_up_retry_resources() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut executor = DockerJobEngine::inert(RecordingRunner {
-            calls: Vec::new(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
-        });
+        // Both failures are boundary conflicts: stale cleanup plus exactly
+        // one retry, then the error surfaces. Each attempt still tidies.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            vec![
+                "Error response from daemon: network with name \"net\" already exists",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "Conflict. The container name \"/job\" is already in use by container deadbeef",
+            ],
+        ));
 
         let error = executor
             .start_job_environment(&container(&temp))
             .unwrap_err();
 
         assert!(error.to_string().contains("docker run"));
-        let calls = &executor.runner().calls;
+        let calls = &executor.runner().inner.calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
@@ -20790,6 +20894,173 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_transient_failure_retries_then_succeeds() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // Daemon unreachable on the first attempt only: the category-driven
+        // policy backs off and the retry recreates the environment.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 0],
+            vec!["Cannot connect to the Docker daemon. Is the docker daemon running?"],
+        ));
+
+        executor.start_job_environment(&container(&temp)).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[6].1, expected_network_create_args());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_terminal_failure_fails_fast_without_retry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // Same inputs fail identically: no retry, but the single attempt
+        // still tidies partial state before the error surfaces.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0],
+            vec!["Error response from daemon: pull access denied for private/image"],
+        ));
+
+        let error = executor
+            .start_job_environment(&container(&temp))
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("pull access denied"),
+            "terminal error must surface unchanged: {error:#}"
+        );
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert!(
+            !calls[1..]
+                .iter()
+                .any(|(_, args)| args == &expected_network_create_args()),
+            "terminal failure must not retry: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_registry_transient_pull_retries_then_succeeds() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // The job `docker run` pulls: a registry rate limit is a transfer
+        // transient, retried with backoff — not a fail-fast terminal.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 1],
+            vec![
+                "",
+                "Error response from daemon: toomanyrequests: You have reached your pull rate limit",
+            ],
+        ));
+
+        executor.start_job_environment(&container(&temp)).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "registry transient must retry the environment: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_readiness_not_found_race_recovers_with_retry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        // The service container vanishes between `run` and the readiness
+        // poll: another writer removed it mid-flight (Conflict-shaped), so
+        // one stale cleanup plus a single retry recovers the race.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 0, 1],
+            vec!["", "", "Error: No such object: svc"],
+        ));
+
+        executor.start_job_environment(&spec).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(calls[2].1[0], "inspect");
+        // Retry cleanup removes the raced service before the retry recreates it.
+        let expected_service_rm = crate::docker_lease::remove_one_container_args("svc");
+        assert!(
+            calls.iter().any(|(_, args)| args == &expected_service_rm),
+            "race retry must clean the service first: {calls:?}"
+        );
+        // The retry re-creates the environment and re-polls readiness.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "NotFound race must retry the environment: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "inspect"))
+                .count(),
+            2,
+            "NotFound race must re-poll readiness: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn remove_container_failure_carries_typed_category() {
+        // The rm bail attaches DockerCommandError like every other
+        // docker-failure production point: the retry policy reads the chain,
+        // never the text. The message itself is unchanged.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1],
+            vec!["Error response from daemon: cannot remove a running container"],
+        ));
+
+        let error = executor
+            .run_docker_remove_container(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                "job".to_string(),
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "docker rm --force -- job failed with code 1: \
+             Error response from daemon: cannot remove a running container"
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<DockerCommandError>().is_some()),
+            "rm failure must carry DockerCommandError: {error:#}"
+        );
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Terminal);
     }
 
     #[test]
@@ -31594,26 +31865,6 @@ bitcoin-processor-app.push=true")
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
         );
-    }
-
-    #[test]
-    fn docker_start_retry_classifies_only_transient_runtime_failures() {
-        for message in [
-            "failed to create TTRPC connection: unsupported protocol",
-            "error reading from server: EOF",
-            "Cannot connect to the Docker daemon. Is the docker daemon running?",
-            "rpc error: transport is closing",
-        ] {
-            assert!(docker_start_error_is_transient(&anyhow::anyhow!(message)));
-        }
-        for message in [
-            "pull access denied for private/image",
-            "invalid reference format",
-            "network with name job already exists",
-            "failed to create task for container: OCI runtime create failed: executable not found",
-        ] {
-            assert!(!docker_start_error_is_transient(&anyhow::anyhow!(message)));
-        }
     }
 
     #[test]
