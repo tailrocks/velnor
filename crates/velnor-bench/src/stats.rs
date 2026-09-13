@@ -225,4 +225,23 @@ mod tests {
         let parsed: Summary = serde_json::from_str(&json).expect("deserialise");
         assert_eq!(parsed, summary);
     }
+
+    #[test]
+    fn summary_floats_survive_json_bit_exactly() {
+        // serde_json's default float parser rounds the 17th significant digit
+        // off by one ulp; the workspace enables `float_roundtrip` so a record
+        // read back from disk validates. This sample's variance needs all 17
+        // digits (observed live on docker/existing-image teardown timings).
+        let summary = Summary::new(&[
+            117, 126, 122, 135, 122, 106, 124, 138, 124, 122, 165, 167, 174, 182, 120, 132, 124,
+            122, 130, 127,
+        ])
+        .expect("summary");
+        assert_eq!(format!("{:?}", summary.variance), "434.15526315789475");
+        let json = serde_json::to_string(&summary).expect("serialise");
+        let parsed: Summary = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(parsed.variance.to_bits(), summary.variance.to_bits());
+        assert_eq!(parsed.mean.to_bits(), summary.mean.to_bits());
+        assert_eq!(parsed, summary);
+    }
 }

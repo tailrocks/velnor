@@ -13,12 +13,17 @@
 //! 4. **A statistic is only emitted when the sample supports it.** See
 //!    [`stats`].
 
+pub mod census;
+pub mod compare;
 pub mod drivers;
 pub mod env;
 pub mod fact;
+pub mod fault;
 pub mod gittrace;
 pub mod record;
 pub mod scenario;
+pub mod soak;
 pub mod stage;
 pub mod stats;
 pub mod sys;
+pub mod trace;

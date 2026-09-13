@@ -193,6 +193,31 @@ pub fn append_legacy_trust(root: PathBuf, trust_scope: &str) -> PathBuf {
     }
 }
 
+/// The GC lease scope of a trust-partitioned store: its path relative to
+/// its class root, in `/`-separated form (`bin/<trust>/<repo>` in the
+/// legacy layout, `bin/<repo>` in the canonical one).
+///
+/// The one spelling of lease-scope derivation, shared by the runner's lease
+/// publication and the lease-vs-mount conformance test. Both sides call the
+/// same store-path helpers with the job's admitted scope and strip the same
+/// class root, so a lease cannot name a namespace the mounts do not write —
+/// the custom-pool divergence (`bin/public-forks/<repo>` leased while the
+/// job mounts a class namespace) is inexpressible, not merely untested.
+/// Fails when the store is not below the root rather than leasing a scope
+/// that names nothing.
+pub fn gc_scope_below_root(store: &Path, class_root: &Path) -> Result<String> {
+    store
+        .strip_prefix(class_root)
+        .with_context(|| {
+            format!(
+                "store {} is not below its class root {}",
+                store.display(),
+                class_root.display()
+            )
+        })
+        .map(|relative| relative.to_string_lossy().to_string())
+}
+
 pub fn child_with_legacy_trust(root: PathBuf, child: &str, trust_scope: &str) -> PathBuf {
     let child = root.join(child);
     if root

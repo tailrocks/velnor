@@ -138,25 +138,12 @@ pub(crate) fn verify_docker_job_cgroup_boundary(
     let driver = CGROUP_DRIVER.get_or_try_init(
         host_runner.then(facts::daemon).flatten(),
         || -> Result<String, ExecutionError> {
-            let driver = runner
-                .run(
-                    "docker",
-                    &[
-                        "info".into(),
-                        "--format".into(),
-                        "{{.CgroupDriver}} {{.CgroupVersion}}".into(),
-                    ],
-                )
+            let probed = crate::docker::Docker::job(&mut *runner)
+                .daemon_cgroup()
                 .map_err(|error| {
-                    ExecutionError::DockerPreflight(format!("docker cgroup probe: {error}"))
+                    ExecutionError::DockerPreflight(format!("docker cgroup probe: {error:#}"))
                 })?;
-            if driver.code != 0 {
-                return Err(ExecutionError::DockerPreflight(format!(
-                    "docker info cgroup probe exited {}: {}",
-                    driver.code, driver.stderr
-                )));
-            }
-            Ok(driver.stdout)
+            Ok(format!("{} {}", probed.driver, probed.version))
         },
     )?;
 

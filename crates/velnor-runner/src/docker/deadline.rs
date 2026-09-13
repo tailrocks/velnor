@@ -320,7 +320,7 @@ fn classify_verb(verb: &str, rest: &[String]) -> DockerOp {
     match verb {
         "info" | "version" | "df" | "events" => DockerOp::DaemonQuery,
         "ps" | "ls" | "list" | "inspect" | "port" | "images" | "top" | "stats" | "diff"
-        | "history" | "search" | "use" | "show" => DockerOp::Query,
+        | "history" | "search" | "use" | "show" | "du" => DockerOp::Query,
         "logs" => {
             if rest
                 .iter()
@@ -440,6 +440,12 @@ mod tests {
             vec!["login", "--username", "u", "--password-stdin", "registry"],
             vec!["cp", "src", "container:/dst"],
             vec!["system", "prune", "--force"],
+            vec![
+                "buildx",
+                "du",
+                "--builder",
+                "velnor-builder-shared-trusted-owner_repo",
+            ],
             vec!["frobnicate"],
         ] {
             let (op, deadline) = deadline_for(&args(&command), SIX_HOURS);

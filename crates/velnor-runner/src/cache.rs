@@ -825,13 +825,21 @@ fn reclaim_work_root_with_layout(
             }
         }
     }
-    // Deliberate safety decision: emergency reclaim does not prune BuildKit.
-    // `prune_owned_builder` can enumerate Velnor's builders, but this reclaimer
-    // has no BuildKit lease or job-claim covering the builder's content. A
-    // builder can therefore be live while its cache path is idle, and
-    // `buildx prune --max-used-space 0B` is destructive in exactly that window.
-    // Keep the explicit operator function available; only a future caller that
-    // holds the matching BuildKit lease may invoke it.
+    // The claim boundary this path used to lack now exists: builders with any
+    // job hold are skipped no matter how large, and holds from vanished job
+    // containers are repaired first. Only when the file stores cannot satisfy
+    // the target does emergency reclaim stop and prune unclaimed builders,
+    // largest first — bounded, measured, and cold-only. This is what makes
+    // the old dead reclaim (enumerate, then deliberately do nothing) live.
+    if emergency && report.freed_bytes < target_bytes {
+        let remaining = target_bytes.saturating_sub(report.freed_bytes);
+        let pruned = crate::buildkit::pressure_prune_builders(run_root, remaining);
+        report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
+        for builder in pruned.pruned {
+            tracing::info!(builder = %builder, "emergency reclaim pruned unclaimed BuildKit builder");
+        }
+        report.failures.extend(pruned.failures);
+    }
     Ok(report)
 }
 
@@ -873,81 +881,6 @@ fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
     }
     fs::remove_dir_all(&candidate.path)
         .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
-}
-
-/// Names of the buildx builders Velnor owns, from `docker buildx ls` output.
-///
-/// The builder name is always `velnor-builder-<scope>`; inspecting the literal
-/// prefix `velnor-builder` therefore never succeeded, which made the whole
-/// disk-pressure BuildKit reclaim a silent no-op. Ownership is the prefix, so
-/// enumerate and match the prefix instead of guessing one name.
-pub(crate) fn owned_builder_names(buildx_ls_stdout: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in buildx_ls_stdout.lines() {
-        let Some(first) = line.split_whitespace().next() else {
-            continue;
-        };
-        // `docker buildx ls` marks the selected builder with a trailing `*` and
-        // indents each builder's nodes; nodes are not builders.
-        if line.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let name = first.trim_end_matches('*');
-        if name.starts_with(OWNED_BUILDER_PREFIX) && !names.iter().any(|seen| seen == name) {
-            names.push(name.to_string());
-        }
-    }
-    names
-}
-
-/// Explicitly prune every Velnor-owned BuildKit builder down to
-/// `max_used_space_bytes`. Emergency reclaim intentionally does not call this:
-/// the builder content has no lease/claim boundary yet.
-#[allow(
-    dead_code,
-    reason = "operator action requires an explicit BuildKit lease"
-)]
-pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
-    let Ok(listed) = std::process::Command::new("docker")
-        .args(["buildx", "ls"])
-        .output()
-    else {
-        return Ok(false);
-    };
-    if !listed.status.success() {
-        return Ok(false);
-    }
-    let builders = owned_builder_names(&String::from_utf8_lossy(&listed.stdout));
-    let limit = format!("{max_used_space_bytes}B");
-    let mut pruned = false;
-    for builder in builders {
-        let output = std::process::Command::new("docker")
-            .args([
-                "buildx",
-                "prune",
-                "--builder",
-                &builder,
-                "--force",
-                "--max-used-space",
-                &limit,
-            ])
-            .output()
-            .context("prune Velnor-owned buildx builder")?;
-        if output.status.success() {
-            pruned = true;
-            continue;
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("No such container") || stderr.contains("no builder") {
-            continue;
-        }
-        bail!(
-            "Velnor-owned buildx builder prune failed for {builder}: {}: {}",
-            output.status,
-            stderr.trim()
-        );
-    }
-    Ok(pruned)
 }
 
 fn reclaim_priority(store: CacheStore) -> u8 {
@@ -2099,17 +2032,17 @@ velnor-builder-untrusted      docker-container
 someone-elses-builder         docker-container
 ";
         assert_eq!(
-            owned_builder_names(listing),
+            crate::docker::client::owned_builder_names(listing),
             vec![
                 "velnor-builder-trusted".to_string(),
                 "velnor-builder-untrusted".to_string()
             ],
             "the bare name never exists; ownership is the prefix"
         );
-        assert!(owned_builder_names(listing)
+        assert!(crate::docker::client::owned_builder_names(listing)
             .iter()
             .all(|name| name.starts_with(OWNED_BUILDER_PREFIX)));
-        assert!(owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
+        assert!(crate::docker::client::owned_builder_names("NAME/NODE\ndefault *\n").is_empty());
     }
 
     /// Every store the emergency reclaimer may delete must declare a lease
@@ -2348,5 +2281,139 @@ someone-elses-builder         docker-container
         assert!(paths.is_empty());
         drop(leases);
         fs::remove_dir_all(run_root).unwrap();
+    }
+
+    /// A trusted job on a custom pool mounts its executable stores under the
+    /// admitted pool scope, and the runner leases exactly that scope: budget
+    /// GC must evict idle custom-pool and floor stores while the live
+    /// `bin/public-forks/<repo>` store survives. Legacy layout, where the
+    /// keys embed trust — the shape a class-namespace divergence (mounts
+    /// under `untrusted`, leases admitted-verbatim) would break by leaving
+    /// the live store unleased and evictable.
+    #[test]
+    fn custom_pool_legacy_leases_protect_mounted_executable_stores() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-custom-pool-lease-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let run_root = root.join("run");
+        // A job temp dir under a slot, so the store helpers normalize to the
+        // daemon-shared work root exactly like production.
+        let temp_host = work.join("slot-1/job-1/temp");
+        let trust = crate::trust_class::AdmittedTrust::narrow(
+            crate::trust_class::TrustClass::Trusted,
+            "public-forks",
+        );
+        let effective = trust.effective_scope();
+        assert_eq!(effective, "public-forks");
+        let repository_key = crate::container::sanitize_store_key("octo/base");
+
+        let cargo_root = crate::container::cargo_store_host(&temp_host, effective);
+        let mise_root = crate::container::mise_store_host(&temp_host, effective);
+        assert_eq!(
+            cargo_root,
+            work.join("_velnor_cargo"),
+            "custom-pool cargo root must be the legacy root"
+        );
+        // The mounts the job writes: the admitted namespace, not the class
+        // floor.
+        let live_bin =
+            crate::container::cargo_executable_store_host(&temp_host, effective, &repository_key);
+        assert_eq!(
+            live_bin,
+            work.join("_velnor_cargo/bin/public-forks/octo_base"),
+            "a trusted custom-pool job mounts its admitted namespace"
+        );
+        let live_installs =
+            crate::container::mise_executable_store_host(&temp_host, effective, &repository_key);
+        let live_binaries =
+            crate::container::mise_binary_store_host(&temp_host, effective, &repository_key);
+
+        // An idle same-pool store and an idle floor store, so the pass is not
+        // vacuously empty: both must be evictable while the live store stands.
+        let idle_bin = work.join("_velnor_cargo/bin/public-forks/octo_idle");
+        let floor_bin = work.join("_velnor_cargo/bin/untrusted/octo_base");
+        let idle_installs = work.join("_velnor_mise/installs/public-forks/octo_idle");
+        let idle_binaries = work.join("_velnor_mise/binaries/public-forks/octo_idle");
+        for path in [
+            &live_bin,
+            &live_installs,
+            &live_binaries,
+            &idle_bin,
+            &floor_bin,
+            &idle_installs,
+            &idle_binaries,
+        ] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("tool"), vec![0; 16]).unwrap();
+        }
+        // Idle stores sort before the live ones under the oldest-first
+        // budget walk, deterministically.
+        backdate(&idle_bin, DAY * 3);
+        backdate(&floor_bin, DAY * 2);
+        backdate(&idle_installs, DAY * 3);
+        backdate(&idle_binaries, DAY * 3);
+
+        // The runner's lease publication, through the shared derivation: one
+        // holder lease per live scope, read back through the real round-trip.
+        let stale_after = Duration::from_secs(60);
+        let holder = "job-1";
+        let scopes = [
+            (
+                "cargo",
+                crate::storage::gc_scope_below_root(&live_bin, &cargo_root).unwrap(),
+            ),
+            (
+                "mise",
+                crate::storage::gc_scope_below_root(&live_installs, &mise_root).unwrap(),
+            ),
+            (
+                "mise",
+                crate::storage::gc_scope_below_root(&live_binaries, &mise_root).unwrap(),
+            ),
+        ];
+        assert_eq!(scopes[0].1, "bin/public-forks/octo_base");
+        assert_eq!(scopes[1].1, "installs/public-forks/octo_base");
+        assert_eq!(scopes[2].1, "binaries/public-forks/octo_base");
+        let leases: Vec<_> = scopes
+            .iter()
+            .map(|(class, scope)| {
+                crate::capacity::ScopeLease::acquire(
+                    &run_root,
+                    class,
+                    &format!("{scope}/{holder}"),
+                    stale_after,
+                )
+                .unwrap()
+            })
+            .collect();
+        let active = crate::capacity::active_scopes(&run_root, stale_after).unwrap();
+
+        let listing = cache_listing_with_layout(&work, false, None).unwrap();
+        let mut policy = policy();
+        policy.in_use_scopes = active;
+        // Bind each class budget to its live bytes: every idle store must go,
+        // the live ones must stand.
+        policy.class_budgets = BTreeMap::from([(CacheStore::Cargo, 16), (CacheStore::Mise, 32)]);
+        let candidates = select_eviction_candidates(&listing, &policy);
+        let evicted: BTreeSet<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect();
+        for idle in [&idle_bin, &floor_bin, &idle_installs, &idle_binaries] {
+            assert!(
+                evicted.contains(idle),
+                "idle store {} must be evicted: {evicted:?}",
+                idle.display()
+            );
+        }
+        for live in [&live_bin, &live_installs, &live_binaries] {
+            assert!(
+                !evicted.contains(live),
+                "live custom-pool store {} is leased and must survive: {evicted:?}",
+                live.display()
+            );
+        }
+        drop(leases);
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -21,6 +21,7 @@ mod action;
 mod admission;
 pub mod args;
 mod attestation;
+mod buildkit;
 mod cache;
 mod capacity;
 mod checkout;
@@ -33,6 +34,8 @@ mod docker_lease;
 pub mod execution;
 mod executor;
 mod expression;
+#[cfg(test)]
+mod fault_injection;
 mod fs_copy;
 pub(crate) mod gha_cache;
 mod git_mirror;

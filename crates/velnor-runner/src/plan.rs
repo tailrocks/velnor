@@ -115,7 +115,6 @@ mod tests {
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
-            cargo_target_host: None,
             store_trust_scope: "release".to_owned(),
             mbx_store_host: None,
             sccache_store_host: None,

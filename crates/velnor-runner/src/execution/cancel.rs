@@ -420,8 +420,7 @@ fn signal_process_group(pgid: u32, signal: TerminationSignal) -> Result<(), Stri
 /// bounded by [`crate::docker::deadline_for`].
 fn docker_bounded(args: &[String]) -> Result<String, String> {
     let (_, deadline) = crate::docker::deadline_for(args, CONTAINER_FALLBACK_DEADLINE);
-    crate::docker_lease::run_host_docker_bounded(args, deadline)
-        .map_err(|error| format!("{error:#}"))
+    crate::docker::client::host_call_bounded(args, deadline).map_err(|error| format!("{error:#}"))
 }
 
 /// Only reachable if a future `docker` subcommand classifies as `Payload`,
@@ -429,25 +428,16 @@ fn docker_bounded(args: &[String]) -> Result<String, String> {
 const CONTAINER_FALLBACK_DEADLINE: Duration = Duration::from_secs(60);
 
 fn container_alive(name: &str) -> bool {
-    let args = vec![
-        "inspect".to_string(),
-        "--format".to_string(),
-        "{{.State.Running}}".to_string(),
-        name.to_string(),
-    ];
-    match docker_bounded(&args) {
-        Ok(output) => output.trim() == "true",
-        Err(detail) => {
-            let detail = format!("{detail:#}");
-            // Only a daemon that positively reports the container missing is
-            // evidence that it is gone. Treating *any* inspect failure as "gone"
-            // let a wedged or timing-out daemon end the ladder having sent no
-            // signal at all, and report the container terminated — the one
-            // failure direction cancellation must never take. An unknown state
-            // keeps the target alive so the ladder escalates against it.
-            !(detail.contains("No such container") || detail.contains("no such container"))
-        }
-    }
+    // Only a daemon that positively reports the container missing is
+    // evidence that it is gone (`NotFound` reads as not running inside the
+    // client). Treating *any* inspect failure as "gone" let a wedged or
+    // timing-out daemon end the ladder having sent no signal at all, and
+    // report the container terminated — the one failure direction
+    // cancellation must never take. An unknown state keeps the target alive
+    // so the ladder escalates against it.
+    crate::docker::Docker::host()
+        .container_running(name)
+        .unwrap_or(true)
 }
 
 fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String> {
@@ -460,7 +450,8 @@ fn signal_container(name: &str, signal: TerminationSignal) -> Result<(), String>
     match docker_bounded(&args) {
         Ok(_) => Ok(()),
         Err(detail)
-            if detail.contains("No such container") || detail.contains("is not running") =>
+            if crate::docker::client::daemon_reports_missing(&detail)
+                || detail.contains("is not running") =>
         {
             Ok(())
         }
@@ -1706,6 +1697,11 @@ mod tests {
             pgid: 4242,
             label: "late-step".into(),
         });
+        // `request` starts the detached ladder thread, which can claim the
+        // late target before this thread's inline pass runs. Both passes
+        // append to the same outcomes log, so wait for the entry rather than
+        // asserting the inline pass won the race.
+        wait_for_outcomes(&token, 1);
         assert_eq!(
             token
                 .outcomes()
@@ -1731,6 +1727,9 @@ mod tests {
             "a service container must outlive a cancellation request"
         );
         token.force();
+        // The detached pass can still be alive here and claim the service
+        // container first; the escalation outcome lands in the same log.
+        wait_for_outcomes(&token, 2);
         assert_eq!(
             token
                 .outcomes()

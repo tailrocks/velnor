@@ -210,7 +210,14 @@ where
         mirror,
         log,
     )?;
-    normalize_checkout_mtimes(runner, &plan.destination, log);
+    // Wall-clock checkout, like GitHub-hosted runners: checked-out files keep
+    // the mtime git gave them (now). Pinning mtimes to the commit timestamp
+    // made stale build artifacts read as fresh whenever dep-info outlived
+    // the sources it was built from — a staleness class no SHA gate can
+    // close for key-driven caches, and directory pinning additionally
+    // defeated rerun-if-changed=<dir> add/remove detection. Compiler reuse
+    // now comes only from content-addressed caches (mbx/sccache), which do
+    // not read mtimes at all.
     Ok(())
 }
 
@@ -219,79 +226,6 @@ fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
         git_ref: plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),
         full_history: plan.fetch_depth.is_none(),
         tags: plan.fetch_tags,
-    }
-}
-
-/// Pin every checked-out file's mtime to the commit timestamp, so two jobs
-/// checking out the SAME commit see identical mtimes. Cargo fingerprints path
-/// dependencies by mtime: with fresh per-job checkouts every workspace crate
-/// looked dirty on every job, recompiling the whole workspace even when
-/// sccache and the persistent target dir were warm. Best-effort: any failure
-/// (no git, odd fs) leaves mtimes as checked out.
-fn normalize_checkout_mtimes<R>(runner: &mut R, destination: &Path, log: &mut Vec<String>)
-where
-    R: CommandRunner,
-{
-    let _span = tracing::info_span!(
-        "checkout.workspace.mtime_normalize",
-        phase = "mtime-normalization",
-    )
-    .entered();
-    let args = [
-        "-C".to_string(),
-        path_arg(destination),
-        "log".to_string(),
-        "-1".to_string(),
-        "--format=%ct".to_string(),
-    ];
-    let Ok(result) = runner.run("git", &args) else {
-        return;
-    };
-    if result.code != 0 {
-        return;
-    }
-    let Ok(commit_secs) = result.stdout.trim().parse::<u64>() else {
-        return;
-    };
-    let commit_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(commit_secs);
-    let mut pending = vec![destination.to_path_buf()];
-    let mut touched = 0usize;
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_dir() {
-                if entry.file_name() != ".git" {
-                    pending.push(path);
-                }
-            } else if file_type.is_file()
-                && let Ok(file) = std::fs::File::options().append(true).open(&path)
-                && file.set_modified(commit_time).is_ok()
-            {
-                touched += 1;
-            }
-        }
-        // Directories too: cargo's `rerun-if-changed=<dir>` fingerprints the
-        // directory mtime, so an unpinned dir re-runs build scripts (and
-        // recompiles their crates) on every fresh checkout — observed live as
-        // blockchain-explorer rebuilding 28s of clippy per warm run because
-        // its build.rs tracks the proto include directories. Setting file
-        // times does not touch the parent dir, so order is irrelevant.
-        if let Ok(handle) = std::fs::File::open(&dir)
-            && handle.set_modified(commit_time).is_ok()
-        {
-            touched += 1;
-        }
-    }
-    if touched > 0 {
-        log.push(format!(
-            "Pinned {touched} file and directory mtimes to the commit timestamp (stable cargo fingerprints across jobs)"
-        ));
     }
 }
 
@@ -835,19 +769,7 @@ where
             } else {
                 run_git(runner, &reset, log)?;
             }
-            let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
-                .ok()
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                });
-            run_git(
-                runner,
-                &checkout_clean_args(destination, preserve_workspace_target),
-                log,
-            )?;
+            run_git(runner, &checkout_clean_args(destination), log)?;
         }
     }
 
@@ -1078,23 +1000,18 @@ fn write_fetch_head(git_dir: &Path, sha: &str, git_ref: &str, clone_url: &str) -
     .with_context(|| format!("write {}", path.display()))
 }
 
-fn checkout_clean_args(destination: &Path, preserve_workspace_target: bool) -> Vec<String> {
-    let mut args = vec![
+fn checkout_clean_args(destination: &Path) -> Vec<String> {
+    // Full actions/checkout clean semantics: the workspace is ephemeral, so
+    // no `target/` survives between jobs. (A persistent Cargo target layer
+    // used to be excluded here; it was deleted with the mtime pin because
+    // wall-clock sources made its mtime-based reuse always-dirty, and pinned
+    // mtimes made it stale-prone. Compiler reuse is content-addressed now.)
+    vec![
         "-C".to_string(),
         path_arg(destination),
         "clean".to_string(),
         "-ffdx".to_string(),
-    ];
-    // The persistent Cargo bucket is bind-mounted at the workflow-visible
-    // `target/` path before checkout. Native checkout must keep that one
-    // runner-owned cache mount; otherwise `git clean -ffdx` empties the bucket
-    // at the beginning of every job and defeats no-change reruns. All other
-    // ignored and untracked workspace content retains actions/checkout's clean
-    // semantics.
-    if preserve_workspace_target {
-        args.extend(["-e".to_string(), "target/".to_string()]);
-    }
-    args
+    ]
 }
 
 /// `git -c` args that make the git-lfs smudge/process filters skip downloading
@@ -2179,6 +2096,17 @@ mod tests {
 
     impl RepoFixture {
         fn new() -> Self {
+            Self::new_inner(None)
+        }
+
+        /// Same repo, but the seed commit carries a 2001 committer stamp: the
+        /// trap for mtime pinning — a pin would set every mtime to 2001 while
+        /// wall-clock checkout leaves them at now.
+        fn new_backdated() -> Self {
+            Self::new_inner(Some("2001-02-03T04:05:06+00:00"))
+        }
+
+        fn new_inner(commit_date: Option<&str>) -> Self {
             let root =
                 std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
             let origin = root.join("origin/repo.git");
@@ -2210,13 +2138,36 @@ mod tests {
             }
             std::fs::write(work.join("value"), "one").unwrap();
             git(vec!["-C".into(), path_arg(&work), "add".into(), ".".into()]);
-            git(vec![
-                "-C".into(),
-                path_arg(&work),
-                "commit".into(),
-                "-m".into(),
-                "one".into(),
-            ]);
+            let commit_args: Vec<String> = ["-C", path_arg(&work).as_str(), "commit", "-m", "one"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            match commit_date {
+                Some(date) => {
+                    let result = runner
+                        .run_with_env(
+                            "git",
+                            &commit_args,
+                            &[
+                                ("GIT_AUTHOR_DATE".to_string(), date.to_string()),
+                                ("GIT_COMMITTER_DATE".to_string(), date.to_string()),
+                            ],
+                        )
+                        .unwrap();
+                    assert_eq!(result.code, 0, "git {commit_args:?}: {}", result.stderr);
+                }
+                None => {
+                    let result = runner.run("git", &commit_args).unwrap();
+                    assert_eq!(result.code, 0, "git {commit_args:?}: {}", result.stderr);
+                }
+            }
+            // The pre-commit closure's borrow ended at its last use above; a
+            // fresh closure serves the post-commit calls.
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
             git(vec![
                 "-C".into(),
                 path_arg(&work),
@@ -3450,14 +3401,135 @@ mod tests {
     }
 
     #[test]
-    fn checkout_clean_preserves_only_runner_owned_target_when_persistent() {
+    fn checkout_clean_always_empties_the_ephemeral_workspace() {
+        // No target/ exclusion: the workspace is ephemeral, so clean removes
+        // everything, matching actions/checkout.
         assert_eq!(
-            checkout_clean_args(Path::new("/__w"), true),
-            ["-C", "/__w", "clean", "-ffdx", "-e", "target/"]
-        );
-        assert_eq!(
-            checkout_clean_args(Path::new("/__w"), false),
+            checkout_clean_args(Path::new("/__w")),
             ["-C", "/__w", "clean", "-ffdx"]
         );
+    }
+
+    /// In-memory JSONL sink with the runner's production shape: `fmt::json`
+    /// plus span-close events, the exact layer `telemetry::init` installs.
+    #[derive(Clone)]
+    struct BufferWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn checkout_emits_the_four_bench_phase_spans() {
+        // Span contract for `velnor-bench/src/trace.rs`: the benchmark reads
+        // checkout phase timings from trace.jsonl span-close records, keyed by
+        // these span names and `phase` fields. Renaming either side breaks
+        // this test on purpose. Real git over a file:// origin, so every span
+        // below fires through the production path, not a fake.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace);
+        let store = fixture.store();
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+            .with_current_span(true)
+            .with_writer({
+                let buffer = buffer.clone();
+                move || BufferWriter(buffer.clone())
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut runner = ProcessCommandRunner;
+            let mut log = Vec::new();
+            execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&store))
+                .expect("checkout over a file:// origin succeeds");
+        });
+
+        let bytes = buffer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let text = String::from_utf8(bytes).expect("trace output is UTF-8");
+        let mut closed: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).expect("trace line is JSON");
+            if record["fields"]["message"] != "close" {
+                continue;
+            }
+            let name = record["span"]["name"].as_str().unwrap_or("").to_owned();
+            let phase = record["span"]["phase"].as_str().unwrap_or("").to_owned();
+            closed.push((name, phase));
+        }
+        for (name, phase) in [
+            ("checkout.mirror.lock_wait", "mirror-lock-wait"),
+            ("checkout.mirror.fetch", "mirror-fetch"),
+            ("checkout.workspace.fetch", "workspace-fetch"),
+            ("checkout.workspace.checkout", "workspace-checkout"),
+        ] {
+            assert!(
+                closed
+                    .iter()
+                    .any(|closed| closed.0 == name && closed.1 == phase),
+                "missing span-close ({name}, {phase}) in {closed:?}"
+            );
+        }
+        assert!(
+            !closed.iter().any(|closed| closed.0.contains("mtime")),
+            "the mtime-normalization phase is deleted with the pin: {closed:?}"
+        );
+    }
+
+    #[test]
+    fn checkout_leaves_wall_clock_mtimes() {
+        // Wall-clock conformance (BC-14): checked-out files keep the mtime
+        // git gave them, like GitHub-hosted runners — never the commit
+        // timestamp. The fixture commit is backdated to 2001, so a pin
+        // would set every mtime 25 years in the past.
+        let fixture = RepoFixture::new_backdated();
+        let workspace = fixture.root.join("workspace");
+        let plan = fixture.plan(workspace.clone());
+        let started = std::time::SystemTime::now();
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("checkout over a file:// origin succeeds");
+
+        let mut checked = 0usize;
+        let mut pending = vec![workspace];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read checkout dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if entry.file_type().expect("file type").is_dir() {
+                    if entry.file_name() != ".git" {
+                        pending.push(path);
+                    }
+                    continue;
+                }
+                let mtime = std::fs::metadata(&path)
+                    .expect("metadata")
+                    .modified()
+                    .expect("mtime");
+                assert!(
+                    mtime >= started,
+                    "{} has a pinned-looking mtime {mtime:?} (checkout started {started:?})",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the checkout must contain files to check");
     }
 }

@@ -81,6 +81,54 @@ pub struct JobDockerScope {
     job_id: String,
 }
 
+/// Machine-readable form of the per-job counters, for the benchmark bridge.
+///
+/// This reads the same process counters the `velnor.docker` tracing fields are
+/// derived from; it is not a second counter. `velnor-bench` consumes snapshots
+/// (or the identical tracing fields) instead of recounting invocations at its
+/// own call sites.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassTotal {
+    /// Closed vocabulary label from [`DockerOp::label`]; never an argument.
+    pub label: &'static str,
+    pub count: u64,
+    pub latency_ms: u64,
+}
+
+/// Point-in-time view of the current job scope's counters.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Snapshot {
+    pub invocations: u64,
+    pub timeouts: u64,
+    pub failures: u64,
+    /// One entry per class that occurred, in [`DockerOp::ALL`] order.
+    pub classes: Vec<ClassTotal>,
+}
+
+/// Read the current counters without resetting them.
+#[must_use]
+pub fn snapshot() -> Snapshot {
+    let mut classes = Vec::new();
+    for op in DockerOp::ALL {
+        let count = CLASS_COUNT[op.index()].load(Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        let micros = CLASS_MICROS[op.index()].load(Ordering::Relaxed);
+        classes.push(ClassTotal {
+            label: op.label(),
+            count,
+            latency_ms: micros / 1_000,
+        });
+    }
+    Snapshot {
+        invocations: INVOCATIONS.load(Ordering::Relaxed),
+        timeouts: TIMEOUTS.load(Ordering::Relaxed),
+        failures: FAILURES.load(Ordering::Relaxed),
+        classes,
+    }
+}
+
 impl JobDockerScope {
     /// Host `docker` processes spawned so far in this job.
     #[must_use]
@@ -171,5 +219,51 @@ mod tests {
         let second = begin_job("job-2");
         assert_eq!(second.invocations(), 0);
         assert_eq!(second.per_class_counts(), "");
+    }
+
+    #[test]
+    fn a_snapshot_reads_the_same_counters_as_the_forensics_fields() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let scope = begin_job("job-snapshot");
+        observe(DockerOp::Query, Duration::from_millis(5), 0, false);
+        observe(DockerOp::Query, Duration::from_millis(7), 0, false);
+        observe(DockerOp::Remove, Duration::from_millis(20_000), 124, true);
+        let snapshot = snapshot();
+        assert_eq!(snapshot.invocations, scope.invocations());
+        assert_eq!(snapshot.timeouts, 1);
+        assert_eq!(snapshot.failures, 1);
+        assert_eq!(
+            snapshot.classes,
+            vec![
+                ClassTotal {
+                    label: "query",
+                    count: 2,
+                    latency_ms: 12,
+                },
+                ClassTotal {
+                    label: "remove",
+                    count: 1,
+                    latency_ms: 20_000,
+                },
+            ]
+        );
+        // The snapshot is a read, not a reset: the scope still reports.
+        assert_eq!(scope.invocations(), 3);
+        assert_eq!(scope.per_class_counts(), "query=2,remove=1");
+        assert_eq!(
+            snapshot
+                .classes
+                .iter()
+                .map(|class| class.count)
+                .sum::<u64>(),
+            3
+        );
+    }
+
+    #[test]
+    fn a_snapshot_of_an_idle_scope_is_empty_but_valid() {
+        let _serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
+        let _scope = begin_job("job-idle");
+        assert_eq!(snapshot(), Snapshot::default());
     }
 }

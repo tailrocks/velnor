@@ -21,6 +21,8 @@ pub enum Family {
     Docker,
     /// Behaviour of a host that keeps state across jobs.
     PersistentHost,
+    /// Injected failures and their containment.
+    Fault,
 }
 
 impl Family {
@@ -31,6 +33,7 @@ impl Family {
             Self::Rust => "rust",
             Self::Docker => "docker",
             Self::PersistentHost => "persistent-host",
+            Self::Fault => "fault",
         }
     }
 }
@@ -320,6 +323,8 @@ scenarios! {
         "Full ready -> broker -> acquire -> admission -> capacity -> checkout -> docker -> first command -> completion -> teardown breakdown";
     "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
         "Stage breakdown while every configured slot is busy";
+    "lifecycle/trust-partition", Lifecycle, VelnorJob, None, VELNOR_JOB, &[],
+        "Trust-partition cost: same workload as trusted vs fork-pr jobs; compare the admission, capacity and checkout stages of the two records";
 
     // Rust cache behaviour. These rows require a real Velnor job: host Cargo
     // can measure compilation, but cannot establish Velnor acceleration.
@@ -390,6 +395,20 @@ scenarios! {
         "Hundredth job; accumulation, leak and fragmentation behaviour";
     "persistent-host/after-gc", PersistentHost, VelnorJob, None, VELNOR_JOB, &[],
         "First job after a full disk and image garbage collection";
+
+    // Fault scenarios: the preferred driver injects into a real job, but the
+    // four classes below are measurable today through docker-direct, where the
+    // harness injects a real fault into a real container lifecycle. Unlike the
+    // Rust rows, degradation is honest here: the containment under test is the
+    // harness's own cleanup contract, stated on the record.
+    "fault/container-killed-mid-step", Fault, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
+        "SIGKILL the container while the user step runs; teardown must remove everything (docker-kill-mid-step)";
+    "fault/step-command-fails", Fault, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
+        "User command exits non-zero; the code is recorded and teardown completes (docker-exec-nonzero)";
+    "fault/object-missing", Fault, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
+        "Inspect and remove an absent object; a clean not-found error and no residue (docker-object-missing)";
+    "fault/network-conflict", Fault, VelnorJob, Some(Driver::DockerDirect), VELNOR_JOB, CONTAINER,
+        "Create the same network twice; the conflict is contained and owned objects are removed (docker-network-conflict)";
 }
 
 /// Look one scenario up by id.
@@ -421,6 +440,11 @@ mod tests {
     fn the_matrix_covers_every_required_measurement() {
         for id in [
             "lifecycle/stage-breakdown",
+            "lifecycle/trust-partition",
+            "fault/container-killed-mid-step",
+            "fault/step-command-fails",
+            "fault/object-missing",
+            "fault/network-conflict",
             "rust/cold",
             "rust/warm",
             "rust/noop",
@@ -571,6 +595,46 @@ mod tests {
                 scenario.id
             );
         }
+    }
+
+    #[test]
+    fn fault_rows_degrade_to_docker_direct() {
+        let capabilities = Capabilities {
+            docker_daemon: true,
+            ..Capabilities::default()
+        };
+        for scenario in MATRIX
+            .iter()
+            .filter(|scenario| scenario.family == Family::Fault)
+        {
+            let Runnability::Degraded {
+                driver,
+                missing_for_preferred,
+            } = scenario.runnability(capabilities)
+            else {
+                panic!("{} must degrade to docker-direct", scenario.id);
+            };
+            assert_eq!(driver, Driver::DockerDirect, "{}", scenario.id);
+            assert!(
+                missing_for_preferred.contains(&Requirement::VelnorJobDriver),
+                "{}",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_trust_partition_row_needs_a_real_job() {
+        let capabilities = Capabilities {
+            docker_daemon: true,
+            rust_toolchain: true,
+            ..Capabilities::default()
+        };
+        let scenario = find("lifecycle/trust-partition").expect("scenario");
+        assert!(matches!(
+            scenario.runnability(capabilities),
+            Runnability::Unrunnable { .. }
+        ));
     }
 
     #[test]

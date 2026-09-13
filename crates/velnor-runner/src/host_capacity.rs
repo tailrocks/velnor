@@ -122,7 +122,7 @@ pub fn docker_usage_bytes() -> Option<u64> {
         "--format".to_string(),
         "{{json .}}".to_string(),
     ];
-    let output = crate::docker_lease::run_host_docker(&args).ok()?;
+    let output = crate::docker::client::host_call(&args).ok()?;
     docker_usage_bytes_from_df(&output)
 }
 

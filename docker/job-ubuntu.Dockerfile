@@ -94,16 +94,13 @@ RUN mkdir -p /opt/mise/bin \
 # Rust-free lock view. `cargo:cargo-deny` is compiled by the toolchain, so it
 # genuinely depends on it and belongs in the Rust layer below.
 #
-# Cosign (127 MB unpacked) serves exactly one adapter and would be a good
-# candidate to install lazily — the adapter already runs `mise install --locked
-# --yes cosign` itself. Leaving it out of this list does not work: mise's
-# `exec_auto_install` makes any `mise exec` materialise the *whole* configured
-# toolset, so the next `mise exec` in this build (and the first one in any job)
-# reinstalls it. Making it genuinely lazy means either turning off
-# `exec_auto_install` image-wide, which changes tool resolution for every user
-# workflow, or dropping cosign from job-mise.toml and giving the adapter its own
-# pinned source in crates/velnor-runner/src/executor.rs. Until one of those
-# lands, install it here deliberately rather than as an implicit side effect.
+# Cosign is deliberately NOT in this list: it serves exactly one adapter
+# (sigstore/cosign-installer), so baking its 127 MB unpacked into every job
+# is pure waste. The adapter fetches the pinned release itself, with the
+# version plus per-arch checksums in crates/velnor-runner/src/executor.rs as
+# its lock. Do not re-add cosign to job-mise.toml: mise's `exec_auto_install`
+# would materialise it on the next `mise exec` in this build and the first
+# one in any job, silently re-baking it.
 COPY --from=toolset-config /out/mise.toml /out/mise.lock /opt/mise/config/
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
@@ -118,7 +115,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
          'aqua:opentofu/opentofu' \
          'aqua:oven-sh/bun' \
          'github:fornwall/rust-script' \
-         cosign \
          gh \
          hadolint \
          just \
@@ -178,8 +174,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && mise exec -- just --version \
     && mise exec -- protoc --version \
     && mise exec -- gh --version \
-    && mise exec -- mold --version \
-    && mise exec -- cosign version
+    && mise exec -- mold --version
 
 # Job-runtime packages: everything a *workflow* may need but the toolchain
 # install does not. This is the volatile half of the package set, so it sits

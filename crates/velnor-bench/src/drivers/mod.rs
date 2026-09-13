@@ -7,6 +7,7 @@
 
 pub mod cargo;
 pub mod docker;
+pub mod fault;
 mod isolated_docker;
 
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use anyhow::Result;
 
 use crate::{
     record::Observation,
-    scenario::{Driver, Scenario},
+    scenario::{Driver, Family, Scenario},
     sys::Runner,
 };
 
@@ -92,6 +93,7 @@ pub fn build(scenario: &Scenario, driver: Driver) -> Result<Box<dyn Workload>> {
              no such runner is configured, and this harness will not simulate one",
             scenario.id
         ),
+        Driver::DockerDirect if scenario.family == Family::Fault => fault::build(scenario),
         Driver::DockerDirect => docker::build(scenario),
         Driver::CargoDirect => cargo::build(scenario),
     }
