@@ -1550,7 +1550,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         if automatic {
             if lane == RunnerMode::Velnor {
-                self.velnor_lane_event_expression(&dispatch)
+                self.velnor_lane_event_expression(dispatch)
             } else {
                 format!("{} || ({dispatch})", self.automatic_event_expression())
             }
