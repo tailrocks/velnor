@@ -573,6 +573,15 @@ struct CacheSpec {
     /// Mr. Boxington object transport. Required and non-empty in that
     /// combination; the justification is rendered next to the cache steps.
     pub(crate) mbx_output_cache_justification: Option<String>,
+    /// Whether this contract is the mutable mount seed of a Docker image
+    /// build: the generator renders the host restore, seed-context
+    /// preparation, and trusted-only export collection around the lane's
+    /// build commands instead of the generic path cache, so the compiler
+    /// state inside the build's cache mounts reaches a fresh builder. The
+    /// declared build commands must prove they inject and extract the seed
+    /// (`validate_mutable_mount_seed`), so a declared seed that no build
+    /// consumes is a usage error rather than dead configuration.
+    pub(crate) mutable_mount_seed: bool,
 }
 
 impl CacheSpec {
@@ -1485,6 +1494,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
                 paths: cache.paths().unwrap_or_default().to_vec(),
                 purpose: CachePurpose::Generic,
                 mbx_output_cache_justification: None,
+                mutable_mount_seed: cache.mutable_mount_seed(),
             }),
             tool_version: row.tool_version().map(str::to_owned),
             toolchain: None,
@@ -1530,6 +1540,7 @@ fn apply_unit_row(config: &mut ProjectConfig, row: &config::UnitSection) {
             paths: cache.paths().unwrap_or_default().to_vec(),
             purpose: CachePurpose::Generic,
             mbx_output_cache_justification: None,
+            mutable_mount_seed: cache.mutable_mount_seed(),
         });
     }
     if let Some(pinned) = row.pinned_lockfile() {
@@ -1989,7 +2000,109 @@ fn render_static_template_for_config(
     } else {
         template
     };
-    render_pinned_toolchain_fill(config, &render_static_template(&template))
+    let rendered = render_pinned_toolchain_fill(config, &render_static_template(&template))?;
+    validate_static_template_cache_transports(&rendered)?;
+    Ok(rendered)
+}
+
+/// Reject a static workflow body that points Mr. Boxington's local backend at
+/// a job no persistent store can serve. `backend: local` reuses whatever store
+/// the runner's filesystem already holds; on a disposable hosted runner it
+/// holds nothing, so every job starts cold while the declaration claims
+/// persistence. A local backend is only accepted for a job whose `runs-on`
+/// selects the repository's persistent (self-hosted or runner-group) pool, and
+/// a GitHub object-cache backend is only accepted with the cache key that
+/// makes its snapshots reusable — a keyless snapshot import would restore
+/// nothing and save under a per-run key no later run can find.
+///
+/// # Errors
+/// Returns a usage error naming the offending job when a hosted job declares
+/// the local backend, or when a GitHub-backend step carries no cache mode,
+/// key, or restore keys.
+fn validate_static_template_cache_transports(rendered: &str) -> Result<(), GeneratorError> {
+    for (job, block) in static_workflow_job_blocks(rendered) {
+        let runs_on = block
+            .lines()
+            .find(|line| line.trim_start().starts_with("runs-on:"))
+            .map(|line| {
+                line.trim_start()
+                    .strip_prefix("runs-on:")
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        // The runner-group selector is the persistent pool by construction:
+        // the generation config declares it for the self-hosted lane. A bare
+        // `self-hosted` label says the same thing without a group.
+        let persistent =
+            runs_on.contains("self-hosted") || runs_on.contains("fromJSON('{\"group\"");
+        let uses_mr_boxington = block.contains("jdx/mr-boxington-action@");
+        if uses_mr_boxington && block.contains("backend: local") && !persistent {
+            return Err(GeneratorError::usage(format!(
+                "static workflow job `{job}` points Mr. Boxington's `backend: local` at \
+                 `runs-on: {runs_on}`; a disposable hosted runner keeps no local store, so the \
+                 job would rebuild cold under a declaration of persistence. Restore compiler \
+                 state through the GitHub object cache (`backend: github` with \
+                 `github-cache-mode: objects` and a compatibility-identity `cache-key`), or run \
+                 the job on the persistent runner pool the local store lives on"
+            )));
+        }
+        if uses_mr_boxington
+            && block.contains("backend: github")
+            && ["github-cache-mode:", "cache-key:", "restore-keys:"]
+                .into_iter()
+                .any(|required| !block.contains(required))
+        {
+            return Err(GeneratorError::usage(format!(
+                "static workflow job `{job}` points Mr. Boxington's `backend: github` at the \
+                 object cache without `github-cache-mode`, `cache-key`, and `restore-keys`; \
+                 without a compatibility-identity key the job imports nothing and saves under a \
+                 per-run key no later run can restore"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The job blocks of a rendered static workflow, as `(job key, body)` pairs.
+/// Structural, not a YAML parse: the generator only needs which step lines
+/// belong to which job, and a body too malformed to expose that is caught by
+/// the `__VELNOR_` marker and pin checks around it.
+fn static_workflow_job_blocks(rendered: &str) -> Vec<(String, String)> {
+    let mut blocks = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+    for line in rendered.lines() {
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            // A top-level key ends any job block; only `jobs:` bodies hold
+            // jobs, and job keys sit at exactly one indent level below it.
+            if let Some(job) = current.take() {
+                blocks.push(job);
+            }
+            continue;
+        }
+        if indent == 2 {
+            let trimmed = line.trim_end();
+            if trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                if let Some(job) = current.take() {
+                    blocks.push(job);
+                }
+                current = Some((trimmed.trim_end_matches(':').to_owned(), Vec::new()));
+                continue;
+            }
+        }
+        if let Some((_, body)) = current.as_mut() {
+            body.push(line);
+        }
+    }
+    if let Some(job) = current.take() {
+        blocks.push(job);
+    }
+    blocks
+        .into_iter()
+        .map(|(job, body)| (job, body.join("\n")))
+        .collect()
 }
 
 /// The repository marker the regeneration gate matches on.
@@ -4463,6 +4576,9 @@ mod tests {
         "velnor-workflow test-crates --config .github/ci/project.toml";
     use super::*;
     use crate::estate::render_apt_package_update_template;
+    use crate::primitives::{
+        CacheBackend, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES, MUTABLE_MOUNT_HOST_DIR,
+    };
     use crate::scan::rust::{parse_cargo_manifest, parse_include_str_literals, CargoDependency};
 
     #[expect(
@@ -5853,6 +5969,307 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!rendered.contains("cargo check"));
     }
 
+    /// A hosted job that points Mr. Boxington's local backend at a disposable
+    /// runner claims persistence nothing can serve. Generation refuses it
+    /// unless the job selects the persistent runner pool — and the GitHub
+    /// object-cache alternative is refused too when it carries no cache key,
+    /// because a keyless snapshot import restores nothing (§9.1 test 7).
+    #[test]
+    fn static_templates_reject_local_mbx_without_declared_persistence() {
+        let hosted_local = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n          version: 1.8.3\n";
+        let rejected = must_fail(
+            validate_static_template_cache_transports(hosted_local),
+            "hosted local mbx must be rejected",
+        );
+        let message = rejected.to_string();
+        assert!(message.contains("build"), "{message}");
+        assert!(message.contains("backend: local"), "{message}");
+
+        let self_hosted_local = "name: CI\njobs:\n  build:\n    runs-on: [self-hosted, pool]\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        must(
+            validate_static_template_cache_transports(self_hosted_local),
+            "local mbx on the persistent pool is accepted",
+        );
+
+        let group_local = "name: CI\njobs:\n  build:\n    runs-on: ${{ fromJSON('{\"group\":\"ci\",\"labels\":[\"self-hosted\",\"pool\"]}') }}\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        must(
+            validate_static_template_cache_transports(group_local),
+            "local mbx behind the persistent runner group is accepted",
+        );
+
+        let keyless_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          version: 1.8.3\n";
+        let rejected = must_fail(
+            validate_static_template_cache_transports(keyless_github),
+            "keyless object-cache mbx must be rejected",
+        );
+        let message = rejected.to_string();
+        assert!(message.contains("cache-key"), "{message}");
+
+        let keyed_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.8.3\n          cache-key: example-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n          restore-keys: |\n            example-${{ runner.os }}-\n";
+        must(
+            validate_static_template_cache_transports(keyed_github),
+            "keyed object-cache mbx is accepted",
+        );
+
+        // The generator's own canonical static step must satisfy the
+        // contract it enforces.
+        must(
+            validate_static_template_cache_transports(&format!(
+                "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n{STATIC_MR_BOXINGTON_STEP}"
+            )),
+            "the canonical static Mr. Boxington step passes its own validation",
+        );
+    }
+
+    /// The Docker mutable mount seed renders the whole lifecycle in order —
+    /// host restore, seed-context preparation, the build, trusted-only
+    /// collection, trusted-only save — on the hosted lane, and nothing at all
+    /// on the persistent self-hosted lane.
+    #[test]
+    fn docker_mutable_mount_seed_renders_restore_seed_and_trusted_export() {
+        let root = temporary_repository("docker-seed");
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write Dockerfile",
+        );
+        // The scan refuses a Both-runners repository that declares no
+        // self-hosted labels; the seed lifecycle test needs both lanes, so the
+        // labels are declared the way a generation config would.
+        let mut config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "scan Docker repository",
+        );
+        config.velnor_labels = vec!["self-hosted".to_owned(), "pool".to_owned()];
+        config.runners = RunnerMode::Both;
+        let index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Docker),
+            "scanned Docker unit",
+        );
+        config.units[index].pr_commands = vec![
+            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"
+                .to_owned(),
+        ];
+        config.units[index].full_commands = vec![
+            "docker buildx build --load --cache-from type=gha,scope=example-docker --file 'Dockerfile' --tag local-ci:dockerfile --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".to_owned(),
+            "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".to_owned(),
+        ];
+        // The persistent self-hosted lane runs its own retained builder: no
+        // seed transport, no seed reference.
+        config.units[index].velnor_pr_commands = Some(vec![
+            "docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'".to_owned(),
+        ]);
+        config.units[index].velnor_full_commands = Some(vec![
+            "docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"
+                .to_owned(),
+        ]);
+        config.units[index].cache = Some(CacheSpec {
+            key_files: vec!["Cargo.lock".to_owned(), "Dockerfile".to_owned()],
+            paths: vec![MUTABLE_MOUNT_HOST_DIR.to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: true,
+        });
+        must(
+            primitives::validate_mutable_mount_seed(&config.units[index]),
+            "a seed-consumed-and-extracted build declares a valid lifecycle",
+        );
+
+        let ir = WorkflowIr::from_config(&config);
+        let unit = &config.units[index];
+        let contract = UnitContract {
+            lanes: ir.default_lane_jobs(true),
+            timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
+            cache: CacheBackend::Detected,
+            cache_save: true,
+            mutable_mount_seed: true,
+        };
+        let rendered = ir.render_unit_surface(unit, &contract);
+
+        let restore = must_some(
+            rendered.find("Restore Docker build seed"),
+            "seed restore rendered",
+        );
+        let prepare = must_some(
+            rendered.find("Prepare Docker build seed context"),
+            "seed context preparation rendered",
+        );
+        let run = must_some(rendered.find("Run "), "checks step rendered");
+        let collect = must_some(
+            rendered.find("Collect Docker mutable-cache export"),
+            "export collection rendered",
+        );
+        let save = must_some(
+            rendered.find("Save Docker build seed"),
+            "seed save rendered",
+        );
+        assert!(restore < prepare && prepare < run && run < collect && collect < save);
+
+        // Both collection and save are trusted-event surfaces; an untrusted
+        // pull request restores and builds but never writes seed state.
+        let trusted_gate = "if: (github.event_name == 'push' && github.ref == 'refs/heads/main')";
+        assert!(rendered.contains(&format!(
+            "Collect Docker mutable-cache export\n        {trusted_gate}"
+        )));
+        // The save gate wraps the trusted expression and adds the restore
+        // outcome: an exact-key hit means the seed is already current, so
+        // re-saving under an immutable key would write nothing new.
+        assert!(rendered.contains(
+            "Save Docker build seed\n        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main')"
+        ));
+        assert!(rendered.contains("&& steps.cache.outputs.cache-hit != 'true'"));
+
+        // The export collection refuses a partial export instead of seeding
+        // the next builder with less than the declared contract.
+        assert!(rendered.contains("Docker cache export is missing"));
+
+        // One namespace for the Docker seed, distinct from the unit-lane mbx
+        // keys, and the saved paths are the seed directory — never a raw
+        // `target/` duplicate of the mbx closure.
+        // Restore key, restore-keys prefix, and save key: one namespace.
+        assert_eq!(rendered.matches("velnor-docker-seed-").count(), 3);
+        assert!(rendered
+            .contains("velnor-docker-seed-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles("));
+        assert!(!rendered.contains("velnor-mbx-"));
+        assert!(rendered.contains("path: |\n            .velnor-docker-cache\n          key:"));
+
+        // The persistent self-hosted lane carries no seed transport at all.
+        let velnor = must_some(
+            rendered.find("\n  velnor:").map(|index| &rendered[index..]),
+            "self-hosted lane rendered",
+        );
+        assert!(!velnor.contains("velnor-docker-seed-"));
+        assert!(!velnor.contains("Collect Docker mutable-cache export"));
+    }
+
+    /// A declared seed the declared builds never consume is the exact
+    /// "declared persistence that does not exist" this contract exists to
+    /// remove, so every gap is a usage error with the missing direction named.
+    #[test]
+    fn mutable_mount_seed_validation_rejects_unconsumed_declarations() {
+        let docker_unit = |mutate: &dyn Fn(&mut Unit)| {
+            let root = temporary_repository("docker-seed-invalid");
+            must(
+                fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+                "write Dockerfile",
+            );
+            let mut config = must(
+                scan_repository(&root, RunnerMode::Github),
+                "scan Docker repository",
+            );
+            let index = must_some(
+                config
+                    .units
+                    .iter()
+                    .position(|unit| unit.kind == UnitKind::Docker),
+                "scanned Docker unit",
+            );
+            config.units[index].cache = Some(CacheSpec {
+                key_files: vec!["Dockerfile".to_owned()],
+                paths: vec![MUTABLE_MOUNT_HOST_DIR.to_owned()],
+                purpose: CachePurpose::Generic,
+                mbx_output_cache_justification: None,
+                mutable_mount_seed: true,
+            });
+            mutate(&mut config.units[index]);
+            config.units[index].clone()
+        };
+        let full_commands = vec![
+            "docker buildx build --load --file 'Dockerfile' --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'".to_owned(),
+            "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --file 'Dockerfile' '.'".to_owned(),
+        ];
+
+        // A hosted full build that never injects the seed.
+        let unit = docker_unit(&|unit: &mut Unit| {
+            unit.full_commands = vec![full_commands[1].clone()];
+        });
+        let error = must_fail(
+            primitives::validate_mutable_mount_seed(&unit),
+            "a seed no build injects must be rejected",
+        );
+        assert!(error.to_string().contains("--build-context"), "{error}");
+
+        // A hosted full build that injects but never extracts.
+        let unit = docker_unit(&|unit: &mut Unit| {
+            unit.full_commands = vec![full_commands[0].clone()];
+        });
+        let error = must_fail(
+            primitives::validate_mutable_mount_seed(&unit),
+            "a seed no build extracts must be rejected",
+        );
+        assert!(error.to_string().contains("velnor-cache-export"), "{error}");
+
+        // Extraction on an untrusted pull-request lane writes seed state from
+        // unreviewed code, so the declaration is refused outright.
+        let unit = docker_unit(&|unit: &mut Unit| {
+            unit.full_commands = full_commands.clone();
+            unit.pr_commands = vec![full_commands[1].clone()];
+        });
+        let error = must_fail(
+            primitives::validate_mutable_mount_seed(&unit),
+            "a pull-request extraction must be rejected",
+        );
+        assert!(error.to_string().contains("pull-request"), "{error}");
+
+        // The persistent self-hosted lane gets no restore step, so a command
+        // that references the seed context there would fail on a missing
+        // directory.
+        let unit = docker_unit(&|unit: &mut Unit| {
+            unit.full_commands = full_commands.clone();
+            unit.velnor_full_commands = Some(vec![full_commands[0].clone()]);
+        });
+        let error = must_fail(
+            primitives::validate_mutable_mount_seed(&unit),
+            "a self-hosted seed reference must be rejected",
+        );
+        assert!(error.to_string().contains("self-hosted"), "{error}");
+
+        // The seed contract is a Docker image build contract; nothing else
+        // owns cache mounts a seed can be injected into.
+        let root = scanned_fixture(RunnerMode::Both);
+        let mut config = root;
+        let index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        config.units[index].cache = Some(CacheSpec {
+            key_files: vec!["Cargo.lock".to_owned()],
+            paths: vec![MUTABLE_MOUNT_HOST_DIR.to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: true,
+        });
+        let error = must_fail(
+            primitives::validate_mutable_mount_seed(&config.units[index]),
+            "a non-Docker seed must be rejected",
+        );
+        assert!(error.to_string().contains("Docker image build"), "{error}");
+    }
+
+    /// Cache namespaces partition by surface: unit lanes restore the unit
+    /// mbx keys, the Docker seed restores the seed keys, and neither surface
+    /// can restore the other's state. The release-family keys are repo-owned
+    /// template bytes, so the crate boundary this test pins is the one the
+    /// generator renders.
+    #[test]
+    fn cache_namespaces_partition_unit_lanes_from_the_docker_seed() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let rust = must_some(
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        let nested = WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
+        assert!(nested.contains("velnor-mbx-"), "{nested}");
+        assert!(!nested.contains("velnor-docker-seed-"), "{nested}");
+        assert!(!nested.contains("velnor-release-mbx-"), "{nested}");
+        assert!(STATIC_MR_BOXINGTON_STEP.contains("velnor-static-mbx-"));
+    }
+
     #[test]
     fn scanner_groups_dockerfiles_by_build_context() {
         let root = temporary_repository("docker-context");
@@ -6924,6 +7341,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             paths: vec!["target".to_owned()],
             purpose: CachePurpose::Outputs,
             mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
         });
         let ir = WorkflowIr::from_config(&config);
         // Unjustified duplicate output transport is rejected, never silently
@@ -6939,6 +7357,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             mbx_output_cache_justification: Some(
                 "bench baselines read raw target artifacts the object transport drops".to_owned(),
             ),
+            mutable_mount_seed: false,
         });
         let ir = WorkflowIr::from_config(&config);
         must(

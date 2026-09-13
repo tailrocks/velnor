@@ -389,13 +389,16 @@ fn config_without_declares() -> String {
 }
 
 fn tempfile() -> PathBuf {
+    // Test threads run concurrently and share a clock; a timestamp alone can
+    // hand two tests the same directory and let one test's cleanup delete the
+    // other's output mid-write. A process-local sequence makes the name
+    // collision-free.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let base = std::env::temp_dir().join(format!(
         "velnor-primitives-test-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&base).unwrap();
     base

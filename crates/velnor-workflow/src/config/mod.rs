@@ -224,6 +224,15 @@ pub(crate) struct UnitCacheSection {
     key_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     paths: Option<Vec<String>>,
+    /// Whether this cache is the mutable mount seed of a Docker image build:
+    /// the generator renders the host restore, seed-context preparation, and
+    /// trusted-only export collection around the lane's declared build
+    /// commands instead of the generic path cache, so the compiler state the
+    /// build's cache mounts hold survives onto a fresh builder. Declared, not
+    /// guessed: the declared build commands must prove they inject and extract
+    /// the seed, and the validator refuses the combination otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mutable_mount_seed: Option<bool>,
 }
 
 /// A repository-local file outside the workflow surface that the generated
@@ -377,6 +386,10 @@ impl UnitCacheSection {
 
     pub(crate) fn paths(&self) -> Option<&[String]> {
         self.paths.as_deref()
+    }
+
+    pub(crate) fn mutable_mount_seed(&self) -> bool {
+        self.mutable_mount_seed.unwrap_or(false)
     }
 }
 

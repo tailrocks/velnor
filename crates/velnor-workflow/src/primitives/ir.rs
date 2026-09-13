@@ -8,7 +8,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use super::{CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES};
+use super::{
+    CacheBackend, GraphNode, LaneJob, Pins, UnitContract, DEFAULT_UNIT_TIMEOUT_MINUTES,
+    MUTABLE_MOUNT_HOST_DIR,
+};
 use crate::{
     github_expression, hosted_mold_setup, lane_supports_unit, nested_unit_workflow_file,
     rendered_cache_values, sidebar_group_name, stack_group_job_id, unit_group, unit_group_job_id,
@@ -257,6 +260,7 @@ pub(crate) fn render_pinned_toolchain_steps(
         paths: vec!["~/.rustup".to_owned()],
         purpose: CachePurpose::Toolchains,
         mbx_output_cache_justification: None,
+        mutable_mount_seed: false,
     });
     let key = format!(
         "velnor-rustup-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
@@ -334,6 +338,106 @@ pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) 
           {change_dir}cargo fetch --locked",
         checks_env(unit)
     );
+}
+
+/// The files a Docker mutable mount seed exchange carries: what the image's
+/// export target writes out after a trusted full build, and what the next
+/// build's seed context holds. The image consumes them by these names.
+const MUTABLE_MOUNT_SEED_FILES: &[&str] =
+    &["cargo-registry.tar", "cargo-git.tar", "mbx-closure.tar"];
+
+/// Restore the Docker mutable mount seed on the hosted lane and stage the
+/// seed context directory the image build overrides the empty
+/// `velnor-cache-seed` stage with. The image copies out of the context into
+/// its cache mounts only when a mount is empty, so a retained builder keeps
+/// its warm state and a fresh builder starts from the restored one.
+fn render_mutable_mount_seed_restore(output: &mut String, ir: &WorkflowIr, unit: &Unit) {
+    let Some(cache) = unit.cache.as_ref() else {
+        return;
+    };
+    let (paths, key_files) = rendered_cache_values(cache);
+    let key = format!(
+        "velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Restore Docker build seed\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}\n          restore-keys: |\n            velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-",
+        ir.pins.cache_restore
+    );
+    let _ = writeln!(
+        output,
+        "      - name: Prepare Docker build seed context\n        env:{}
+        run: |
+          set -euo pipefail
+          mkdir -p {MUTABLE_MOUNT_HOST_DIR}/seed
+          if compgen -G \"{MUTABLE_MOUNT_HOST_DIR}/seed/*\" > /dev/null; then
+            echo \"Docker build seed restored:\"
+            du -sh {MUTABLE_MOUNT_HOST_DIR}/seed/*
+          else
+            echo \"Docker build seed empty: the build starts from cold cache mounts\"
+          fi",
+        checks_env(unit)
+    );
+}
+
+/// Collect the mutable-cache state a trusted full build exported out of the
+/// image's cache mounts, and save it for the next builder. Collection runs
+/// only on trusted events (untrusted pull-request code never writes seed
+/// state) and only when the declared full commands actually produced the
+/// export; a partial export fails here instead of seeding the next build with
+/// a lie.
+fn render_mutable_mount_seed_collection(
+    output: &mut String,
+    ir: &WorkflowIr,
+    unit: &Unit,
+    cache_save: bool,
+) {
+    let trusted_cache = format!(
+        "(github.event_name == 'push' && github.ref == 'refs/heads/{}') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}')",
+        ir.default_branch, ir.default_branch
+    );
+    let required_files = MUTABLE_MOUNT_SEED_FILES
+        .iter()
+        .map(|file| {
+            format!(
+                "          test -s \"{MUTABLE_MOUNT_HOST_DIR}/export/{file}\" \
+                 || {{ echo \"::error::Docker cache export is missing {file}\" >&2; exit 1; }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = writeln!(
+        output,
+        "      - name: Collect Docker mutable-cache export\n        if: {trusted_cache}\n        env:{}
+        run: |
+          set -euo pipefail
+          if [ ! -f \"{MUTABLE_MOUNT_HOST_DIR}/export/{}\" ]; then
+            echo \"no Docker cache export: this run did not execute the full build commands\"
+            exit 0
+          fi
+{required_files}
+          rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/seed.next\"
+          mkdir -p \"{MUTABLE_MOUNT_HOST_DIR}/seed.next\"
+          mv \"{MUTABLE_MOUNT_HOST_DIR}\"/export/* \"{MUTABLE_MOUNT_HOST_DIR}/seed.next/\"
+          rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/seed\"
+          mv \"{MUTABLE_MOUNT_HOST_DIR}/seed.next\" \"{MUTABLE_MOUNT_HOST_DIR}/seed\"
+          rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/export\"
+          echo \"Docker build seed updated:\"
+          du -sh \"{MUTABLE_MOUNT_HOST_DIR}\"/seed/*",
+        checks_env(unit),
+        MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
+    );
+    if cache_save && let Some(cache) = unit.cache.as_ref() {
+        let (paths, key_files) = rendered_cache_values(cache);
+        let key = format!(
+            "velnor-docker-seed-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-${{{{ hashFiles({key_files}) }}}}"
+        );
+        let _ = writeln!(
+            output,
+            "      - name: Save Docker build seed\n        if: ({trusted_cache}) && steps.cache.outputs.cache-hit != 'true'\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
+            ir.pins.cache_save
+        );
+    }
 }
 
 /// Record why a raw output cache rides alongside the Mr. Boxington object
@@ -801,13 +905,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     /// The legacy default unit contract: every supported lane, the default
-    /// timeout, and the detected cache backend.
-    pub(crate) fn default_unit_contract(&self, cache_save: bool) -> UnitContract {
+    /// timeout, the detected cache backend, and the unit's own declared cache
+    /// contract. A unit that declares a Docker mutable mount seed gets the
+    /// seed lifecycle rendered for it exactly as a declared pipeline would —
+    /// the default contract defaults the lane surface, never the cache
+    /// transport a unit declared.
+    pub(crate) fn default_unit_contract(&self, unit: &Unit, cache_save: bool) -> UnitContract {
         UnitContract {
             lanes: self.default_lane_jobs(cache_save),
             timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
             cache: CacheBackend::Detected,
             cache_save,
+            mutable_mount_seed: unit
+                .cache
+                .as_ref()
+                .is_some_and(|cache| cache.mutable_mount_seed),
         }
     }
 
@@ -860,7 +972,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     pub(crate) fn render_nested_unit(&self, unit: &Unit, kind: WorkflowKind) -> String {
         self.render_unit_surface(
             unit,
-            &self.default_unit_contract(kind != WorkflowKind::PullRequest),
+            &self.default_unit_contract(unit, kind != WorkflowKind::PullRequest),
         )
     }
 
@@ -921,7 +1033,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             "${{ inputs.selection-artifact }}",
         )));
         self.render_tool_provisioning(output, lane, unit, cache_save);
-        if contract.cache.enables_actions_cache(self, unit)
+        let seed = contract.mutable_mount_seed;
+        if seed && lane == RunnerMode::Github {
+            render_mutable_mount_seed_restore(output, self, unit);
+        } else if contract.cache.enables_actions_cache(self, unit)
             && let Some(cache) = &unit.cache
         {
             render_retained_output_cache_note(output, self, unit, cache);
@@ -952,7 +1067,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             &yaml_scalar(&sidebar_group_name(unit)),
             yaml_scalar(lane.display_name()).as_str(),
         );
-        if cache_save
+        if seed && lane == RunnerMode::Github {
+            render_mutable_mount_seed_collection(output, self, unit, cache_save);
+        } else if cache_save
             && lane == RunnerMode::Github
             && contract.cache.enables_actions_cache(self, unit)
             && let Some(cache) = unit.cache.as_ref()
@@ -1357,6 +1474,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                             paths: Vec::new(),
                             purpose: CachePurpose::Generic,
                             mbx_output_cache_justification: None,
+                            mutable_mount_seed: false,
                         })
                     },
                     rendered_cache_values,
