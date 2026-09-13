@@ -28,6 +28,11 @@ instead of from error category + idempotence (GOAL 31 violation). Three sites:
   conflict needles (`already exists`, `already in use`,
   `already in progress`); everything else is terminal (fail closed,
   including exit-124 class-deadline timeouts per `deadline.rs` rationale).
+  Review follow-up: registry-transfer transients (`toomanyrequests`,
+  429/5xx, `i/o timeout`, `context deadline exceeded`) join Transient with
+  backoff, and a daemon positive-missing answer (`NotFound`) reads as
+  Conflict through `docker_error_category` (another writer removed an
+  object the start attempt created).
 - `DockerCommandError`: typed carrier whose `Display` reproduces the exact
   historical boundary message, so logs and downstream text are unchanged;
   only the category is new.
@@ -87,15 +92,15 @@ downcast. Other flock errnos keep context and abort (fail closed).
 
 ## Follow-ups (untouched string-matched sites, found during this work)
 
-1. `executor.rs::run_docker_remove_container` (~5968): stderr
-   `removal of container ... is already in progress` tolerance — attach
-   `DockerCommandError` and check `Conflict` instead.
+1. DONE — `executor.rs::run_docker_remove_container`: in-progress
+   tolerance is the `Conflict` category narrowed to the in-progress
+   needles, and the bail attaches `DockerCommandError` message-identically.
 2. `executor.rs::cleanup_stale` (~5891): `to_string().contains("not found")`
    on network removal — convert to a typed chain check.
-3. `docker/client.rs::host_call` (~1044): `stderr.contains("already in
-   progress")` — `Conflict` category; also attach `DockerCommandError` at
-   the host-transport bail (~1047) for uniform categories on maintenance
-   paths.
+3. DONE — `docker/client.rs::host_call`: in-progress tolerance is the
+   `Conflict` category narrowed to the in-progress needle, and the
+   host-transport bail attaches `DockerCommandError` message-identically
+   for uniform categories on maintenance paths.
 4. `buildkit.rs` (~1045): `detail.contains("no builder")` — needs a
    structured/typed builder-missing signal.
 5. `buildkit.rs` / `execution/cancel.rs`: `daemon_reports_missing(&detail)`

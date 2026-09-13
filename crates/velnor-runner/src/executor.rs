@@ -8,7 +8,9 @@ use crate::{
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{JobContainerSpec, Shell},
-    docker::client::{docker_error_category, DockerCommandError, DockerErrorCategory},
+    docker::client::{
+        classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
+    },
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::{
@@ -6000,18 +6002,25 @@ where
             // container removal does not cause the slot to cycle unnecessarily.
             // A bounded timeout (Created/removing BuildKit) is the same class:
             // job teardown proceeds; doctor/boot retry until the object is gone.
-            if result.code == 124
-                || (result.stderr.contains("removal of container")
-                    && result.stderr.contains("is already in progress"))
-            {
+            // The tolerance is the Conflict category narrowed to the in-progress
+            // needles: a stderr that also matches Transient (daemon down
+            // mid-removal) surfaces instead of masking as success.
+            let removal_in_flight = result.stderr.contains("removal of container")
+                && result.stderr.contains("is already in progress")
+                && classify_docker_stderr(&result.stderr) == DockerErrorCategory::Conflict;
+            if result.code == 124 || removal_in_flight {
                 return Ok(result);
             }
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -20874,6 +20883,123 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             "terminal failure must not retry: {calls:?}"
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_registry_transient_pull_retries_then_succeeds() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // The job `docker run` pulls: a registry rate limit is a transfer
+        // transient, retried with backoff — not a fail-fast terminal.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 1],
+            vec![
+                "",
+                "Error response from daemon: toomanyrequests: You have reached your pull rate limit",
+            ],
+        ));
+
+        executor.start_job_environment(&container(&temp)).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "registry transient must retry the environment: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_readiness_not_found_race_recovers_with_retry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        // The service container vanishes between `run` and the readiness
+        // poll: another writer removed it mid-flight (Conflict-shaped), so
+        // one stale cleanup plus a single retry recovers the race.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 0, 1],
+            vec!["", "", "Error: No such object: svc"],
+        ));
+
+        executor.start_job_environment(&spec).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(calls[2].1[0], "inspect");
+        // Retry cleanup removes the raced service before the retry recreates it.
+        let expected_service_rm = crate::docker_lease::remove_one_container_args("svc");
+        assert!(
+            calls.iter().any(|(_, args)| args == &expected_service_rm),
+            "race retry must clean the service first: {calls:?}"
+        );
+        // The retry re-creates the environment and re-polls readiness.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "NotFound race must retry the environment: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "inspect"))
+                .count(),
+            2,
+            "NotFound race must re-poll readiness: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn remove_container_failure_carries_typed_category() {
+        // The rm bail attaches DockerCommandError like every other
+        // docker-failure production point: the retry policy reads the chain,
+        // never the text. The message itself is unchanged.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1],
+            vec!["Error response from daemon: cannot remove a running container"],
+        ));
+
+        let error = executor
+            .run_docker_remove_container(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                "job".to_string(),
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "docker rm --force -- job failed with code 1: \
+             Error response from daemon: cannot remove a running container"
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<DockerCommandError>().is_some()),
+            "rm failure must carry DockerCommandError: {error:#}"
+        );
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Terminal);
     }
 
     #[test]

@@ -210,10 +210,12 @@ pub(crate) enum DockerErrorCategory {
     Terminal,
 }
 
-/// Transport and daemon-unavailable vocabulary. A daemon/containerd restart
-/// briefly returns these for every `docker` invocation; the historical
-/// single immediate retry always landed inside the same restart window, which
-/// is why transient failures retry with backoff instead.
+/// Transport, daemon-unavailable, and registry-transfer vocabulary. A
+/// daemon/containerd restart briefly returns the transport needles for every
+/// `docker` invocation; a registry rate limit, 5xx, or stalled transfer
+/// returns the transfer needles for pulls and pushes. The historical single
+/// immediate retry always landed inside the same restart window, which is why
+/// transient failures retry with backoff instead.
 const DOCKER_TRANSIENT_NEEDLES: &[&str] = &[
     "failed to create ttrpc connection",
     "error reading from server: eof",
@@ -222,6 +224,20 @@ const DOCKER_TRANSIENT_NEEDLES: &[&str] = &[
     "cannot connect to the docker daemon",
     "is the docker daemon running",
     "transport is closing",
+    // Registry transfer: a `docker run` that pulls fails with the registry's
+    // rate limit or 5xx, or the transfer stalls and the HTTP client times out
+    // mid-flight. Same shape as a daemon restart — the next attempt
+    // re-resolves and resumes — so backoff, never fail fast.
+    "toomanyrequests",
+    "too many requests",
+    "http status: 429",
+    "http status: 5",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "i/o timeout",
+    "context deadline exceeded",
 ];
 
 /// Resource-contention vocabulary: another writer (a previous attempt, a
@@ -282,15 +298,20 @@ impl DockerCommandError {
 /// chain, or [`DockerErrorCategory::Terminal`] when no typed docker failure
 /// is present. Fail closed: an error the boundary never classified
 /// (filesystem, config, unknown) must not retry as if the daemon hiccupped.
+/// A daemon positive-missing answer ([`NotFound`]) is Conflict-shaped: the
+/// start path — the only consumer — only queries objects its own attempt
+/// created, so a missing answer means another writer removed the object
+/// mid-flight, and one stale cleanup plus a single retry recovers the race.
 pub(crate) fn docker_error_category(error: &anyhow::Error) -> DockerErrorCategory {
-    error
-        .chain()
-        .find_map(|cause| {
-            cause
-                .downcast_ref::<DockerCommandError>()
-                .map(DockerCommandError::category)
-        })
-        .unwrap_or(DockerErrorCategory::Terminal)
+    for cause in error.chain() {
+        if let Some(command) = cause.downcast_ref::<DockerCommandError>() {
+            return command.category();
+        }
+        if cause.downcast_ref::<NotFound>().is_some() {
+            return DockerErrorCategory::Conflict;
+        }
+    }
+    DockerErrorCategory::Terminal
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,10 +1159,23 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already in progress") {
+        // Another writer already owns this object (Conflict): when that
+        // writer is a concurrent `rm` of the same object, the desired end
+        // state is in flight — report success. Narrow to the in-progress
+        // needle on purpose: other conflicts ("already exists") are real
+        // errors on the host path, not tolerance signals. A stderr that also
+        // matches Transient (daemon down mid-removal) surfaces instead of
+        // masking as success — transient checks first in the classifier.
+        let removal_in_flight = stderr.contains("already in progress")
+            && classify_docker_stderr(&stderr) == DockerErrorCategory::Conflict;
+        if removal_in_flight {
             return Ok(String::new());
         }
-        anyhow::bail!("docker {} failed: {}", args.join(" "), stderr);
+        return Err(DockerCommandError::classified(
+            format!("docker {} failed: {}", args.join(" "), stderr),
+            &stderr,
+        )
+        .into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -1409,6 +1443,22 @@ mod tests {
         ] {
             assert_eq!(classify_docker_stderr(stderr), Transient, "{stderr:?}");
         }
+        // Registry transfer during pull/push: rate limit, 429/5xx, stalled
+        // transfer. The next attempt re-resolves and resumes: backoff, never
+        // fail fast.
+        for stderr in [
+            "Error response from daemon: toomanyrequests: You have reached your pull rate limit",
+            "received unexpected HTTP status: 429 Too Many Requests",
+            "received unexpected HTTP status: 503 Service Unavailable",
+            "received unexpected HTTP status: 500 Internal Server Error",
+            "received unexpected HTTP status: 502 Bad Gateway",
+            "received unexpected HTTP status: 504 Gateway Timeout",
+            "unexpected status from HEAD request to https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04: 503 Service Unavailable",
+            "dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "Get \"https://registry-1.docker.io/v2/\": context deadline exceeded",
+        ] {
+            assert_eq!(classify_docker_stderr(stderr), Transient, "{stderr:?}");
+        }
         // Another writer holds the object: one stale cleanup plus one retry.
         for stderr in [
             r#"Error response from daemon: network with name "net" already exists"#,
@@ -1452,6 +1502,9 @@ mod tests {
             docker_error_category(&anyhow::anyhow!("boom")),
             DockerErrorCategory::Terminal
         );
+        // A daemon positive-missing answer is Conflict-shaped: on the start
+        // path it means another writer removed an object this attempt
+        // created, so one stale cleanup plus a single retry recovers the race.
         assert_eq!(
             docker_error_category(
                 &anyhow::Error::new(NotFound {
@@ -1459,7 +1512,7 @@ mod tests {
                 })
                 .context("query")
             ),
-            DockerErrorCategory::Terminal
+            DockerErrorCategory::Conflict
         );
     }
 
