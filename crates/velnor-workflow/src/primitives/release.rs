@@ -1009,6 +1009,8 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
             echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Apply retention evictions
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           evicted=0
@@ -1018,7 +1020,7 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           # their class bound first, then classes over budget, then the global
           # sweep - which never touches a protected class.
           while IFS=$'\t' read -r class reason id size key; do
-            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
               evicted=$((evicted + 1))
               freed=$((freed + size))
               echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
@@ -1039,6 +1041,13 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson failed "$failed" \
             '{evicted_caches: $evicted, failed_evictions: $failed, freed_bytes: $freed}' \
             >> "$GITHUB_STEP_SUMMARY"
+          # A failed eviction is a loud failure, never a swallowed warning:
+          # silent DELETE failures leave the account over budget while the
+          # run reports success.
+          if (( failed > 0 )); then
+            echo "::error::$failed retention evictions failed; rerun maintenance" >&2
+            exit 1
+          fi
       - name: Publish retention evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -1218,6 +1227,45 @@ mod tests {
         );
     }
 
+    /// Every maintenance step that calls `gh api` must carry `GH_TOKEN`: an
+    /// unauthenticated call fails, and where DELETE stderr is discarded the
+    /// failure is silent retention drift.
+    fn assert_maintenance_gh_api_steps_carry_token(workflow: &str) {
+        let mut authenticated: Vec<String> = Vec::new();
+        let mut current: Option<(String, String)> = None;
+        let mut flush = |current: &mut Option<(String, String)>| {
+            if let Some((name, body)) = current.take()
+                && body.contains("gh api")
+            {
+                assert!(
+                    body.contains("GH_TOKEN:"),
+                    "maintenance step `{name}` calls gh api without GH_TOKEN: {body}"
+                );
+                authenticated.push(name);
+            }
+        };
+        for line in workflow.lines() {
+            if let Some(name) = line.strip_prefix("      - name: ") {
+                flush(&mut current);
+                current = Some((name.trim().to_owned(), String::new()));
+            } else if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        flush(&mut current);
+        assert_eq!(
+            authenticated.as_slice(),
+            [
+                "Delete merge-ref cache namespace",
+                "Collect Actions cache account",
+                "Apply retention evictions",
+                "Enforce cache budget",
+            ],
+            "the gh api step set drifted; carry the token assertion to the new shape: {workflow}"
+        );
+    }
+
     /// A scanned throwaway repository: the only way to obtain a real shape.
     fn scanned_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1393,7 +1441,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "ee336d15bffe519c307b4b6c38bed1c35a1912b684eafffcbc97ca990c0dd626",
+                "f9df8ef352b5bc3c80a965278d132e682abdba00f91d70df4da1ce30a2fca66c",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1488,6 +1536,27 @@ mod tests {
             "generated maintenance.yml must carry the header: {generated}"
         );
         assert_maintenance_is_github_hosted(&generated, &cfg);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maintenance_gh_api_steps_carry_gh_token() {
+        for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
+            let mut cfg = config(&["maintenance.yml"], None);
+            cfg.runners = runners;
+            let workflow = super::render_maintenance(&cfg);
+            assert_maintenance_gh_api_steps_carry_token(&workflow);
+            assert!(
+                workflow.contains("if (( failed > 0 ))"),
+                "failed evictions must fail the step loudly: {workflow}"
+            );
+        }
+
+        let mut cfg = config(&["maintenance.yml"], None);
+        cfg.runners = RunnerMode::Velnor;
+        let root = scanned_root("maintenance-token");
+        let surface = generate(&root, &cfg, None);
+        assert_maintenance_gh_api_steps_carry_token(&rendered(&surface, "maintenance.yml"));
         let _ = fs::remove_dir_all(root);
     }
 
