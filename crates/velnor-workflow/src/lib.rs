@@ -5251,7 +5251,10 @@ mod tests {
         let action = declared_setup_action();
         assert!(action.contains("same-repository PRs may bootstrap"));
         assert!(action.contains(
-            "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
+            "CONTROLLED_BOOTSTRAP: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+        ));
+        assert!(!action.contains(
+            "(github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))"
         ));
         let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
         assert!(action.contains(&expected_source));
@@ -5268,12 +5271,22 @@ mod tests {
     #[test]
     fn setup_action_forks_cannot_source_bootstrap() {
         let action = declared_setup_action();
-        assert!(action.contains("CONTROLLED_BOOTSTRAP:"));
-        assert!(
-            action.contains("source recovery is default-branch-push or same-repository-PR only")
+        let bootstrap = must_some(
+            action
+                .lines()
+                .find(|line| line.contains("CONTROLLED_BOOTSTRAP:")),
+            "CONTROLLED_BOOTSTRAP expression",
         );
+        assert!(bootstrap.contains("github.event_name == 'schedule'"));
+        assert!(bootstrap.contains("github.event_name == 'workflow_dispatch'"));
+        assert!(bootstrap
+            .contains("github.event.pull_request.head.repo.full_name == github.repository"));
+        assert!(!bootstrap.contains("pull_request_target"));
+        assert!(action.contains(
+            "source recovery is default-branch push/schedule/workflow_dispatch or same-repository-PR only"
+        ));
         assert!(
-            action.contains("github.event.pull_request.head.repo.full_name == github.repository")
+            !action.contains("source recovery is default-branch-push or same-repository-PR only")
         );
         assert!(!action.contains("pull_request_target"));
     }

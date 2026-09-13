@@ -2,11 +2,11 @@
 schema = 2
 [inputs]
 config	dee90542d277db41
-scan	2e122a147363122d
+scan	cfcd752544c45b02
 generator	15
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
-.github/actions/setup-velnor-workflow/action.yml	f842b1b1c3c9436c
+.github/actions/setup-velnor-workflow/action.yml	02089ff9fee52b2a
 .github/ci/project.toml	fd46c7e022d53f42
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-main.yml	f226ecb6e8309feb
