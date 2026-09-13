@@ -562,6 +562,10 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "base_sha={base}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "head_sha={head}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "units={units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "full_units={full_units}")

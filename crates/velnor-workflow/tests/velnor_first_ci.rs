@@ -203,6 +203,23 @@ fn unit_run_consumes_the_selection_artifact_not_a_hardcoded_id() {
 }
 
 #[test]
+fn unit_jobs_inherit_plan_base_and_head_shas() {
+    let root = unique_dir("plan-shas");
+    write_rust_fixture(&root, 2);
+    let generated = generate(&root);
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(pr.contains("base_sha: ${{ steps.plan.outputs.base_sha }}"));
+    assert!(pr.contains("head_sha: ${{ steps.plan.outputs.head_sha }}"));
+    assert!(pr.contains("base-sha: ${{ needs.plan.outputs.base_sha }}"));
+    assert!(pr.contains("head-sha: ${{ needs.plan.outputs.head_sha }}"));
+    assert!(pr.contains("echo \"base_sha=$BASE_SHA\" >> \"$GITHUB_OUTPUT\""));
+    assert!(pr.contains("echo \"head_sha=$HEAD_SHA\" >> \"$GITHUB_OUTPUT\""));
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(unit.contains("BASE_SHA: ${{ inputs.base-sha || github.event.pull_request.base.sha || github.event.before }}"));
+    assert!(unit.contains("HEAD_SHA: ${{ inputs.head-sha || github.sha }}"));
+}
+
+#[test]
 fn kind_reusable_fetches_cargo_sources_for_the_matrix_unit() {
     let root = unique_dir("kind-fetch");
     write_rust_fixture(&root, 2);
