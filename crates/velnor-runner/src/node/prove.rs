@@ -553,10 +553,13 @@ pub fn read_policy_file(path: &Path) -> anyhow::Result<RoutingFields> {
     Ok(fields)
 }
 
-/// Write desired policy only when the operator has not already done so.
-/// Repo-scoped fleets use this so an operator override wins. Org fleets
-/// must call [`write_policy`]: a live-membership snapshot must not remain
-/// the desired baseline.
+/// Write desired policy only when no file exists yet.
+///
+/// Do not use this for repo-scoped derived policy: a stale first-boot
+/// snapshot would freeze `routing_valid=false` after daemon config changes.
+/// Those callers use [`write_policy_if_changed`]. Org fleets must call
+/// [`write_policy`]: a live-membership snapshot must not remain the desired
+/// baseline. Explicit `--routing-policy-file` is the operator override.
 ///
 /// # Errors
 /// Filesystem or JSON failures.
