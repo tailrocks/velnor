@@ -23,9 +23,9 @@ use anyhow::Error;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
 use velnor_runner::protocol::{
-    AcquireJobOutcome, BrokerClient, BrokerPoll, GitHubApiError, RunServiceClient,
-    RunServiceCompleteJob, RunnerStatus, TaskAgentMessage, TaskAgentSession, TaskResult,
-    RUNNER_JOB_REQUEST, RUNNER_VERSION,
+    AcquireJobOutcome, BrokerClient, BrokerErrorCategory, BrokerPoll, GitHubApiError,
+    RunServiceClient, RunServiceCompleteJob, RunnerStatus, TaskAgentMessage, TaskAgentSession,
+    TaskResult, RUNNER_JOB_REQUEST, RUNNER_VERSION,
 };
 use wiremock::{
     matchers::{header, method, path, query_param},
@@ -324,6 +324,7 @@ async fn acquire_job_classifies_non_retriable_statuses() {
             status: actual,
             request_id,
             body,
+            category,
         } = outcome
         else {
             panic!("expected skipped acquire");
@@ -331,6 +332,9 @@ async fn acquire_job_classifies_non_retriable_statuses() {
         assert_eq!(actual, status);
         assert_eq!(request_id.as_deref(), None);
         assert_eq!(body, "skip");
+        // An untyped body proves nothing, whatever the outer status: the
+        // boundary carries `Conflict` so the row stays for the oracle.
+        assert_eq!(category, BrokerErrorCategory::Conflict);
     }
 }
 
