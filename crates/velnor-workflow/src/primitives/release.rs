@@ -1073,9 +1073,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 
 /// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
 /// on the hosted image even when CI lanes select `runners = "velnor"`. `uses:`
-/// stays on the SOURCE_REV pin (GitHub Actions rejects expressions in `uses:`
+/// stays on the `SOURCE_REV` pin (GitHub Actions rejects expressions in `uses:`
 /// versions). `rev:` is `${{ github.sha }}` so default-branch dispatch installs
-/// HEAD through an action yaml that includes CONTROLLED_BOOTSTRAP for
+/// HEAD through an action yaml that includes `CONTROLLED_BOOTSTRAP` for
 /// `workflow_dispatch`.
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
@@ -1434,15 +1434,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "83874c154e9ac95eee90560f5abef07692155bb563a9ca4cc0c20416d56db72a",
+                "051dd3aa91d114f18d38a54b6cc21db0d9bb8151194141bcae9c8d95d692c29f",
             ),
             (
                 "preview.yml",
-                "55cbadc8b96013657cd0d1f025d35c402bfa688664c157a6beab98a08bccba35",
+                "19abd14b8c74848159d30efd29bde0a19c99410617aa10309d1de14a896d3e82",
             ),
             (
                 "maintenance.yml",
-                "f9df8ef352b5bc3c80a965278d132e682abdba00f91d70df4da1ce30a2fca66c",
+                "3b791d66a1f690b88650168dbed1213113d213b9cdd63d1eb0ab0ca2e4946886",
             ),
             (
                 "ci-release-package-signer.yml",

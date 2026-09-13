@@ -28,11 +28,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -444,11 +444,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -878,11 +878,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1312,11 +1312,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1746,11 +1746,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2180,11 +2180,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -2614,11 +2614,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3048,11 +3048,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3482,11 +3482,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3916,11 +3916,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3957,10 +3957,10 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-mbx-v3-c6bdb1d38ec3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-workflow/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'docker/build-mise.*', 'mise.lock') }}
+          cache-key: velnor-mbx-v3-4477b9ead0db-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-control/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-workflow/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('Dockerfile', 'crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/**/*.rs', 'crates/velnor-workflow/README.md', 'crates/velnor-workflow/benches/**', 'crates/velnor-workflow/examples/**', 'crates/velnor-workflow/src/**', 'crates/velnor-workflow/src/runtime.rs', 'crates/velnor-workflow/templates/**', 'crates/velnor-workflow/templates/release-package-signer.yml', 'crates/velnor-workflow/tests/**', 'docker/build-mise.*', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'fleet/**', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json', 'tools/unit-collector/**') }}
           restore-keys: |
-            velnor-mbx-v3-c6bdb1d38ec3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-workflow/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-
-            velnor-mbx-v3-c6bdb1d38ec3-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-
+            velnor-mbx-v3-4477b9ead0db-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-control/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-workflow/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-4477b9ead0db-${{ runner.os }}-${{ runner.arch }}-rust-velnor-workflow-
           save-on-workflow-dispatch: true
       - name: Restore mold 2.42.0 cache
         id: mold-cache
@@ -4350,11 +4350,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -4784,11 +4784,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -5218,11 +5218,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6017727759da543800c90be401c60c7f0d42092b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: 6017727759da543800c90be401c60c7f0d42092b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=6017727759da543800c90be401c60c7f0d42092b" >> "$GITHUB_ENV"
       - name: Download Velnor CI selection
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

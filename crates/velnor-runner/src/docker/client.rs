@@ -1138,21 +1138,26 @@ fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn container_rm_args_with_claimed_ids(args: &[String], ids: &[String]) -> Vec<String> {
-    // Both production callers only reach here with a non-empty `rm` argv
-    // (a claim exists only when `args.first()` is `Some("rm")`), but this
-    // is `pub(crate)`: an empty argv degrades to the claimed ids instead
-    // of panicking on `args[0]`.
-    let Some(first) = args.first() else {
-        return ids.to_vec();
-    };
+#[derive(Clone, Copy)]
+pub(crate) struct NonEmptyDockerArgs<'a> {
+    first: &'a String,
+    rest: &'a [String],
+}
+
+impl<'a> NonEmptyDockerArgs<'a> {
+    pub(crate) fn new(args: &'a [String]) -> Option<Self> {
+        let (first, rest) = args.split_first()?;
+        Some(Self { first, rest })
+    }
+}
+
+pub(crate) fn container_rm_args_with_claimed_ids(
+    args: NonEmptyDockerArgs<'_>,
+    ids: &[String],
+) -> Vec<String> {
+    let first = args.first;
     let mut claimed = vec![first.clone()];
-    claimed.extend(
-        args.iter()
-            .skip(1)
-            .filter(|arg| arg.starts_with('-'))
-            .cloned(),
-    );
+    claimed.extend(args.rest.iter().filter(|arg| arg.starts_with('-')).cloned());
     claimed.extend(ids.iter().cloned());
     claimed
 }
@@ -1304,7 +1309,12 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     }
     let claimed_args = rm_claim
         .as_ref()
-        .map(|claim| container_rm_args_with_claimed_ids(args, &claim.ids));
+        .map(|claim| {
+            NonEmptyDockerArgs::new(args)
+                .map(|args| container_rm_args_with_claimed_ids(args, &claim.ids))
+                .ok_or_else(|| anyhow::anyhow!("docker rm claim requires non-empty arguments"))
+        })
+        .transpose()?;
     let args = claimed_args.as_deref().unwrap_or(args);
     let mut command = host_docker_command(args)?;
     let child = command
@@ -1835,15 +1845,14 @@ mod tests {
     /// invocation of the exact argument vector the parser consumes.
 
     #[test]
-    fn claimed_rm_args_degrade_on_empty_argv_instead_of_panicking() {
-        // The production callers only pass a non-empty `rm` argv, but the
-        // helper is `pub(crate)`: an empty argv yields the claimed ids
-        // instead of panicking on `args[0]`.
-        let ids = vec!["id-a".to_string()];
-        assert_eq!(container_rm_args_with_claimed_ids(&[], &ids), ids);
+    fn docker_rm_helpers_enforce_non_empty_argv() {
+        assert!(NonEmptyDockerArgs::new(&[]).is_none());
         let argv = vec!["rm".to_string(), "-f".to_string(), "stale".to_string()];
         assert_eq!(
-            container_rm_args_with_claimed_ids(&argv, &ids),
+            container_rm_args_with_claimed_ids(
+                NonEmptyDockerArgs::new(&argv).unwrap(),
+                &["id-a".to_string()],
+            ),
             vec!["rm".to_string(), "-f".to_string(), "id-a".to_string()]
         );
     }
