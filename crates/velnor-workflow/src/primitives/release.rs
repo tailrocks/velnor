@@ -333,12 +333,7 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
     };
     match release.kind.as_str() {
         "crates" => !release.packages.is_empty(),
-        "rust-binary" => {
-            !release.package.is_empty()
-                && !release.binary.is_empty()
-                && targets_are_real(&release.targets)
-        }
-        "native" => {
+        "rust-binary" | "native" => {
             !release.package.is_empty()
                 && !release.binary.is_empty()
                 && targets_are_real(&release.targets)
@@ -819,6 +814,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         )
 }
 
+#[allow(clippy::format_push_string)]
 fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = render_binary_release(config, release);
     let github_runner = yaml_scalar(&config.github_runner);
@@ -1180,9 +1176,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 
 /// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
 /// on the hosted image even when CI lanes select `runners = "velnor"`. `uses:`
-/// stays on the SOURCE_REV pin (GitHub Actions rejects expressions in `uses:`
+/// stays on the `SOURCE_REV` pin (GitHub Actions rejects expressions in `uses:`
 /// versions). `rev:` is `${{ github.sha }}` so default-branch dispatch installs
-/// HEAD through an action yaml that includes CONTROLLED_BOOTSTRAP for
+/// HEAD through an action yaml that includes `CONTROLLED_BOOTSTRAP` for
 /// `workflow_dispatch`.
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW

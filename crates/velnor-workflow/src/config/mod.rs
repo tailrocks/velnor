@@ -124,7 +124,7 @@ struct WorkflowSection {
     /// Generated runner lanes. Absent keeps the generator's current default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     runners: Option<String>,
-    /// Lanes that run on pull_request/push/schedule without a dispatch choice.
+    /// Lanes that run on `pull_request`/`push`/`schedule` without a dispatch choice.
     /// Must be a subset of `runners`. Absent infers `github` when GitHub is
     /// available, otherwise the sole configured backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]

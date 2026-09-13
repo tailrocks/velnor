@@ -2407,10 +2407,7 @@ fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
     verify_feed(arguments)?;
     let kind = required_option(&options, "kind")?;
-    let channel = options
-        .get("channel")
-        .map(String::as_str)
-        .unwrap_or("stable");
+    let channel = options.get("channel").map_or("stable", String::as_str);
     if !matches!(channel, "stable" | "preview") {
         return Err(GeneratorError::usage("channel must be stable or preview"));
     }

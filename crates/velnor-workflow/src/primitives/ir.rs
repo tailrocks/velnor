@@ -1205,10 +1205,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// seed lifecycle rendered for it exactly as a declared pipeline would —
     /// the default contract defaults the lane surface, never the cache
     /// transport a unit declared.
-    #[expect(
-        clippy::unused_self,
-        reason = "unit contracts stay on WorkflowIr so callers keep one render environment"
-    )]
     pub(crate) fn default_unit_contract(&self, unit: &Unit, cache_save: bool) -> UnitContract {
         UnitContract {
             lanes: Self::default_lane_jobs(self.runners, cache_save),
