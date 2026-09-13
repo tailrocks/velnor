@@ -5909,6 +5909,19 @@ async fn check_runner_registry(
     }
 }
 
+/// Category-driven retry policy for a failed broker session create. Only
+/// the boundary's `Terminal` verdict (a deterministic refusal — fixed
+/// credentials fail identically on every attempt) fails fast. `Transient`,
+/// `Conflict` (a lost response may already have created the session, so the
+/// retry converges instead of abandoning), and unclassified transport
+/// failures retry inside the unchanged 5-attempt budget, as before.
+fn broker_session_create_is_retryable(error: &anyhow::Error) -> bool {
+    !matches!(
+        broker_error_category(error),
+        Some(BrokerErrorCategory::Terminal)
+    )
+}
+
 async fn create_broker_session_with_retry(
     broker: &BrokerClient,
     session: &TaskAgentSession,
@@ -5919,6 +5932,13 @@ async fn create_broker_session_with_retry(
         match broker.create_session(session).await {
             Ok(session) => return Ok(session),
             Err(error) if attempt < BROKER_SESSION_CREATE_MAX_ATTEMPTS => {
+                // Category-driven: a deterministic refusal fails fast
+                // instead of burning the whole retry budget against fixed
+                // credentials. Same error shape as budget exhaustion below.
+                if !broker_session_create_is_retryable(&error) {
+                    return Err(error)
+                        .with_context(|| format!("create broker runner session ({diagnostic})"));
+                }
                 let delay = broker_session_create_retry_delay(attempt);
                 eprintln!(
                     "Broker session create failed on attempt {attempt}/{}: {}. Retrying in {}s.",
@@ -17905,6 +17925,84 @@ jobs:
         assert_eq!(
             broker_session_create_retry_delay(4),
             Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS * 3)
+        );
+    }
+
+    #[test]
+    fn broker_session_create_retry_policy_only_terminal_fails_fast() {
+        // Only a deterministic refusal fails fast; every other outcome —
+        // transient, conflict, or an unclassified transport failure — retries
+        // inside the attempt budget, as before the taxonomy.
+        for category in [
+            Some(BrokerErrorCategory::Transient),
+            Some(BrokerErrorCategory::Conflict),
+            None,
+        ] {
+            let error = anyhow::Error::from(GitHubApiError {
+                status: 503,
+                action: "create broker session".into(),
+                body: "try later".into(),
+                retry_after_seconds: None,
+                rate_limit_reset_epoch: None,
+                remaining: None,
+                category,
+            });
+            assert!(
+                broker_session_create_is_retryable(&error),
+                "category {category:?} must retry"
+            );
+        }
+        let terminal = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "create broker session".into(),
+            body: "bad credentials".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: None,
+            category: Some(BrokerErrorCategory::Terminal),
+        });
+        assert!(!broker_session_create_is_retryable(&terminal));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn broker_session_create_terminal_failure_fails_fast_without_retrying() {
+        // Regression (r0-798-corr): the loop retried every failure through
+        // the whole 5-attempt budget (a 401 burned ~90 s of sleeps before
+        // failing). A deterministic refusal now fails on the first attempt;
+        // `expect(1)` fails if the loop ever retries a `Terminal` again.
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/session"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let broker = BrokerClient::new(&server.uri(), "token").unwrap();
+        let stored = stored_config();
+        let session =
+            TaskAgentSession::new("owner (PID: 1)", 2, stored.settings.agent_name.clone());
+        let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &server.uri());
+        let error = create_broker_session_with_retry(&broker, &session, &diagnostic)
+            .await
+            .expect_err("a 401 session create must fail fast");
+
+        assert!(
+            error.to_string().contains("create broker runner session"),
+            "{error:#}"
+        );
+        // The fail-fast verdict survives the context the loop adds.
+        assert_eq!(
+            broker_error_category(&error),
+            Some(BrokerErrorCategory::Terminal)
         );
     }
 
