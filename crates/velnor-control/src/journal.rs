@@ -14,8 +14,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velnor_model::{
-    ActorPhase, CanaryStatus, ExecutionBackendKind, FleetHealthState, Generation, HealthDocument,
-    JobId, ReadyProof, SlotId,
+    CanaryStatus, ExecutionBackendKind, FleetHealthState, Generation, HealthDocument, JobId,
+    JobPhase2, ReadyProof, SlotId, SlotPhase2,
 };
 
 use crate::store::error::{StoreError, StoreResult};
@@ -30,7 +30,7 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// the current version onto an older journal *before* any event may be
 /// written, so a binary that predates the bump refuses the file outright
 /// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 7;
+pub const JOURNAL_SCHEMA_VERSION: u32 = 8;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
@@ -226,13 +226,6 @@ impl FleetState {
     }
 }
 
-fn job_occupies_slot(phase: ActorPhase) -> bool {
-    matches!(
-        phase,
-        ActorPhase::Assigned | ActorPhase::Running | ActorPhase::Completing
-    )
-}
-
 /// A pending outbox row is an admission barrier for its exact slot identity.
 /// An owner that cannot be proven from durable state is a global barrier: it
 /// must never be guessed or silently reassigned to another slot.
@@ -272,7 +265,7 @@ fn slot_has_active_job(state: &FleetState, slot_id: &SlotId) -> bool {
     state
         .jobs
         .iter()
-        .any(|job| job.slot_id == *slot_id && job_occupies_slot(job.phase))
+        .any(|job| job.slot_id == *slot_id && job.phase.occupies_slot())
 }
 
 fn restore_slot_after_job_removal(
@@ -296,25 +289,25 @@ fn restore_slot_after_job_removal(
     }
     // Fencing is a recovery barrier. Job reconciliation must clear the row,
     // but only a healthy same-generation actor may reopen the slot.
-    if state.slots[index].phase == ActorPhase::Fenced {
+    if state.slots[index].phase == SlotPhase2::Fenced {
         return;
     }
     if state.slots[index].ready_proof().is_ok() && state.slots[index].registered {
-        state.slots[index].phase = ActorPhase::Ready;
+        state.slots[index].phase = SlotPhase2::Ready;
         commands.push(SideEffect::AdvertiseCapacity {
             permits: state.advertised_capacity(),
         });
     } else if state.slots[index].registered {
-        state.slots[index].phase = ActorPhase::Registered;
+        state.slots[index].phase = SlotPhase2::Registered;
     } else {
-        state.slots[index].phase = ActorPhase::Provisioning;
+        state.slots[index].phase = SlotPhase2::Provisioning;
     }
 }
 
 fn oldest_queued_job_seconds(jobs: &[JobRecord]) -> u64 {
     let now = unix_now();
     jobs.iter()
-        .filter(|job| job_occupies_slot(job.phase) && job.accepted_unix > 0)
+        .filter(|job| job.phase.occupies_slot() && job.accepted_unix > 0)
         .map(|job| now.saturating_sub(job.accepted_unix))
         .max()
         .unwrap_or(0)
@@ -349,7 +342,7 @@ fn unix_now() -> u64 {
 pub struct SlotRecord {
     pub slot_id: SlotId,
     pub generation: Generation,
-    pub phase: ActorPhase,
+    pub phase: SlotPhase2,
     pub permit_held: bool,
     pub routing_valid: bool,
     pub session_live: bool,
@@ -364,7 +357,7 @@ impl SlotRecord {
         Self {
             slot_id,
             generation: Generation::INITIAL,
-            phase: ActorPhase::Absent,
+            phase: SlotPhase2::Absent,
             permit_held: false,
             routing_valid: false,
             session_live: false,
@@ -392,7 +385,7 @@ pub struct JobRecord {
     pub generation: Generation,
     pub attempt: u32,
     pub worker: String,
-    pub phase: ActorPhase,
+    pub phase: JobPhase2,
     pub accepted_unix: u64,
     /// Terminal conclusion recorded by `JobTerminalResult` before the
     /// completion payload was serialised. Recovery must reuse this instead of
@@ -763,7 +756,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             let slot = state.slot_mut(&slot_id);
             if generation < slot.generation
                 || admission_blocked
-                || (generation == slot.generation && slot.phase == ActorPhase::Fenced)
+                || (generation == slot.generation && slot.phase == SlotPhase2::Fenced)
             {
                 rejected = true;
             } else {
@@ -776,13 +769,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     slot.registered = false;
                     slot.pid = None;
                     slot.heartbeat_unix = 0;
-                    slot.phase = ActorPhase::Provisioning;
+                    slot.phase = SlotPhase2::Provisioning;
                 }
                 slot.generation = generation;
                 slot.permit_held = true;
                 slot.routing_valid = routing;
-                if slot.phase == ActorPhase::Absent {
-                    slot.phase = ActorPhase::Provisioning;
+                if slot.phase == SlotPhase2::Absent {
+                    slot.phase = SlotPhase2::Provisioning;
                 }
                 commands.push(SideEffect::SpawnSlot {
                     slot_id,
@@ -795,7 +788,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
+            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
                 rejected = true;
             } else {
                 slot.executor_proven = true;
@@ -806,7 +799,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
+            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
                 rejected = true;
             } else {
                 slot.session_live = true;
@@ -820,7 +813,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
-                || slot.phase == ActorPhase::Fenced
+                || slot.phase == SlotPhase2::Fenced
                 || admission_blocked
                 || slot.ready_proof().is_err()
             {
@@ -840,13 +833,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
-                || slot.phase == ActorPhase::Fenced
+                || slot.phase == SlotPhase2::Fenced
                 || admission_blocked
             {
                 rejected = true;
             } else {
                 slot.registered = true;
-                slot.phase = ActorPhase::Registered;
+                slot.phase = SlotPhase2::Registered;
             }
         }
         Event::RegistrationLost {
@@ -856,7 +849,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             let draining = slot_has_active_job(&state, &slot_id)
                 || pending_outbox_blocks_admission(&state, &slot_id, generation);
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == ActorPhase::Fenced || !slot.registered
+            if generation != slot.generation || slot.phase == SlotPhase2::Fenced || !slot.registered
             {
                 rejected = true;
             } else {
@@ -867,13 +860,13 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 slot.permit_held = false;
                 slot.session_live = false;
                 if draining {
-                    slot.phase = ActorPhase::Fenced;
+                    slot.phase = SlotPhase2::Fenced;
                     commands.push(SideEffect::FenceSlot {
                         slot_id,
                         generation,
                     });
                 } else {
-                    slot.phase = ActorPhase::Provisioning;
+                    slot.phase = SlotPhase2::Provisioning;
                 }
             }
         }
@@ -886,12 +879,12 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             {
                 let slot = state.slot_mut(&slot_id);
                 if generation != slot.generation
-                    || slot.phase == ActorPhase::Fenced
+                    || slot.phase == SlotPhase2::Fenced
                     || admission_blocked
                 {
                     rejected = true;
                 } else if slot.ready_proof().is_ok() && slot.registered {
-                    slot.phase = ActorPhase::Ready;
+                    slot.phase = SlotPhase2::Ready;
                 } else {
                     rejected = true;
                 }
@@ -918,19 +911,19 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             // completion.
             let slot = state.slot_mut(&slot_id);
             if generation != slot.generation
-                || slot.phase != ActorPhase::Ready
+                || slot.phase != SlotPhase2::Ready
                 || state.jobs.iter().any(|job| job.job_id == job_id)
             {
                 rejected = true;
             } else {
-                state.slot_mut(&slot_id).phase = ActorPhase::Assigned;
+                state.slot_mut(&slot_id).phase = SlotPhase2::Assigned;
                 state.jobs.push(JobRecord {
                     job_id,
                     slot_id,
                     generation,
                     attempt: 0,
                     worker: String::new(),
-                    phase: ActorPhase::Assigned,
+                    phase: JobPhase2::Assigned,
                     accepted_unix: 0,
                     terminal_conclusion: None,
                     provisional: true,
@@ -1010,11 +1003,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 .iter()
                 .any(|job| job.job_id == job_id && job.generation > generation);
             let other_live = state.jobs.iter().any(|job| {
-                job.slot_id == slot_id && job.job_id != job_id && job_occupies_slot(job.phase)
+                job.slot_id == slot_id && job.job_id != job_id && job.phase.occupies_slot()
             });
             if newer_job
                 || slot_generation != Some(generation)
-                || slot_phase != Some(ActorPhase::Assigned)
+                || slot_phase != Some(SlotPhase2::Assigned)
                 || other_live
             {
                 rejected = true;
@@ -1035,7 +1028,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     generation,
                     attempt,
                     worker,
-                    phase: ActorPhase::Assigned,
+                    phase: JobPhase2::Assigned,
                     accepted_unix,
                     terminal_conclusion: None,
                     // A 200 came back: this row is now proof of ownership.
@@ -1053,7 +1046,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 if job.generation != generation {
                     rejected = true;
                 } else {
-                    job.phase = ActorPhase::Running;
+                    job.phase = JobPhase2::Running;
                 }
             } else {
                 rejected = true;
@@ -1080,7 +1073,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                 Some(job)
                     if job.generation == generation
                         && slot_generation == Some(generation)
-                        && job_occupies_slot(job.phase)
+                        && job.phase.occupies_slot()
                         // A terminal result is written once. A second, different
                         // conclusion for the same job generation is a caller bug,
                         // never a correction.
@@ -1090,7 +1083,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                             .is_none_or(|recorded| *recorded == conclusion) =>
                 {
                     job.terminal_conclusion = Some(conclusion);
-                    job.phase = ActorPhase::Completing;
+                    job.phase = JobPhase2::Completing;
                 }
                 _ => rejected = true,
             }
@@ -1131,12 +1124,12 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                         || !outbox_owner_is_proven(&state, row)
                     {
                         rejected = true;
-                    } else if state.jobs[job_index].phase != ActorPhase::Completing {
-                        state.jobs[job_index].phase = ActorPhase::Completing;
+                    } else if state.jobs[job_index].phase != JobPhase2::Completing {
+                        state.jobs[job_index].phase = JobPhase2::Completing;
                     }
                 } else {
                     let created = unix_now();
-                    state.jobs[job_index].phase = ActorPhase::Completing;
+                    state.jobs[job_index].phase = JobPhase2::Completing;
                     state.outbox.push(OutboxRecord {
                         job_id: job_id.clone(),
                         slot_id: state.jobs[job_index].slot_id.clone(),
@@ -1280,7 +1273,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                                 && job.slot_id == row.slot_id
                                 && job.generation == generation
                                 && !job.provisional
-                                && job.phase == ActorPhase::Completing
+                                && job.phase == JobPhase2::Completing
                         })
                 });
             if valid {
@@ -1341,7 +1334,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             pid,
         } => {
             let slot = state.slot_mut(&slot_id);
-            if generation != slot.generation || slot.phase == ActorPhase::Fenced {
+            if generation != slot.generation || slot.phase == SlotPhase2::Fenced {
                 rejected = true;
             } else {
                 slot.pid = Some(pid);
@@ -1357,7 +1350,7 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             if generation != slot.generation || occupied {
                 rejected = true;
             } else {
-                slot.phase = ActorPhase::Fenced;
+                slot.phase = SlotPhase2::Fenced;
                 commands.push(SideEffect::FenceSlot {
                     slot_id,
                     generation,
@@ -1759,6 +1752,7 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v4_to_v5(&transaction)?;
     migrate_v5_to_v6(&transaction)?;
     migrate_v6_to_v7(&transaction)?;
+    migrate_v7_to_v8(&transaction)?;
     transaction.commit()?;
     Ok(())
 }
@@ -1933,7 +1927,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
         state.slots.push(SlotRecord {
             slot_id: SlotId(slot_id),
             generation: Generation(i64_u64(generation, "slot generation")?),
-            phase: parse_actor_phase(&phase)?,
+            phase: parse_slot_phase(&phase)?,
             permit_held: sqlite_bool(permit_held, "slot permit_held")?,
             routing_valid: sqlite_bool(routing_valid, "slot routing_valid")?,
             session_live: sqlite_bool(session_live, "slot session_live")?,
@@ -1992,7 +1986,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             generation: Generation(i64_u64(generation, "job generation")?),
             attempt: i64_u32(attempt, "job attempt")?,
             worker,
-            phase: parse_actor_phase(&phase)?,
+            phase: parse_job_phase(&phase)?,
             accepted_unix: i64_u64(accepted_unix, "job accepted_unix")?,
             terminal_conclusion,
             provisional,
@@ -2090,21 +2084,31 @@ fn meta_canary(meta: &HashMap<String, String>) -> StoreResult<CanaryStatus> {
     }
 }
 
-fn parse_actor_phase(value: &str) -> StoreResult<ActorPhase> {
+fn parse_slot_phase(value: &str) -> StoreResult<SlotPhase2> {
     match value {
-        "absent" => Ok(ActorPhase::Absent),
-        "provisioning" => Ok(ActorPhase::Provisioning),
-        "registered" => Ok(ActorPhase::Registered),
-        "ready" => Ok(ActorPhase::Ready),
-        "assigned" => Ok(ActorPhase::Assigned),
-        "running" => Ok(ActorPhase::Running),
-        "completing" => Ok(ActorPhase::Completing),
-        "fenced" => Ok(ActorPhase::Fenced),
+        "absent" => Ok(SlotPhase2::Absent),
+        "provisioning" => Ok(SlotPhase2::Provisioning),
+        "registered" => Ok(SlotPhase2::Registered),
+        "ready" => Ok(SlotPhase2::Ready),
+        "assigned" => Ok(SlotPhase2::Assigned),
+        "fenced" => Ok(SlotPhase2::Fenced),
         // The retired phases (`starting`, `retiring`, `degraded`,
-        // `quarantined`) fail closed here: a materialized row naming one is
-        // evidence from a vocabulary this binary no longer speaks, and
-        // guessing which live phase it meant would invent capacity state.
-        _ => Err(invalid_materialized("actor phase", value)),
+        // `quarantined`) and the job-only phases (`running`, `completing`)
+        // fail closed here: a slot row naming one is evidence from a
+        // vocabulary this binary no longer speaks for slots, and guessing
+        // which live phase it meant would invent capacity state.
+        _ => Err(invalid_materialized("slot phase", value)),
+    }
+}
+
+fn parse_job_phase(value: &str) -> StoreResult<JobPhase2> {
+    match value {
+        "assigned" => Ok(JobPhase2::Assigned),
+        "running" => Ok(JobPhase2::Running),
+        "completing" => Ok(JobPhase2::Completing),
+        // Slot-only phases on a job row are the mirror image of the slot
+        // case above: fail closed rather than invent execution state.
+        _ => Err(invalid_materialized("job phase", value)),
     }
 }
 
@@ -2581,6 +2585,30 @@ fn migrate_v6_to_v7(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     Ok(())
 }
 
+/// v8 splits the shared actor-phase vocabulary into slot and job phases.
+/// The reducer never wrote `running`/`completing` to a slot row or a
+/// slot-only phase to a job row, so conforming rows migrate untouched; a row
+/// outside its new vocabulary is foreign evidence and fails closed here,
+/// inside the setup transaction, before the version stamp can move.
+fn migrate_v7_to_v8(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 8 {
+        return Ok(());
+    }
+    let mut statement = tx.prepare("SELECT phase FROM slots")?;
+    let phases = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for phase in phases {
+        parse_slot_phase(&phase?)?;
+    }
+    let mut statement = tx.prepare("SELECT phase FROM jobs")?;
+    let phases = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for phase in phases {
+        parse_job_phase(&phase?)?;
+    }
+    tx.pragma_update(None, "user_version", 8u32)?;
+    Ok(())
+}
+
 /// Repair the one historical migration poison that can pass the version gate.
 ///
 /// The v5 bump once stamped a v4 `jobs` table as version 5. A later opener
@@ -3016,7 +3044,7 @@ mod tests {
         let state = journal.materialized_state().unwrap();
         let row = state.jobs.iter().find(|row| row.job_id == job("job-1"));
         let row = row.expect("job survives");
-        assert_eq!(row.phase, ActorPhase::Completing);
+        assert_eq!(row.phase, JobPhase2::Completing);
         assert_eq!(row.terminal_conclusion.as_deref(), Some("succeeded"));
         assert!(state.outbox.is_empty());
         assert_eq!(
@@ -3323,7 +3351,7 @@ mod tests {
         let state = journal.materialized_state().unwrap();
         assert!(state.jobs.is_empty());
         assert!(state.outbox.is_empty());
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         assert!(!journal.has_remote_terminal_ack(&job("job-1"), g).unwrap());
         let losses = journal.unresolvable_completions().unwrap();
         assert_eq!(losses.len(), 1);
@@ -4499,7 +4527,7 @@ mod tests {
             .unwrap();
         assert!(same_generation.rejected);
         assert!(same_generation.commands.is_empty());
-        assert_eq!(same_generation.state.slots[0].phase, ActorPhase::Fenced);
+        assert_eq!(same_generation.state.slots[0].phase, SlotPhase2::Fenced);
         let outcome = journal
             .apply(Event::PermitReserved {
                 slot_id: slot_id.clone(),
@@ -4523,7 +4551,7 @@ mod tests {
             .find(|slot| slot.slot_id == slot_id)
             .unwrap();
         assert_eq!(slot.generation, generation.next());
-        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert_eq!(slot.phase, SlotPhase2::Provisioning);
         assert!(slot.permit_held);
         assert!(slot.routing_valid);
         assert!(!slot.executor_proven);
@@ -4578,7 +4606,7 @@ mod tests {
             let outcome = journal.apply(event).unwrap();
             assert!(outcome.rejected);
             assert!(outcome.commands.is_empty());
-            assert_eq!(outcome.state.slots[0].phase, ActorPhase::Fenced);
+            assert_eq!(outcome.state.slots[0].phase, SlotPhase2::Fenced);
         }
     }
 
@@ -4588,15 +4616,15 @@ mod tests {
         let generation = r#gen();
 
         for phase in [
-            ActorPhase::Assigned,
-            ActorPhase::Running,
-            ActorPhase::Completing,
+            JobPhase2::Assigned,
+            JobPhase2::Running,
+            JobPhase2::Completing,
         ] {
             let state = FleetState {
                 slots: vec![SlotRecord {
                     slot_id: slot_id.clone(),
                     generation,
-                    phase: ActorPhase::Assigned,
+                    phase: SlotPhase2::Assigned,
                     permit_held: true,
                     ..SlotRecord::new(slot_id.clone())
                 }],
@@ -4711,7 +4739,7 @@ mod tests {
         assert!(outcome.rejected);
         assert!(outcome.commands.is_empty());
         assert_eq!(outcome.state.slots[0].generation, generation);
-        assert_eq!(outcome.state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(outcome.state.slots[0].phase, SlotPhase2::Assigned);
         assert_eq!(outcome.state.jobs[0].generation, generation);
     }
 
@@ -4846,7 +4874,7 @@ mod tests {
         assert!(!slot.registered);
         assert!(!slot.permit_held);
         assert!(!slot.session_live);
-        assert_eq!(slot.phase, ActorPhase::Provisioning);
+        assert_eq!(slot.phase, SlotPhase2::Provisioning);
     }
 
     #[test]
@@ -4901,7 +4929,7 @@ mod tests {
         assert!(!slot_state.registered);
         assert!(!slot_state.permit_held);
         assert!(!slot_state.session_live);
-        assert_eq!(slot_state.phase, ActorPhase::Fenced);
+        assert_eq!(slot_state.phase, SlotPhase2::Fenced);
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.jobs[0].job_id, job_id);
 
@@ -4949,7 +4977,7 @@ mod tests {
         assert!(torn_down.jobs.is_empty());
         assert!(torn_down.outbox[0].remote_acked);
         assert!(!torn_down.slots[0].permit_held);
-        assert_eq!(torn_down.slots[0].phase, ActorPhase::Fenced);
+        assert_eq!(torn_down.slots[0].phase, SlotPhase2::Fenced);
 
         // The old generation remains fenced; recovery must rotate only after
         // the durable job and outbox teardown proof.
@@ -5019,7 +5047,7 @@ mod tests {
         );
         assert_eq!(
             recovered.load_state().unwrap().slots[0].phase,
-            ActorPhase::Ready
+            SlotPhase2::Ready
         );
     }
 
@@ -5043,7 +5071,7 @@ mod tests {
             })
             .unwrap();
         assert!(outcome.rejected);
-        assert_eq!(outcome.state.slots[0].phase, ActorPhase::Provisioning);
+        assert_eq!(outcome.state.slots[0].phase, SlotPhase2::Provisioning);
     }
 
     #[test]
@@ -5321,7 +5349,7 @@ mod tests {
         assert!(state.jobs.is_empty());
         assert!(
             state.slots.iter().any(
-                |record| record.slot_id == slot("scope-1") && record.phase == ActorPhase::Ready
+                |record| record.slot_id == slot("scope-1") && record.phase == SlotPhase2::Ready
             ),
             "{state:?}"
         );
@@ -5508,7 +5536,7 @@ mod tests {
         let state = journal.load_state().unwrap();
         assert_eq!(state.jobs.len(), 1);
         assert_eq!(state.jobs[0].job_id, job("guid-1"));
-        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
     }
 
     #[test]
@@ -5551,7 +5579,7 @@ mod tests {
             })
             .unwrap();
         let state = journal.load_state().unwrap();
-        assert_eq!(state.jobs[0].phase, ActorPhase::Completing);
+        assert_eq!(state.jobs[0].phase, JobPhase2::Completing);
         assert!(state.jobs[0].accepted_unix > 0);
     }
 
@@ -5711,7 +5739,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 7,
+            JOURNAL_SCHEMA_VERSION, 8,
             "this test pins the current upgrade"
         );
         for column in [
@@ -5878,7 +5906,7 @@ mod tests {
             row.provisional,
             "the retarget records identity, not ownership"
         );
-        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
         assert_eq!(state.advertised_capacity(), 0);
 
         // The addressing survives promotion: a crash after JobOwned but before
@@ -6145,7 +6173,7 @@ mod tests {
         );
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "the slot is freed");
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         assert_eq!(state.advertised_capacity(), 1);
 
         // Now prove ownership and try again: it must be refused.
@@ -6235,7 +6263,7 @@ mod tests {
         assert!(!acked.rejected);
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         assert!(state.slots[0].phase.counts_as_ready());
         drop(journal);
 
@@ -6328,9 +6356,21 @@ mod tests {
     }
 
     #[test]
-    fn retired_actor_phases_fail_closed_on_materialization() {
+    fn slot_and_job_phase_vocabularies_are_separated() {
         for retired in ["starting", "retiring", "degraded", "quarantined"] {
-            let error = parse_actor_phase(retired).unwrap_err();
+            let slot_error = parse_slot_phase(retired).unwrap_err();
+            assert_eq!(slot_error.envelope.reason, "journal.materialized.invalid");
+            let job_error = parse_job_phase(retired).unwrap_err();
+            assert_eq!(job_error.envelope.reason, "journal.materialized.invalid");
+        }
+        // Cross-type phases fail closed: a slot can never be Running or
+        // Completing, and a job can never carry a slot-only phase.
+        for job_only in ["running", "completing"] {
+            let error = parse_slot_phase(job_only).unwrap_err();
+            assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        }
+        for slot_only in ["absent", "provisioning", "registered", "ready", "fenced"] {
+            let error = parse_job_phase(slot_only).unwrap_err();
             assert_eq!(error.envelope.reason, "journal.materialized.invalid");
         }
         for live in [
@@ -6339,12 +6379,67 @@ mod tests {
             "registered",
             "ready",
             "assigned",
-            "running",
-            "completing",
             "fenced",
         ] {
-            assert!(parse_actor_phase(live).is_ok(), "{live}");
+            assert!(parse_slot_phase(live).is_ok(), "{live}");
         }
+        for live in ["assigned", "running", "completing"] {
+            assert!(parse_job_phase(live).is_ok(), "{live}");
+        }
+        // Occupancy is a property of the job type: every job phase occupies.
+        for phase in JobPhase2::ALL {
+            assert!(phase.occupies_slot(), "{phase:?}");
+        }
+        for phase in SlotPhase2::ALL {
+            assert_eq!(phase.counts_as_ready(), phase == SlotPhase2::Ready);
+        }
+    }
+
+    #[test]
+    fn v7_journal_migrates_phase_vocabulary_to_v8() {
+        let (dir, mut journal) = open_tmp("v7-to-v8");
+        let path = dir.join("journal.db");
+        let g = prime_running_job(&mut journal, "scope-1", "job-1");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 7u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let reopened = Journal::open(&path).unwrap();
+        let version: i64 = reopened
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
+        let state = reopened.materialized_state().unwrap();
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
+        assert_eq!(state.jobs[0].phase, JobPhase2::Running);
+        assert_eq!(state.jobs[0].generation, g);
+    }
+
+    #[test]
+    fn v7_migration_fails_closed_on_cross_type_phase_rows() {
+        let (dir, mut journal) = open_tmp("v7-to-v8-poison");
+        let path = dir.join("journal.db");
+        prime_running_job(&mut journal, "scope-1", "job-1");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("UPDATE slots SET phase = 'running'", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 7u32).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        drop(conn);
+
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.materialized.invalid");
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
     }
 
     #[test]

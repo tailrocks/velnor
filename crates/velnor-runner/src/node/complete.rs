@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use velnor_control::journal::{payload_checksum, Event, JobRecord, Journal};
-use velnor_model::{ActorPhase, Generation, JobId, SlotId};
+use velnor_model::{Generation, JobId, JobPhase2, SlotId};
 
 use super::cleanup;
 use crate::protocol::{completion_failure_is_permanent, CompletionAcknowledgement};
@@ -176,7 +176,7 @@ where
             job.job_id == row.job_id
                 && job.slot_id == row.slot_id
                 && job.generation == row.generation
-                && job.phase == ActorPhase::Completing
+                && job.phase == JobPhase2::Completing
         });
     if !row.intended || row.remote_acked || !row.send_started || !owner_is_current {
         anyhow::bail!(
@@ -752,7 +752,7 @@ pub fn infer_slot_id(journal: &Journal, config_dir: &Path) -> Option<SlotId> {
     let running: Vec<&SlotId> = state
         .jobs
         .iter()
-        .filter(|job| matches!(job.phase, ActorPhase::Assigned | ActorPhase::Running))
+        .filter(|job| matches!(job.phase, JobPhase2::Assigned | JobPhase2::Running))
         .map(|job| &job.slot_id)
         .collect();
     if running.len() == 1 {
@@ -870,7 +870,7 @@ fn ack_remote(
 mod tests {
     use super::*;
     use velnor_control::journal::{Event, ACQUISITION_RESOLUTION_SECONDS, MAX_ACQUISITION_PROBES};
-    use velnor_model::{Generation, SlotId};
+    use velnor_model::{Generation, SlotId, SlotPhase2};
 
     fn tmp(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1542,7 +1542,7 @@ mod tests {
         assert!(journal.pending_outbox().unwrap().is_empty());
         let state = journal.materialized_state().unwrap();
         assert!(state.jobs.is_empty());
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1603,7 +1603,7 @@ mod tests {
         assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
         assert_eq!(
             journal.materialized_state().unwrap().slots[0].phase,
-            ActorPhase::Ready,
+            SlotPhase2::Ready,
         );
         // The abandonment is recorded, never disguised as a delivery.
         let abandoned = journal.unresolvable_completions().unwrap();
@@ -1696,7 +1696,7 @@ mod tests {
         assert!(!cleanup::outbox_path(&dir, &job_id.0, generation.0).exists());
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1748,8 +1748,8 @@ mod tests {
         assert!(pending[0].send_started);
         assert!(!pending[0].remote_acked);
         let state = journal.load_state().unwrap();
-        assert_eq!(state.jobs[0].phase, ActorPhase::Completing);
-        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.jobs[0].phase, JobPhase2::Completing);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
         let rejected = intend_acquisition(
             &mut journal,
             &JobId("job-2".into()),
@@ -1788,7 +1788,7 @@ mod tests {
         assert!(journal.pending_outbox().unwrap().is_empty());
         let state = journal.load_state().unwrap();
         assert!(state.jobs.is_empty(), "{:?}", state.jobs);
-        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
         // Slot must leave Completing after async complete_job.
         own_next_job(
             &mut journal,
@@ -2081,7 +2081,7 @@ mod tests {
         let generation = own_next_job(&mut journal, &JobId("guid-1".into()), &slot);
         assert_eq!(generation, g);
         let state = journal.load_state().unwrap();
-        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
         assert_eq!(state.jobs[0].job_id.0, "guid-1");
         assert!(!state.jobs[0].provisional);
         std::fs::remove_dir_all(dir).ok();

@@ -60,9 +60,9 @@ pub use microvm::{
     JAILER_CONTROLS,
 };
 pub use node::{
-    ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthAlert,
-    HealthAlertCode, HealthAlertSeverity, HealthDocument, JobId, NotReady, ReadyProof,
-    RecoveryHealthState, SliDimension, SlotId,
+    CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthAlert, HealthAlertCode,
+    HealthAlertSeverity, HealthDocument, JobId, JobPhase2, NotReady, ReadyProof,
+    RecoveryHealthState, SliDimension, SlotId, SlotPhase2,
 };
 pub use phase::{slot_transition_allowed, InvalidSlotToken, SlotKind, SlotPhase};
 pub use resources::{

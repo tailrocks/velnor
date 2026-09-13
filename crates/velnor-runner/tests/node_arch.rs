@@ -1278,7 +1278,7 @@ fn controller_keeps_ready_when_exec_exists_without_assignment() {
         .iter()
         .find(|item| item.slot_id.0 == "own-1")
         .expect("slot");
-    assert_eq!(slot.phase, velnor_model::ActorPhase::Ready, "{slot:?}");
+    assert_eq!(slot.phase, velnor_model::SlotPhase2::Ready, "{slot:?}");
     assert!(!state.github_reachable, "{state:?}");
     std::fs::remove_dir_all(dir).ok();
 }
@@ -1328,7 +1328,7 @@ fn controller_does_not_assign_rest_queued_ids() {
         .iter()
         .find(|item| item.slot_id.0 == "own-1")
         .expect("slot");
-    assert_eq!(slot.phase, velnor_model::ActorPhase::Ready, "{slot:?}");
+    assert_eq!(slot.phase, velnor_model::SlotPhase2::Ready, "{slot:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1438,7 +1438,7 @@ fn job_once_without_exec_persists_only_after_ownership() {
         .unwrap()
         .load_state()
         .unwrap();
-    assert_eq!(state.jobs[0].phase, velnor_model::ActorPhase::Running);
+    assert_eq!(state.jobs[0].phase, velnor_model::JobPhase2::Running);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1466,7 +1466,7 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
     confirm_acquisition(&mut journal, &job_id, &slot_id, generation).unwrap();
     assert_eq!(
         journal.load_state().unwrap().jobs[0].phase,
-        velnor_model::ActorPhase::Assigned
+        velnor_model::JobPhase2::Assigned
     );
     // This is the emission handle_job_request performs right after its store
     // JobStarted edge: the journal phase must track the running execution.
@@ -1475,7 +1475,7 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
         .unwrap()
         .load_state()
         .unwrap();
-    assert_eq!(state.jobs[0].phase, velnor_model::ActorPhase::Running);
+    assert_eq!(state.jobs[0].phase, velnor_model::JobPhase2::Running);
     std::fs::remove_dir_all(dir).ok();
 }
 
