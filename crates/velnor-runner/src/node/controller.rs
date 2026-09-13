@@ -4885,6 +4885,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: Some(reset),
             remaining: Some(0),
+            category: None,
         });
         assert!(pacing.registration_due("velnor-1", now));
         assert!(pacing.registration_due("velnor-2", now));
@@ -4906,6 +4907,7 @@ mod tests {
             retry_after_seconds: Some(30),
             rate_limit_reset_epoch: None,
             remaining: None,
+            category: None,
         });
         let mut pacing = GithubPacing::default();
         pacing.record_registration_error("velnor-1", now, &throttled);
@@ -4927,6 +4929,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: Some(epoch_now() + 3500),
             remaining: Some(4200),
+            category: None,
         });
         pacing.record_registration_error("velnor-1", now, &permission);
         assert!(

@@ -59,6 +59,35 @@ const RESULTS_ARTIFACT_MAX_UPLOAD_ZIP_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const ARTIFACT_TRANSFER_MIN_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 const ARTIFACT_TRANSFER_GRACE_SECONDS: u64 = 120;
 const ARTIFACT_TRANSFER_MAX_SECONDS: u64 = 60 * 60;
+
+/// Retry category of a broker/completion boundary failure, decided once at
+/// the boundary where the status and body are observed. Retry, abandon, and
+/// refresh policy matches on this category; it never re-parses error text.
+/// (GOAL 31, same shape as `DockerErrorCategory`.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrokerErrorCategory {
+    /// Transport break, 5xx, 408/429: the same request may succeed later.
+    /// Retry with backoff inside the path's bounded attempt budget.
+    Transient,
+    /// Deterministic refusal (typed gone, auth/validation 4xx): the same
+    /// inputs fail the same way. Fail fast — no retry — and, on the
+    /// completion path, spend the durable attempt budget at once so the
+    /// slot is released now instead of after hours of doomed retries.
+    Terminal,
+    /// Another delivery or holder may own the job (acquire 409, an
+    /// untyped 404/422 a proxy could have produced): never abandon and
+    /// never double-send. Duplicate delivery is safe — the provisional
+    /// intent row re-records idempotently and the `renewjob` oracle
+    /// decides ownership — so the row stays for the oracle.
+    Conflict,
+}
+
+/// Typed GitHub/run-service API failure. `Display` is the historical
+/// boundary message (`{action} failed: status={status}, body={body}`); the
+/// broker/completion boundary additionally attaches a [`BrokerErrorCategory`]
+/// on this type (rather than in a wrapper) so the error chain keeps its
+/// shape and downstream `GitHubApiError` downcasts (credential refresh,
+/// quota/rate-limit hints) keep working untouched.
 #[derive(Debug, thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
@@ -70,6 +99,27 @@ pub struct GitHubApiError {
     /// `x-ratelimit-remaining`. Required to tell quota 403 (remaining=0)
     /// from permission 403 (remaining>0); GitHub sends reset headers on both.
     pub remaining: Option<u64>,
+    /// Boundary-produced [`BrokerErrorCategory`]. `None` everywhere except
+    /// the broker/completion production sites that classify
+    /// (terminal completion refusal, broker acknowledge): transport
+    /// failures carry no status to classify from, and every other
+    /// `GitHubApiError` producer predates the taxonomy.
+    pub(crate) category: Option<BrokerErrorCategory>,
+}
+
+/// Boundary-produced category of a broker/completion failure, or `None`
+/// when the boundary never classified it (transport errors, other
+/// producers, test doubles). Callers must define the unclassified default
+/// explicitly at the decision site: the completion journal fails open
+/// (retry) because a finished job's outcome must never be lost to one
+/// unrecognized error — the reverse of the Docker boundary's fail-closed
+/// default, where the cost asymmetry runs the other way.
+pub(crate) fn broker_error_category(error: &anyhow::Error) -> Option<BrokerErrorCategory> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<GitHubApiError>()
+            .and_then(|api| api.category)
+    })
 }
 
 /// GitHub DELETE `/actions/runners/{id}` while the runner still holds a job.
@@ -215,6 +265,27 @@ fn github_api_error(
         retry_after_seconds: None,
         rate_limit_reset_epoch: None,
         remaining: None,
+        category: None,
+    }
+    .into()
+}
+
+/// Broker/completion-boundary failure with the boundary-produced
+/// [`BrokerErrorCategory`] attached. Same message as [`github_api_error`].
+fn github_api_error_categorized(
+    action: impl Into<String>,
+    status: u16,
+    body: impl Into<String>,
+    category: BrokerErrorCategory,
+) -> anyhow::Error {
+    GitHubApiError {
+        status,
+        action: action.into(),
+        body: sanitize_response_body(&body.into()),
+        retry_after_seconds: None,
+        rate_limit_reset_epoch: None,
+        remaining: None,
+        category: Some(category),
     }
     .into()
 }
@@ -466,6 +537,7 @@ fn github_api_error_with_retry(
         retry_after_seconds: hint.retry_after_seconds,
         rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
         remaining: hint.remaining,
+        category: None,
     }
     .into()
 }
@@ -1854,6 +1926,15 @@ pub fn is_retriable_completion_status(status: u16) -> bool {
 /// the remote's answer is the case where retrying is the only correct move.
 #[must_use]
 pub fn completion_failure_is_permanent(error: &anyhow::Error) -> bool {
+    // Category-driven: the completion boundary attaches `Terminal` to a
+    // deterministic refusal, and that verdict wins over any re-derivation.
+    // Unclassified errors (transport failures, test doubles) fall back to
+    // the historical status derivation, which fails open to retry: not
+    // knowing the remote's answer is the case where retrying is the only
+    // correct move.
+    if let Some(category) = broker_error_category(error) {
+        return matches!(category, BrokerErrorCategory::Terminal);
+    }
     error
         .chain()
         .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
@@ -1955,6 +2036,23 @@ fn is_run_service_job_not_found(body: &str) -> bool {
 #[must_use]
 pub fn acquire_reply_is_definitely_gone(body: &str) -> bool {
     matches!(run_service_error_code(body), Some(404 | 422))
+}
+
+/// Boundary classifier for a non-retriable `acquirejob` reply, produced
+/// where the reply is observed and carried on
+/// [`AcquireJobOutcome::Skipped`]. Only a typed gone is [`BrokerErrorCategory::Terminal`]
+/// (the slot may be freed now); anything else skipped — a 409 held by an
+/// unknown runner, or a 404/422 whose body is not a run-service error at
+/// all — is [`BrokerErrorCategory::Conflict`]: not proven gone, so the
+/// provisional row stays for the `renewjob` oracle and a duplicate broker
+/// delivery re-records the same intent idempotently instead of abandoning
+/// a job this runner may own.
+pub(crate) fn classify_acquire_skipped(body: &str) -> BrokerErrorCategory {
+    if acquire_reply_is_definitely_gone(body) {
+        BrokerErrorCategory::Terminal
+    } else {
+        BrokerErrorCategory::Conflict
+    }
 }
 
 /// Whether a `renewjob` failure proves the run service has no such job for this
@@ -2089,13 +2187,26 @@ impl BrokerClient {
         let (http_status, text) =
             github_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if http_status != 0 && !(200..300).contains(&http_status) {
-            return Err(github_api_error(
+            return Err(github_api_error_categorized(
                 "acknowledge broker runner request",
                 http_status,
                 text,
+                classify_broker_ack_error(http_status),
             ));
         }
         Ok(())
+    }
+}
+
+/// Boundary classifier for a failed broker `acknowledge` POST. The only
+/// caller is best-effort by design — the ack is a Busy marker, the broker
+/// redelivers regardless, and a duplicate ack is safe — so the category is
+/// forensic, not a retry input: no retry, one attempt, 30 s timeout.
+fn classify_broker_ack_error(status: u16) -> BrokerErrorCategory {
+    match status {
+        409 => BrokerErrorCategory::Conflict,
+        status if is_retriable_completion_status(status) => BrokerErrorCategory::Transient,
+        _ => BrokerErrorCategory::Terminal,
     }
 }
 
@@ -2123,6 +2234,12 @@ pub enum AcquireJobOutcome {
         status: StatusCode,
         request_id: Option<String>,
         body: String,
+        /// Boundary-produced [`BrokerErrorCategory`] for this reply:
+        /// [`BrokerErrorCategory::Terminal`] only for a typed gone (the
+        /// acquisition intent may be abandoned), [`BrokerErrorCategory::Conflict`]
+        /// otherwise (the row stays for the `renewjob` oracle). Callers
+        /// match on this category; they never re-derive it from `body`.
+        category: BrokerErrorCategory,
     },
 }
 
@@ -2219,6 +2336,7 @@ impl RunServiceClient {
                         return Ok(AcquireJobOutcome::Skipped {
                             status: status_code,
                             request_id: None,
+                            category: classify_acquire_skipped(&text),
                             body: text,
                         });
                     }
@@ -2247,13 +2365,17 @@ impl RunServiceClient {
             else {
                 unreachable!("successful acquire returns before retry handling");
             };
+            // Category-driven policy: a terminal failure (deterministic 4xx,
+            // poison payload) fails fast on this attempt instead of burning
+            // the whole retry budget — the bearer token cannot change
+            // mid-call, so the same request fails identically on every
+            // attempt. Only transient failures sleep and retry, bounded by
+            // `RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS`.
+            if !acquire_failure_is_transient(&error) {
+                return Err(AcquireJobError::Permanent(error).into());
+            }
             if attempt >= RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS {
-                let error = if acquire_failure_is_transient(&error) {
-                    AcquireJobError::Transient(error)
-                } else {
-                    AcquireJobError::Permanent(error)
-                };
-                return Err(error.into());
+                return Err(AcquireJobError::Transient(error).into());
             }
 
             let delay = self.acquire_retry_delay(attempt);
@@ -2375,9 +2497,24 @@ impl RunServiceClient {
                 Err(_) => true,
             };
             if attempt >= MAX_ATTEMPTS || !retriable {
+                // A deterministic refusal leaves the boundary carrying
+                // `Terminal`, so the journal's abandon policy reads the
+                // boundary verdict instead of re-deriving it. An exhausted
+                // transient budget and status-less transport failures stay
+                // unclassified: the policy fails open to retry for those.
+                let terminal = !retriable;
                 return match outcome {
                     Ok((status, text)) => {
-                        Err(github_api_error("complete run-service job", status, text))
+                        if terminal {
+                            Err(github_api_error_categorized(
+                                "complete run-service job",
+                                status,
+                                text,
+                                BrokerErrorCategory::Terminal,
+                            ))
+                        } else {
+                            Err(github_api_error("complete run-service job", status, text))
+                        }
                     }
                     Err(error) => Err(error).context("complete run-service job request"),
                 };
@@ -3046,6 +3183,7 @@ async fn parse_acquire_job_response(response: reqwest::Response) -> Result<Acqui
         return Ok(AcquireJobOutcome::Skipped {
             status,
             request_id,
+            category: classify_acquire_skipped(&body),
             body,
         });
     }
@@ -8669,6 +8807,46 @@ mod tests {
     }
 
     #[test]
+    fn completion_permanence_prefers_the_boundary_category() {
+        // The boundary verdict wins over status re-derivation in both
+        // directions: a `Terminal` refusal with a retriable-looking status
+        // is permanent, and a non-terminal category with a refusal status
+        // is not.
+        let boundary_terminal = github_api_error_categorized(
+            "complete run-service job",
+            503,
+            "try later",
+            BrokerErrorCategory::Terminal,
+        );
+        assert!(completion_failure_is_permanent(&boundary_terminal));
+        let wrapped = boundary_terminal.context("complete run-service job");
+        assert!(
+            completion_failure_is_permanent(&wrapped),
+            "the boundary category must survive the context the callers add"
+        );
+
+        let boundary_transient = github_api_error_categorized(
+            "complete run-service job",
+            400,
+            "bad request",
+            BrokerErrorCategory::Transient,
+        );
+        assert!(!completion_failure_is_permanent(&boundary_transient));
+
+        // Unclassified errors keep the historical status derivation.
+        assert!(completion_failure_is_permanent(&github_api_error(
+            "complete run-service job",
+            400,
+            "bad request"
+        )));
+        assert!(!completion_failure_is_permanent(&github_api_error(
+            "complete run-service job",
+            503,
+            "try later"
+        )));
+    }
+
+    #[test]
     fn acquire_reply_is_gone_only_for_typed_404_and_422() {
         for code in [404u16, 422] {
             assert!(acquire_reply_is_definitely_gone(
@@ -8691,6 +8869,57 @@ mod tests {
             &upstream_run_service_error_body("actions-broker", 404, "gone").to_string(),
         ));
         assert!(!acquire_reply_is_definitely_gone(""));
+    }
+
+    #[test]
+    fn acquire_skipped_category_is_terminal_only_for_typed_gone() {
+        for code in [404u16, 422] {
+            assert_eq!(
+                classify_acquire_skipped(
+                    &upstream_run_service_error_body("actions-run-service", code, "gone")
+                        .to_string()
+                ),
+                BrokerErrorCategory::Terminal
+            );
+        }
+        // Held-by-unknown, untyped, foreign-sourced, and empty replies are
+        // all `Conflict`: not proven gone, so the row stays for the
+        // `renewjob` oracle instead of being abandoned.
+        for body in [
+            upstream_run_service_error_body("actions-run-service", 409, "already acquired")
+                .to_string(),
+            r#"{"message":"Not Found"}"#.to_owned(),
+            upstream_run_service_error_body("actions-broker", 404, "gone").to_string(),
+            String::new(),
+        ] {
+            assert_eq!(
+                classify_acquire_skipped(&body),
+                BrokerErrorCategory::Conflict,
+                "unproven reply must not abandon: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn broker_ack_errors_classify_for_forensics() {
+        for status in [0u16, 408, 429, 500, 503] {
+            assert_eq!(
+                classify_broker_ack_error(status),
+                BrokerErrorCategory::Transient,
+                "status {status}"
+            );
+        }
+        assert_eq!(
+            classify_broker_ack_error(409),
+            BrokerErrorCategory::Conflict
+        );
+        for status in [400u16, 401, 403, 404, 422] {
+            assert_eq!(
+                classify_broker_ack_error(status),
+                BrokerErrorCategory::Terminal,
+                "status {status}"
+            );
+        }
     }
 
     #[test]
@@ -8832,6 +9061,54 @@ mod tests {
                 CompletionAcknowledgement::RemoteObservedTerminal
             );
         }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn complete_job_terminal_refusal_carries_boundary_category() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let run_service_url = format!("{}/run/jobs/123", server.uri());
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/completejob"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("invalid payload"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let completion = RunServiceCompleteJob {
+            plan_id: "plan".to_owned(),
+            job_id: "job".to_owned(),
+            conclusion: TaskResult::Succeeded,
+            outputs: BTreeMap::new(),
+            step_results: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            environment_url: None,
+            billing_owner_id: None,
+            infrastructure_failure_category: None,
+        };
+        let error = RunServiceClient::new("token")
+            .unwrap()
+            .complete_job(&run_service_url, completion)
+            .await
+            .expect_err("a 400 completion must surface the terminal refusal");
+
+        assert_eq!(
+            broker_error_category(&error),
+            Some(BrokerErrorCategory::Terminal)
+        );
+        assert!(completion_failure_is_permanent(&error));
+        // Message-compatible: the category rides on the typed error, so the
+        // historical boundary message is unchanged.
+        assert_eq!(
+            error.to_string(),
+            "complete run-service job failed: status=400, body=invalid payload"
+        );
     }
 
     use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
@@ -9238,6 +9515,7 @@ mod tests {
             retry_after_seconds: None,
             rate_limit_reset_epoch: None,
             remaining: Some(4999),
+            category: None,
         });
         assert!(!acquire_failure_is_transient(&unauthorized));
     }
@@ -9320,6 +9598,43 @@ mod tests {
 
         assert!(!is_transient_acquire_error(&error));
         assert!(error.to_string().contains("parse acquire run-service job"));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn acquire_job_terminal_failure_fails_fast_without_retrying() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/run/jobs/123/acquirejob"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let run_service = RunServiceClient::new("token")
+            .unwrap()
+            .with_acquire_retry_delay_for_test(Duration::ZERO);
+        let error = run_service
+            .acquire_job(
+                &format!("{}/run/jobs/123", server.uri()),
+                "broker-message",
+                std::env::consts::OS,
+                None,
+            )
+            .await
+            .expect_err("a 401 acquire must fail fast as a permanent error");
+
+        assert!(!is_transient_acquire_error(&error));
+        assert!(
+            error
+                .to_string()
+                .contains("permanent run-service acquire failure"),
+            "{error:#}"
+        );
     }
 
     #[test]
