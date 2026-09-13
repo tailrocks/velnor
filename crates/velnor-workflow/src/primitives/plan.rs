@@ -5,9 +5,9 @@ use crate::{GeneratorError, RunnerMode};
 
 /// Render the `plan:` job.
 ///
-/// Planning executes checked-in shell files, so it always runs on a hosted
-/// runner and is never trusted-event gated: it must not expose untrusted pull
-/// request code to a self-hosted runner, and it must run on every event.
+/// Planning executes checked-in shell files on the selected control-plane
+/// runner. A Velnor lane is trusted-event gated so it never exposes untrusted
+/// pull-request code to self-hosted capacity.
 pub(crate) struct AffectedPlan;
 
 impl Primitive for AffectedPlan {
@@ -21,9 +21,8 @@ impl Primitive for AffectedPlan {
 
     fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let mut job = String::new();
-        ctx.lanes
-            .ir()
-            .render_plan(&mut job, RunnerMode::Github, false);
+        let ir = ctx.lanes.ir();
+        ir.render_plan(&mut job, ir.runners, ir.runners == RunnerMode::Velnor);
         Ok(Rendered {
             nodes: vec![GraphNode::Plan { job }],
             ..Rendered::default()

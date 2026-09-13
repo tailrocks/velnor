@@ -5,11 +5,18 @@ name: Preview release
 # prerelease that always names the current main tip, so a consumer can install
 # "what main builds right now" without waiting for a tag.
 #
-# Deliberately NOT the stable coherence chain. A preview run emits no OCI image,
-# no release-record.json, and no release-record digest chain; its artifacts are
-# admitted by identity (version + source commit) plus GitHub artifact
-# attestation produced by the shared ci-release-package-signer callable with
-# source-ref refs/heads/main. Consumer-side verification enforces the rest.
+# Deliberately NOT the stable coherence chain. A preview run emits no OCI image
+# and no release-record.json (that record names deb digests and an OCI index a
+# preview never builds); instead every preview deb carries its own
+# velnor.package-record/v1 at /usr/share/velnor/package-record.json — emitted and
+# verified by the host-native preview binary, source-derived (commit, versions,
+# manifest hash, this arch's runner binary digest) and therefore acyclic inside
+# the deb. It is what `velnorctl release activate` consumes on a preview host,
+# so the units' `release verify-installed` gate can pass at all (#673). Beyond
+# that record, artifacts are admitted by identity (version + source commit) plus
+# GitHub artifact attestation produced by the shared ci-release-package-signer
+# callable with source-ref refs/heads/main. Consumer-side verification enforces
+# the rest.
 #
 # Version contract: `<crate_version>~preview.<run_number>+<7-hex-short-sha>`
 # (for example 0.1.274~preview.42+abc1234). `~` is required: dpkg sorts `~`
@@ -116,7 +123,6 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      CACHE_LANE: Preview
       CARGO_INCREMENTAL: "0"
       GUEST_ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
@@ -140,19 +146,81 @@ jobs:
           git checkout --detach "$SOURCE_COMMIT"
           [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          install_args: "rust"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
 
-      - name: Add guest-agent target
-        run: rustup target add "$TARGET"
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install kernel and rootfs build packages
         run: |
@@ -251,7 +319,6 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: Preview
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -283,18 +350,56 @@ jobs:
       - name: Install mold linker
         uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          install_args: "rust"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -302,8 +407,24 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Export metadata from one preview-build binary
         env:
@@ -323,6 +444,11 @@ jobs:
           jq -e 'type == "object"' manifest.json >/dev/null
           jq -e --arg sha "$SOURCE_COMMIT" '.source_sha == $sha' build-identity.json >/dev/null \
             || { echo "::error::build identity source_sha != preview source commit $SOURCE_COMMIT" >&2; exit 1; }
+          # This same host-native binary is the only executable thing in this
+          # lane bound to the preview identity, so it also emits every deb's
+          # package record (#673): the cross-compiling deb jobs copy it instead
+          # of executing their target binary.
+          cp "$runner" velnor-release-tool
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -330,6 +456,7 @@ jobs:
           path: |
             build-identity.json
             manifest.json
+            velnor-release-tool
           if-no-files-found: error
 
   build:
@@ -347,7 +474,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: Preview
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -380,18 +506,65 @@ jobs:
       - name: Install mold linker
         uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
 
+      # rust-toolchain.toml is the single source for the channel, its
+      # components, and its targets; a file-driven install applies all of
+      # them, so every cross target the matrices name is covered already.
+      # A cache hit makes this a fast no-op. Preview builds run only from
+      # trusted pushes to the default branch, so that - and nothing broader -
+      # is what may save the toolchain cache.
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
         with:
-          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
+          # Zig (linker toolchain) and cargo-binstall (fetcher for cargo-deb).
+          # The Rust toolchain is never a mise tool: rustup provisions it from
+          # rust-toolchain.toml above, and mise's cargo backend would demand a
+          # second, mise-managed rust for every cargo:* install.
+          install_args: "zig cargo-binstall aqua:rust-cross/cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -399,22 +572,34 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install cargo-deb (verified prebuilt only)
         env:
-          # cargo-binstall performs GitHub API discovery independently of mise.
-          # Authenticate parallel preview jobs so they do not share the tiny
-          # anonymous rate limit and fail nondeterministically with HTTP 403.
+          # cargo-binstall performs GitHub API discovery. Authenticate the
+          # parallel deb jobs so they do not share the tiny anonymous rate
+          # limit and fail nondeterministically with HTTP 403.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
-            --disable-strategies compile --no-confirm --force
+          cargo-binstall -y cargo-deb@3.7.0 --disable-strategies compile
           cargo-deb --version
 
       - name: Build preview binaries (runner + every deb asset)
@@ -465,6 +650,55 @@ jobs:
           mkdir -p crates/velnor-runner/release
           cp preview-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp preview-metadata/manifest.json crates/velnor-runner/release/manifest.json
+
+      - name: Stage the deb's own package record
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+          CRATE_VERSION: ${{ needs.identity.outputs.crate_version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Issue #673: a preview install has no out-of-band release record to
+          # activate from, so the deb carries its own velnor.package-record/v1.
+          # The candidate record is authored here from source-derived inputs
+          # (no deb digest, no OCI digest — acyclic by construction), then
+          # emitted by the host-native preview binary the metadata job built
+          # from this exact commit: that binary refuses any record whose kind,
+          # commit, crate version, or runner binary digest disagrees with its
+          # own embedded identity, and writes only the canonical bytes.
+          chmod +x preview-metadata/velnor-release-tool
+          binary="target/${TARGET}/release/velnor-runner"
+          test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
+          binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum preview-metadata/manifest.json | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' preview-metadata/manifest.json)"
+          jq -n \
+            --arg schema "velnor.package-record/v1" \
+            --arg repo "tailrocks/velnor" \
+            --arg kind "preview" \
+            --arg commit "$SOURCE_COMMIT" \
+            --arg crate "$CRATE_VERSION" \
+            --arg debian "$VERSION" \
+            --argjson mv "$manifest_version" \
+            --arg mhash "$manifest_sha256" \
+            --arg arch "${{ matrix.arch }}" \
+            --arg target "$TARGET" \
+            --arg binary "$binary_sha256" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, kind: $kind, commit: $commit,
+                       crate_version: $crate, debian_version: $debian,
+                       manifest_version: $mv, manifest_sha256: $mhash },
+              architecture: { arch: $arch, target: $target, binary_sha256: $binary }
+            }' > package-record.candidate.json
+          preview-metadata/velnor-release-tool release emit \
+            --record package-record.candidate.json \
+            --binary "$binary" \
+            --out crates/velnor-runner/release/package-record.json
+          jq -e --arg version "$VERSION" --arg commit "$SOURCE_COMMIT" \
+            '.build.kind == "preview" and .build.debian_version == $version and .build.commit == $commit' \
+            crates/velnor-runner/release/package-record.json >/dev/null \
+            || { echo "::error::emitted package record does not name this preview identity" >&2; exit 1; }
 
       - name: Download guest payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -578,7 +812,21 @@ jobs:
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           grep -q "usr/share/velnor/build-identity.json" "$manifest" || { echo "::error::deb missing build identity" >&2; exit 1; }
           grep -q "usr/share/velnor/manifest.json" "$manifest" || { echo "::error::deb missing compiled manifest" >&2; exit 1; }
+          grep -q "usr/share/velnor/package-record.json" "$manifest" || { echo "::error::deb missing its package record" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          # The deb must ship exactly the package record that was emitted for
+          # this arch, compared as a stream (the deb guard never extracts or
+          # traps), and its binary digest must name the packaged runner: this
+          # record is what a preview host activates from (#673).
+          dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json \
+            | cmp - crates/velnor-runner/release/package-record.json \
+            || { echo "::error::packaged package-record.json differs from the emitted record" >&2; exit 1; }
+          record_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | sha256sum | awk '{print $1}')"
+          [ "$record_sha256" = "$(awk 'NF {print $1; exit}' crates/velnor-runner/release/package-record.json.sha256)" ] \
+            || { echo "::error::packaged package-record.json digest != emitted sidecar" >&2; exit 1; }
+          packaged_binary_sha256="$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
+          [ "$packaged_binary_sha256" = "$(dpkg-deb --fsys-tarfile "$src" | tar -xOf - ./usr/share/velnor/package-record.json | jq -r '.architecture.binary_sha256')" ] \
+            || { echo "::error::deb runner binary does not match the package record" >&2; exit 1; }
           # dpkg sorts `~` before the release, so this deb can never satisfy an
           # upgrade to the future <crate_version> stable release.
           dpkg --compare-versions "$VERSION" lt "$(sed -n 's/^version = "\(.*\)"/\1/p' crates/velnor-runner/Cargo.toml | head -n1)" \
@@ -635,6 +883,11 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: preview-metadata
+          path: preview-metadata
+
       - name: Assemble the consumer release manifest and independent checksums
         run: |
           set -euo pipefail
@@ -664,6 +917,13 @@ jobs:
           # SHA256SUMS binds artifact basenames. Verify from the downloaded
           # artifact corpus before anything is published.
           (cd artifacts && sha256sum --check --strict ../SHA256SUMS)
+          # The packaged package record is the only identity a preview host can
+          # activate from (#673), so each deb is re-verified from its own bytes:
+          # the record must be coherent and name exactly this commit, version,
+          # arch, and packaged runner binary.
+          chmod +x preview-metadata/velnor-release-tool
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf -- "$tmpdir"' EXIT
           for arch in amd64 arm64; do
             deb="artifacts/velnor-runner-preview-${VERSION}-${arch}.deb"
             [ -f "$deb" ] || { echo "::error::missing preview deb for $arch" >&2; exit 1; }
@@ -671,6 +931,19 @@ jobs:
               || { echo "::error::published deb version != preview identity ($arch)" >&2; exit 1; }
             [ "$(dpkg-deb -f "$deb" Architecture)" = "$arch" ] \
               || { echo "::error::published deb arch mismatch ($arch)" >&2; exit 1; }
+            record="$tmpdir/package-record-$arch.json"
+            dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/share/velnor/package-record.json > "$record"
+            record_digest="$(sha256sum "$record" | awk '{print $1}')"
+            preview-metadata/velnor-release-tool release verify-record \
+              --record "$record" --sha256 "$record_digest" >/dev/null \
+              || { echo "::error::packaged package record is incoherent ($arch)" >&2; exit 1; }
+            packaged_binary="$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/bin/velnor-runner | sha256sum | awk '{print $1}')"
+            jq -e --arg commit "$COMMIT" --arg version "$VERSION" --arg arch "$arch" --arg binary "$packaged_binary" \
+              '.build.kind == "preview" and .build.commit == $commit and
+               .build.debian_version == $version and
+               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \
+              "$record" >/dev/null \
+              || { echo "::error::packaged package record does not name this preview identity ($arch)" >&2; exit 1; }
           done
 
       - name: Replace the rolling preview release atomically

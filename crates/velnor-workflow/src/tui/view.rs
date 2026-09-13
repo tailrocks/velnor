@@ -713,10 +713,18 @@ mod tests {
             pinned_lockfile: true,
             cache: None,
             tool_version: Some("1.97.1".to_owned()),
+            // Generation refuses a Rust unit without a recorded pin, so the
+            // fixture records the pin its workflows are rendered against.
+            toolchain: Some(crate::RustToolchain {
+                channel: "1.91.1".to_owned(),
+                components: Vec::new(),
+                targets: Vec::new(),
+                profile: None,
+            }),
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),
-            profile: crate::RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "static metadata".to_owned(),
                 detected: vec!["Rust".to_owned()],
@@ -737,7 +745,11 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         };
         let id = "workspace-with-a-long-name".to_owned();
         let mut selector = termrock::widgets::ListState::new(Some(id.clone()));

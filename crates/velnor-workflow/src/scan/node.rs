@@ -362,6 +362,7 @@ pub(crate) fn detect(
             }],
             purpose: CachePurpose::Generic,
             mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
         });
         let mut package_unit = unit(kind, &package_root, package_watch, commands, package_cache);
         let base_id = format!("{}-{}", kind.id_prefix(), identifier_suffix(&facts.name));

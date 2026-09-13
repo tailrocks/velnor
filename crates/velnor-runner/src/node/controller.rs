@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use velnor_model::{ActorPhase, FleetHealthState, Generation, JobId, SlotId};
 
 use crate::config;
 use crate::protocol::{GitHubScope, RegistrationClient};
+use crate::runner::daemon_forensic_log;
 
 use super::cleanup;
 use super::complete;
@@ -68,6 +70,13 @@ const RATE_LIMIT_HEADROOM_REMAINING: u64 = 100;
 /// Per-slot JIT registration retry backoff ceiling. The first retries are
 /// deliberately short (5s doubling) — only sustained failures grow long.
 const REGISTRATION_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(600);
+/// A fleet that cannot resolve its desired routing policy fails closed
+/// forever. Restating that diagnosis once per probe interval keeps it loud in
+/// the journal without one line per reconcile cycle.
+const UNRESOLVED_POLICY_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Unix seconds of the last unresolved-desired-policy diagnosis.
+static UNRESOLVED_POLICY_LOGGED_AT: AtomicU64 = AtomicU64::new(0);
 
 /// Controller-local REST pacing for the shared PAT.
 /// Read-only probes and JIT registration retries in this controller draw from the same budget:
@@ -1324,12 +1333,8 @@ async fn observe_github_and_routing(
         } else if let Some(url) = exec.url.as_deref() {
             if let Ok(scope) = crate::protocol::GitHubScope::parse(url) {
                 if let Some(org) = scope.org_login() {
-                    let generated = prove::org_policy_from_generated(
-                        org,
-                        exec.labels.clone(),
-                        trust.clone(),
-                        &prove::generated_policy_dir(),
-                    );
+                    let generated =
+                        prove::org_desired_policy(org, exec.labels.clone(), trust.clone());
                     if let Some(policy) = &generated {
                         prove::write_policy(&args.state_dir, policy)?;
                     }
@@ -1343,6 +1348,9 @@ async fn observe_github_and_routing(
         } else {
             prove::read_policy(&args.state_dir)
         };
+        if policy.is_none() {
+            note_unresolved_desired_policy(args, exec.url.as_deref());
+        }
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let now = tokio::time::Instant::now();
             if pacing.probe_due(now) {
@@ -1426,6 +1434,56 @@ async fn observe_github_and_routing(
         group_valid: routing.group_valid,
     })?;
     Ok(())
+}
+
+/// Fail-closed must never mean silent. A fleet that cannot name its desired
+/// routing policy registers no runner, so the only symptoms are idle slot
+/// processes, queued GitHub jobs, and a degraded health file with no
+/// explanation. Repeat the diagnosis at the probe cadence, never per cycle.
+fn note_unresolved_desired_policy(args: &ControllerArgs, url: Option<&str>) {
+    let now = epoch_now();
+    if !unresolved_policy_note_due(UNRESOLVED_POLICY_LOGGED_AT.load(Ordering::Relaxed), now) {
+        return;
+    }
+    UNRESOLVED_POLICY_LOGGED_AT.store(now, Ordering::Relaxed);
+    let note = unresolved_desired_policy_note(url);
+    eprintln!("{note}");
+    crate::sd_notify::status(&note);
+    daemon_forensic_log(&args.state_dir, &note);
+}
+
+/// `last == 0` is "never said it out loud yet": the first observation always
+/// speaks, later ones wait out the interval.
+fn unresolved_policy_note_due(last: u64, now: u64) -> bool {
+    last == 0 || now.saturating_sub(last) >= UNRESOLVED_POLICY_LOG_INTERVAL.as_secs()
+}
+
+/// The operator-facing diagnosis: which policy source is missing and which
+/// existing knob fixes it.
+fn unresolved_desired_policy_note(url: Option<&str>) -> String {
+    let detail = match url.and_then(|url| GitHubScope::parse(url).ok()) {
+        Some(scope) => match scope.org_login().map(str::to_owned) {
+            Some(org) => {
+                let searched = prove::org_desired_policy_search_dirs()
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                format!("no generated allowlist {org}-desired-policy.json in {searched}")
+            }
+            None => format!(
+                "no complete routing-policy.json on disk and repo scope {} does not \
+                 yield one (group, labels, and trust_scope must all be set)",
+                scope.original_url
+            ),
+        },
+        None => "daemon URL is not a parseable GitHub scope".to_owned(),
+    };
+    format!(
+        "GitHub routing fail-closed: desired routing policy unresolved ({detail}); \
+         no slot can register and every job for this fleet queues. Install the \
+         generated allowlist or point --routing-policy-file at an explicit policy."
+    )
 }
 
 /// False when no live probe can run (no exec config, URL, or token): the old
@@ -4186,6 +4244,55 @@ mod tests {
             std::env::remove_var("VELNOR_FLEET_POLICY_OUT_DIR");
         }
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn unresolved_org_policy_names_every_searched_source() {
+        let note = unresolved_desired_policy_note(Some("https://github.com/tailrocks"));
+        assert!(note.contains("fail-closed"), "{note}");
+        assert!(
+            note.contains("tailrocks-desired-policy.json"),
+            "the missing artifact must be named: {note}"
+        );
+        for dir in prove::org_desired_policy_search_dirs() {
+            assert!(
+                note.contains(&dir.display().to_string()),
+                "every searched directory must be named: {note}"
+            );
+        }
+        assert!(
+            note.contains("--routing-policy-file"),
+            "the operator fix must be named: {note}"
+        );
+    }
+
+    #[test]
+    fn unresolved_policy_without_org_scope_says_why() {
+        let note = unresolved_desired_policy_note(Some("https://github.com/tailrocks/velnor"));
+        assert!(
+            note.contains("https://github.com/tailrocks/velnor"),
+            "the scope that yields no policy must be named: {note}"
+        );
+        assert!(
+            note.contains("routing-policy.json"),
+            "the repo-scoped source must be named: {note}"
+        );
+        let unparseable = unresolved_desired_policy_note(None);
+        assert!(
+            unparseable.contains("not a parseable GitHub scope"),
+            "{unparseable}"
+        );
+    }
+
+    #[test]
+    fn unresolved_policy_diagnosis_repeats_on_cadence_not_per_cycle() {
+        assert!(
+            unresolved_policy_note_due(0, 1_000),
+            "first observation speaks"
+        );
+        assert!(!unresolved_policy_note_due(1_000, 1_059));
+        assert!(unresolved_policy_note_due(1_000, 1_060));
+        assert!(!unresolved_policy_note_due(1_060, 1_060 + 59));
     }
 
     #[test]

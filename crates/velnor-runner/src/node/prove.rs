@@ -454,6 +454,26 @@ pub fn generated_policy_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib/velnor/fleet-policy"))
 }
 
+/// Packaged copy of the generated allowlists, shipped by the velnor-runner
+/// package next to the release-ref ledger it was generated from
+/// (`/usr/share/velnor/fleet/policies`). Read-only release artifact: the
+/// publisher-writable [`generated_policy_dir`] overrides it, never the reverse.
+pub const PACKAGED_FLEET_POLICY_DIR: &str = "/usr/share/velnor/fleet/policies";
+
+/// Where an org-scoped fleet looks for its generated allowlist, in override
+/// order. Runner hosts that never run the fleet publisher still ship the
+/// packaged artifact, so a missing publisher directory cannot leave an
+/// org-scoped daemon without any desired policy.
+#[must_use]
+pub fn org_desired_policy_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![generated_policy_dir()];
+    let packaged = PathBuf::from(PACKAGED_FLEET_POLICY_DIR);
+    if !dirs.contains(&packaged) {
+        dirs.push(packaged);
+    }
+    dirs
+}
+
 #[derive(Debug, Deserialize)]
 struct GeneratedDesiredPolicy {
     organization: String,
@@ -484,6 +504,31 @@ pub fn org_policy_from_generated(
         trust_scope,
     };
     fields_complete(&fields).then_some(fields)
+}
+
+/// Desired policy from the first search directory holding this org's generated
+/// allowlist. `None` means no source could name the desired policy and the
+/// caller must fail closed loudly.
+#[must_use]
+pub fn org_desired_policy(
+    org: &str,
+    labels: Vec<String>,
+    trust_scope: String,
+) -> Option<RoutingFields> {
+    org_desired_policy_from_dirs(org, labels, trust_scope, &org_desired_policy_search_dirs())
+}
+
+/// [`org_desired_policy`] against explicit directories, so the override order
+/// is testable without touching packaged paths.
+#[must_use]
+pub fn org_desired_policy_from_dirs(
+    org: &str,
+    labels: Vec<String>,
+    trust_scope: String,
+    dirs: &[PathBuf],
+) -> Option<RoutingFields> {
+    dirs.iter()
+        .find_map(|dir| org_policy_from_generated(org, labels.clone(), trust_scope.clone(), dir))
 }
 
 /// Read `routing-policy.json` when present.
@@ -1539,6 +1584,60 @@ mod tests {
             "org fleets must replace a live-membership snapshot"
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn org_desired_policy_falls_back_to_the_packaged_allowlist() {
+        let generated = serde_json::json!({
+            "organization": "tailrocks",
+            "group_name": "velnor-trusted",
+            "selected_repositories": ["tailrocks/velnor", "tailrocks/velnor-apt"]
+        });
+        let publisher = tmp("publisher-policy");
+        let packaged = tmp("packaged-policy");
+        std::fs::write(
+            packaged.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&generated).unwrap(),
+        )
+        .unwrap();
+        let dirs = vec![publisher.clone(), packaged.clone()];
+
+        // A runner host without the publisher directory still resolves policy.
+        let policy = org_desired_policy_from_dirs(
+            "tailrocks",
+            vec!["velnor".into()],
+            "trusted".into(),
+            &dirs,
+        )
+        .expect("packaged allowlist must satisfy an org-scoped fleet");
+        assert_eq!(policy.group, "velnor-trusted");
+
+        // The publisher-writable directory overrides the packaged artifact and
+        // never the reverse.
+        std::fs::write(
+            publisher.join("tailrocks-desired-policy.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "organization": "tailrocks",
+                "group_name": "publisher-override",
+                "selected_repositories": ["tailrocks/velnor"]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let overridden = org_desired_policy_from_dirs(
+            "tailrocks",
+            vec!["velnor".into()],
+            "trusted".into(),
+            &dirs,
+        )
+        .unwrap();
+        assert_eq!(overridden.group, "publisher-override");
+
+        assert!(
+            org_desired_policy_search_dirs().contains(&PathBuf::from(PACKAGED_FLEET_POLICY_DIR))
+        );
+        std::fs::remove_dir_all(publisher).ok();
+        std::fs::remove_dir_all(packaged).ok();
     }
 
     #[cfg(feature = "test-support")]

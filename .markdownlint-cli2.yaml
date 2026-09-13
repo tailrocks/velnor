@@ -6,3 +6,8 @@
 config:
   default: true
   MD013: false
+# `.github-gen/` is the generator's own surface (configuration plus source
+# fragments that are verbatim regenerated, including rule files whose
+# `# Generated` banner is deliberately an H1); it is not hand-written prose.
+ignores:
+  - "**/.github-gen/**"

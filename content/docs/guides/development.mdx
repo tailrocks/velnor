@@ -45,7 +45,9 @@ mise run check
   `VELNOR_FLEET_POLICY_OUT_DIR` to the provisioned absolute root-owned directory.
   `audit-ci`, `fleet-plan`, and the runtime read that same directory when the
   variable is set; without it, repository checks read the committed
-  `fleet/policies/` snapshots.
+  `fleet/policies/` snapshots. Org-scoped daemons on runner hosts fall back to
+  the packaged copy of those snapshots (`/usr/share/velnor/fleet/policies`), so
+  a missing publisher directory cannot leave a fleet without a desired policy.
 
 These commands and their exact arguments are defined in [`mise.toml:18-51`](../../mise.toml)
 [`mise.toml:68-85`](../../mise.toml) [`mise.toml:142-149`](../../mise.toml). For a

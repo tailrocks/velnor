@@ -280,7 +280,8 @@ const ARTIFACT_INPUTS: &[InputRule] = &[
     InputRule::Any("path"),
     InputRule::Literal("if-no-files-found", &["warn", "error", "ignore"]),
     InputRule::Literal("include-hidden-files", &["true", "false"]),
-    InputRule::Literal("overwrite", &["true", "false"]),
+    // No `overwrite` input: Velnor always overwrites, so the input has no
+    // reader. Declaring it is an unknown-input rejection, not a silent no-op.
     InputRule::Literal("compression-level", &["0"]),
     InputRule::Literal("retention-days", &["1", "7", "14", "30", "90"]),
 ];
@@ -2811,6 +2812,31 @@ mod tests {
             serde_json::json!({"token": "secret"}),
         ));
         assert_eq!(errors[0].field, "with.token");
+    }
+
+    /// Velnor always overwrites artifact uploads, so `overwrite` has no reader.
+    /// The strict manifest must reject it as an unknown input instead of
+    /// silently accepting a no-op.
+    #[test]
+    fn upload_artifact_rejects_the_removed_overwrite_input() {
+        let errors = violations(&job(
+            "actions/upload-artifact",
+            Some("v7"),
+            serde_json::json!({"name": "release", "path": "dist", "overwrite": "true"}),
+        ));
+        assert_eq!(errors.len(), 1, "{errors:#?}");
+        assert_eq!(errors[0].field, "with.overwrite");
+        assert!(
+            errors[0].accepted.contains(&"path".to_string()),
+            "the rejection should list the admissible inputs: {errors:#?}"
+        );
+
+        let clean = violations(&job(
+            "actions/upload-artifact",
+            Some("v7"),
+            serde_json::json!({"name": "release", "path": "dist"}),
+        ));
+        assert!(clean.is_empty(), "{clean:#?}");
     }
 
     #[test]

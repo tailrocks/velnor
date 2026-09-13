@@ -31,6 +31,7 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
         .filter(|file| !file.is_empty())
         .map_or_else(|| crate::nested_unit_workflow_file(unit), str::to_owned);
     super::validate_cache_transports_for_unit(ctx.lanes.ir(), unit)?;
+    super::validate_mutable_mount_seed(unit)?;
     let contract = UnitContract {
         lanes: declared_lanes(ctx, args)?,
         timeout_minutes: declared_timeout(ctx, args)?,
@@ -38,6 +39,10 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
         // The emitted surface is the trusted-event surface, so its hosted lane
         // carries the cache save step.
         cache_save: true,
+        mutable_mount_seed: unit
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.mutable_mount_seed),
     };
     let content = ctx.lanes.ir().render_unit_surface(unit, &contract);
     let nodes = vec![GraphNode::Unit {

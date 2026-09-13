@@ -967,13 +967,21 @@ mod tests {
             pinned_lockfile: false,
             cache: None,
             tool_version: None,
+            // Generation refuses a Rust unit without a recorded pin, so the
+            // fixture records the pin its workflows are rendered against.
+            toolchain: Some(crate::RustToolchain {
+                channel: "1.91.1".to_owned(),
+                components: Vec::new(),
+                targets: Vec::new(),
+                profile: None,
+            }),
         }
     }
 
     fn config() -> crate::ProjectConfig {
         crate::ProjectConfig {
             repository: "test".to_owned(),
-            profile: crate::RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
                 detected: Vec::new(),
@@ -1003,7 +1011,11 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         }
     }
 

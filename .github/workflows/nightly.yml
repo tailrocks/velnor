@@ -37,9 +37,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@6e59b98d5d1a6d42017465b045554a18d97d7e68
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@ca1bb1458e06d7d8e385088f48130e9b39bf841f
         with:
-          rev: 6e59b98d5d1a6d42017465b045554a18d97d7e68
+          rev: ca1bb1458e06d7d8e385088f48130e9b39bf841f
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ca1bb1458e06d7d8e385088f48130e9b39bf841f" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -52,7 +54,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-6e59b98d5d1a6d42017465b045554a18d97d7e68
+          name: velnor-workflow-runtime-ca1bb1458e06d7d8e385088f48130e9b39bf841f
           path: ~/.cargo/bin/velnor-workflow
           if-no-files-found: error
           retention-days: 7
@@ -65,11 +67,58 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    uses: tailrocks/velnor/.github/workflows/velnor-workflow-policy.yml@07d083181537b3b51c98e35879ffc16bd7f9b288
-    with:
-      policy-revision: 07d083181537b3b51c98e35879ffc16bd7f9b288
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
+    steps:
+      - name: Checkout caller workflow data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: policy-checkout
+          sparse-checkout: |
+            .github/workflows
+          sparse-checkout-cone-mode: true
+          fetch-depth: 1
+          persist-credentials: false
+          # Static policy validation only; fork head checkout is intentional.
+          allow-unsafe-pr-checkout: true
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          version: 1.8.3
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-ca1bb1458e06d7d8e385088f48130e9b39bf841f
+          restore-keys: |
+            velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
+      - name: Install pinned Velnor workflow runtime
+        env:
+          CARGO_HOME: ${{ runner.temp }}/velnor-workflow-cargo-home
+          CARGO_TARGET_DIR: ${{ runner.temp }}/velnor-workflow-cargo-target
+          VELNOR_WORKFLOW_INSTALL_DIR: ${{ runner.temp }}/velnor-workflow-install
+          VELNOR_WORKFLOW_ROOT: ${{ runner.temp }}/velnor-workflow
+        run: |
+          set -euo pipefail
+          install -d -m 700 \
+            "$CARGO_HOME" \
+            "$CARGO_TARGET_DIR" \
+            "$VELNOR_WORKFLOW_INSTALL_DIR"
+          cd "$VELNOR_WORKFLOW_INSTALL_DIR"
+          cargo install \
+            --locked \
+            --git https://github.com/tailrocks/velnor \
+            --rev ca1bb1458e06d7d8e385088f48130e9b39bf841f \
+            --root "$VELNOR_WORKFLOW_ROOT" \
+            velnor-workflow \
+            --bin velnor-workflow
+          echo "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"
+      - name: Enforce workflow policy
+        env:
+          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+          VELNOR_WORKFLOW_POLICY_REVISION: ca1bb1458e06d7d8e385088f48130e9b39bf841f
+        run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   group-unit-bun-velnor:
     name: "Bun · Bun package (velnor)"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',bun-velnor,') }}
@@ -182,6 +231,14 @@ jobs:
     with:
       scope: ${{ needs.plan.outputs.scope }}
       selection-artifact: velnor-ci-selection
+  group-unit-rust-velnor-workflow-contract:
+    name: "Rust · velnor-workflow-contract"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnor-workflow-contract,') }}
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-rust-velnor-workflow-contract.yml
+    with:
+      scope: ${{ needs.plan.outputs.scope }}
+      selection-artifact: velnor-ci-selection
   group-unit-rust-velnorctl:
     name: "Rust · velnorctl"
     if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(format(',{0},', needs.plan.outputs.units), ',rust-velnorctl,') }}
@@ -201,7 +258,7 @@ jobs:
   nightly-required:
     name: nightly-required
     if: ${{ always() }}
-    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnorctl, group-unit-rust-production-topology]
+    needs: [plan, policy, group-unit-bun-velnor, group-unit-docker, group-unit-docs, group-unit-opentofu, group-unit-rust-policy, group-unit-rust-unit-collector, group-unit-rust-velnor-bench, group-unit-rust-velnor-client, group-unit-rust-velnor-control, group-unit-rust-velnor-model, group-unit-rust-velnor-render, group-unit-rust-velnor-runner, group-unit-rust-velnor-tools, group-unit-rust-velnor-workflow, group-unit-rust-velnor-workflow-contract, group-unit-rust-velnorctl, group-unit-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -389,6 +446,18 @@ jobs:
             case "$result" in
               success|skipped) ;;
               *) echo "unselected CI unit rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then
+            result="${{ needs['group-unit-rust-velnor-workflow-contract'].result }}"
+            case "$result" in
+              success) ;;
+              *) echo "selected CI unit rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;
+            esac
+          else
+            case "$result" in
+              success|skipped) ;;
+              *) echo "unselected CI unit rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-velnorctl,"* ]]; then

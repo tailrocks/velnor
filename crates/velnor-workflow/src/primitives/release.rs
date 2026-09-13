@@ -12,16 +12,15 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note, Args,
-    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, POLICY_PROVIDER,
-    PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
+    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
     velnor_runner_group, workflow_runtime_setup, yaml_scalar, ActionPin, GeneratorError,
-    ProjectConfig, ReleaseKind, ReleaseSpec, RunnerMode, GENERATED_HEADER,
-    VELNOR_POLICY_PROVIDER_TEMPLATE, VELNOR_PREVIEW_WORKFLOW_TEMPLATE,
-    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE, VELNOR_RELEASE_WORKFLOW_TEMPLATE,
+    ProjectConfig, ReleaseSpec, RunnerMode, GENERATED_HEADER,
+    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -32,7 +31,6 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
     ("preview.yml", PREVIEW),
     ("maintenance.yml", MAINTENANCE),
     ("ci-release-package-signer.yml", RELEASE_SIGNER),
-    ("velnor-workflow-policy.yml", POLICY_PROVIDER),
 ];
 
 /// The canonical file a declared release-side family renders, when the family
@@ -62,16 +60,11 @@ pub(crate) fn release_content(config: &ProjectConfig) -> Option<String> {
         .map(|release| render_release(config, release))
 }
 
-/// The `preview.yml` content for a config. A repository whose release kind
-/// carries a fully reviewed native publisher renders its declared static
-/// preview surface; every other contract renders the generic rolling preview.
+/// The `preview.yml` content for a config. Every contract renders the generic
+/// rolling preview; a repository with a reviewed native preview declares its
+/// bytes as a static workflow instead.
 pub(crate) fn preview_content(config: &ProjectConfig) -> String {
-    match config.release.as_ref() {
-        Some(release) if release.kind == ReleaseKind::VelnorNative => {
-            crate::render_static_template(VELNOR_PREVIEW_WORKFLOW_TEMPLATE)
-        }
-        _ => render_preview(config, config.release.as_ref()),
-    }
+    render_preview(config, config.release.as_ref())
 }
 
 /// The headerless `maintenance.yml` body for a config.
@@ -82,15 +75,6 @@ pub(crate) fn maintenance_content(config: &ProjectConfig) -> String {
 /// The `ci-release-package-signer.yml` content.
 pub(crate) fn release_signer_content() -> String {
     crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
-}
-
-/// The `velnor-workflow-policy.yml` content for a config.
-pub(crate) fn policy_provider_content(config: &ProjectConfig) -> String {
-    let template = VELNOR_POLICY_PROVIDER_TEMPLATE.replace(
-        "__VELNOR_GITHUB_RUNNER__",
-        &yaml_scalar(&config.github_runner),
-    );
-    crate::render_static_template(&template)
 }
 
 /// A reviewed workflow body, declared verbatim, rendered through the static
@@ -129,7 +113,10 @@ impl Primitive for StaticWorkflow {
             "__VELNOR_GITHUB_RUNNER__",
             &yaml_scalar(&ctx.config.github_runner),
         );
-        let content = crate::render_static_template(&template);
+        let content = crate::render_pinned_toolchain_fill(
+            ctx.config,
+            &crate::render_static_template(&template),
+        )?;
         Ok(Rendered {
             files: std::iter::once((
                 std::path::PathBuf::from(".github/workflows").join(file),
@@ -234,27 +221,6 @@ impl Primitive for ReleaseSigner {
     }
 }
 
-/// The declared pinned policy provider workflow.
-pub(crate) struct PolicyProvider;
-
-impl Primitive for PolicyProvider {
-    fn id(&self) -> &'static str {
-        POLICY_PROVIDER
-    }
-
-    fn schema(&self) -> &'static [&'static str] {
-        &[]
-    }
-
-    fn render(&self, ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        render_file(
-            ctx,
-            "velnor-workflow-policy.yml",
-            policy_provider_content(ctx.config),
-        )
-    }
-}
-
 /// The release contract a row renders: the declared arguments when the row
 /// declares any, otherwise the config's contract.
 fn declared_or_configured_spec(
@@ -281,9 +247,7 @@ fn declared_or_configured_spec(
 /// partially rendered publisher.
 fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
     let kind = match args.string("kind")?.as_deref() {
-        Some("crates") => ReleaseKind::Crates,
-        Some("rust-binary") => ReleaseKind::RustBinary,
-        Some("pages") => ReleaseKind::Pages,
+        Some("crates" | "rust-binary" | "pages") => args.string("kind")?.unwrap_or_default(),
         Some(other) => {
             return Err(GeneratorError::usage(format!(
                 "`{family}` `kind` must be `crates`, `rust-binary`, or `pages`, found `{other}`"
@@ -313,7 +277,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
 /// Rust binary, so the contract is the binary publisher's without a `kind`.
 fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
     Ok(ReleaseSpec {
-        kind: ReleaseKind::RustBinary,
+        kind: "rust-binary".to_owned(),
         package: args.string("package")?.unwrap_or_default(),
         packages: Vec::new(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -327,10 +291,10 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
 }
 
 fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
-    let missing = match spec.kind {
-        ReleaseKind::Crates => "`packages`",
-        ReleaseKind::RustBinary => "`package`, `binary`, and `targets`",
-        ReleaseKind::Pages => "`artifact_path`",
+    let missing = match spec.kind.as_str() {
+        "crates" => "`packages`",
+        "rust-binary" => "`package`, `binary`, and `targets`",
+        "pages" => "`artifact_path`",
         _ => "the contract",
     };
     GeneratorError::usage(format!(
@@ -365,29 +329,23 @@ fn render_file(
 }
 
 pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
-    match release.kind {
-        ReleaseKind::Crates => !release.packages.is_empty(),
-        ReleaseKind::RustBinary => {
+    let targets_are_real = |targets: &[String]| {
+        !targets.is_empty()
+            && targets.iter().all(|target| {
+                target.ends_with("-unknown-linux-gnu") || target.ends_with("-apple-darwin")
+            })
+    };
+    match release.kind.as_str() {
+        "crates" => !release.packages.is_empty(),
+        "rust-binary" => {
             !release.package.is_empty()
                 && !release.binary.is_empty()
-                && !release.targets.is_empty()
-                && release.targets.iter().all(|target| {
-                    target.ends_with("-unknown-linux-gnu") || target.ends_with("-apple-darwin")
-                })
+                && targets_are_real(&release.targets)
         }
-        ReleaseKind::VelnorNative => {
-            !release.package.is_empty()
-                && !release.binary.is_empty()
-                && !release.targets.is_empty()
-                && !release.image.is_empty()
-                && !release.source_repository.is_empty()
-                && !release.consumer_repository.is_empty()
-                && release.targets.iter().all(|target| {
-                    target.ends_with("-unknown-linux-gnu") || target.ends_with("-apple-darwin")
-                })
-        }
-        ReleaseKind::Pages => !release.artifact_path.is_empty(),
-        ReleaseKind::AgentImage | ReleaseKind::DockerFleet | ReleaseKind::Apt => false,
+        "pages" => !release.artifact_path.is_empty(),
+        // A publisher the renderer does not implement renders nothing: the
+        // repository that owns one declares its bytes and records its own kind.
+        _ => false,
     }
 }
 
@@ -426,6 +384,14 @@ fn selected_runner(config: &ProjectConfig) -> String {
     configured_runner(config, config.runners)
 }
 
+fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
+    if config.runners == RunnerMode::Velnor {
+        String::new()
+    } else {
+        workflow_runtime_setup(RunnerMode::Github)
+    }
+}
+
 fn release_lanes(config: &ProjectConfig, target: &str) -> Vec<(&'static str, String)> {
     let github = || yaml_scalar(release_runner(target));
     let velnor = || configured_runner(config, RunnerMode::Velnor);
@@ -445,11 +411,32 @@ fn canonical_lane(config: &ProjectConfig) -> &'static str {
 }
 
 fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> String {
-    let Some(release) = release.filter(|release| release.kind == ReleaseKind::RustBinary) else {
+    let Some(release) = release.filter(|release| release.kind == "rust-binary") else {
         return format!(
             "{GENERATED_HEADER}# Preview is omitted: no complete Rust binary release contract.\n"
         );
     };
+    // The scan refuses a Rust repository without a pin, so this is only
+    // unreachable for hand-built configs; without the pin there is no
+    // toolchain contract to build the binary under, so fail closed.
+    let Some(toolchain) = crate::config_rust_toolchain(config) else {
+        return format!(
+            "{GENERATED_HEADER}# Preview is omitted: the repository pins no Rust toolchain.\n"
+        );
+    };
+    // The build jobs run only from trusted pushes to the default branch, so
+    // that — and nothing broader — is what may save the toolchain cache.
+    let mut toolchain_steps = String::new();
+    render_pinned_toolchain_steps(
+        &mut toolchain_steps,
+        ActionPin::CacheRestore.reference(),
+        ActionPin::CacheSave.reference(),
+        &toolchain,
+        Some(&format!(
+            "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
+            config.default_branch
+        )),
+    );
     let mut matrix = String::new();
     for target in &release.targets {
         for (lane, runner) in release_lanes(config, target) {
@@ -482,7 +469,9 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     )
     .replace(
         "          persist-credentials: false\\n      - name: Set up sccache",
-        "          persist-credentials: false\\n      - name: Enforce workflow policy\\n        env:\\n          EVENT_NAME: ${{ github.event_name }}\\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\\n      - name: Set up sccache",
+        &format!(
+            "          persist-credentials: false\\n      - name: Enforce workflow policy\\n        env:\\n          EVENT_NAME: ${{{{ github.event_name }}}}\\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\\n{toolchain_steps}      - name: Set up sccache"
+        ),
     )
     .replace(
         "      - name: Build preview binary",
@@ -508,7 +497,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         "      - name: Enforce workflow policy\n",
         &format!(
             "{}      - name: Enforce workflow policy\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
     )
     .replacen(
@@ -531,20 +520,16 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    if release.kind == ReleaseKind::VelnorNative {
-        return crate::render_static_template(VELNOR_RELEASE_WORKFLOW_TEMPLATE);
-    }
     if !release_contract_complete(release) {
         return format!(
             "{GENERATED_HEADER}# Release omitted: artifact, platform, registry, or signer contract is incomplete.\n"
         );
     }
-    match release.kind {
-        ReleaseKind::Crates => render_crates_release(config, release),
-        ReleaseKind::RustBinary => render_binary_release(config, release),
-        ReleaseKind::VelnorNative => crate::render_static_template(VELNOR_RELEASE_WORKFLOW_TEMPLATE),
-        ReleaseKind::Pages => render_pages_release(config, release),
-        ReleaseKind::AgentImage | ReleaseKind::DockerFleet | ReleaseKind::Apt => format!(
+    match release.kind.as_str() {
+        "crates" => render_crates_release(config, release),
+        "rust-binary" => render_binary_release(config, release),
+        "pages" => render_pages_release(config, release),
+        _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
     }
@@ -616,7 +601,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 );
             }
             render_cargo_source_preparation(&mut output, unit);
-            let cargo_offline = cargo_offline_env(unit);
+            let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,
                 "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
@@ -685,8 +670,12 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
+    );
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
     );
     output = output.replace(
         "run: velnor-workflow release verify-tag\n",
@@ -740,7 +729,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "      - name: Set up sccache\n",
         &format!(
             "{}      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Set up sccache\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
     );
     output.push_str(
@@ -783,7 +772,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             "      - name: Set up sccache\n",
             &format!(
                 "{}      - name: Set up sccache\n",
-                workflow_runtime_setup(RunnerMode::Github)
+                workflow_runtime_setup_for_config(config)
             ),
         );
         let build = build.replace(
@@ -808,6 +797,10 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
             config.default_branch
         );
     }
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
+    );
     output
         .replace(
             "name: ${{ matrix.target }}",
@@ -886,8 +879,12 @@ fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String
         "      - name: Enforce workflow policy\n",
         &format!(
             "{}      - name: Enforce workflow policy\n",
-            workflow_runtime_setup(RunnerMode::Github)
+            workflow_runtime_setup_for_config(config)
         ),
+    );
+    output = output.replace(
+        "runs-on: ubuntu-24.04",
+        &format!("runs-on: {}", selected_runner(config)),
     );
     output
 }
@@ -1047,13 +1044,36 @@ jobs:
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
-    MAINTENANCE_WORKFLOW.replace(
+    let mut output = MAINTENANCE_WORKFLOW
+        .replace("runs-on: ubuntu-24.04", &format!("runs-on: {}", selected_runner(config)))
+        .replace(
         "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
         &format!(
             "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
             config.default_branch
         ),
-    )
+        );
+    if config.runners == RunnerMode::Velnor {
+        let gate = format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            config.default_branch
+        );
+        output = output
+            .replace(
+                &format!(
+                    "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
+                    config.default_branch
+                ),
+                &format!(
+                    "if: ${{{{ {gate} && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}}}"
+                ),
+            )
+            .replace(
+                "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+                &format!("if: ${{{{ {gate} }}}}"),
+            );
+    }
+    output
 }
 
 #[cfg(test)]
@@ -1113,6 +1133,13 @@ mod tests {
             ),
             "write release fixture manifest",
         );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write release fixture toolchain pin",
+        );
         root
     }
 
@@ -1133,12 +1160,24 @@ mod tests {
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
+            // The scan guarantees this fact on every Rust unit of a real
+            // repository; the test config carries the same contract, pinning
+            // the targets the fixture's release contract builds for.
+            toolchain: Some(crate::RustToolchain {
+                channel: "1.91.1".to_owned(),
+                components: Vec::new(),
+                targets: vec![
+                    "x86_64-unknown-linux-gnu".to_owned(),
+                    "aarch64-unknown-linux-gnu".to_owned(),
+                ],
+                profile: None,
+            }),
         }
     }
 
     fn binary_spec() -> ReleaseSpec {
         ReleaseSpec {
-            kind: ReleaseKind::RustBinary,
+            kind: "rust-binary".to_owned(),
             package: "example".to_owned(),
             packages: Vec::new(),
             binary: "example".to_owned(),
@@ -1157,7 +1196,7 @@ mod tests {
     fn config(workflow_files: &[&str], release: Option<ReleaseSpec>) -> ProjectConfig {
         crate::ProjectConfig {
             repository: String::new(),
-            profile: crate::RepositoryProfile::Generic,
+            profile: "generic".to_owned(),
             analysis: crate::AnalysisSummary {
                 method: "test".to_owned(),
                 detected: Vec::new(),
@@ -1173,7 +1212,7 @@ mod tests {
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Both,
             github_runner: "ubuntu-24.04".to_owned(),
-            velnor_labels: crate::default_velnor_runner_labels(),
+            velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
             release_enabled: release.is_some(),
             release_reason: String::new(),
             release,
@@ -1181,7 +1220,11 @@ mod tests {
             workflow_templates: BTreeMap::new(),
             adopted_workflow_surface: false,
             actionlint_config_variables_null: false,
+            ci_required: true,
             package_update_channels: None,
+            velnor_runner_group: None,
+            static_files: Vec::new(),
+            declared_surface: false,
         }
     }
 
@@ -1202,7 +1245,7 @@ mod tests {
         generation: Option<&str>,
     ) -> Result<super::super::Surface, GeneratorError> {
         let shape = must(
-            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main"),
+            crate::scan::scan_shape(root, crate::RunnerMode::Both, "main", &[]),
             "scan release fixture",
         );
         let generation = generation.map(|rows| {
@@ -1229,21 +1272,23 @@ mod tests {
         super::super::generate(root, &shape, config, generation.as_ref())
     }
 
-    /// The default rows render the legacy release surface, pinned to the bytes
-    /// the reviewed renderer produced. The digests are the expectation, not a
+    /// The default rows render the release surface, pinned to the bytes the
+    /// reviewed renderer produced. The digests are the expectation, not a
     /// second call into the same code, so a renderer change shows up here and
     /// has to be carried into the pin deliberately; the structural assertions
-    /// below say what the pinned bytes are for.
+    /// below say what the pinned bytes are for. The artifact signer and the
+    /// policy provider are not pinned here: they are a repository's declared
+    /// static surface, not part of the generic renderer.
     #[test]
     fn default_rows_render_the_legacy_release_surface() {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "4268511f1069142ef57786b24e0e84f64b99f7cd5381e8ebc64196471411ba46",
+                "0ee555c5a52737ce0d9b0329ce4953c71f1a2811c37386b17bb1edd3fda4db8f",
             ),
             (
                 "preview.yml",
-                "bbd3a2cc82f21409b288b30b9f4e6dc1d1bb173d766b4915609d3762686595d8",
+                "01378eb561dd0970bdc5cccc00938a135e428a3aae32619e85da93dac60916a6",
             ),
             (
                 "maintenance.yml",
@@ -1253,14 +1298,17 @@ mod tests {
                 "ci-release-package-signer.yml",
                 "63e76d5e5615192d52e34bba0b8bd51ddcec3b610e934633dd282c585d9721f1",
             ),
-            (
-                "velnor-workflow-policy.yml",
-                "78a1fe789a20bc3568587ec831aea85d7fd18c04885ee632219b0180b454e72b",
-            ),
         ];
         let root = scanned_root("default");
-        let files = PINNED.iter().map(|(file, _)| *file).collect::<Vec<_>>();
-        let config = config(&files, Some(binary_spec()));
+        let config = config(
+            &[
+                "release.yml",
+                "preview.yml",
+                "maintenance.yml",
+                "ci-release-package-signer.yml",
+            ],
+            Some(binary_spec()),
+        );
         let surface = generate(&root, &config, None);
         for (file, digest) in PINNED {
             let rendered = rendered(&surface, file);
@@ -1280,7 +1328,6 @@ mod tests {
             ("preview.yml", "Preview"),
             ("maintenance.yml", "cache"),
             ("ci-release-package-signer.yml", "attest"),
-            ("velnor-workflow-policy.yml", "velnor-workflow"),
         ] {
             let rendered = rendered(&surface, file);
             assert!(
@@ -1294,6 +1341,29 @@ mod tests {
         }
         assert!(surface.added_files.is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn velnor_release_surfaces_have_no_hosted_runner_branch() {
+        let mut config = config(&["release.yml", "preview.yml"], Some(binary_spec()));
+        config.runners = RunnerMode::Velnor;
+        let Some(release) = config.release.as_ref() else {
+            panic!("release fixture must carry a release contract")
+        };
+        let rendered = [
+            super::render_release(&config, release),
+            super::render_preview(&config, Some(release)),
+        ];
+
+        for workflow in rendered {
+            assert!(workflow.contains("runs-on: [self-hosted, example-runner]"));
+            assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
+            assert!(!workflow.contains("github-hosted"), "{workflow}");
+        }
     }
 
     /// An incomplete contract omits the publisher exactly as the legacy path
@@ -1433,6 +1503,7 @@ mod tests {
     /// legacy renderer for every scanned unit, so a row that slips past the
     /// pipeline family — here narrowed with `coverage = "explicit"` — would
     /// otherwise be emitted and then silently overwritten.
+
     #[test]
     fn a_declared_file_a_nested_unit_renderer_owns_is_rejected() {
         let root = scanned_root("owned-nested");

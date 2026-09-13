@@ -284,6 +284,17 @@ sudo velnor-runner release export
 mixed binary, package, or manifest tuple. `velnorctl release` is not an
 available command.
 
+Preview-channel packages carry their own identity, so a preview deb is
+startable without the stable release chain: each deb ships
+`/usr/share/velnor/package-record.json`, and activation reads it directly.
+
+```sh
+sudo velnor-runner release activate --record /usr/share/velnor/package-record.json
+```
+
+A stable release never activates from the package record inside its own deb;
+it still requires the out-of-band release record published with the release.
+
 After activation or upgrade, verify the installed tuple, then start services:
 
 ```sh

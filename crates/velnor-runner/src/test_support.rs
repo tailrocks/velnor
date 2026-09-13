@@ -513,3 +513,234 @@ pub fn render_deterministic_telemetry_fixture() -> String {
         .join("\n")
         + "\n"
 }
+
+/// Stateful Results Service artifact store for loopback tests.
+///
+/// `upload_artifact_blocking` and friends talk to a real HTTP surface, so the
+/// fixture must model the one behaviour that matters for idempotency: the
+/// service *accepts* a repeated name instead of rejecting it, and rows are
+/// only removed through `DeleteArtifact`.
+#[cfg(all(test, feature = "test-support"))]
+pub(crate) mod results_artifact_store {
+    use std::sync::{Arc, Mutex};
+
+    use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+
+    const ARTIFACT_SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+
+    struct Row {
+        database_id: u64,
+        job_id: String,
+        name: String,
+    }
+
+    #[derive(Default)]
+    struct Inner {
+        next_id: u64,
+        rows: Vec<Row>,
+        deleted_ids: Vec<u64>,
+        created_names: Vec<String>,
+        puts: usize,
+        pending: Option<(u64, String, String)>,
+    }
+
+    /// Handle over the store mounted on one [`MockServer`].
+    pub(crate) struct Store {
+        server: MockServer,
+        inner: Arc<Mutex<Inner>>,
+    }
+
+    impl Store {
+        /// Mount ListArtifacts, DeleteArtifact, CreateArtifact, the signed blob
+        /// PUT, and FinalizeArtifact on a fresh mock server.
+        pub(crate) async fn mount() -> Self {
+            let server = MockServer::start().await;
+            let inner = Arc::new(Mutex::new(Inner::default()));
+
+            let list_inner = Arc::clone(&inner);
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(format!("/{ARTIFACT_SERVICE}/ListArtifacts")))
+                .respond_with(move |_request: &wiremock::Request| {
+                    let state = list_inner.lock().unwrap_or_else(|poisoned| {
+                        poisoned.into_inner()
+                    });
+                    let artifacts = state
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            serde_json::json!({
+                                "workflow_run_backend_id": "plan-1",
+                                "workflow_job_run_backend_id": row.job_id,
+                                "database_id": row.database_id,
+                                "name": row.name,
+                                "size": 7,
+                                "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "artifacts": artifacts,
+                    }))
+                })
+                .mount(&server)
+                .await;
+
+            let delete_inner = Arc::clone(&inner);
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(format!(
+                    "/{ARTIFACT_SERVICE}/DeleteArtifact"
+                )))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request.body).expect("DeleteArtifact body");
+                    let job_id = body["workflow_job_run_backend_id"].as_str().unwrap_or("");
+                    let name = body["name"].as_str().unwrap_or("");
+                    let mut state = delete_inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let index = state
+                        .rows
+                        .iter()
+                        .position(|row| row.job_id == job_id && row.name == name);
+                    let Some(index) = index else {
+                        return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "ok": false,
+                        }));
+                    };
+                    let removed = state.rows.remove(index);
+                    state.deleted_ids.push(removed.database_id);
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "ok": true,
+                        "artifact_id": removed.database_id.to_string(),
+                    }))
+                })
+                .mount(&server)
+                .await;
+
+            let create_inner = Arc::clone(&inner);
+            let server_uri = server.uri();
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(format!(
+                    "/{ARTIFACT_SERVICE}/CreateArtifact"
+                )))
+                .respond_with(move |request: &wiremock::Request| {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request.body).expect("CreateArtifact body");
+                    let name = body["name"].as_str().unwrap_or_default().to_owned();
+                    let job_id = body["workflow_job_run_backend_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let mut state = create_inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state.next_id += 1;
+                    let database_id = state.next_id;
+                    state.created_names.push(name.clone());
+                    state.pending = Some((database_id, job_id, name));
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "ok": true,
+                        "signed_upload_url": format!("{server_uri}/blob/{database_id}"),
+                    }))
+                })
+                .mount(&server)
+                .await;
+
+            let put_inner = Arc::clone(&inner);
+            Mock::given(matchers::method("PUT"))
+                .respond_with(move |_request: &wiremock::Request| {
+                    put_inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .puts += 1;
+                    ResponseTemplate::new(201)
+                })
+                .mount(&server)
+                .await;
+
+            let finalize_inner = Arc::clone(&inner);
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(format!(
+                    "/{ARTIFACT_SERVICE}/FinalizeArtifact"
+                )))
+                .respond_with(move |_request: &wiremock::Request| {
+                    let mut state = finalize_inner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let Some((database_id, job_id, name)) = state.pending.take() else {
+                        return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "ok": false,
+                        }));
+                    };
+                    state.rows.push(Row {
+                        database_id,
+                        job_id,
+                        name,
+                    });
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "ok": true,
+                        "artifact_id": database_id.to_string(),
+                    }))
+                })
+                .mount(&server)
+                .await;
+
+            Self { server, inner }
+        }
+
+        pub(crate) fn uri(&self) -> String {
+            self.server.uri()
+        }
+
+        /// `(database_id, job_id, name)` rows the store currently serves.
+        pub(crate) fn rows(&self) -> Vec<(u64, String, String)> {
+            let state = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state
+                .rows
+                .iter()
+                .map(|row| (row.database_id, row.job_id.clone(), row.name.clone()))
+                .collect()
+        }
+
+        pub(crate) fn deleted_ids(&self) -> Vec<u64> {
+            self.inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .deleted_ids
+                .clone()
+        }
+
+        pub(crate) fn created_names(&self) -> Vec<String> {
+            self.inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .created_names
+                .clone()
+        }
+
+        /// Seed a row as if an earlier upload had already landed.
+        pub(crate) fn seed(&self, database_id: u64, job_id: &str, name: &str) {
+            let mut state = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.next_id = state.next_id.max(database_id);
+            state.rows.push(Row {
+                database_id,
+                job_id: job_id.to_owned(),
+                name: name.to_owned(),
+            });
+        }
+
+        /// Number of signed blob PUTs that reached the store.
+        pub(crate) fn puts(&self) -> usize {
+            self.inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .puts
+        }
+    }
+}
