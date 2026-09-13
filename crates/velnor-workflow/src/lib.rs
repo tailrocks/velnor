@@ -5294,6 +5294,12 @@ mod tests {
             action.contains("cargo install --locked --git https://github.com/tailrocks/velnor.git")
         );
         assert!(!action.contains("SOURCE_REPOSITORY"));
+        // The runtime build is foreign code: it runs outside the caller
+        // checkout and without caller-inherited link flags, which macOS
+        // runners cannot link.
+        assert!(action.contains("cd \"$RUNNER_TEMP\""));
+        assert!(action.contains("-u RUSTFLAGS"));
+        assert!(action.contains("-u CARGO_ENCODED_RUSTFLAGS"));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
         assert!(action.contains("run_conclusion"));
