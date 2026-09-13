@@ -1706,6 +1706,10 @@ fn job_runs_on_matches_labels(job: &Mapping, expected: &[String]) -> bool {
 }
 
 fn normalize_gate_expression(value: &str) -> String {
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; the gate shape the policy matchers
+    // below recognize is identical, so canonicalize the spelling first.
+    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
     let value = value.trim();
     let value = value
         .strip_prefix("${{")
@@ -1880,8 +1884,14 @@ fn inspect_uses(value: &Value, path: &Path, failures: &mut PolicyFindings) {
     if is_approved_local_reusable(action) {
         return;
     }
+    if is_approved_local_action(action) {
+        return;
+    }
     let reference_path = action.split_once('@').map_or(action, |(path, _)| path);
     if reference_path.contains("/.github/workflows/") {
+        if is_approved_fleet_reusable(action) {
+            return;
+        }
         if action.starts_with("./") && action.contains('@') {
             failures.record(
                 path,
@@ -1920,6 +1930,50 @@ fn is_full_sha_reference(value: &str) -> bool {
     value
         .split_once('@')
         .is_some_and(|(action, reference)| !action.is_empty() && is_full_sha(reference))
+}
+
+/// A repository-local composite action, pinned by the audited tree itself:
+/// the policy audits the pull-request head tree, so a tampered local action
+/// is reviewed code exactly like an inline `run:` step, and a tampered
+/// reference outside `.github/actions/` stays rejected below.
+fn is_approved_local_action(value: &str) -> bool {
+    let Some(path) = value.strip_prefix("./.github/actions/") else {
+        return false;
+    };
+    !path.is_empty()
+        && !path.contains('@')
+        && !path.contains('\\')
+        && !path.split('/').any(|segment| segment == "..")
+}
+
+fn is_approved_fleet_reusable(value: &str) -> bool {
+    let Some((path, reference)) = value.split_once('@') else {
+        return false;
+    };
+    if !is_full_sha(reference) {
+        return false;
+    }
+    let mut segments = path.split('/');
+    let (Some(owner), Some(repository), Some(dot_github), Some(workflows), Some(file)) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    segments.next().is_none()
+        && crate::estate::FLEET_VELNOR_ACTION_OWNERS.contains(&owner)
+        && repository == "velnor-actions"
+        && dot_github == ".github"
+        && workflows == "workflows"
+        && !file.is_empty()
+        && Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("yml"))
+        && !file.contains('\\')
+        && !file.contains("..")
 }
 
 fn is_full_sha(value: &str) -> bool {
@@ -1973,6 +2027,24 @@ fn inspect_runner(
     }
 }
 
+fn normalize_runner_expression(value: &str) -> String {
+    value
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or_else(
+            || value.split_whitespace().collect(),
+            |inner| inner.split_whitespace().collect(),
+        )
+}
+
+fn is_approved_dynamic_runner(label: &str) -> bool {
+    let normalized = normalize_runner_expression(label);
+    crate::estate::APPROVED_DYNAMIC_RUNNERS
+        .iter()
+        .any(|shape| normalized == **shape)
+}
+
 fn analyze_runner(
     value: &Value,
     matrix: Option<&Mapping>,
@@ -2001,9 +2073,13 @@ fn analyze_runner(
                 resolving.remove(field);
                 result
             } else if label.contains("${{") {
-                RunnerAnalysis {
-                    dynamic: true,
-                    ..RunnerAnalysis::default()
+                if is_approved_dynamic_runner(label) {
+                    RunnerAnalysis::default()
+                } else {
+                    RunnerAnalysis {
+                        dynamic: true,
+                        ..RunnerAnalysis::default()
+                    }
                 }
             } else if contains_self_hosted_label(label) {
                 RunnerAnalysis {
@@ -3298,6 +3374,48 @@ jobs:
     }
 
     #[test]
+    fn policy_accepts_the_both_mode_lanes_dispatch_gate() -> Result<(), Box<dyn Error>> {
+        // Both-mode aggregates name the manual lane selector `lanes`; the
+        // gate shape is the generated one, only the input spelling differs.
+        let workflow = r"
+name: Velnor lanes reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-reusable", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor lanes dispatch
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both') }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        // A dispatch-only gate stays rejected: manual dispatch must ride with
+        // the automatic arms, never alone on the self-hosted lane.
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
     fn policy_accepts_the_generated_inline_transport_in_every_variant() -> Result<(), Box<dyn Error>>
     {
         // The base-owned entrypoint carries the `Policy` variant.
@@ -3541,6 +3659,81 @@ jobs:
 
         let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@v4\n";
         let root = policy_fixture("uses-invalid", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_adopted_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: {lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+
+        // A lane selector that routes pull requests anywhere but the hosted
+        // label stays rejected: untrusted pull requests must never resolve
+        // to the persistent pool.
+        let unsafe_lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: {unsafe_lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("lane-unsafe", &invalid, "both")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_matrix_lane_selection_runners() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  build:\n    runs-on: ${{{{ fromJSON(matrix.config.runner) }}}}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("matrix-valid", &valid, "both")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_tree_pinned_local_actions() -> Result<(), Box<dyn Error>> {
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./.github/actions/cache-cargo-registry\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
+        );
+        let root = policy_fixture("local-action-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: ./../actions/cache-cargo-registry\n";
+        let root = policy_fixture("local-action-escape", invalid, "github")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_sha_pinned_fleet_reusables() -> Result<(), Box<dyn Error>> {
+        let sha = "851ef541d67f9cabebf2ddb2a2a02f51f6c54130";
+        let owner = crate::estate::FLEET_VELNOR_ACTION_OWNERS[0];
+        let valid = format!(
+            "name: Valid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-valid", &valid, "github")?;
+        assert!(run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@2026.8.33\n"
+        );
+        let root = policy_fixture("fleet-unpinned", &invalid, "github")?;
+        assert!(!run_policy(root)?);
+
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: unknown-owner/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+        );
+        let root = policy_fixture("fleet-owner", &invalid, "github")?;
         assert!(!run_policy(root)?);
         Ok(())
     }

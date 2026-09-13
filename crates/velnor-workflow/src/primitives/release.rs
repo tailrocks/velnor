@@ -1078,9 +1078,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 
 /// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
 /// on the hosted image even when CI lanes select `runners = "velnor"`. `uses:`
-/// stays on the SOURCE_REV pin (GitHub Actions rejects expressions in `uses:`
+/// stays on the `SOURCE_REV` pin (GitHub Actions rejects expressions in `uses:`
 /// versions). `rev:` is `${{ github.sha }}` so default-branch dispatch installs
-/// HEAD through an action yaml that includes CONTROLLED_BOOTSTRAP for
+/// HEAD through an action yaml that includes `CONTROLLED_BOOTSTRAP` for
 /// `workflow_dispatch`.
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
