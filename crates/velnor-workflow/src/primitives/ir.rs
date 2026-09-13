@@ -1472,8 +1472,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     ///
     /// The automatic fallback is `both`, not the release idiom's `github`:
     /// release admits only its GitHub lane, while CI automatic triggers keep
-    /// both lanes (the hosted job ungated, the Velnor job on its event gate),
-    /// so the resolved output must describe what actually runs.
+    /// both lanes admitted (the hosted job on the full automatic gate, the
+    /// Velnor job on its main-only gate), so the resolved output must describe
+    /// what actually runs.
     pub(crate) fn render_lane_admission(&self, output: &mut String) {
         let _ = writeln!(
             output,
@@ -1575,7 +1576,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn automatic_event_expression(&self) -> String {
         format!(
-            "github.event_name == 'pull_request' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            "github.event_name == 'pull_request' || ({})",
+            self.main_automatic_event_expression()
+        )
+    }
+
+    /// The trusted automatic arm: main-branch push and schedule only, never
+    /// pull requests. Both-mode Velnor lanes use this so fork PRs never
+    /// schedule self-hosted execution; the GitHub lane keeps PR coverage.
+    fn main_automatic_event_expression(&self) -> String {
+        format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule')",
             self.default_branch
         )
     }
@@ -1600,8 +1611,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
         // The manual selector is `lanes` on Both-mode aggregates and `runner`
-        // everywhere else; the automatic arms below are identical in both
-        // spellings.
+        // everywhere else; only the input spelling differs between modes.
         let input = if self.runners == RunnerMode::Both {
             "lanes"
         } else {
@@ -1623,7 +1633,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 | (RunnerMode::Both, RunnerMode::Velnor | RunnerMode::Github)
         );
         if automatic {
-            format!("{} || ({dispatch})", self.automatic_event_expression())
+            // Both-mode Velnor lanes are main-gated: main push/schedule plus
+            // explicit lanes dispatch, never automatic pull requests. The
+            // GitHub lane keeps PR coverage, and Velnor-only surfaces keep
+            // their PR arm because no hosted lane covers them.
+            let automatic_arm = if (self.runners, lane) == (RunnerMode::Both, RunnerMode::Velnor) {
+                format!("({})", self.main_automatic_event_expression())
+            } else {
+                self.automatic_event_expression()
+            };
+            format!("{automatic_arm} || ({dispatch})")
         } else {
             dispatch
         }

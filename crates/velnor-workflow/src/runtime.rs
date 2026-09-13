@@ -2118,6 +2118,23 @@ fn has_manual_velnor_dispatch_gate(value: &str) -> bool {
     let value = normalize_gate_expression(value);
     value == "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
         || has_untrusted_pull_request_gate(&value)
+        || is_main_gated_velnor_gate(&value)
+}
+
+/// The Both-mode Velnor lane gate: main-branch push/schedule plus explicit
+/// lanes dispatch, never automatic pull requests. The `lanes` spelling is
+/// already canonicalized to `runner` by [`normalize_gate_expression`].
+fn is_main_gated_velnor_gate(value: &str) -> bool {
+    let dispatch = "||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
+    value
+        .strip_suffix(dispatch)
+        .and_then(|automatic| {
+            automatic
+                .strip_prefix('(')
+                .and_then(|automatic| automatic.strip_suffix(')'))
+                .or(Some(automatic))
+        })
+        .is_some_and(is_automatic_push_schedule_gate)
 }
 
 fn normalize_gate_expression(value: &str) -> String {
@@ -3219,6 +3236,25 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_the_main_gated_velnor_lanes_gate() -> Result<(), Box<dyn Error>> {
+        // Both-mode Velnor lanes are main-gated: main push/schedule plus
+        // explicit lanes dispatch, never automatic pull requests.
+        let workflow = r"
+name: Velnor main-gated reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && ((github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.lanes == 'velnor' || github.event.inputs.lanes == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-lanes-main-gated", workflow, "velnor")?;
         assert!(run_policy(root)?);
         Ok(())
     }

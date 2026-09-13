@@ -7360,28 +7360,51 @@ const INCLUDED: &str = include_str!("fixture.txt");
             let plan = must_some(aggregate.find("  plan:"), "plan job");
             assert!(admission < plan, "{aggregate}");
         }
-        // Automatic triggers keep their current gating: the dispatch selector
-        // only narrows manual runs.
+        // The GitHub lane keeps PR coverage; the Velnor lane is main-gated:
+        // main push/schedule plus explicit lanes dispatch, never automatic
+        // pull requests.
         let rust_unit = must_some(
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",
         );
         let nested = generator.render_nested_unit(rust_unit, WorkflowKind::Main);
+        let github_gate = must_some(
+            nested
+                .lines()
+                .find(|line| line.contains("github.event.inputs.lanes == 'github'")),
+            "GitHub lane gate",
+        );
         assert!(
-            nested.contains(
-                "github.event_name == 'pull_request' || (github.ref == 'refs/heads/main'"
+            github_gate.contains("github.event_name == 'pull_request'"),
+            "{nested}"
+        );
+        let velnor_gate = must_some(
+            nested
+                .lines()
+                .find(|line| line.contains("github.event.inputs.lanes == 'velnor'")),
+            "Velnor lane gate",
+        );
+        assert!(
+            velnor_gate.contains(
+                "(github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))"
             ),
             "{nested}"
         );
-        assert!(
-            nested.contains("github.event.inputs.lanes == 'velnor'"),
-            "{nested}"
-        );
-        assert!(
-            nested.contains("github.event.inputs.lanes == 'github'"),
-            "{nested}"
-        );
+        assert!(!velnor_gate.contains("pull_request"), "{nested}");
         assert!(!nested.contains("inputs.runner"), "{nested}");
+        // The emitted per-kind surface carries the same main-gated Velnor
+        // jobs behind the reusable unit selector.
+        let kind_surface = generator.render_kind_units(UnitKind::Rust, None);
+        let mut velnor_gates = 0;
+        for line in kind_surface
+            .lines()
+            .filter(|line| line.contains("github.event.inputs.lanes == 'velnor'"))
+        {
+            velnor_gates += 1;
+            assert!(line.contains("inputs.unit =="), "{kind_surface}");
+            assert!(!line.contains("pull_request"), "{kind_surface}");
+        }
+        assert!(velnor_gates > 0, "{kind_surface}");
     }
 
     #[test]
@@ -7407,6 +7430,20 @@ const INCLUDED: &str = include_str!("fixture.txt");
             let nested = generator.render_nested_unit(rust_unit, WorkflowKind::Main);
             assert!(nested.contains("github.event.inputs.runner =="), "{nested}");
             assert!(!nested.contains("inputs.lanes"), "{nested}");
+            if runners == RunnerMode::Velnor {
+                // Velnor-only surfaces keep the PR arm: no hosted lane covers
+                // pull requests, so main-gating would drop PR verification.
+                let velnor_gate = must_some(
+                    nested
+                        .lines()
+                        .find(|line| line.contains("github.event.inputs.runner == 'velnor'")),
+                    "Velnor-only lane gate",
+                );
+                assert!(
+                    velnor_gate.contains("github.event_name == 'pull_request'"),
+                    "{nested}"
+                );
+            }
         }
     }
 
