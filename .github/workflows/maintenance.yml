@@ -65,7 +65,7 @@ jobs:
     steps:
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@${{ github.sha }}
         with:
           rev: ${{ github.sha }}
       - name: Set trusted workflow policy revision

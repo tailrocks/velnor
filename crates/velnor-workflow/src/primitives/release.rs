@@ -1065,8 +1065,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 "#;
 
 /// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
-/// on the hosted image and always install `setup-velnor-workflow`, even when
-/// CI lanes select `runners = "velnor"`.
+/// on the hosted image and always install `setup-velnor-workflow` at HEAD so
+/// default-branch dispatch can source-bootstrap, even when CI lanes select
+/// `runners = "velnor"`.
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
         .replace(
@@ -1155,17 +1156,25 @@ mod tests {
             workflow.contains("setup-velnor-workflow"),
             "maintenance must install the hosted workflow runtime: {workflow}"
         );
+        let head_rev = github_expression("github.sha");
         assert!(
             workflow.contains(&format!(
+                "uses: {}@{head_rev}",
+                crate::VELNOR_WORKFLOW_SETUP_ACTION
+            )),
+            "maintenance must resolve setup at HEAD: {workflow}"
+        );
+        assert!(
+            workflow.contains(&format!("rev: {head_rev}")),
+            "maintenance cache-plan must install HEAD: {workflow}"
+        );
+        assert!(
+            !workflow.contains(&format!(
                 "uses: {}@{}",
                 crate::VELNOR_WORKFLOW_SETUP_ACTION,
                 crate::VELNOR_WORKFLOW_SOURCE_REV
             )),
-            "maintenance action pin stays SOURCE_REV: {workflow}"
-        );
-        assert!(
-            workflow.contains("rev: ${{ github.sha }}"),
-            "maintenance cache-plan must install HEAD: {workflow}"
+            "maintenance must not pin setup to SOURCE_REV: {workflow}"
         );
         assert!(
             !workflow.contains(&format!("rev: {}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
@@ -1379,7 +1388,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "f604040e5ea80a0c971678cadd0d459090118b3f337082cb96bf50ae9d372f77",
+                "3e4437d765a3e1a24cb3d4c8146c8347b5f140e1d0fa7b5c2143587b31402bd6",
             ),
             (
                 "ci-release-package-signer.yml",
