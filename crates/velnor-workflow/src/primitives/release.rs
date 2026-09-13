@@ -830,43 +830,55 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         "    needs: [verify, build]\n",
         "    needs: [admit-runner, verify, build]\n",
     );
+    let mut extra = String::new();
+    let mut publish_needs = vec![
+        "admit-runner".to_owned(),
+        "verify".to_owned(),
+        "build".to_owned(),
+    ];
     if !release.image.is_empty() {
-        let image = yaml_scalar(&release.image);
-        let image_job = format!(
-            "  image:\n    name: Publish container image\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Log in to GHCR\n        uses: {}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ github.token }}}}\n      - name: Build and push image\n        uses: {}\n        with:\n          context: .\n          push: true\n          tags: {image}:${{{{ github.ref_name }}}}\n          provenance: true\n          sbom: true\n",
+        let image_tag = yaml_scalar(&format!("{}:${{{{ github.ref_name }}}}", release.image));
+        extra.push_str(&format!(
+            "  image:\n    name: Publish container image\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Log in to GHCR\n        uses: {}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ github.token }}}}\n      - name: Build and push image\n        uses: {}\n        with:\n          context: .\n          push: true\n          tags: {image_tag}\n          provenance: true\n          sbom: true\n",
             ActionPin::Checkout.reference(),
             ActionPin::DockerLogin.reference(),
             ActionPin::DockerBuild.reference(),
-        );
-        output = output.replace("\n  publish:", &format!("\n{image_job}\n  publish:"));
-        output = output.replace(
-            "    needs: [admit-runner, verify, build]\n    runs-on:",
-            "    needs: [admit-runner, verify, build, image]\n    runs-on:",
-        );
+        ));
+        publish_needs.push("image".to_owned());
     }
     if !release.consumer_repository.is_empty() {
         let package = yaml_scalar(&release.package);
-        let deb_job = format!(
+        extra.push_str(&format!(
             "  debian:\n    name: Package Debian artifacts\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-deb --package {package} --version \"${{VERSION#v}}\"\n      - name: Attest Debian packages\n        uses: {}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n",
             ActionPin::Checkout.reference(),
             ActionPin::DownloadArtifact.reference(),
             ActionPin::Attest.reference(),
             ActionPin::UploadArtifact.reference(),
-        );
-        output = output.replace("\n  publish:", &format!("\n{deb_job}\n  publish:"));
+        ));
+        publish_needs.push("debian".to_owned());
     }
     let guest = config
         .units
         .iter()
         .any(|unit| unit.watch.iter().any(|path| path.contains("microvm")));
     if guest {
-        let guest_job = format!(
+        extra.push_str(&format!(
             "  guest:\n    name: Guest kernel/rootfs ${{{{ matrix.arch }}}}\n    needs: [admit-runner, verify]\n    runs-on: {github_runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        arch: [x86_64, aarch64]\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Build guest image\n        run: velnor-workflow release package-guest --arch \"${{{{ matrix.arch }}}}\"\n      - name: Upload guest image\n        uses: {}\n        with:\n          name: guest-${{{{ matrix.arch }}}}\n          path: dist/guest-*\n          if-no-files-found: error\n          retention-days: 2\n",
             ActionPin::Checkout.reference(),
             ActionPin::UploadArtifact.reference(),
-        );
-        output = output.replace("\n  publish:", &format!("\n{guest_job}\n  publish:"));
+        ));
+        publish_needs.push("guest".to_owned());
     }
+    if !extra.is_empty() {
+        output = output.replace("\n  publish:", &format!("\n{extra}\n  publish:"));
+    }
+    output = output.replace(
+        "  publish:\n    name: Publish GitHub release\n    needs: [admit-runner, verify, build]\n",
+        &format!(
+            "  publish:\n    name: Publish GitHub release\n    needs: [{}]\n",
+            publish_needs.join(", ")
+        ),
+    );
     output.replace(
         "on:\n  push:\n    tags: [\"v*\"]\n",
         "on:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n",
@@ -1693,82 +1705,129 @@ mod tests {
 
     #[test]
     fn a_declared_native_release_admits_github_writer_only() {
-        let root = scanned_root("native-release");
-        let config = config(&["preview.yml"], None);
-        let surface = generate(
-            &root,
-            &config,
-            Some(
-                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-                 [declare.args]\nkind = \"native\"\npackage = \"example\"\n\
-                 binary = \"example\"\n\
-                 targets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
-                 image = \"ghcr.io/example/app\"\n\
-                 consumer_repository = \"example/apt\"\n",
+        for (name, package, image, consumer) in [
+            (
+                "native-release",
+                "example",
+                "ghcr.io/example/app",
+                "example/apt",
             ),
-        );
-        let release = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/release.yml"))
-            .unwrap_or_else(|| panic!("a declared native release must render release.yml"));
-        assert!(release.contains("name: Admit release runner"), "{release}");
-        assert!(
-            release.contains("native release publishes from GitHub only"),
-            "{release}"
-        );
-        assert!(release.contains("Publish container image"), "{release}");
-        assert!(release.contains("Package Debian artifacts"), "{release}");
-        assert!(release.contains("default: github"), "{release}");
-        assert!(!release.contains("default: velnor"), "{release}");
-        let _ = fs::remove_dir_all(root);
+            (
+                "native-release-acme",
+                "widget",
+                "ghcr.io/acme/widget",
+                "acme/apt",
+            ),
+        ] {
+            let root = scanned_root(name);
+            let config = config(&["preview.yml"], None);
+            let surface = generate(
+                &root,
+                &config,
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"native\"\npackage = \"{package}\"\n\
+                     binary = \"{package}\"\n\
+                     targets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+                     image = \"{image}\"\n\
+                     consumer_repository = \"{consumer}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("a declared native release must render release.yml"));
+            assert!(release.contains("name: Admit release runner"), "{release}");
+            assert!(
+                release.contains("native release publishes from GitHub only"),
+                "{release}"
+            );
+            assert!(release.contains("Publish container image"), "{release}");
+            assert!(release.contains(image), "{release}");
+            assert!(release.contains("github.ref_name"), "{release}");
+            assert!(
+                !release.contains(
+                    "  image:\n    name: Publish container image\n    needs: [admit-runner, verify, build, image]"
+                ),
+                "image must not depend on itself: {release}"
+            );
+            assert!(release.contains("Package Debian artifacts"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains("default: github"), "{release}");
+            assert!(!release.contains("default: velnor"), "{release}");
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
     fn a_declared_homebrew_feed_mutates_from_github_only() {
-        let root = scanned_root("homebrew-feed");
-        let surface = generate(
-            &root,
-            &config(&[], None),
-            Some(
-                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-                 [declare.args]\nkind = \"homebrew\"\npackage = \"example\"\n\
-                 source_repository = \"example/app\"\n",
-            ),
-        );
-        let release = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/release.yml"))
-            .unwrap_or_else(|| panic!("a homebrew feed must render release.yml"));
-        assert!(release.contains("Package feed"), "{release}");
-        assert!(release.contains("homebrew"), "{release}");
-        assert!(release.contains("default: github"), "{release}");
-        assert!(
-            release.contains("feed mutation publishes from GitHub only"),
-            "{release}"
-        );
-        let _ = fs::remove_dir_all(root);
+        for (name, package, source) in [
+            ("homebrew-feed", "example", "example/app"),
+            ("homebrew-feed-acme", "widget", "acme/widget"),
+        ] {
+            let root = scanned_root(name);
+            let surface = generate(
+                &root,
+                &config(&[], None),
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"homebrew\"\npackage = \"{package}\"\n\
+                     source_repository = \"{source}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("a homebrew feed must render release.yml"));
+            assert!(release.contains("Package feed"), "{release}");
+            assert!(release.contains("homebrew"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains(source), "{release}");
+            assert!(release.contains("default: github"), "{release}");
+            assert!(
+                release.contains("feed mutation publishes from GitHub only"),
+                "{release}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
     fn a_declared_apt_feed_mutates_from_github_only() {
-        let root = scanned_root("apt-feed");
-        let surface = generate(
-            &root,
-            &config(&[], None),
-            Some(
-                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
-                 [declare.args]\nkind = \"apt\"\npackage = \"example\"\n\
-                 consumer_repository = \"example/apt\"\n",
-            ),
-        );
-        let release = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/release.yml"))
-            .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
-        assert!(release.contains("Package feed"), "{release}");
-        assert!(release.contains("--kind apt"), "{release}");
-        assert!(release.contains("default: github"), "{release}");
-        let _ = fs::remove_dir_all(root);
+        for (name, package, consumer) in [
+            ("apt-feed", "example", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/apt"),
+        ] {
+            let root = scanned_root(name);
+            let surface = generate(
+                &root,
+                &config(&[], None),
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
+                     consumer_repository = \"{consumer}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
+            assert!(release.contains("Package feed"), "{release}");
+            assert!(release.contains("--kind apt"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains(consumer), "{release}");
+            assert!(release.contains("default: github"), "{release}");
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     #[test]
