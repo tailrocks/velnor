@@ -43,6 +43,13 @@ RUN mkdir -p /opt/mise/bin \
     && mise exec -- mbx --version | grep -F '1.8.3'
 
 WORKDIR /src
+# Mutable-cache seed context. The CI host restores the previous trusted
+# build's exported state into a directory and overrides this stage with
+# `--build-context velnor-cache-seed=<dir>`; the build copies out of it into
+# the cache mounts below only when a mount is empty, so a retained builder
+# keeps its warm state and a fresh builder starts from the restored one.
+# Declared empty: a build without the override keeps its exact shape.
+FROM scratch AS velnor-cache-seed
 COPY Cargo.toml Cargo.lock ./
 COPY crates/velnor-model/Cargo.toml ./crates/velnor-model/Cargo.toml
 COPY crates/velnor-control/Cargo.toml ./crates/velnor-control/Cargo.toml
@@ -84,8 +91,12 @@ RUN mkdir -p \
         crates/velnor-bench/src/main.rs \
         tools/unit-collector/src/lib.rs \
         tools/unit-collector/src/main.rs
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=velnor-cargo-registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=velnor-cargo-git,sharing=locked \
+    --mount=from=velnor-cache-seed,target=/velnor-cache-seed,readonly=true \
+    set -eux; \
+    if [ -z "$(ls -A /usr/local/cargo/registry 2>/dev/null)" ] && [ -s /velnor-cache-seed/cargo-registry.tar ]; then tar -x -C /usr/local/cargo/registry -f /velnor-cache-seed/cargo-registry.tar; fi; \
+    if [ -z "$(ls -A /usr/local/cargo/git 2>/dev/null)" ] && [ -s /velnor-cache-seed/cargo-git.tar ]; then tar -x -C /usr/local/cargo/git -f /velnor-cache-seed/cargo-git.tar; fi; \
     cd /opt/mise/config \
     && mise exec -- cargo fetch --manifest-path /src/Cargo.toml --locked
 COPY crates/velnor-model ./crates/velnor-model
@@ -114,11 +125,39 @@ COPY --from=build /tmp/velnor-ci-inputs-validated /usr/local/share/velnor/ci-inp
 RUN test -f /usr/local/share/velnor/ci-inputs-validated
 
 FROM build AS release
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/mbx \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=velnor-cargo-registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=velnor-cargo-git,sharing=locked \
+    --mount=type=cache,target=/mbx,id=velnor-mbx-store,sharing=locked \
+    --mount=from=velnor-cache-seed,target=/velnor-cache-seed,readonly=true \
+    set -eux; \
+    if [ -z "$(ls -A /usr/local/cargo/registry 2>/dev/null)" ] && [ -s /velnor-cache-seed/cargo-registry.tar ]; then tar -x -C /usr/local/cargo/registry -f /velnor-cache-seed/cargo-registry.tar; fi; \
+    if [ -z "$(ls -A /usr/local/cargo/git 2>/dev/null)" ] && [ -s /velnor-cache-seed/cargo-git.tar ]; then tar -x -C /usr/local/cargo/git -f /velnor-cache-seed/cargo-git.tar; fi; \
+    if [ -z "$(ls -A /mbx 2>/dev/null)" ] && [ -s /velnor-cache-seed/mbx-closure.tar ]; then \
+        cd /opt/mise/config \
+        && mise exec -- mbx cache import /velnor-cache-seed/mbx-closure.tar; \
+    fi; \
     cd /opt/mise/config \
     && CARGO_TARGET_DIR=/src/target mise exec -- mbx build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow
+
+# Mutable-cache extraction. Only a trusted full build targets this stage: it
+# copies the build's cache mounts back out and exports the mbx closure of this
+# checkout's build, the collect stage runs only after the release stage
+# succeeded, and a missing or partial export fails the exporting step instead
+# of silently seeding the next builder cold. The scratch-rooted target keeps
+# `--output type=local` to exactly these files.
+FROM release AS velnor-cache-export-input
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=velnor-cargo-registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=velnor-cargo-git,sharing=locked \
+    --mount=type=cache,target=/mbx,id=velnor-mbx-store,sharing=locked \
+    set -eux; \
+    mkdir -p /velnor-cache-export; \
+    tar -c -C /usr/local/cargo/registry -f /velnor-cache-export/cargo-registry.tar .; \
+    tar -c -C /usr/local/cargo/git -f /velnor-cache-export/cargo-git.tar .; \
+    cd /src \
+    && CARGO_TARGET_DIR=/src/target mise exec -- mbx cache export /velnor-cache-export/mbx-closure.tar
+
+FROM scratch AS velnor-cache-export
+COPY --from=velnor-cache-export-input /velnor-cache-export /
 
 FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
 

@@ -1,16 +1,16 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	e5ef66264aa25ccc
-scan	45274eaaede3697d
+config	88c05cc02c022f81
+scan	6e34265e59dc74d8
 generator	6
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
-.github/ci/project.toml	e612a26c744b3cb6
+.github/ci/project.toml	e1621892053e550f
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-bun-velnor.yml	0b467e61f4663413
-.github/workflows/ci-docker-docker.yml	218d9dda197c110a
+.github/workflows/ci-docker-docker.yml	0f34a4bdc10507b5
 .github/workflows/ci-docs-docs.yml	4ad8df9ccf520c9b
 .github/workflows/ci-main.yml	3a4fb82f52b18d17
 .github/workflows/ci-opentofu-opentofu.yml	f1ab6bc17442c59d
@@ -32,5 +32,5 @@ generator	6
 .github/workflows/ci-rust-velnorctl.yml	7883f00d7edc731c
 .github/workflows/maintenance.yml	6f95b9c9d9c1040d
 .github/workflows/nightly.yml	76863cd8643a5dc1
-.github/workflows/preview.yml	efb280149d7bcafa
-.github/workflows/release.yml	82b7681f28070bea
+.github/workflows/preview.yml	df31e76c548558ca
+.github/workflows/release.yml	df6329249d39eaec
