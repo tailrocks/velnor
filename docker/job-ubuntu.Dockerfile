@@ -13,7 +13,7 @@ FROM docker:29-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c
 # `docker/job-mise.lock` mirrors the Rust channel resolved from
 # rust-toolchain.toml (a plain version mirror — the entry carries no url and no
 # checksum, unlike every other tool). Copying that file into the layer that
-# installs Node, Python, gh, mold, protoc, just, hadolint, sccache and mbx would
+# installs Node, Python, gh, mold, protoc, just, hadolint and mbx would
 # re-couple the two version axes: a Rust patch bump edits the lock, the lock
 # invalidates the layer, and ~600 MB of unrelated toolchain is reinstalled. This
 # stage strips the mirror, so the non-Rust toolchain layer below is keyed on a
@@ -123,7 +123,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
          node \
          protoc \
          python \
-         sccache \
     && mise reshim
 
 # The Rust toolchain, and only the Rust toolchain, is gated on
@@ -160,7 +159,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     && mbx --version | grep -F '1.8.3' \
     && mbx doctor \
     && test -z "${RUSTC_WRAPPER:-}" \
-    && mise exec -- sccache --version | grep -F 'sccache 0.16.0' \
+    && ! command -v sccache \
     && ! command -v kache \
     && mise exec -- rustc --version \
     && mise exec -- node --version \

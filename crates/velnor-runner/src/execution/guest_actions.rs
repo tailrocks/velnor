@@ -46,10 +46,7 @@ fn guest_action_script(step: &GuestStep, action: &str) -> Result<String, String>
         crate::action::NativeActionAdapter::Checkout => guest_checkout_script(step),
         crate::action::NativeActionAdapter::Cache
         | crate::action::NativeActionAdapter::RustCache => guest_cache_script(step, "cache-hit"),
-        crate::action::NativeActionAdapter::Sccache => {
-            "set -eu; command -v sccache >/dev/null; sccache --start-server; printf 'sccache: native guest adapter started\\n'"
-                .to_string()
-        }
+        crate::action::NativeActionAdapter::Sccache => crate::sccache_compat::guest_script(),
         other => {
             return Err(guest_capability_error(
                 "guest.steps[].action",
