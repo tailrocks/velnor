@@ -9,6 +9,7 @@ pub mod cargo;
 pub mod docker;
 pub mod fault;
 mod isolated_docker;
+pub mod velnor_job;
 
 use std::path::PathBuf;
 
@@ -88,11 +89,7 @@ pub trait Workload {
 /// No driver is implemented for this scenario and driver combination.
 pub fn build(scenario: &Scenario, driver: Driver) -> Result<Box<dyn Workload>> {
     match driver {
-        Driver::VelnorJob => anyhow::bail!(
-            "{}: the velnor-job driver needs a registered runner and dispatch credentials; \
-             no such runner is configured, and this harness will not simulate one",
-            scenario.id
-        ),
+        Driver::VelnorJob => velnor_job::build(scenario),
         Driver::DockerDirect if scenario.family == Family::Fault => fault::build(scenario),
         Driver::DockerDirect => docker::build(scenario),
         Driver::CargoDirect => cargo::build(scenario),

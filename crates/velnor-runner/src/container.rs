@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::container::host_budget::{HostBudget, SlotBudget};
+use crate::container::host_budget::{BuildkitSize, HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
 
 /// One derived resource budget for the machine, and the share of it that
@@ -238,6 +238,25 @@ impl JobContainerSpec {
         HostBudget::observe_host()
             .per_slot(self.slot_count)
             .capped_by_container_cpus(self.declared_container_cpus())
+    }
+
+    /// CPU/memory ceiling for a shared buildkitd this job holds alongside
+    /// `holders - 1` other jobs: the slot share times the holder count,
+    /// capped at the host budget. The daemon used to be created from the
+    /// static `resource_options` spelling of operator policy alone, so the
+    /// derived budget sized every compiler except the one inside buildkitd.
+    /// An explicit `--memory` limit narrows the aggregate exactly as it
+    /// narrows one job container; without any declared limit the call still
+    /// succeeds with `None`.
+    ///
+    /// # Errors
+    /// A declared `--memory` limit is present but malformed, the same
+    /// rejection `start_args` applies instead of silently dropping policy.
+    pub(crate) fn buildkit_size(&self, holders: u32) -> io::Result<BuildkitSize> {
+        let budget = self.slot_budget();
+        let declared = self.declared_container_memory()?;
+        let holders = NonZeroU32::new(holders).unwrap_or(NonZeroU32::MIN);
+        Ok(budget.buildkit_size(holders, declared))
     }
 
     /// One line naming the budget, how it was derived, and any workflow value

@@ -4060,13 +4060,11 @@ where
                         Ok(false)
                     }
                 };
-                let outcome = match (
-                    state.temp_host.as_deref(),
-                    crate::buildkit::claims_run_root(),
-                ) {
+                let run_root = crate::buildkit::claims_run_root();
+                let outcome = match (state.temp_host.as_deref(), run_root.as_ref()) {
                     (Some(_temp), Some(run_root)) => {
                         match crate::buildkit::release_and_stop_if_last(
-                            &run_root,
+                            run_root,
                             &name,
                             &container.name,
                             stop,
@@ -4117,6 +4115,41 @@ where
                     }
                     Some(_) => {
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
+                    }
+                }
+                // Holders remain: shrink the daemon ceiling for those that do,
+                // so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. Best-effort like the stop — sizing is
+                // an optimization, never a release failure — and skipped when
+                // the remaining holders cannot be counted. A final release
+                // resizes nothing: the daemon is stopped or already gone.
+                if matches!(outcome, Some(outcome) if !outcome.removed_last)
+                    && let Some(run_root) = run_root.as_ref()
+                    && let Some(remaining) = crate::buildkit::builder_holder_count(run_root, &name)
+                    && remaining > 0
+                {
+                    match container.buildkit_size(u32::try_from(remaining).unwrap_or(u32::MAX)) {
+                        Ok(size) if !size.is_empty() => {
+                            if let Err(error) = crate::buildkit::resize_builder_daemon(
+                                &name,
+                                size.cpu_milli,
+                                size.memory_bytes,
+                            ) {
+                                use std::fmt::Write as _;
+                                let _ = writeln!(
+                                    stderr,
+                                    "buildx post: resize of {name} failed ({error:#})"
+                                );
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            use std::fmt::Write as _;
+                            let _ = writeln!(
+                                stderr,
+                                "buildx post: resize of {name} skipped ({error:#})"
+                            );
+                        }
                     }
                 }
                 Ok(StepExecutionResult {
@@ -4671,6 +4704,13 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
+        // The holder count below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to count, so a created
+        // daemon is sized for this job alone and an existing daemon is left
+        // untouched — resizing it to a single share could throttle sharers
+        // this setup cannot see.
+        let mut holders: u32 = 1;
+        let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
             crate::buildkit::claims_run_root(),
@@ -4717,6 +4757,31 @@ where
                     );
                 }
             }
+            // Count after the claim above, so this job is included. The read
+            // only fails when the file this setup just wrote cannot be read
+            // back; a created daemon is then sized for this job alone rather
+            // than failing the step, while an existing daemon is left
+            // untouched — an uncounted resize could throttle unseen sharers.
+            match crate::buildkit::builder_holder_count(&run_root, &name) {
+                Some(count) => {
+                    holders = u32::try_from(count.max(1)).unwrap_or(1);
+                    holders_known = true;
+                }
+                None => {
+                    holders = 1;
+                }
+            }
+        }
+        // The derived slot budget sizes the daemon for its current holders.
+        // The static operator policy survives only as the total-absence
+        // fallback when the budget is unobservable: a budget that knows
+        // anything sizes the daemon, and mixing one invented dimension with
+        // one derived dimension would silently reintroduce the unsized
+        // daemon this replaces.
+        let buildkit_size = container.buildkit_size(holders)?;
+        let mut driver_opts = buildkit_size.driver_opts();
+        if driver_opts.is_empty() {
+            driver_opts = buildx_driver_resource_options(&container.resource_options)?;
         }
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -4739,7 +4804,23 @@ where
             self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
         let result = if inspect_result.code == 0 {
             let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.container_docker(container, &action_state, &use_args, None, timeout)?
+            let result =
+                self.container_docker(container, &action_state, &use_args, None, timeout)?;
+            // An existing daemon keeps whatever ceiling it was born with, so
+            // resize it for the counted holders present now. Best-effort: a
+            // wrong ceiling slows builds, it never breaks them, and the next
+            // setup converges it. Uncounted holders resize nothing.
+            if holders_known
+                && !buildkit_size.is_empty()
+                && let Err(error) = crate::buildkit::resize_builder_daemon(
+                    &name,
+                    buildkit_size.cpu_milli,
+                    buildkit_size.memory_bytes,
+                )
+            {
+                eprintln!("buildx setup: resize of {name}: {error:#}");
+            }
+            result
         } else {
             let mut args = vec![
                 "buildx".to_string(),
@@ -4750,9 +4831,8 @@ where
                 driver,
                 "--use".to_string(),
             ];
-            let resource_options = buildx_driver_resource_options(&container.resource_options)?;
-            if !resource_options.is_empty() {
-                args.extend(["--driver-opt".to_string(), resource_options.join(",")]);
+            if !driver_opts.is_empty() {
+                args.extend(["--driver-opt".to_string(), driver_opts.join(",")]);
             }
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
@@ -19071,12 +19151,34 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        assert!(calls.iter().any(|c| c
-            .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
-            && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
-            && c.contains(&format!(
-                "'--config' '/__t/buildkitd-config-{builder}.toml'"
-            ))));
+        // The derived slot budget sizes the daemon: recompute the size from
+        // the same host observation and require it on the create argv. The
+        // static `resource_options` survive only as the total-absence
+        // fallback when the budget is unobservable on this machine.
+        let size = spec.buildkit_size(1).unwrap();
+        let mut expected_opts = size.driver_opts();
+        if expected_opts.is_empty() {
+            expected_opts = buildx_driver_resource_options(&spec.resource_options).unwrap();
+        }
+        assert!(!expected_opts.is_empty());
+        let expected_driver_opt = expected_opts.join(",");
+        let create = calls
+            .iter()
+            .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
+            .expect("buildx create call");
+        assert!(
+            create.contains(&format!("'--driver-opt' '{expected_driver_opt}'")),
+            "derived budget must reach buildkitd, got: {create}"
+        );
+        assert!(create.contains(&format!(
+            "'--config' '/__t/buildkitd-config-{builder}.toml'"
+        )));
+        if !size.is_empty() {
+            assert!(
+                !create.contains("memory=12g"),
+                "derived budget wins over the static spelling, got: {create}"
+            );
+        }
         assert_eq!(
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
