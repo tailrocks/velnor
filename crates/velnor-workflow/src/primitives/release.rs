@@ -1446,6 +1446,7 @@ mod tests {
             version_bump_units: Vec::new(),
             default_branch: "main".to_owned(),
             runners: crate::RunnerMode::Both,
+            automatic: crate::RunnerMode::Github,
             github_runner: "ubuntu-24.04".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
             release_enabled: release.is_some(),

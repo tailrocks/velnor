@@ -91,17 +91,30 @@ fn hosted_lane_uses_the_github_mb_boxington_backend() {
         .into_iter()
         .find(|(name, _)| name == "ci-unit-rust.yml")
         .expect("the rust kind reusable renders a workflow");
-    assert!(
-        workflow.contains("backend: github"),
-        "hosted lane lost the github backend"
-    );
     let project = read(".github/ci/project.toml");
-    if project.contains("runners = \"github\"") {
+    if project.contains("runners = \"velnor\"") {
+        assert!(
+            !workflow.contains("backend: github"),
+            "velnor-only surface must not emit a GitHub hosted backend"
+        );
+        assert!(
+            workflow.contains("backend: local"),
+            "velnor lane lost its local backend"
+        );
+    } else if project.contains("runners = \"github\"") {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
         assert!(
             !workflow.contains("backend: local"),
             "github-only surface must not emit a Velnor local backend"
         );
     } else {
+        assert!(
+            workflow.contains("backend: github"),
+            "hosted lane lost the github backend"
+        );
         assert!(
             workflow.contains("backend: local"),
             "velnor lane lost its local backend"

@@ -679,6 +679,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
     pub(crate) runners: RunnerMode,
+    pub(crate) automatic: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
     /// The repository drives its Rust units through mise. Naming matters: mise
     /// never provides the Rust toolchain (rustup owns that), it only
@@ -724,16 +725,14 @@ fn workflow_dispatch_inputs(
     default_branch: &str,
     extra_inputs: &str,
     runners: RunnerMode,
+    automatic: RunnerMode,
 ) -> String {
     let (required, default_runner, options) = match runners {
-        RunnerMode::Velnor => (
-            "true",
-            "velnor",
-            "          - velnor\n          - github\n          - both\n",
-        ),
-        _ => (
+        RunnerMode::Github => ("false", "github", "          - github\n"),
+        RunnerMode::Velnor => ("true", "velnor", "          - velnor\n"),
+        RunnerMode::Both => (
             "false",
-            "github",
+            automatic.as_str(),
             "          - github\n          - velnor\n          - both\n",
         ),
     };
@@ -746,6 +745,7 @@ fn aggregate_triggers(
     kind: WorkflowKind,
     default_branch: &str,
     runners: RunnerMode,
+    automatic: RunnerMode,
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => (
@@ -753,7 +753,7 @@ fn aggregate_triggers(
             "CI / PR",
             format!(
                 "on:\n  pull_request:\n  merge_group:\n{}",
-                workflow_dispatch_inputs("affected", default_branch, "", runners)
+                workflow_dispatch_inputs("affected", default_branch, "", runners, automatic)
             ),
             "true",
         ),
@@ -763,7 +763,7 @@ fn aggregate_triggers(
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
                 yaml_scalar(default_branch),
-                workflow_dispatch_inputs("full", default_branch, "", runners)
+                workflow_dispatch_inputs("full", default_branch, "", runners, automatic)
             ),
             "true",
         ),
@@ -777,6 +777,7 @@ fn aggregate_triggers(
                     default_branch,
                     "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
                     runners,
+                    automatic,
                 )
             ),
             "true",
@@ -866,6 +867,7 @@ impl WorkflowIr {
                 VelnorPullRequest::TrustedOnly
             },
             runners: config.runners,
+            automatic: config.automatic,
             tools,
             mise_present,
             mr_boxington,
@@ -877,7 +879,7 @@ impl WorkflowIr {
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+            aggregate_triggers(kind, &self.default_branch, self.runners, self.automatic);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -983,7 +985,7 @@ impl WorkflowIr {
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) =
-            aggregate_triggers(kind, &self.default_branch, self.runners);
+            aggregate_triggers(kind, &self.default_branch, self.runners, self.automatic);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
@@ -1591,23 +1593,33 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
-        let dispatch_github = "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')";
-        let dispatch_velnor = "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')";
+        let omitted_github = matches!(self.automatic, RunnerMode::Github | RunnerMode::Both);
+        let omitted_velnor = matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both);
+        let dispatch_github = if omitted_github {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
+        } else {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
+        };
+        let dispatch_velnor = if omitted_velnor {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
+        } else {
+            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
+        };
         match lane {
             RunnerMode::Github => {
-                if self.runners == RunnerMode::Velnor {
-                    format!(
-                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || ({dispatch_github})"
-                    )
-                } else {
+                if matches!(self.automatic, RunnerMode::Github | RunnerMode::Both) {
                     format!(
                         "{} || ({dispatch_github})",
                         self.automatic_event_expression()
                     )
+                } else {
+                    format!(
+                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || ({dispatch_github})"
+                    )
                 }
             }
             RunnerMode::Velnor => {
-                if self.runners == RunnerMode::Velnor {
+                if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
                     self.velnor_lane_event_expression(dispatch_velnor)
                 } else {
                     format!(

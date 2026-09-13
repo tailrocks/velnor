@@ -50,6 +50,8 @@ struct CiConfig {
     #[serde(default)]
     runners: String,
     #[serde(default)]
+    automatic: String,
+    #[serde(default)]
     analysis: Analysis,
     #[serde(default)]
     workflow: Workflow,
@@ -2502,6 +2504,7 @@ mod tests {
             verified: true,
             default_branch: "main".to_owned(),
             runners: "github".to_owned(),
+            automatic: "github".to_owned(),
             analysis: Analysis::default(),
             workflow: Workflow::default(),
             release: Release::default(),

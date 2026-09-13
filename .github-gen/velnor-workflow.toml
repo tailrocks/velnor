@@ -6,10 +6,15 @@ repository = "tailrocks/velnor"
 [scan]
 exclude = ["migrations/**"]
 
-# Runner placement: the hosted image the GitHub lane pins, and the self-hosted
-# labels the trust-gated Velnor lane selects by.
+# Runner placement: `runners` is the available backends. `automatic` is the
+# lanes that run on PR/push/schedule without a dispatch choice (omit infers
+# github when GitHub is available, otherwise the sole backend). Example:
+# runners = "both" and automatic = "github" auto-runs GitHub on PRs and keeps
+# Velnor dispatch-only; automatic = "both" auto-runs both on trusted events
+# so the lanes can be compared.
 [workflow]
 runners = "velnor"
+automatic = "velnor"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]
