@@ -574,8 +574,9 @@ where
                 false,
                 true,
                 true,
-                false,           // lfs: action repos don't use LFS
-                None,            // action bundles are not primary-repository mirrors
+                false, // preserve_target: action bundles are metadata-only, never built
+                false, // lfs: action repos don't use LFS
+                None,  // action bundles are not primary-repository mirrors
                 &mut Vec::new(), // action-repo fetch trace is internal, not surfaced
             )?;
         }

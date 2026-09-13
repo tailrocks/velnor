@@ -1382,6 +1382,60 @@ pub fn declares_sccache(job: &AgentJobRequestMessage) -> bool {
     })
 }
 
+/// Whether the workflow opts out of Velnor's Rust acceleration without
+/// requesting a different compiler cache: `MBX_DISABLE` set to a truthy
+/// value in job-level, container-level, or any enabled step's environment.
+/// Such jobs run plain Cargo (the fixture's scenario C), so they need a
+/// stable workspace exactly like the explicit-sccache path. An
+/// expression-valued or falsy setting does not count: this is an
+/// optimization gate, and under-approximating only leaves a job cold.
+pub fn declares_mbx_opt_out(job: &AgentJobRequestMessage) -> bool {
+    env_sets_mbx_disable(&crate::runtime_env::job_environment_variables(job))
+        || job
+            .job_container
+            .as_ref()
+            .is_some_and(container_sets_mbx_disable)
+        || job.steps.iter().filter(|step| step.enabled).any(|step| {
+            step.environment.as_ref().is_some_and(|environment| {
+                env_sets_mbx_disable(&crate::runtime_env::environment_token_pairs(environment))
+            })
+        })
+}
+
+fn container_sets_mbx_disable(container: &serde_json::Value) -> bool {
+    // The container value is the container spec, not an env map: only its
+    // nested env objects carry workflow environment. (The capability gate
+    // over-approximates names because missing a forbidden name is unsafe;
+    // this optimization gate only reads values where environment lives,
+    // because a false positive merely warms a workspace needlessly.)
+    let Some(object) = container.as_object() else {
+        return env_sets_mbx_disable(&crate::runtime_env::environment_token_pairs(container));
+    };
+    ["environmentVariables", "EnvironmentVariables", "env", "Env"]
+        .iter()
+        .filter_map(|key| object.get(*key))
+        .any(|nested| env_sets_mbx_disable(&crate::runtime_env::environment_token_pairs(nested)))
+}
+
+fn env_sets_mbx_disable(pairs: &[(String, String)]) -> bool {
+    pairs.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("MBX_DISABLE")
+            && matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+    })
+}
+
+/// Whether the job runs outside mbx management and therefore needs a stable
+/// workspace to keep Cargo fingerprints (and sccache keys) warm across
+/// checkouts: the explicit-sccache compatibility path or the plain-Cargo
+/// opt-out. The default mbx path manages its own targets and keeps the
+/// ephemeral per-job workspace.
+pub(crate) fn wants_stable_workspace(job: &AgentJobRequestMessage) -> bool {
+    declares_sccache(job) || declares_mbx_opt_out(job)
+}
+
 pub(crate) fn validate_microvm_compiler_cache(job: &AgentJobRequestMessage) -> anyhow::Result<()> {
     if let Some(name) = compiler_cache_environment_names(job)
         .into_iter()
@@ -3148,6 +3202,65 @@ mod tests {
         });
         let _ = std::fs::remove_file(path);
         result.unwrap();
+    }
+
+    #[test]
+    fn mbx_opt_out_detected_in_job_step_and_container_env() {
+        let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        assert!(!declares_mbx_opt_out(&target));
+        target.environment_variables = vec![serde_json::json!({ "MBX_DISABLE": "1" })];
+        assert!(declares_mbx_opt_out(&target));
+
+        let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        target.steps[0].environment = Some(serde_json::json!({ "MBX_DISABLE": "true" }));
+        assert!(declares_mbx_opt_out(&target));
+
+        let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        target.job_container = Some(serde_json::json!({
+            "image": "ubuntu:24.04",
+            "env": { "MBX_DISABLE": "yes" }
+        }));
+        assert!(declares_mbx_opt_out(&target));
+    }
+
+    #[test]
+    fn mbx_opt_out_ignores_falsy_absent_and_disabled() {
+        for value in ["0", "false", "", "no", "off", "${{ needs.x }}"] {
+            let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+            target.environment_variables = vec![serde_json::json!({ "MBX_DISABLE": value })];
+            assert!(
+                !declares_mbx_opt_out(&target),
+                "MBX_DISABLE={value} must not count as an opt-out"
+            );
+        }
+        // A disabled step's environment never reaches the container.
+        let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        target.steps[0].enabled = false;
+        target.steps[0].environment = Some(serde_json::json!({ "MBX_DISABLE": "1" }));
+        assert!(!declares_mbx_opt_out(&target));
+        // Container spec keys are not environment.
+        let mut target = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        target.job_container = Some(serde_json::json!({ "image": "ubuntu:24.04" }));
+        assert!(!declares_mbx_opt_out(&target));
+    }
+
+    #[test]
+    fn wants_stable_workspace_covers_sccache_and_opt_out_only() {
+        let sccache = job(
+            "mozilla-actions/sccache-action",
+            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
+            serde_json::json!({}),
+        );
+        assert!(declares_sccache(&sccache));
+        assert!(wants_stable_workspace(&sccache));
+
+        let mut opt_out = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        opt_out.environment_variables = vec![serde_json::json!({ "MBX_DISABLE": "1" })];
+        assert!(!declares_sccache(&opt_out));
+        assert!(wants_stable_workspace(&opt_out));
+
+        let plain = job("actions/checkout", Some("v7"), serde_json::json!({}));
+        assert!(!wants_stable_workspace(&plain));
     }
 
     #[test]
