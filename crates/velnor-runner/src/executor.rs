@@ -11,6 +11,7 @@ use crate::{
     docker::client::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
+    execution::{CompositeConclusionScopes, StepOutcome},
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::{
@@ -12382,50 +12383,17 @@ pub(crate) struct JobExecutionState {
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     conclusions: BTreeMap<String, StepOutcome>,
-    /// Inner step ids converted by an ignored umbrella conclusion. Inner
-    /// `Failure` entries stay in `conclusions` (raw `steps.<id>` reads),
-    /// but the job-scope status scans skip these ids: upstream
-    /// `job.status` derives from top-level step results only, so after an
-    /// ignored umbrella a later `failure()` step must not run.
-    converted_conclusions: BTreeSet<String>,
+    /// Nested composite conclusion scopes (open-umbrella stack plus the
+    /// ignored-umbrella conversion set). The scope machinery lives in
+    /// `execution::composite_scopes`; this state only delegates to it.
+    composite_scopes: CompositeConclusionScopes,
     path: Vec<String>,
     masks: Vec<String>,
-    composite_stack: Vec<String>,
-    composite_conclusion_stack: Vec<CompositeConclusionFrame>,
     /// The running job's cancellation, so `success()`, `failure()` and
     /// `cancelled()` answer from the job's real status instead of from a
     /// constant. The engine installs its own required token here before the
     /// first step runs.
     cancellation: crate::execution::cancel::JobCancellation,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CompositeConclusionFrame {
-    step_id: String,
-    conclusions: BTreeMap<String, StepOutcome>,
-    /// Transitive inner ids popped from nested scopes. Kept separate from
-    /// `conclusions` so the scope status scan never sees them; an ignored
-    /// outer umbrella converts them with its own direct ids.
-    descendants: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepOutcome {
-    Success,
-    Failure,
-    Cancelled,
-    Skipped,
-}
-
-impl StepOutcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            StepOutcome::Success => "success",
-            StepOutcome::Failure => "failure",
-            StepOutcome::Cancelled => "cancelled",
-            StepOutcome::Skipped => "skipped",
-        }
-    }
 }
 
 impl JobExecutionState {
@@ -12505,11 +12473,9 @@ impl JobExecutionState {
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             conclusions: BTreeMap::new(),
-            converted_conclusions: BTreeSet::new(),
+            composite_scopes: CompositeConclusionScopes::default(),
             path: Vec::new(),
             masks: Vec::new(),
-            composite_stack: Vec::new(),
-            composite_conclusion_stack: Vec::new(),
             cancellation: crate::execution::cancel::JobCancellation::inert(),
         };
         state.env = state
@@ -12561,11 +12527,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
-            converted_conclusions: self.converted_conclusions.clone(),
+            composite_scopes: self.composite_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
-            composite_stack: self.composite_stack.clone(),
-            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             // A derived state is the same job, so it carries the same
             // cancellation. Dropping it here would make every step's condition
             // — which is evaluated on a derived state — read as not cancelled.
@@ -12593,11 +12557,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
-            converted_conclusions: self.converted_conclusions.clone(),
+            composite_scopes: self.composite_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
-            composite_stack: self.composite_stack.clone(),
-            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             // A derived state is the same job, so it carries the same
             // cancellation. Dropping it here would make every step's condition
             // — which is evaluated on a derived state — read as not cancelled.
@@ -12610,75 +12572,28 @@ impl JobExecutionState {
     }
 
     fn push_composite(&mut self, step_id: &str) {
-        self.composite_stack.push(step_id.to_string());
-        self.composite_conclusion_stack
-            .push(CompositeConclusionFrame {
-                step_id: step_id.to_string(),
-                conclusions: BTreeMap::new(),
-                descendants: BTreeSet::new(),
-            });
+        self.composite_scopes.push(step_id);
     }
 
-    /// Pop a composite scope, returning the transitive inner step ids
-    /// (direct plus nested descendants). The transitive set always
-    /// propagates to the parent frame's descendants — even when this
-    /// level stands — so an ignored outer umbrella converts nested
-    /// failures with its own. Descendants never enter `conclusions`,
-    /// so the scope status scan is unchanged.
+    /// Pop a composite scope, returning the transitive inner step ids.
+    /// The propagation invariant lives with the scope stack; see
+    /// `CompositeConclusionScopes::pop`.
     fn pop_composite(&mut self, step_id: &str) -> Vec<String> {
-        if self
-            .composite_stack
-            .last()
-            .is_some_and(|scope| scope == step_id)
-        {
-            self.composite_stack.pop();
-        }
-        if self
-            .composite_conclusion_stack
-            .last()
-            .is_some_and(|frame| frame.step_id == step_id)
-        {
-            match self.composite_conclusion_stack.pop() {
-                Some(frame) => {
-                    let mut transitive: BTreeSet<String> = frame.conclusions.into_keys().collect();
-                    transitive.extend(frame.descendants);
-                    if let Some(parent) = self.composite_conclusion_stack.last_mut() {
-                        parent.descendants.extend(transitive.iter().cloned());
-                    }
-                    transitive.into_iter().collect()
-                }
-                None => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        }
+        self.composite_scopes.pop(step_id)
     }
 
     /// Mark inner step ids as converted by their umbrella's ignored
-    /// conclusion. Their `Failure` entries stay in `conclusions` (raw
-    /// `steps.<id>` reads), but the job-scope status scans skip them —
-    /// upstream `job.status` derives from top-level step results only.
+    /// conclusion. The conversion rule lives with the scope stack; see
+    /// `CompositeConclusionScopes::convert`.
     fn convert_conclusions(&mut self, step_ids: Vec<String>) {
-        self.converted_conclusions.extend(step_ids);
+        self.composite_scopes.convert(step_ids);
     }
 
-    /// Defensive-flush twin of the End path's `pop_composite` harvest: a
-    /// plan whose `CompositeEnd` never arrived leaves its scopes open, so
+    /// Defensive-flush twin of the End path's `pop_composite` harvest:
     /// an ignored flush umbrella converts every still-open scope's ids.
     /// The stacks stay untouched — only the status scans change.
     fn convert_open_composite_scopes(&mut self) {
-        let ids: Vec<String> = self
-            .composite_conclusion_stack
-            .iter()
-            .flat_map(|frame| {
-                frame
-                    .conclusions
-                    .keys()
-                    .cloned()
-                    .chain(frame.descendants.iter().cloned())
-            })
-            .collect();
-        self.convert_conclusions(ids);
+        self.composite_scopes.convert_open_scopes();
     }
 
     pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
@@ -12696,9 +12611,7 @@ impl JobExecutionState {
         };
         self.outcomes.insert(step_id.to_string(), outcome);
         self.conclusions.insert(step_id.to_string(), conclusion);
-        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
-            frame.conclusions.insert(step_id.to_string(), conclusion);
-        }
+        self.composite_scopes.record(step_id, conclusion);
 
         if !result.state.outputs.is_empty() {
             self.outputs
@@ -12739,11 +12652,8 @@ impl JobExecutionState {
             .insert(step_id.to_string(), StepOutcome::Cancelled);
         self.conclusions
             .insert(step_id.to_string(), StepOutcome::Cancelled);
-        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
-            frame
-                .conclusions
-                .insert(step_id.to_string(), StepOutcome::Cancelled);
-        }
+        self.composite_scopes
+            .record(step_id, StepOutcome::Cancelled);
     }
 
     fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
@@ -12963,9 +12873,10 @@ impl JobExecutionState {
     fn job_status(&self) -> &'static str {
         if self.is_cancelled() {
             "cancelled"
-        } else if self.conclusions.iter().any(|(id, outcome)| {
-            *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-        }) {
+        } else if self
+            .composite_scopes
+            .top_level_has_failure(&self.conclusions)
+        {
             "failure"
         } else {
             "success"
@@ -12986,15 +12897,7 @@ impl JobExecutionState {
     }
 
     fn status_scope_has_failure(&self) -> bool {
-        if let Some(frame) = self.composite_conclusion_stack.last() {
-            frame.conclusions.iter().any(|(id, outcome)| {
-                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-            })
-        } else {
-            self.conclusions.iter().any(|(id, outcome)| {
-                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-            })
-        }
+        self.composite_scopes.scope_has_failure(&self.conclusions)
     }
 
     /// Read a dotted context path (e.g. `github.event.pull_request.number`)

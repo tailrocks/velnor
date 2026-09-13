@@ -8,6 +8,7 @@ mod artifacts;
 mod backend;
 mod cache_transport;
 pub mod cancel;
+mod composite_scopes;
 mod docker;
 mod firecracker;
 mod guest;
@@ -35,6 +36,7 @@ pub use cancel::{
     TargetRegistration, TerminationLadder, TerminationOutcome, TerminationSignal,
     TerminationTarget,
 };
+pub(crate) use composite_scopes::{CompositeConclusionScopes, StepOutcome};
 pub(crate) use docker::verify_docker_job_cgroup_boundary;
 pub use docker::DockerBackend;
 pub use firecracker::{
