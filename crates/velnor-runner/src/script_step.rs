@@ -867,6 +867,7 @@ impl CommandFileSet {
             warning_count: 0,
             notice_count: 0,
             command_failed: false,
+            allow_unsecure_stop_command_tokens: false,
         };
         self.collect_env(&temp_dir, &mut state)?;
         self.collect_summary(&temp_dir, &mut state)?;
@@ -1081,6 +1082,11 @@ pub struct StepCommandState {
     /// upstream's `RunStepAsync` merge — a failed command fails the step
     /// even when the process itself exited 0.
     pub command_failed: bool,
+    /// Whether output rendering must honor invalid stop-command tokens because
+    /// the job explicitly opted into insecure command execution. The parser
+    /// carries this alongside the command result so the log renderer applies
+    /// the same policy instead of inventing a display-only stop state.
+    pub(crate) allow_unsecure_stop_command_tokens: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1125,6 +1131,7 @@ impl StepCommandState {
         self.warning_count += other.warning_count;
         self.notice_count += other.notice_count;
         self.command_failed |= other.command_failed;
+        self.allow_unsecure_stop_command_tokens |= other.allow_unsecure_stop_command_tokens;
         if !other.summary.is_empty() {
             self.summary.push_str(&other.summary);
         }
