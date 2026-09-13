@@ -41,10 +41,10 @@ use crate::{
         configure_safe_directory, reap_stale_checkout_credentials, CheckoutPlan,
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
+    execution::condition_is_statically_false,
     executor::{
-        condition_is_statically_false, BoundedStepSender, CommandRunner, DockerJobEngine,
-        ExecutableStep, JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
-        STEP_PUBLISH_CHANNEL_CAPACITY,
+        BoundedStepSender, CommandRunner, DockerJobEngine, ExecutableStep, JobExecutionSummary,
+        ProcessCommandRunner, StepLog, StepStartEvent, STEP_PUBLISH_CHANNEL_CAPACITY,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
