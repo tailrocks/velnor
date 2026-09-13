@@ -1373,13 +1373,13 @@ fn validate_attestation_permissions(
     }
 }
 
+/// Whether the job explicitly requests the sccache compatibility mode.
+///
+/// Thin alias over the single decision point
+/// (`crate::sccache_compat::is_explicit`); kept under this name so admission
+/// and stable-workspace gating keep reading at the manifest boundary.
 pub fn declares_sccache(job: &AgentJobRequestMessage) -> bool {
-    job.steps.iter().filter(|step| step.enabled).any(|step| {
-        step.reference
-            .as_ref()
-            .and_then(|reference| reference.name.as_deref())
-            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
-    })
+    crate::sccache_compat::is_explicit(job)
 }
 
 /// Whether the workflow opts out of Velnor's Rust acceleration without
@@ -2951,6 +2951,21 @@ mod tests {
             &[],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn sccache_version_input_matches_compat_lock() {
+        // The admitted `version:` input and the binary the compat mode
+        // provisions must agree; a drift would fail closed at install time.
+        let locked = format!("v{}", crate::sccache_compat::LOCKED_VERSION);
+        assert!(
+            SCCACHE_INPUTS.iter().any(|rule| matches!(
+                rule,
+                InputRule::Literal("version", versions)
+                    if versions.contains(&locked.as_str())
+            )),
+            "SCCACHE_INPUTS must admit the compat lock {locked}"
+        );
     }
 
     #[test]

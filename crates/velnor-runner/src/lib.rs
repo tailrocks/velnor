@@ -54,6 +54,7 @@ pub mod protocol;
 mod release;
 pub mod runner;
 mod runtime_env;
+mod sccache_compat;
 mod script_step;
 mod sd_notify;
 pub mod service;

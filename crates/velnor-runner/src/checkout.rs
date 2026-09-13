@@ -225,6 +225,7 @@ where
         &plan.clone_url,
         plan.version.as_deref().unwrap_or("HEAD"),
         &plan.destination,
+        workspace_host,
         plan.token.as_deref(),
         plan.fetch_depth,
         plan.fetch_tags,
@@ -262,28 +263,102 @@ where
 /// `executor.rs`: canonicalize both sides, require prefix containment.
 /// Missing trailing components cannot hide a symlink, so only the nearest
 /// existing ancestor is resolved.
+///
+/// Callers run this up front as a fail-fast before any side effect, and
+/// `fetch_git_ref` re-asserts it before every path-resolving write phase
+/// (creation, fetch/hydration, checkout, clean/reset, credential persist).
+/// Each re-assert bounds its window to the gap between that check and its
+/// phase instead of the minutes `ensure_mirror` spends on network fetch —
+/// but the windows are narrowed, not closed: a swap landing exactly between
+/// a check and the phase it guards still redirects that phase, because git
+/// resolves paths itself and no fd survives into its writes. What the
+/// re-asserts guarantee is that a swap completed *before* a check is refused
+/// before the next write, and that no window ever again spans a network
+/// fetch.
 fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(workspace_host)
-        .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout containment requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(workspace_host)
+            .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
+        let workspace = fs::canonicalize(workspace_host)
+            .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
+        let mut existing: &Path = destination;
+        while !existing.exists() {
+            existing = existing.parent().with_context(|| {
+                format!(
+                    "checkout destination '{}' has no existing ancestor",
+                    destination.display()
+                )
+            })?;
+        }
+        let canonical = fs::canonicalize(existing)
+            .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
+        if !canonical.starts_with(&workspace) {
+            bail!(
+                "refusing checkout destination '{}': resolves outside the workspace",
+                destination.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Create the checkout destination without letting a swapped path component
+/// redirect creation outside the workspace.
+///
+/// `fs::create_dir_all` follows symlinks, so create-then-check left an empty
+/// directory outside the workspace on a swapped tree before the check ran.
+/// Check first (nearest existing ancestor — nothing created yet), then create
+/// with ancestor-pinned, no-follow semantics, then re-assert with the
+/// destination itself existing.
+fn create_contained_dir_all(workspace_host: &Path, destination: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout directory creation requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        create_pinned_dir_all(workspace_host, destination)?;
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        Ok(())
+    }
+}
+
+/// Create `destination` component by component below the canonical workspace
+/// root, never traversing a symlink. Each ancestor is descriptor-bound before
+/// its child is opened or created, so a swap racing creation meets a
+/// `NOFOLLOW` open and fails instead of redirecting the new directory.
+#[cfg(unix)]
+fn create_pinned_dir_all(workspace_host: &Path, destination: &Path) -> Result<()> {
+    let relative = destination.strip_prefix(workspace_host).with_context(|| {
+        format!(
+            "checkout destination '{}' is not below the workspace '{}'",
+            destination.display(),
+            workspace_host.display()
+        )
+    })?;
+    // The pre-check above created the workspace, so it canonicalizes now; the
+    // root handed to the pinned walk is absolute and link-free.
     let workspace = fs::canonicalize(workspace_host)
         .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
-    let mut existing: &Path = destination;
-    while !existing.exists() {
-        existing = existing.parent().with_context(|| {
-            format!(
-                "checkout destination '{}' has no existing ancestor",
-                destination.display()
-            )
-        })?;
-    }
-    let canonical = fs::canonicalize(existing)
-        .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
-    if !canonical.starts_with(&workspace) {
-        bail!(
-            "refusing checkout destination '{}': resolves outside the workspace",
+    let _pinned = crate::fs_copy::NoFollowDestinationDir::open_trusted_rooted_destination(
+        &workspace, relative,
+    )
+    .with_context(|| {
+        format!(
+            "create checkout destination '{}' without following links",
             destination.display()
-        );
-    }
+        )
+    })?;
     Ok(())
 }
 
@@ -302,6 +377,7 @@ fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
 pub fn cleanup_checkout_credentials<R>(
     runner: &mut R,
     plans: &[CheckoutPlan],
+    workspace_host: &Path,
 ) -> Result<Vec<Vec<String>>>
 where
     R: CommandRunner,
@@ -309,7 +385,7 @@ where
     let mut traces = Vec::with_capacity(plans.len());
     for plan in plans {
         let mut log = Vec::new();
-        cleanup_checkout_credential(runner, plan, &mut log)?;
+        cleanup_checkout_credential(runner, plan, &mut log, workspace_host)?;
         traces.push(log);
     }
     Ok(traces)
@@ -319,18 +395,26 @@ fn cleanup_checkout_credential<R>(
     runner: &mut R,
     plan: &CheckoutPlan,
     log: &mut Vec<String>,
+    workspace_host: &Path,
 ) -> Result<()>
 where
     R: CommandRunner,
 {
-    // Retire the crash journal entries for this workspace first: from here on
-    // this function owns removing the credential, and a stale entry would let a
-    // later reaper scrub a workspace that has already been handed back.
-    let registered = release_registered_credentials(&plan.destination);
     let git_dir = plan.destination.join(".git");
     if !git_dir.exists() {
         return Ok(());
     }
+    // The `git config --unset-all` below writes through whatever the
+    // destination resolves to *now*. A path component swapped for a symlink
+    // after checkout would turn cleanup into a write outside the workspace,
+    // so gate before touching git — after the existence check so a
+    // never-created destination stays a silent no-op, and before the release
+    // below so a gate-failure bail never leaves a live untracked credential.
+    ensure_cleanup_contained(workspace_host, &plan.destination)?;
+    // Retire the crash journal entries for this workspace: from here on this
+    // function owns removing the credential, and a stale entry would let a
+    // later reaper scrub a workspace that has already been handed back.
+    let registered = release_registered_credentials(&plan.destination);
     let config_path = git_dir.join("config");
     // Cleanup is unconditional. Keying it off `persist_credentials` assumed the
     // only writer of the credential was the persist path, which left every
@@ -369,7 +453,10 @@ where
     }
     // Verify rather than trust. `git config --unset-all` removes one key; the
     // invariant this function has to hold is that no credential of any scope
-    // survives in the workspace at all.
+    // survives in the workspace at all. Gate again: the scrub below writes
+    // through the same `.git` dir the git invocation above did, and a swap
+    // between them must not redirect it.
+    ensure_cleanup_contained(workspace_host, &plan.destination)?;
     if scrub_config_credentials(&config_path)? {
         log.push(format!(
             "Removed a residual credential from {}",
@@ -387,6 +474,18 @@ where
             "Released {registered} tracked checkout credential(s)"
         ));
     }
+    Ok(())
+}
+
+/// Containment for cleanup: both the `git config --unset-all` and the scrub
+/// write through `destination/.git`, so gate the git dir itself — not just
+/// the destination — against a `.git`-component swap. Gating the destination
+/// alone lets a `destination/.git` symlink bypass the gate into scrub writes
+/// outside the workspace. Missing trailing components cannot hide a symlink,
+/// so the git dir resolves to its nearest existing ancestor.
+fn ensure_cleanup_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
+    ensure_checkout_destination_contained(workspace_host, destination)?;
+    ensure_checkout_destination_contained(workspace_host, &destination.join(".git"))?;
     Ok(())
 }
 
@@ -578,6 +677,21 @@ fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
                     path.display()
                 )
             })?;
+        // The journal names an absolute `<workspace>/.git/config` — that is
+        // the only shape `register_credential` ever writes. A relative path
+        // would resolve against the reaper's own working directory, and any
+        // other absolute path is not a checkout credential; scrubbing either
+        // touches a file this journal must never name. Skip the entry without
+        // removing it (it stays for inspection) and keep reaping the rest: a
+        // single planted entry must not block every legitimate cleanup.
+        if !is_journal_config_path(&config) {
+            eprintln!(
+                "Skipping checkout credential journal {}: unexpected config path {}",
+                path.display(),
+                config.display()
+            );
+            continue;
+        }
         if scrub_config_credentials(&config)? {
             eprintln!(
                 "Removed a checkout credential left behind by an aborted job: {}",
@@ -596,6 +710,17 @@ fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
         reaped += 1;
     }
     Ok(reaped)
+}
+
+/// The only config path shape the reaper scrubs: an absolute
+/// `<workspace>/.git/config`, matching what `register_credential` writes.
+fn is_journal_config_path(config: &Path) -> bool {
+    config.is_absolute()
+        && config.file_name().is_some_and(|name| name == "config")
+        && config
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .is_some_and(|name| name == ".git")
 }
 
 /// Remove every `extraheader` entry from a git config file, returning whether
@@ -708,6 +833,7 @@ pub fn fetch_git_ref<R>(
     clone_url: &str,
     git_ref: &str,
     destination: &Path,
+    workspace_host: &Path,
     token: Option<&str>,
     fetch_depth: Option<u32>,
     fetch_tags: bool,
@@ -721,8 +847,13 @@ pub fn fetch_git_ref<R>(
 where
     R: CommandRunner,
 {
-    std::fs::create_dir_all(destination)
-        .with_context(|| format!("create {}", destination.display()))?;
+    // Check-first, ancestor-pinned creation: the pre-check in
+    // `execute_checkout_with_mirror` ran before `ensure_mirror`'s network
+    // fetch, and a concurrent workspace writer could have swapped a path
+    // component for a symlink during those minutes. Refuse before creating
+    // anything — a plain `create_dir_all` would follow the swap and leave an
+    // empty directory outside the workspace.
+    create_contained_dir_all(workspace_host, destination)?;
 
     run_git(runner, &["init".to_string(), path_arg(destination)], log)?;
     // Remove a stale origin only when one exists: on a fresh workspace
@@ -771,6 +902,10 @@ where
     )?;
 
     let fetch_env = git_auth_env(clone_url, token);
+    // Later path-resolving writes re-assert too: the minutes-long fetch below
+    // would otherwise carry a swap from the `git init` above into every phase
+    // after it.
+    ensure_checkout_destination_contained(workspace_host, destination)?;
     {
         let _span =
             tracing::info_span!("checkout.workspace.fetch", phase = "workspace-fetch",).entered();
@@ -821,6 +956,8 @@ where
         }
     }
 
+    // A swap during the fetch above must not reach the checkout writes.
+    ensure_checkout_destination_contained(workspace_host, destination)?;
     {
         let _span =
             tracing::info_span!("checkout.workspace.checkout", phase = "workspace-checkout",)
@@ -845,6 +982,8 @@ where
         }
 
         if clean {
+            // `reset --hard` and `clean -ffdx` delete; re-assert before them.
+            ensure_checkout_destination_contained(workspace_host, destination)?;
             let mut reset = vec!["-C".to_string(), path_arg(destination)];
             if !lfs {
                 reset.extend(lfs_skip_smudge_args());
@@ -868,6 +1007,9 @@ where
     }
 
     if persist_credentials && let Some(token) = token {
+        // The credential write is the last path-resolving write; a swap
+        // during checkout must not plant the token outside the workspace.
+        ensure_checkout_destination_contained(workspace_host, destination)?;
         persist_git_credentials(runner, destination, clone_url, token, log)?;
     }
 
@@ -2043,6 +2185,49 @@ mod tests {
     }
 
     #[test]
+    fn reaper_skips_journal_entries_with_unexpected_config_paths() {
+        let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
+        let journal = root.join("journal");
+        let abandoned = root.join("abandoned");
+        let abandoned_config = write_credentialed_config(&abandoned);
+        // An absolute path that is not a `<workspace>/.git/config`: the only
+        // shape `register_credential` ever writes.
+        let decoy = root.join("decoy.conf");
+        std::fs::write(
+            &decoy,
+            "[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(&journal).unwrap();
+        for (name, config) in [
+            ("legit.json", abandoned_config.display().to_string()),
+            ("relative.json", "some/relative/config".to_string()),
+            ("elsewhere.json", decoy.display().to_string()),
+        ] {
+            std::fs::write(
+                journal.join(name),
+                serde_json::json!({
+                    "config": config,
+                    "workspace": abandoned.display().to_string(),
+                    "pid": 1,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+
+        // The legitimate entry reaps; the two planted entries are skipped —
+        // kept for inspection, never scrubbed, never blocking the rest.
+        assert_eq!(reap_stale_credentials_in(&journal).unwrap(), 1);
+        assert!(!config_has_credential(&abandoned_config));
+        assert!(!journal.join("legit.json").exists());
+        assert!(config_has_credential(&decoy));
+        assert!(journal.join("relative.json").exists());
+        assert!(journal.join("elsewhere.json").exists());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn checkout_fails_closed_when_the_credential_journal_cannot_be_read() {
         let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
         let journal = root.join("journal");
@@ -2093,7 +2278,7 @@ mod tests {
 
         // This used to print a warning to stderr and report success, leaving a
         // credentialed workspace on the host.
-        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan]).unwrap_err();
+        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan], &root).unwrap_err();
         assert!(
             format!("{error:#}").contains("cleanup of checkout credentials"),
             "{error:#}"
@@ -2127,7 +2312,7 @@ mod tests {
 
         // Cleanup used to return early whenever the plan said it had not
         // persisted anything, so a credential written by any other path stayed.
-        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan]).unwrap();
+        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan], &root).unwrap();
         assert!(!config_has_credential(&config));
         std::fs::remove_dir_all(root).ok();
     }
@@ -2165,6 +2350,7 @@ mod tests {
                 plan.persist_credentials = true;
                 plan
             }],
+            &root,
         )
         .unwrap();
         assert!(!config_has_credential(&workspace.join(".git/config")));
@@ -2184,6 +2370,7 @@ mod tests {
             "https://github.com/acme/repo.git",
             "abc123",
             &workspace,
+            &root,
             Some("token"),
             Some(1),
             false,
@@ -2741,6 +2928,279 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// The pre-check passes on a clean tree, but `ensure_mirror` then spends
+    /// minutes on network fetch before the first write; a concurrent
+    /// workspace writer swapping a path component for a symlink in that
+    /// window must still be refused — after `create_dir_all`, before the
+    /// first git command.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_destination_swapped_out_after_the_precheck() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-toctou-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let parent = workspace.join("first");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let destination = parent.join("escape");
+
+        // The fail-fast pre-check sees a clean tree and passes.
+        ensure_checkout_destination_contained(&workspace, &destination).unwrap();
+        // A concurrent writer swaps the parent for a link during the mirror
+        // fetch window. (`fetch_git_ref` itself re-checks after creating the
+        // destination, which is what this test pins.)
+        std::fs::remove_dir(&parent).unwrap();
+        std::os::unix::fs::symlink(&outside, &parent).unwrap();
+
+        let mut runner = RecordingRunner::default();
+        let error = fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &destination,
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            true,
+            true,
+            false,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a swapped-out destination must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        assert!(
+            !outside.join("escape").exists(),
+            "nothing may be created outside the workspace"
+        );
+        assert!(
+            outside.read_dir().unwrap().next().is_none(),
+            "the swap target must stay empty"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Containment is re-asserted before *every* write phase, not just the
+    /// first: a swap landing after `git init` must still be refused before
+    /// the fetch, checkout, clean, and credential writes that follow it.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_reasserts_containment_before_later_write_phases() {
+        /// Swaps the destination's parent for a symlink the first time git
+        /// runs, mimicking a concurrent workspace writer racing the checkout.
+        struct SwappingRunner {
+            parent: PathBuf,
+            outside: PathBuf,
+            calls: Vec<Vec<String>>,
+            swapped: bool,
+        }
+        impl CommandRunner for SwappingRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                self.calls.push(args.to_vec());
+                if !self.swapped {
+                    std::fs::remove_dir_all(&self.parent).unwrap();
+                    std::os::unix::fs::symlink(&self.outside, &self.parent).unwrap();
+                    self.swapped = true;
+                }
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-reswap-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let parent = workspace.join("first");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+
+        let mut runner = SwappingRunner {
+            parent: parent.clone(),
+            outside: outside.clone(),
+            calls: Vec::new(),
+            swapped: false,
+        };
+        let error = fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &parent.join("escape"),
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            true,
+            true,
+            false,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a mid-run swap must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(runner.swapped, "the test never performed its swap");
+        for phase in ["fetch", "checkout", "reset", "clean"] {
+            assert!(
+                !runner
+                    .calls
+                    .iter()
+                    .any(|args| args.iter().any(|arg| arg == phase)),
+                "no `{phase}` may run after the swap: {:?}",
+                runner.calls
+            );
+        }
+        assert!(
+            !outside.join("escape").exists(),
+            "no credential may be planted outside the workspace"
+        );
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A destination that resolves outside the workspace by cleanup time —
+    /// a path component swapped for a symlink after checkout — must refuse
+    /// the `git config --unset-all` rather than write through the link.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_credential_unset_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-swap-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(outside.join("repo"), workspace.join("link")).unwrap();
+
+        let plan = test_checkout_plan(workspace.join("link"));
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup outside the workspace must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Gating the destination alone lets a `destination/.git` swap bypass the
+    /// gate: cleanup must gate the canonicalized git dir too, before both
+    /// the git invocation and the scrub.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_git_dir_swapped_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-gitdir-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let repo = workspace.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside_config = write_credentialed_config(&outside);
+        std::os::unix::fs::symlink(outside.join(".git"), repo.join(".git")).unwrap();
+
+        let plan = test_checkout_plan(repo);
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup through a swapped .git must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped git dir: {:?}",
+            runner.calls
+        );
+        assert!(
+            config_has_credential(&outside_config),
+            "the outside credential must be untouched"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A gate-failure bail must not leave a live untracked credential: the
+    /// gate runs before the journal release, so a refused cleanup keeps its
+    /// registration for a later reaper instead of deleting it.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_gate_failure_keeps_credential_tracked() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-tracked-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(outside.join("repo"), workspace.join("link")).unwrap();
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = Some(root.join("journal")));
+
+        let destination = workspace.join("link");
+        register_credential(&destination).unwrap();
+        assert_eq!(
+            std::fs::read_dir(root.join("journal")).unwrap().count(),
+            1,
+            "the credential must start tracked"
+        );
+
+        let plan = test_checkout_plan(destination.clone());
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup outside the workspace must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            std::fs::read_dir(root.join("journal")).unwrap().count(),
+            1,
+            "a refused cleanup must not release the journal entry"
+        );
+        assert!(
+            active_credentials()
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|registration| registration.destination == destination),
+            "a refused cleanup must keep the credential registered"
+        );
+
+        release_registered_credentials(&destination);
+        TEST_JOURNAL_DIR.with(|dir| *dir.borrow_mut() = None);
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
         CheckoutPlan {
             step_id: "checkout".into(),
@@ -2787,7 +3247,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+        cleanup_checkout_credentials(&mut runner, &[plan], &temp).unwrap();
 
         assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
             "config".into(),
@@ -2820,7 +3280,9 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+        // The destination was never created, so cleanup returns before the
+        // containment gate; the workspace value is never consulted.
+        cleanup_checkout_credentials(&mut runner, &[plan], std::path::Path::new("/tmp")).unwrap();
 
         assert!(runner.calls.is_empty());
     }
@@ -2928,6 +3390,7 @@ mod tests {
             "https://github.com/acme/repo.git",
             "abc123",
             &temp,
+            &temp,
             None,
             Some(1),
             false,
@@ -2968,6 +3431,7 @@ mod tests {
             &mut runner,
             "https://github.com/acme/repo.git",
             "abc123",
+            &temp,
             &temp,
             None,
             Some(1),
@@ -3044,6 +3508,7 @@ mod tests {
             source.to_str().unwrap(),
             &requested,
             &destination,
+            &root,
             None,
             None,
             true,

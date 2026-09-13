@@ -4240,7 +4240,7 @@ where
                 let result = self.native_shell(
                     container,
                     state,
-                    "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
+                    crate::sccache_compat::post_script(),
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -4343,39 +4343,38 @@ where
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
                     }
                 }
-                // Holders remain: shrink the daemon ceiling for those that do,
-                // so a once-shared builder does not keep a machine-sized
-                // ceiling for one job. Best-effort like the stop — sizing is
-                // an optimization, never a release failure — and skipped when
-                // the remaining holders cannot be counted. A final release
-                // resizes nothing: the daemon is stopped or already gone.
+                // Holders remain: shrink the daemon ceiling for those that
+                // do, so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. The ceiling sums the remaining
+                // holders' own recordings — the releaser's limits are not
+                // theirs — with the same per-dimension static fallback
+                // setup uses. Best-effort like the stop: sizing is an
+                // optimization, never a release failure. Unreadable
+                // holders resize nothing, and a final release resizes
+                // nothing either: the daemon is stopped or already gone.
                 if matches!(outcome, Some(outcome) if !outcome.removed_last)
                     && let Some(run_root) = run_root.as_ref()
-                    && let Some(remaining) = crate::buildkit::builder_holder_count(run_root, &name)
-                    && remaining > 0
+                    && let Some(remaining) =
+                        crate::buildkit::builder_holders_for_sizing(run_root, &name)
+                    && !remaining.is_empty()
                 {
-                    match container.buildkit_size(u32::try_from(remaining).unwrap_or(u32::MAX)) {
-                        Ok(size) if !size.is_empty() => {
-                            if let Err(error) = crate::buildkit::resize_builder_daemon(
-                                &name,
-                                size.cpu_milli,
-                                size.memory_bytes,
-                            ) {
-                                use std::fmt::Write as _;
-                                let _ = writeln!(
-                                    stderr,
-                                    "buildx post: resize of {name} failed ({error:#})"
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            use std::fmt::Write as _;
-                            let _ = writeln!(
-                                stderr,
-                                "buildx post: resize of {name} skipped ({error:#})"
-                            );
-                        }
+                    let entitlements: Vec<_> = remaining
+                        .iter()
+                        .map(|holder| holder.entitlement())
+                        .collect();
+                    let derived = container.buildkit_size_summed(&entitlements);
+                    let (static_cpu, static_memory) = container.static_buildkit_fallback();
+                    let size = derived.with_fallback(static_cpu, static_memory);
+                    if !size.is_empty()
+                        && let Err(error) = crate::buildkit::resize_builder_daemon(
+                            &name,
+                            size.cpu_milli,
+                            size.memory_bytes,
+                        )
+                    {
+                        use std::fmt::Write as _;
+                        let _ =
+                            writeln!(stderr, "buildx post: resize of {name} failed ({error:#})");
                     }
                 }
                 Ok(StepExecutionResult {
@@ -4541,8 +4540,32 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
-        Ok(native_command_result(result, StepCommandState::default()))
+        let mut result = self.native_shell(
+            container,
+            state,
+            &crate::sccache_compat::setup_script(),
+            timeout,
+        )?;
+        // The setup script installs outside the default PATH only on the
+        // non-root fallback; mirror a fallback install dir onto later steps'
+        // PATH the same way the cosign adapter does.
+        let mut path = Vec::new();
+        let mut kept = Vec::new();
+        for line in result.stdout.lines() {
+            if let Some(dir) = line.strip_prefix(crate::sccache_compat::PATH_MARKER) {
+                path.push(dir.to_string());
+            } else {
+                kept.push(line.to_string());
+            }
+        }
+        result.stdout = kept.join("\n");
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path,
+                ..StepCommandState::default()
+            },
+        ))
     }
 
     fn native_setup_mold(
@@ -4930,12 +4953,18 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
-        // The holder count below sizes the daemon for the jobs sharing it
-        // now; without a run root there is nothing to count, so a created
+        // This job's own entitlement, recorded in its claim below so the
+        // daemon ceiling sums what each holder measured for itself. Computed
+        // before the claim: a malformed declared limit fails setup here —
+        // the same rejection `start_args` applies — instead of claiming a
+        // builder this setup then refuses to size.
+        let own_entitlement = container.own_buildkit_entitlement()?;
+        // The holder set below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to read, so a created
         // daemon is sized for this job alone and an existing daemon is left
         // untouched — resizing it to a single share could throttle sharers
         // this setup cannot see.
-        let mut holders: u32 = 1;
+        let mut entitlements = vec![own_entitlement];
         let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
@@ -4952,6 +4981,7 @@ where
                 },
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
+                own_entitlement,
             )?;
             // Cap the workflow-minted builders in this scope/tier/repository:
             // per-victim failures are best-effort, but an over-cap group with
@@ -4983,26 +5013,35 @@ where
                     );
                 }
             }
-            // Count after the claim above, so this job is included. The read
+            // Read after the claim above, so this job is included. The read
             // only fails when the file this setup just wrote cannot be read
             // back; a created daemon is then sized for this job alone rather
             // than failing the step, while an existing daemon is left
             // untouched — an uncounted resize could throttle unseen sharers.
-            match crate::buildkit::builder_holder_count(&run_root, &name) {
-                Some(count) => {
-                    holders = u32::try_from(count.max(1)).unwrap_or(1);
+            // The job's own recording is appended when the read somehow
+            // misses it, so sizing never drops the holder standing here.
+            match crate::buildkit::builder_holders_for_sizing(&run_root, &name) {
+                Some(holders) => {
+                    entitlements = holders.iter().map(|holder| holder.entitlement()).collect();
+                    if !holders
+                        .iter()
+                        .any(|holder| holder.container == container.name)
+                    {
+                        entitlements.push(own_entitlement);
+                    }
                     holders_known = true;
                 }
                 None => {
-                    holders = 1;
+                    entitlements = vec![own_entitlement];
                 }
             }
         }
-        // The derived slot budget sizes the daemon for its current holders.
-        // Each known dimension wins independently; an unobservable CPU must
-        // not discard an explicit memory ceiling, and an unobservable memory
-        // budget must not discard an explicit CPU ceiling.
-        let buildkit_size = container.buildkit_size(holders)?;
+        // The summed holder entitlements size the daemon for the jobs
+        // sharing it now. Each known dimension wins independently: an
+        // unobservable CPU must not discard an explicit memory ceiling,
+        // and an unobservable memory budget must not discard an explicit
+        // CPU ceiling. Total absence keeps the verbatim static spelling.
+        let buildkit_size = container.buildkit_size_summed(&entitlements);
         let driver_opts = buildx_driver_options(&buildkit_size, &container.resource_options)?;
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -5028,15 +5067,22 @@ where
             let result =
                 self.container_docker(container, &action_state, &use_args, None, timeout)?;
             // An existing daemon keeps whatever ceiling it was born with, so
-            // resize it for the counted holders present now. Best-effort: a
-            // wrong ceiling slows builds, it never breaks them, and the next
-            // setup converges it. Uncounted holders resize nothing.
+            // resize it for the holders present now, with the same
+            // per-dimension static fallback creation uses: an unobservable
+            // budget resizes an existing daemon exactly as it would create
+            // one. Best-effort: a wrong ceiling slows builds, it never
+            // breaks them, and the next setup converges it. Uncounted
+            // holders resize nothing, and a dimension with neither a
+            // derived nor a static value keeps the daemon's existing
+            // ceiling there.
+            let (static_cpu, static_memory) = container.static_buildkit_fallback();
+            let effective = buildkit_size.with_fallback(static_cpu, static_memory);
             if holders_known
-                && !buildkit_size.is_empty()
+                && !effective.is_empty()
                 && let Err(error) = crate::buildkit::resize_builder_daemon(
                     &name,
-                    buildkit_size.cpu_milli,
-                    buildkit_size.memory_bytes,
+                    effective.cpu_milli,
+                    effective.memory_bytes,
                 )
             {
                 eprintln!("buildx setup: resize of {name}: {error:#}");
@@ -6433,43 +6479,6 @@ fn parse_mise_environment(
     Ok((env, masks))
 }
 
-fn sccache_setup_script() -> String {
-    // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
-    // (download the release if the job image doesn't ship it), then start the
-    // server. Velnor selects RUSTC_WRAPPER=sccache only when this explicit
-    // action is present, so the binary MUST exist on PATH or every invocation fails with
-    // "could not execute process `sccache ...`: No such file or directory".
-    // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
-    // Velnor injects let sccache use the GitHub Actions cache backend.
-    r#"set -e
-command -v sccache >/dev/null 2>&1 || { echo 'sccache v0.16.0 must be preinstalled in the job image' >&2; exit 1; }
-sccache --version | grep -F 'sccache 0.16.0'
-# Velnor provides a fast, host-shared sccache cache bind-mounted at
-# /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
-# service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
-# would make the server fail ("cache url for ghac not found") and every
-# RUSTC_WRAPPER=sccache compile would error. Export the override via GITHUB_ENV so
-# subsequent compile steps (clippy/test) pick it up, and disable the GHA backend.
-SCCACHE_LOCAL_DIR=/var/cache/sccache
-mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-  echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
-  echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-fi
-export RUSTC_WRAPPER=sccache
-export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
-export SCCACHE_GHA_ENABLED=false
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE" >> "$GITHUB_ENV"
-fi
-# Best-effort: cargo will auto-start the server on first use anyway.
-sccache --start-server 2>/dev/null || true
-"#
-    .to_string()
-}
-
 /// Inputs of `hadolint/hadolint-action`, defaults matching its action.yml.
 struct HadolintInputs {
     dockerfile: String,
@@ -7635,7 +7644,7 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path_or_child(path, "/opt/mise")
         || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, crate::sccache_compat::CONTAINER_DIR)
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -11923,6 +11932,12 @@ fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<Str
     Ok(options)
 }
 
+/// Merge a derived daemon size with the static `resource_options`
+/// spelling: each known dimension wins independently, and only unknown
+/// dimensions inherit the static value. Total absence returns the static
+/// spelling verbatim, flag order included. Entries outside the
+/// `cpu-*`/`memory=` vocabulary pass through untouched rather than
+/// vanishing.
 fn buildx_driver_options(
     buildkit_size: &crate::container::host_budget::BuildkitSize,
     resource_options: &[String],
@@ -11967,6 +11982,13 @@ fn buildx_driver_options(
                 .cloned(),
         );
     }
+    options.extend(
+        derived
+            .iter()
+            .chain(fallback.iter())
+            .filter(|option| !option.starts_with("cpu-") && !option.starts_with("memory="))
+            .cloned(),
+    );
     Ok(options)
 }
 
@@ -16931,6 +16953,22 @@ esac
     }
 
     #[test]
+    fn partial_derived_size_inherits_only_unknown_static_dimensions() {
+        use crate::container::host_budget::BuildkitSize;
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let static_options = ["--cpus".into(), "8".into(), "--memory".into(), "12g".into()];
+        // Derived CPU wins over static `--cpus 8`; unobserved memory keeps
+        // the static `memory=12g` instead of silently uncapping.
+        assert_eq!(
+            buildx_driver_options(&derived, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=400000", "memory=12g",]
+        );
+    }
+
+    #[test]
     fn buildkit_resource_fallbacks_fill_unknown_dimensions_independently() {
         let static_options = [
             "--cpus".into(),
@@ -19641,6 +19679,25 @@ type=sha,format=long,prefix=,enable=true"
         let mut spec = container(&temp);
         spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
+        // Pin the host budget to a synthetic 16-CPU/16-GiB tree: the
+        // expected daemon ceiling below is hand-derived from it, so this
+        // test asserts an exact argv instead of recomputing one from the
+        // machine it happens to run on.
+        let budget_root = temp.join("synthetic-budget");
+        fs::create_dir_all(budget_root.join("proc")).unwrap();
+        fs::create_dir_all(budget_root.join("sys/fs/cgroup/velnor-jobs.slice")).unwrap();
+        fs::write(
+            budget_root.join("proc/meminfo"),
+            "MemTotal:       16777216 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            budget_root.join("sys/fs/cgroup/velnor-jobs.slice/cpu.max"),
+            "1600000 100000\n",
+        )
+        .unwrap();
+        let _budget = crate::container::host_budget::TestBudgetGuard::pin(&budget_root, Some(16));
+
         let results = executor
             .execute_ordered_steps_with_context(
                 &spec,
@@ -19694,19 +19751,22 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        // The derived slot budget sizes the daemon: recompute the size from
-        // the same host observation and require it on the create argv. Any
-        // unobservable dimension still falls back to its static policy.
-        let size = spec.buildkit_size(1).unwrap();
-        let expected_opts = buildx_driver_options(&size, &spec.resource_options).unwrap();
-        assert!(!expected_opts.is_empty());
-        let expected_driver_opt = expected_opts.join(",");
+        // The synthetic budget pins this job to 16 CPUs and the 85% memory
+        // pool of 16 GiB on one slot; the declared `--cpus 4` narrows CPU
+        // to 4000 milli and the declared `--memory 12g` narrows memory to
+        // exactly 12 GiB. No run root exists in tests, so the daemon is
+        // sized for this job alone: the exact ceiling is asserted literally
+        // below, while the recomputed size only selects the fallback
+        // assertion branch after it.
+        let own = spec.own_buildkit_entitlement().unwrap();
+        let size = spec.buildkit_size_summed(&[own]);
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
         assert!(
-            create.contains(&format!("'--driver-opt' '{expected_driver_opt}'")),
+            create
+                .contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12884901888'"),
             "derived budget must reach buildkitd, got: {create}"
         );
         assert!(create.contains(&format!(

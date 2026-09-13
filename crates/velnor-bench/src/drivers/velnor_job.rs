@@ -60,14 +60,17 @@ enum Kind {
     /// `context.concurrency` job lifecycles whose containers overlap, while
     /// the benchmark's Docker control-plane phases remain serialized.
     ConcurrentSlots,
-    /// Sequential trusted and untrusted labeled lifecycles; stages carry the
-    /// per-stage slower of the pair, not a claim about remote trust admission.
+    /// The same workload as a trusted and an untrusted job, each in its
+    /// own trust-scoped partition mounting only that class's state; stages
+    /// carry the per-stage slower of the pair, not a claim about remote
+    /// trust admission or cache isolation.
     TrustPartition,
     /// The Nth job on a retaining host: `warmups` unmeasured jobs run in
-    /// `prepare`, then the measured one.
+    /// `prepare`, each retaining its workspace and one stopped container,
+    /// then the measured one.
     PersistentHost { warmups: usize },
-    /// Warmups plus a scoped owned-object GC in `prepare`, then the
-    /// measured first job after it.
+    /// Warmups retain state, a scoped owned-object GC removes exactly that
+    /// retained state in `prepare`, then the measured first job after it.
     AfterGc,
 }
 
@@ -881,16 +884,75 @@ impl VelnorJobWorkload {
         Ok(())
     }
 
+    /// Trust-scoped partition of the iteration workspace: the class's own
+    /// state dir, carrying the same workload files plus a round-tripped
+    /// class marker, so each twin mounts only its own class's state
+    /// instead of differing by label alone.
+    fn trust_partition(workspace: &Path, trust: &str) -> Result<PathBuf> {
+        let partition = workspace.join("trust").join(trust);
+        std::fs::create_dir_all(&partition)?;
+        for name in ["job.sh", "payload.txt"] {
+            let source = workspace.join(name);
+            if source.is_file() {
+                std::fs::copy(&source, partition.join(name))?;
+            }
+        }
+        let marker = partition.join("trust-marker");
+        std::fs::write(&marker, trust)?;
+        let back = std::fs::read_to_string(&marker)?;
+        if back != trust {
+            bail!("trust partition {trust} did not round-trip its marker");
+        }
+        Ok(partition)
+    }
+
     /// One full lifecycle with its stages discarded: warmups establish
-    /// retained state, they are never measurements.
+    /// retained state, they are never measurements. Each warmup retains
+    /// its workspace on disk and one stopped container on the daemon —
+    /// real accumulation the measured job then observes — all owned by
+    /// this workload and removed by teardown (or by the after-gc GC).
     fn warmup(&mut self, context: &mut Context, trust: &str) -> Result<()> {
         let workspace = self.scratch()?.join(format!("warmup-{}", self.iteration));
         self.iteration += 1;
         std::fs::create_dir_all(&workspace)?;
+        std::fs::write(
+            workspace.join("warmup-marker"),
+            format!("warmup {} for {}\n", self.iteration, self.scenario),
+        )?;
         let mut stages = BTreeMap::new();
-        let outcome = self.job_lifecycle(context, &workspace, trust, &mut stages);
-        let _ = std::fs::remove_dir_all(&workspace);
-        outcome
+        self.job_lifecycle(context, &workspace, trust, &mut stages)?;
+        let image = self
+            .job_image
+            .clone()
+            .context("job image was not resolved during preparation")?;
+        let owner = format!("com.velnor.bench.owner={}", self.owner_token());
+        let role = "com.velnor.bench.role=job".to_owned();
+        let name = format!("{}-retained", self.object_name("job"));
+        self.own_container(name.clone());
+        let created = context
+            .runner
+            .run(
+                "docker",
+                &[
+                    "create",
+                    "--name",
+                    &name,
+                    "--label",
+                    &owner,
+                    "--label",
+                    &role,
+                    "--entrypoint",
+                    "/bin/sh",
+                    &image,
+                    "-c",
+                    "sleep 30",
+                ],
+            )?
+            .clone();
+        require_success(&created, "docker create retained warmup container")?;
+        let id = parse_docker_id(&created.stdout)?;
+        Self::record_id(&mut self.owned_containers, &name, id)?;
+        Ok(())
     }
 }
 
@@ -917,7 +979,8 @@ impl Workload for VelnorJobWorkload {
                 }
                 if warmups > 0 {
                     self.notes.push(format!(
-                        "persistent-host precondition: {warmups} unmeasured warmup job(s) ran before the measured one"
+                        "persistent-host precondition: {warmups} unmeasured warmup job(s) ran before the measured one, \
+                         each retaining its workspace and one stopped container"
                     ));
                 }
             }
@@ -925,10 +988,30 @@ impl Workload for VelnorJobWorkload {
                 for _ in 0..2 {
                     self.warmup(context, "trusted")?;
                 }
-                // Scoped GC: build one owned image, then remove exactly it.
-                // No host-wide prune ever runs here — the harness must not
-                // delete state it does not own.
+                // Scoped GC: remove exactly the retained warmup state above
+                // — the stopped containers on the daemon plus the warmup
+                // workspaces on disk — and measure what it freed; one
+                // tracked image build exercises the owned-image removal
+                // path too. No host-wide prune ever runs here: the harness
+                // must not delete state it does not own.
+                let retained_containers = self.owned_containers.len();
                 let scratch = self.scratch()?.clone();
+                let mut retained_bytes = 0u64;
+                let mut retained_workspaces = 0usize;
+                for entry in std::fs::read_dir(&scratch)? {
+                    let path = entry?.path();
+                    if path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("warmup-"))
+                    {
+                        retained_bytes += tree_bytes(&path);
+                        retained_workspaces += 1;
+                        std::fs::remove_dir_all(&path)?;
+                    }
+                }
+                // One tracked image build exercises the owned-image removal
+                // path alongside the warmup-state removal above.
                 let dir = scratch.join("gc-context");
                 std::fs::create_dir_all(&dir)?;
                 // The tag, not the resolved ID: a bare ID is not a valid
@@ -967,8 +1050,12 @@ impl Workload for VelnorJobWorkload {
                 self.capture_owned_image(context, &tag)?;
                 self.remove_owned_image_by_tag(context, &tag)?;
                 let _ = std::fs::remove_dir_all(&dir);
+                self.cleanup_owned(context)
+                    .context("after-gc scoped GC of retained warmup state")?;
                 self.notes.push(format!(
-                    "after-gc precondition: 2 warmup job(s), then scoped GC removed one owned image ({} bytes); no host-wide prune",
+                    "after-gc precondition: 2 warmup job(s) retained state, then scoped GC removed \
+                     {retained_containers} owned container(s) and {retained_workspaces} warmup workspace(s) \
+                     ({retained_bytes} bytes) plus one owned image ({} bytes); no host-wide prune",
                     size.stdout.trim()
                 ));
             }
@@ -997,12 +1084,16 @@ impl Workload for VelnorJobWorkload {
                 self.concurrent_batch(context, &workspace, jobs, &mut stages)?;
             }
             Kind::TrustPartition => {
-                // Both classes really run; the record carries the per-stage
-                // slower, so no class hides behind the other's speed.
+                // Both classes really run, each in its own trust-scoped
+                // partition mounting only that class's state; the record
+                // carries the per-stage slower, so no class hides behind
+                // the other's speed.
+                let trusted_workspace = Self::trust_partition(&workspace, "trusted")?;
                 let mut trusted = BTreeMap::new();
-                self.job_lifecycle(context, &workspace, "trusted", &mut trusted)?;
+                self.job_lifecycle(context, &trusted_workspace, "trusted", &mut trusted)?;
+                let untrusted_workspace = Self::trust_partition(&workspace, "untrusted")?;
                 let mut untrusted = BTreeMap::new();
-                self.job_lifecycle(context, &workspace, "untrusted", &mut untrusted)?;
+                self.job_lifecycle(context, &untrusted_workspace, "untrusted", &mut untrusted)?;
                 for (stage, value) in untrusted {
                     let entry = trusted.entry(stage).or_insert(0);
                     *entry = (*entry).max(value);
@@ -1070,13 +1161,18 @@ impl Workload for VelnorJobWorkload {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = self.notes.clone();
+        notes.push(format!(
+            "capacity reservation holds back a {}MiB docker growth allowance for one trivial bench job",
+            DOCKER_GROWTH_ALLOWANCE_BYTES / 1024 / 1024
+        ));
         match self.kind {
             Kind::ConcurrentSlots => notes.push(
                 "concurrent-slots: container lifetimes overlap, but Docker control-plane phases are serialized; stages are phase-window walls, not true concurrent dispatch"
                     .to_owned(),
             ),
             Kind::TrustPartition => notes.push(
-                "trust-partition: sequential trusted and untrusted labeled lifecycles; stages carry the per-stage slower and do not measure remote trust admission or cache isolation"
+                "trust-partition: trusted and untrusted jobs both ran in separate trust-scoped partitions, \
+                 each mounting only its own class state; stages carry the per-stage slower and do not measure remote trust admission or cache isolation"
                     .to_owned(),
             ),
             _ => {}
@@ -1193,7 +1289,8 @@ mod tests {
     #[test]
     fn local_stages_validate_under_the_velnor_job_driver() {
         // The local driver omits the broker/remote stages; validation must
-        // accept the honest subset — no zero-filled broker claims required.
+        // accept the honest subset — no zero-filled broker claims required —
+        // and reject a record that carries them.
         let local: Vec<Stage> = Stage::ALL
             .into_iter()
             .filter(|stage| {
@@ -1204,31 +1301,40 @@ mod tests {
             })
             .collect();
         assert_eq!(local.len(), 10);
-        let observations: Vec<Observation> = (1..=4)
-            .map(|index| Observation {
-                total_ms: index * 100,
-                stages_ms: local.iter().map(|stage| (*stage, index * 10)).collect(),
-                checkout_phases_ms: BTreeMap::new(),
-                resources: Resources {
-                    process_count: 12,
-                    docker_invocations: 12,
-                    ..Resources::default()
-                },
-                git: GitEvidence::NotMeasured,
-                docker_census: DockerCensus {
-                    by_class: BTreeMap::from([(
-                        "query".to_owned(),
-                        ClassObservation {
-                            count: 12,
-                            latency_ms: 40,
-                        },
-                    )]),
-                },
-                fault: None,
-            })
-            .collect();
+        let observation = |index: u64| Observation {
+            total_ms: index * 100,
+            stages_ms: local.iter().map(|stage| (*stage, index * 10)).collect(),
+            checkout_phases_ms: BTreeMap::new(),
+            resources: Resources {
+                process_count: 12,
+                docker_invocations: 12,
+                ..Resources::default()
+            },
+            git: GitEvidence::NotMeasured,
+            docker_census: DockerCensus {
+                by_class: BTreeMap::from([(
+                    "query".to_owned(),
+                    ClassObservation {
+                        count: 12,
+                        latency_ms: 40,
+                    },
+                )]),
+            },
+            fault: None,
+        };
+        let observations: Vec<Observation> = (1..=4).map(observation).collect();
         let mut runner = Runner::new();
-        let record = BenchRecord {
+        let environment = EnvironmentIdentity::probe(
+            &ProbeInputs {
+                velnor_repo: std::env::current_dir().expect("cwd"),
+                fixture_repo: None,
+                work_root: std::env::temp_dir(),
+                job_image: None,
+                runner_config_dir: None,
+            },
+            &mut runner,
+        );
+        let record = |observations: Vec<Observation>| BenchRecord {
             schema: RESULT_SCHEMA.to_owned(),
             run_id: "test".to_owned(),
             recorded_at_unix_ms: 1,
@@ -1238,21 +1344,29 @@ mod tests {
             runnability: Runnability::Preferred {
                 driver: Driver::VelnorJob,
             },
-            environment: EnvironmentIdentity::probe(
-                &ProbeInputs {
-                    velnor_repo: std::env::current_dir().expect("cwd"),
-                    fixture_repo: None,
-                    work_root: std::env::temp_dir(),
-                    job_image: None,
-                    runner_config_dir: None,
-                },
-                &mut runner,
-            ),
+            environment: environment.clone(),
             observations: observations.clone(),
             summaries: Summaries::new(&observations).expect("summaries"),
             notes: Vec::new(),
             context: BTreeMap::new(),
         };
-        record.validate().expect("local stages must validate");
+        record(observations.clone())
+            .validate()
+            .expect("local stages must validate");
+
+        // A zero-filled broker stage claims the broker answered instantly,
+        // which no local run observes: subset-only validation accepted it,
+        // the narrowed observable set rejects it.
+        let mut dishonest = observations;
+        for observation in &mut dishonest {
+            observation.stages_ms.insert(Stage::BrokerDelivery, 0);
+        }
+        assert!(matches!(
+            record(dishonest).validate(),
+            Err(crate::record::RecordError::StageOutsideDriverCoverage {
+                stage: Stage::BrokerDelivery,
+                ..
+            })
+        ));
     }
 }

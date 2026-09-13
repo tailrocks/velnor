@@ -6522,3 +6522,56 @@ mirror path. (e) Checkout scrubs before bailing on git failure, and
 stable double failure (ephemeral keeps masking). Clone-URL-change pin
 covers remove/add-origin + fetch + force + reset + clean. Bench prose
 above scoped to the zero-unit pin; rust/warm + rust/noop runs pending.
+
+## 117. R0-secc fast-follow: checkout TOCTOU re-assert + service-guard job scope — 2026-09-13
+
+Base `origin/main` at `91defe66` (post-#702). Two verifier follow-ups on §114,
+one focused correction each:
+
+- **Checkout TOCTOU.** The §114 containment pre-check runs before
+  `ensure_mirror`'s minutes-long network fetch, so a concurrent workspace
+  writer could swap a path component for a symlink in the window and the
+  first write would land outside the workspace. `fetch_git_ref` now takes
+  the workspace root and re-asserts containment immediately after
+  `create_dir_all(destination)` — the destination exists by then, so this
+  canonicalizes the destination itself rather than an ancestor — before the
+  first `git init`. The pre-check stays as a fail-fast. An fd-based
+  (`O_NOFOLLOW`/`openat2`) pin for the git writes was considered and
+  rejected: git is path-based, so no fd survives into its writes. Residual,
+  stated honestly: each re-assert bounds its window to the gap between that
+  check and its phase rather than the minutes of network fetch, but a swap
+  landing exactly inside such a gap still redirects that phase — the windows
+  are narrowed, not closed. (Second-round hardening, same branch: creation
+  is check-first and ancestor-pinned via `NoFollowDestinationDir` so a
+  swapped tree creates nothing outside; containment is re-asserted before
+  every write phase — fetch/hydration, checkout, clean/reset, credential
+  persist; cleanup gates the canonicalized `.git` dir as well as the
+  destination, before both the git invocation and the scrub, with the gate
+  above the journal release; the reaper skips journal entries whose config
+  path is not an absolute `<workspace>/.git/config`.) `download_repository_actions`
+  threads its `actions_host` root through as the action-bundle workspace.
+  `cleanup_checkout_credentials` takes the workspace too and gates the `git
+  config --unset-all` with the same containment — after the `.git`
+  existence check so a never-created destination stays a silent no-op.
+- **Service ladder guards die on cancel.** The §114 `register_owned_containers`
+  guards lived in the poller task, which breaks right after `request()` on
+  broker-driven cancel paths — deregistering every target before `Forced`
+  escalation, so services never terminate. Ownership is hoisted to
+  `handle_job_request`: the service names are computed once from
+  `service_container_names` and the guards held next to `_job_timeout` for
+  the job scope. `JobCancellationWatch` loses the container-name fields and
+  the poller task no longer registers anything.
+
+Tests: 3 new (post-precheck swap refusal, cleanup-unset refusal outside the
+workspace, broker cancel terminates services after the poller task exits —
+the last drives the real poller against a stub broker, holds guards at a
+job-scope mirror, forces, and asserts the service-key outcome). Efficacy
+proven by mutation: with the re-assert removed the swap test fails; with the
+cleanup gate removed the cleanup test fails; with the guards narrowed to a
+poller-task lifetime the service assertion fails. The service test also
+fails to compile pre-fix (it constructs the slimmed `JobCancellationWatch`).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --locked` clean; strict clippy clean on runner
+(`--all-targets --locked --features test-support -- -D warnings`); serial
+runner lib with `test-support` 1925 passed, 0 failed, 1 ignored.

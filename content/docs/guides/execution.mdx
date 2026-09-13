@@ -243,6 +243,11 @@ a trust-partitioned sccache store at `/var/cache/sccache` and sets
 `SCCACHE_CACHE_SIZE=20G`, and `SCCACHE_GHA_ENABLED=false`. It does not combine
 the two accelerators.
 
+The default job image does not ship sccache. The first explicit-sccache step
+provisions the pinned, checksum-verified sccache release into the job
+container itself (reusing a PATH binary already at the locked version), so
+only jobs that request the mode ever download or run it.
+
 These five are applied after the workflow's environment, so on the sccache path
 a workflow cannot override `RUSTC_WRAPPER` or re-enable Mr Boxington. On the
 default Mr Boxington path nothing sets `MBX_DISABLE` or `RUSTC_WRAPPER`, so

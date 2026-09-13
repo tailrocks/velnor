@@ -259,23 +259,70 @@ impl JobContainerSpec {
             .capped_by_container_cpus(self.declared_container_cpus())
     }
 
-    /// CPU/memory ceiling for a shared buildkitd this job holds alongside
-    /// `holders - 1` other jobs: the slot share times the holder count,
-    /// capped at the host budget. The daemon used to be created from the
-    /// static `resource_options` spelling of operator policy alone, so the
-    /// derived budget sized every compiler except the one inside buildkitd.
-    /// An explicit `--memory` limit narrows the aggregate exactly as it
-    /// narrows one job container; without any declared limit the call still
-    /// succeeds with `None`.
+    /// This job's own BuildKit entitlement: its slot share narrowed by its
+    /// own declared limits. Recorded in the claim file at claim time; the
+    /// daemon ceiling is the sum of every holder's recording, never this
+    /// job's limits multiplied across strangers. The daemon used to be
+    /// created from the static `resource_options` spelling of operator
+    /// policy alone, so the derived budget sized every compiler except the
+    /// one inside buildkitd.
     ///
     /// # Errors
     /// A declared `--memory` limit is present but malformed, the same
     /// rejection `start_args` applies instead of silently dropping policy.
-    pub(crate) fn buildkit_size(&self, holders: u32) -> io::Result<BuildkitSize> {
+    pub(crate) fn own_buildkit_entitlement(&self) -> io::Result<BuildkitSize> {
         let budget = self.slot_budget();
         let declared = self.declared_container_memory()?;
-        let holders = NonZeroU32::new(holders).unwrap_or(NonZeroU32::MIN);
-        Ok(budget.buildkit_size(holders, declared))
+        Ok(budget.own_buildkit_entitlement(declared))
+    }
+
+    /// CPU/memory ceiling for a shared buildkitd doing the compiling for
+    /// `entitlements`: the summed holder recordings, capped at the host
+    /// budget. Pure w.r.t. declared policy — every holder's limits already
+    /// narrowed its own recording — so the sizing (and releasing) job's
+    /// workflow limits cannot leak onto other holders.
+    pub(crate) fn buildkit_size_summed(&self, entitlements: &[BuildkitSize]) -> BuildkitSize {
+        self.slot_budget().buildkit_size_summed(entitlements)
+    }
+
+    /// Static daemon-wide ceilings from `resource_options` alone, for the
+    /// per-dimension fallback when the derived budget cannot observe a
+    /// dimension. Lenient where the create path is strict: unknown flags
+    /// and malformed values read as undeclared rather than failing the
+    /// resize — the create path already rejects a misspelled operator
+    /// policy loudly, and a best-effort resize must not fail twice.
+    /// Workflow createOptions are deliberately excluded: they differ per
+    /// job, so they cannot fill a dimension of a shared daemon's ceiling.
+    pub(crate) fn static_buildkit_fallback(&self) -> (Option<u64>, Option<u64>) {
+        let cpu_milli = self
+            .resource_options
+            .windows(2)
+            .filter(|pair| pair[0] == "--cpus")
+            .map(|pair| pair[1].as_str())
+            .chain(
+                self.resource_options
+                    .iter()
+                    .filter_map(|option| option.strip_prefix("--cpus=")),
+            )
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .filter_map(crate::container::host_budget::cpu_milli_from_cpus)
+            .filter(|milli| *milli > 0)
+            .min();
+        let memory_bytes = self
+            .resource_options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, option)| {
+                if option == "--memory" {
+                    self.resource_options.get(index + 1).map(String::as_str)
+                } else {
+                    option.strip_prefix("--memory=")
+                }
+            })
+            .filter_map(parse_docker_memory_bytes)
+            .min();
+        (cpu_milli, memory_bytes)
     }
 
     /// One line naming the budget, how it was derived, and any workflow value
@@ -381,14 +428,13 @@ impl JobContainerSpec {
                 ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
             ]);
         } else if let Some(host) = &self.sccache_store_host {
-            command.pair("-v", self.mount_arg(host, "/var/cache/sccache"));
-            command.envs([
-                ("MBX_DISABLE", "1"),
-                ("RUSTC_WRAPPER", "sccache"),
-                ("SCCACHE_DIR", "/var/cache/sccache"),
-                ("SCCACHE_CACHE_SIZE", "20G"),
-                ("SCCACHE_GHA_ENABLED", "false"),
-            ]);
+            // Explicit sccache compatibility mode: mount and env owned by the
+            // compat module; the default mbx branch above is untouched.
+            command.pair(
+                "-v",
+                self.mount_arg(host, crate::sccache_compat::CONTAINER_DIR),
+            );
+            command.envs(crate::sccache_compat::container_env());
         }
     }
 
@@ -1459,18 +1505,8 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-/// Host-persistent sccache compiler store, namespaced by the job's admitted
-/// scope like every other trust-partitioned store.
-pub(crate) fn sccache_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "compiler/sccache",
-        "_velnor_sccache",
-    )
-}
-
-/// Host-persistent Cargo download/index store, daemon-shared like sccache.
+/// Host-persistent Cargo download/index store, daemon-shared like the
+/// compiler stores.
 /// Extracted registry sources and git checkouts remain job-local because they
 /// are mutable during materialization and are unsafe to share across slots.
 ///
@@ -1834,6 +1870,28 @@ mod tests {
     }
 
     #[test]
+    fn static_daemon_fallback_reads_only_daemon_wide_policy() {
+        let mut job = spec();
+        // Workflow createOptions differ per job, so they cannot fill a
+        // shared daemon's ceiling — not even when resource_options say
+        // nothing in that dimension.
+        job.resource_options = vec!["--cpus".into(), "4".into()];
+        job.options = vec!["--memory".into(), "1g".into(), "--cpus".into(), "1".into()];
+        assert_eq!(job.static_buildkit_fallback(), (Some(4000), None));
+
+        job.resource_options = vec!["--memory".into(), "12g".into()];
+        assert_eq!(
+            job.static_buildkit_fallback(),
+            (None, Some(12 * 1024 * 1024 * 1024))
+        );
+
+        // Lenient where the create path is strict: garbage reads as
+        // undeclared rather than failing a best-effort resize.
+        job.resource_options = vec!["--cpus".into(), "bogus".into(), "--pids-limit".into()];
+        assert_eq!(job.static_buildkit_fallback(), (None, None));
+    }
+
+    #[test]
     fn job_network_carries_daemon_and_job_ownership_labels() {
         assert_eq!(
             spec().create_network_args(),
@@ -1861,6 +1919,12 @@ mod tests {
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
+        // Default path carries no sccache presence at all: no wrapper, no
+        // sccache env, no provisioned binary on PATH.
+        assert!(!args.iter().any(|arg| arg.contains("RUSTC_WRAPPER")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.to_ascii_lowercase().contains("sccache")));
     }
 
     #[test]
@@ -2235,25 +2299,6 @@ mod tests {
         assert_eq!(
             mise_store_host(temp, "trusted").join("cache"),
             PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
-        );
-    }
-
-    #[test]
-    fn sccache_host_is_shared_across_daemon_slots() {
-        // slot-N work roots collapse to one daemon-level sccache dir.
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
-        );
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
     }
 
