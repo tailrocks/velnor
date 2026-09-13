@@ -25,18 +25,22 @@
 //!
 //! BuildKit sizing follows the same budget. A shared builder daemon does the
 //! compiling for every job holding it, so its ceiling is the aggregate
-//! entitlement of its current holders — the slot share times the holder
-//! count — capped at the host budget:
+//! entitlement of its current holders — the *sum* of what each holder
+//! recorded for itself at claim time — capped at the host budget:
 //!
 //! * one holder gets exactly its slot's share, the same ceiling as its job
 //!   container, so a lone build cannot eat the machine;
 //! * every slot holding one builder converges on the whole host budget, which
 //!   is correct: the daemon is doing the work of the whole machine;
-//! * an unobservable budget sizes nothing, and setup falls back to the static
-//!   `resource_options` spelling of operator policy rather than inventing a
-//!   ceiling.
+//! * a holder's declared workflow limits narrow only its own entitlement:
+//!   the sizing job never multiplies its own limits by the holder count,
+//!   which would let one workflow's policy throttle (or widen) strangers;
+//! * an unobservable dimension sizes nothing in that dimension, and setup
+//!   falls back to the static `resource_options` spelling of operator policy
+//!   per dimension rather than inventing a ceiling.
 //!
-//! See [`SlotBudget::buildkit_size`]. The holder count comes from the claim
+//! See [`SlotBudget::own_buildkit_entitlement`] and
+//! [`SlotBudget::buildkit_size_summed`]. The entitlements come from the claim
 //! file ([`crate::buildkit`]); creation sizes the daemon, every setup resizes
 //! it for the current holders, and every post-action release shrinks it for
 //! the holders that remain, so the ceiling tracks sharing instead of being
@@ -181,6 +185,10 @@ impl HostBudget {
 
     /// Observe the budget of the host this process is running on.
     pub(crate) fn observe_host() -> Self {
+        #[cfg(test)]
+        if let Some((root, parallelism)) = TEST_BUDGET_SOURCE.with(|slot| slot.borrow().clone()) {
+            return Self::observe(&root, parallelism);
+        }
         let parallelism = std::thread::available_parallelism()
             .ok()
             .and_then(|value| u32::try_from(value.get()).ok());
@@ -217,6 +225,40 @@ impl HostBudget {
             memory_bytes,
             host: self.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_BUDGET_SOURCE: std::cell::RefCell<Option<(PathBuf, Option<u32>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Pin [`HostBudget::observe_host`] to a synthetic tree for the current test
+/// thread, so executor argv tests assert exact derived ceilings instead of
+/// recomputing them from the machine they happen to run on. Holding the
+/// guard pins; dropping it unpins, including on unwind. Thread-local, so
+/// parallel tests on other threads keep observing the real host — but a
+/// test that observes from a spawned thread observes the host, not the pin.
+#[cfg(test)]
+pub(crate) struct TestBudgetGuard {
+    _sealed: (),
+}
+
+#[cfg(test)]
+impl TestBudgetGuard {
+    pub(crate) fn pin(root: &Path, parallelism: Option<u32>) -> Self {
+        TEST_BUDGET_SOURCE.with(|slot| {
+            *slot.borrow_mut() = Some((root.to_path_buf(), parallelism));
+        });
+        Self { _sealed: () }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestBudgetGuard {
+    fn drop(&mut self) {
+        TEST_BUDGET_SOURCE.with(|slot| slot.borrow_mut().take());
     }
 }
 
@@ -290,38 +332,80 @@ impl SlotBudget {
         env
     }
 
+    /// This job's own BuildKit entitlement: its slot share narrowed by its
+    /// own declared limits, uncapped and unmultiplied. `declared_memory` is
+    /// the tightest explicit operator/workflow `--memory` limit, if any; it
+    /// narrows this job's entitlement the same way it narrows its job
+    /// container, never widens it. (Declared `--cpus` needs no parameter:
+    /// [`Self::capped_by_container_cpus`] already narrowed this share before
+    /// sizing.) Recorded in the claim file at claim time, so the daemon
+    /// ceiling is summed from what each holder measured for itself instead
+    /// of multiplying one job's limits across strangers. A zero or
+    /// unobservable share entitles nothing — a daemon ceiling of zero would
+    /// refuse to run, and an invented ceiling is the defect this module
+    /// exists to remove.
+    pub(crate) fn own_buildkit_entitlement(&self, declared_memory: Option<u64>) -> BuildkitSize {
+        let cpu_milli = self
+            .docker_cpu_milli
+            .value()
+            .copied()
+            .filter(|milli| *milli > 0);
+        let memory_bytes = self
+            .memory_bytes
+            .value()
+            .copied()
+            .map(|share| match declared_memory {
+                Some(declared) => share.min(declared),
+                None => share,
+            })
+            .filter(|bytes| *bytes > 0);
+        BuildkitSize {
+            cpu_milli,
+            memory_bytes,
+        }
+    }
+
     /// CPU/memory ceiling for one shared buildkitd doing the compiling for
-    /// `holders` concurrent jobs: the slot share times the holder count,
-    /// capped at the host budget. `declared_memory` is the tightest explicit
-    /// operator/workflow `--memory` limit, if any; it narrows the aggregate
-    /// the same way it narrows one job container, never widens it. (Declared
-    /// `--cpus` needs no parameter: [`Self::capped_by_container_cpus`] already
-    /// narrowed this share before sizing.) A zero or unobservable share sizes
-    /// nothing — a daemon ceiling of zero would refuse to run, and an
-    /// invented ceiling is the defect this module exists to remove.
-    pub(crate) fn buildkit_size(
-        &self,
-        holders: NonZeroU32,
-        declared_memory: Option<u64>,
-    ) -> BuildkitSize {
-        let count = u64::from(holders.get());
-        let cpu_milli = match (&self.docker_cpu_milli, &self.host.cpu_milli) {
-            (Observation::Observed(share), Observation::Observed(host)) => {
-                let sized = share.saturating_mul(count).min(*host);
+    /// its current holders: the sum of their recorded
+    /// [`Self::own_buildkit_entitlement`] values, capped at the host budget
+    /// (host CPU, scheduler memory pool). A holder whose dimension is
+    /// unknown — unobservable at its claim time, or recorded before
+    /// entitlements were tracked — contributes nothing in that dimension; a
+    /// dimension with no known contribution sizes nothing, and the caller
+    /// falls back to the static operator policy for it. An unobservable
+    /// host budget sizes nothing at all: an uncapped sum is an invented
+    /// ceiling. Observability is host-wide in practice, so mixed
+    /// known/unknown holders only meet across an upgrade window or a
+    /// mid-run observability flap.
+    pub(crate) fn buildkit_size_summed(&self, entitlements: &[BuildkitSize]) -> BuildkitSize {
+        let mut cpu_sum = 0u64;
+        let mut cpu_known = false;
+        let mut memory_sum = 0u64;
+        let mut memory_known = false;
+        for entitlement in entitlements {
+            if let Some(milli) = entitlement.cpu_milli {
+                cpu_sum = cpu_sum.saturating_add(milli);
+                cpu_known = true;
+            }
+            if let Some(bytes) = entitlement.memory_bytes {
+                memory_sum = memory_sum.saturating_add(bytes);
+                memory_known = true;
+            }
+        }
+        let cpu_milli = match (&self.host.cpu_milli, cpu_known) {
+            (Observation::Observed(host), true) => {
+                let sized = cpu_sum.min(*host);
                 (sized > 0).then_some(sized)
             }
             _ => None,
         };
-        let memory_bytes = match (&self.memory_bytes, &self.host.memory_bytes) {
-            (Observation::Observed(share), Observation::Observed(host)) => {
-                // The pool every slot divides; slot shares times the slot
-                // count land back here (modulo the floor), so the cap only
-                // ever binds a holder count the slot model cannot explain.
+        let memory_bytes = match (&self.host.memory_bytes, memory_known) {
+            (Observation::Observed(host), true) => {
+                // The pool every slot divides; summed slot shares land back
+                // here (modulo the floor), so the cap only ever binds a
+                // holder set the slot model cannot explain.
                 let pool = host / 100 * SCHEDULER_MEMORY_PERCENT;
-                let mut sized = share.saturating_mul(count).min(pool);
-                if let Some(declared) = declared_memory {
-                    sized = sized.min(declared.saturating_mul(count));
-                }
+                let sized = memory_sum.min(pool);
                 (sized > 0).then_some(sized)
             }
             _ => None,
@@ -376,9 +460,11 @@ impl SlotBudget {
     }
 }
 
-/// CPU/memory ceiling for one shared buildkitd, derived from the slot
-/// budget by [`SlotBudget::buildkit_size`]. `None` is "this dimension is
-/// unknown": the caller sizes nothing there rather than guessing.
+/// CPU/memory ceiling for one shared buildkitd, derived from summed
+/// holder entitlements by [`SlotBudget::buildkit_size_summed`]. `None` is
+/// "this dimension is unknown": the caller sizes nothing there rather than
+/// guessing. The same shape records one holder's own
+/// [`SlotBudget::own_buildkit_entitlement`] in the claim file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BuildkitSize {
     pub(crate) cpu_milli: Option<u64>,
@@ -390,6 +476,18 @@ impl BuildkitSize {
     /// all, and the caller falls back to the static operator policy.
     pub(crate) fn is_empty(&self) -> bool {
         self.cpu_milli.is_none() && self.memory_bytes.is_none()
+    }
+
+    /// Fill unknown dimensions from the static operator policy, so partial
+    /// observability degrades per dimension: a known derived ceiling always
+    /// wins, and only the unknown dimension inherits the static value. The
+    /// caller parses the static `resource_options` spelling; `None` there
+    /// means undeclared, and the dimension stays unknown.
+    pub(crate) fn with_fallback(&self, cpu_milli: Option<u64>, memory_bytes: Option<u64>) -> Self {
+        Self {
+            cpu_milli: self.cpu_milli.or(cpu_milli),
+            memory_bytes: self.memory_bytes.or(memory_bytes),
+        }
     }
 
     /// Render as docker-container `--driver-opt` entries: the cgroup v1
@@ -408,7 +506,9 @@ impl BuildkitSize {
     }
 }
 
-fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
+/// Whole `--cpus` decimals as milli-CPUs, floored. Shared with the static
+/// daemon fallback, which parses the same spelling from `resource_options`.
+pub(crate) fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
     if !cpus.is_finite() || cpus <= 0.0 {
         return None;
     }
@@ -947,10 +1047,12 @@ mod tests {
     #[test]
     fn a_lone_builder_holder_gets_exactly_its_slot_share() {
         let (_root, slot) = sixteen_cpu_four_slot_tree("a_lone_builder_holder");
-        let size = slot.buildkit_size(NonZeroU32::MIN, None);
-        assert_eq!(size.cpu_milli, Some(4000));
+        let own = slot.own_buildkit_entitlement(None);
+        assert_eq!(own.cpu_milli, Some(4000));
         let slot_mem = *slot.memory_bytes.value().unwrap();
-        assert_eq!(size.memory_bytes, Some(slot_mem));
+        assert_eq!(own.memory_bytes, Some(slot_mem));
+        let size = slot.buildkit_size_summed(std::slice::from_ref(&own));
+        assert_eq!(size, own);
         assert_eq!(
             size.driver_opts(),
             vec![
@@ -962,54 +1064,89 @@ mod tests {
     }
 
     #[test]
-    fn shared_builder_size_grows_with_holders_and_stops_at_the_host() {
-        let (_root, slot) = sixteen_cpu_four_slot_tree("shared_builder_grows");
+    fn shared_builder_size_sums_entitlements_and_stops_at_the_host() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("shared_builder_sums");
         let host_mem = *slot.host.memory_bytes.value().unwrap();
         let pool = host_mem / 100 * 85;
+        let own = slot.own_buildkit_entitlement(None);
 
-        let two = slot.buildkit_size(NonZeroU32::new(2).unwrap(), None);
+        let two = slot.buildkit_size_summed(&[own, own]);
         assert_eq!(two.cpu_milli, Some(8000));
         assert_eq!(two.memory_bytes, Some(pool / 4 * 2));
 
         // All four slots on one builder: the whole machine, which is
         // correct — the daemon is doing the whole machine's compiling.
-        let four = slot.buildkit_size(NonZeroU32::new(4).unwrap(), None);
+        let four = slot.buildkit_size_summed(&[own, own, own, own]);
         assert_eq!(four.cpu_milli, Some(16_000));
         assert_eq!(four.memory_bytes, Some(pool / 4 * 4));
 
-        // A holder count the slot model cannot explain still never exceeds
-        // the host: the caps bind, the multiplication does not escape.
-        let absurd = slot.buildkit_size(NonZeroU32::new(64).unwrap(), None);
+        // A holder set the slot model cannot explain still never exceeds
+        // the host: the caps bind, the sum does not escape.
+        let absurd = slot.buildkit_size_summed(&[own; 64]);
         assert_eq!(absurd.cpu_milli, Some(16_000));
         assert_eq!(absurd.memory_bytes, Some(pool));
     }
 
     #[test]
-    fn a_declared_memory_limit_narrows_the_builder_aggregate() {
-        let (_root, slot) = sixteen_cpu_four_slot_tree("declared_memory_narrows");
+    fn a_declared_limit_narrows_only_its_own_holders_entitlement() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("declared_narrows_own");
         let one_gb = 1024 * 1024 * 1024;
-        let size = slot.buildkit_size(NonZeroU32::new(2).unwrap(), Some(one_gb));
-        // Two holders entitled to 1 GiB each: 2 GiB, not two slot shares.
-        assert_eq!(size.memory_bytes, Some(2 * one_gb));
+        let slot_mem = *slot.memory_bytes.value().unwrap();
+        // One holder declared 1 GiB, the other declared nothing: the sum is
+        // 1 GiB plus a full share — not the declared limit times two, and
+        // not two full shares.
+        let declared = slot.own_buildkit_entitlement(Some(one_gb));
+        assert_eq!(declared.memory_bytes, Some(one_gb));
+        let open = slot.own_buildkit_entitlement(None);
+        let size = slot.buildkit_size_summed(&[declared, open]);
+        assert_eq!(size.memory_bytes, Some(one_gb + slot_mem));
+        assert_eq!(size.cpu_milli, Some(8000));
         // A declared limit above the derived share changes nothing.
-        let loose = slot.buildkit_size(NonZeroU32::MIN, Some(64 * one_gb));
-        assert_eq!(loose.memory_bytes, slot.memory_bytes.value().copied());
+        let loose = slot.own_buildkit_entitlement(Some(64 * one_gb));
+        assert_eq!(loose.memory_bytes, Some(slot_mem));
     }
 
     #[test]
-    fn an_unobservable_budget_sizes_no_builder() {
-        let root = SyntheticRoot::new("an_unobservable_budget_sizes_no_builder");
-        let budget = HostBudget::observe(root.path(), None);
-        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
-        let size = slot.buildkit_size(NonZeroU32::new(2).unwrap(), None);
-        assert_eq!(
-            size,
-            BuildkitSize {
-                cpu_milli: None,
-                memory_bytes: None,
-            }
-        );
+    fn unknown_holder_dimensions_contribute_nothing() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("unknown_contributes_nothing");
+        let own = slot.own_buildkit_entitlement(None);
+        let unknown = BuildkitSize {
+            cpu_milli: None,
+            memory_bytes: None,
+        };
+        // A legacy holder beside a known one: the sum is the known share.
+        let size = slot.buildkit_size_summed(&[own, unknown]);
+        assert_eq!(size, own);
+        // Nobody known: nothing derived, and the caller falls back to the
+        // static operator policy instead of inventing a ceiling.
+        let size = slot.buildkit_size_summed(&[unknown, unknown]);
         assert!(size.is_empty());
         assert!(size.driver_opts().is_empty());
+        // Same when the sizing job itself cannot observe the host: an
+        // uncapped sum is an invented ceiling.
+        let root = SyntheticRoot::new("unknown_holder_unobservable_host");
+        let budget = HostBudget::observe(root.path(), None);
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        let size = slot.buildkit_size_summed(&[own, own]);
+        assert!(size.is_empty());
+    }
+
+    #[test]
+    fn static_fallback_fills_only_unknown_dimensions() {
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let effective = derived.with_fallback(Some(1000), Some(1024));
+        // Derived CPU wins over the static value; unknown memory inherits it.
+        assert_eq!(
+            effective,
+            BuildkitSize {
+                cpu_milli: Some(4000),
+                memory_bytes: Some(1024),
+            }
+        );
+        let undeclared = derived.with_fallback(None, None);
+        assert_eq!(undeclared, derived);
     }
 }
