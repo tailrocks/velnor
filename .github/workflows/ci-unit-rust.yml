@@ -16,7 +16,7 @@ on:
 jobs:
   github-rust-policy:
     name: "GitHub / rust-policy"
-    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -447,7 +447,7 @@ jobs:
 
   github-rust-unit-collector:
     name: "GitHub / rust-unit-collector"
-    if: ${{ inputs.unit == 'rust-unit-collector' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-unit-collector' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -896,7 +896,7 @@ jobs:
 
   github-rust-velnor-bench:
     name: "GitHub / rust-velnor-bench"
-    if: ${{ inputs.unit == 'rust-velnor-bench' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-bench' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1345,7 +1345,7 @@ jobs:
 
   github-rust-velnor-client:
     name: "GitHub / rust-velnor-client"
-    if: ${{ inputs.unit == 'rust-velnor-client' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-client' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -1794,7 +1794,7 @@ jobs:
 
   github-rust-velnor-control:
     name: "GitHub / rust-velnor-control"
-    if: ${{ inputs.unit == 'rust-velnor-control' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-control' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2243,7 +2243,7 @@ jobs:
 
   github-rust-velnor-model:
     name: "GitHub / rust-velnor-model"
-    if: ${{ inputs.unit == 'rust-velnor-model' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-model' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2692,7 +2692,7 @@ jobs:
 
   github-rust-velnor-render:
     name: "GitHub / rust-velnor-render"
-    if: ${{ inputs.unit == 'rust-velnor-render' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-render' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3141,7 +3141,7 @@ jobs:
 
   github-rust-velnor-runner:
     name: "GitHub / rust-velnor-runner"
-    if: ${{ inputs.unit == 'rust-velnor-runner' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-runner' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -3590,7 +3590,7 @@ jobs:
 
   github-rust-velnor-tools:
     name: "GitHub / rust-velnor-tools"
-    if: ${{ inputs.unit == 'rust-velnor-tools' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-tools' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4039,7 +4039,7 @@ jobs:
 
   github-rust-velnor-workflow:
     name: "GitHub / rust-velnor-workflow"
-    if: ${{ inputs.unit == 'rust-velnor-workflow' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-workflow' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4488,7 +4488,7 @@ jobs:
 
   github-rust-velnor-workflow-contract:
     name: "GitHub / rust-velnor-workflow-contract"
-    if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnor-workflow-contract' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -4937,7 +4937,7 @@ jobs:
 
   github-rust-velnorctl:
     name: "GitHub / rust-velnorctl"
-    if: ${{ inputs.unit == 'rust-velnorctl' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-velnorctl' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -5386,7 +5386,7 @@ jobs:
 
   github-rust-production-topology:
     name: "GitHub / rust-production-topology"
-    if: ${{ inputs.unit == 'rust-production-topology' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both'))) }}
+    if: ${{ inputs.unit == 'rust-production-topology' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))) }}
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"

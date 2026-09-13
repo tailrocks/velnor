@@ -10,7 +10,7 @@ on:
       runner:
         description: Execution backend
         required: false
-        default: velnor
+        default: both
         type: choice
         options:
           - github
