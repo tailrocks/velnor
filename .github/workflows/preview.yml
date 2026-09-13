@@ -186,7 +186,7 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
           save-on-workflow-dispatch: true
@@ -203,7 +203,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
@@ -385,7 +385,7 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
           save-on-workflow-dispatch: true
@@ -402,7 +402,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
@@ -545,7 +545,7 @@ jobs:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
           save-on-workflow-dispatch: true
@@ -562,7 +562,7 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
