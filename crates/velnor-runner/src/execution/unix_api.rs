@@ -144,7 +144,15 @@ fn read_http_response(stream: &mut UnixStream) -> Result<String, String> {
                 .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
                 .and_then(|(_, value)| value.trim().parse::<usize>().ok())
                 .unwrap_or(0);
-            if buf.len() >= header_end + 4 + content_length {
+            // `content_length` is peer-shaped: check the sum so a huge
+            // declaration is a bounded error, never an overflow panic.
+            let Some(need) = header_end
+                .checked_add(4)
+                .and_then(|end| end.checked_add(content_length))
+            else {
+                return Err("firecracker content-length overflows the response bound".into());
+            };
+            if buf.len() >= need {
                 return Ok(String::from_utf8_lossy(&buf).into_owned());
             }
         }
@@ -226,6 +234,19 @@ mod tests {
         assert!(req.contains("velnor.isolation_id=job-1"), "{req}");
         assert!(!req.contains("virtio-fs"), "{req}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn overflowing_content_length_is_a_bounded_error_not_a_panic() {
+        // `header_end + 4 + content_length` overflows for a `usize::MAX`
+        // declaration: the old plain `+` panicked, the checked sum is a
+        // bounded read error.
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", usize::MAX);
+        writer.write_all(response.as_bytes()).unwrap();
+        drop(writer);
+        let error = read_http_response(&mut reader).unwrap_err();
+        assert!(error.contains("overflows"), "{error}");
     }
 
     #[test]
