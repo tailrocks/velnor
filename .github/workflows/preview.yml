@@ -207,9 +207,14 @@ jobs:
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
       - name: Prepare Cargo sources
         env:
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -406,9 +411,14 @@ jobs:
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
       - name: Prepare Cargo sources
         env:
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -566,9 +576,14 @@ jobs:
           restore-keys: |
             velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
 
+      # Fetch runs online even though every later step builds from the
+      # restored snapshot: `--locked` pins resolution to Cargo.lock (git
+      # deps are rev-pinned, crates.io versions are immutable), so the
+      # network can only fill gaps, never drift. An offline fetch here
+      # deadlocks dependency changes whenever the restore-keys fallback
+      # restores a snapshot predating a newly added dependency (#689).
       - name: Prepare Cargo sources
         env:
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
