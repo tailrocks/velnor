@@ -2872,7 +2872,7 @@ jobs:
     #[test]
     fn policy_accepts_the_generated_untrusted_velnor_pull_request_gate(
     ) -> Result<(), Box<dyn Error>> {
-        let workflow = r#"
+        let workflow = r"
 name: Velnor PR
 on:
   pull_request:
@@ -2882,7 +2882,7 @@ jobs:
     runs-on: [self-hosted, example-velnor]
     steps:
       - run: true
-"#;
+";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
         assert!(run_policy(root)?);
         Ok(())
