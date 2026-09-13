@@ -54,8 +54,26 @@ const MAX_RETAINED_MASK_COUNT: usize = 256;
 const MAX_RETAINED_MASK_BYTES: usize = 64 * 1024;
 const TELEMETRY_RING_CAPACITY: usize = 4096;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 const TEST_STORE_FAILURE_TRIGGER_EVENTS: &str = "velnor_test_store_failure_events";
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 const TEST_STORE_FAILURE_TRIGGER_TRANSITIONS: &str = "velnor_test_store_failure_transitions";
 
 static OPS: OnceLock<Arc<OpsSink>> = OnceLock::new();
@@ -246,6 +264,15 @@ struct RetentionLeaseGuard<'a> {
 
 impl<'a> RetentionLeaseGuard<'a> {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn new(store: &'a Store, lease: RetentionLease) -> Self {
         Self {
             store,
@@ -263,6 +290,10 @@ impl<'a> RetentionLeaseGuard<'a> {
     }
 
     fn lease(&self) -> &RetentionLease {
+        // Proof: both constructors store `Some`; the only two callers run
+        // before the single `release()` take in straight-line flow, and
+        // `Drop` never calls `lease()`.
+        #[allow(clippy::expect_used, reason = "guard owns its lease until release")]
         self.lease
             .as_ref()
             .expect("retention lease guard must own a lease")
@@ -323,12 +354,39 @@ pub struct OpsSink {
     telemetry: TelemetrySink,
     telemetry_logical: AtomicU64,
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     test_store_failure_trigger_armed: Mutex<bool>,
     #[cfg(any(test, feature = "test-support"))]
     forensic_failures: Mutex<Vec<String>>,
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     injected_prune_failure: AtomicBool,
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     injected_prune_store_failure: Mutex<Option<StoreError>>,
 }
 
@@ -343,6 +401,12 @@ impl OpsSink {
     ) -> Result<Self, velnor_control::store::StoreError> {
         let store = Store::open(&path)?;
         let telemetry_path = velnor_control::telemetry::path_for_instance(&path, &instance_slug);
+        // Proof: `TelemetrySink::new` fails only on a zero capacity or byte
+        // bound; both arguments below are nonzero constants (4096, 8 MiB).
+        #[allow(
+            clippy::expect_used,
+            reason = "sink capacity and bound are nonzero constants"
+        )]
         Ok(Self {
             store,
             instance_slug,
@@ -362,12 +426,39 @@ impl OpsSink {
                 .expect("fixed telemetry sink configuration is valid"),
             telemetry_logical: AtomicU64::new(1),
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             test_store_failure_trigger_armed: Mutex::new(false),
             #[cfg(any(test, feature = "test-support"))]
             forensic_failures: Mutex::new(Vec::new()),
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             injected_prune_failure: AtomicBool::new(false),
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             injected_prune_store_failure: Mutex::new(None),
         })
     }
@@ -508,6 +599,15 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub(crate) fn store_for_tests(&self) -> &Store {
         &self.store
     }
@@ -675,6 +775,15 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn prune_if_due_at(&self, now_unix: u64) {
         if let Some(admission) = self.try_admit_prune_at(now_unix) {
             self.prune_once(admission.now_unix, Some(now_unix));
@@ -751,6 +860,15 @@ impl OpsSink {
         let completion;
         let prune_result = {
             #[cfg(test)]
+            #[allow(
+                clippy::unwrap_used,
+                clippy::expect_used,
+                clippy::panic,
+                clippy::unreachable,
+                clippy::todo,
+                clippy::unimplemented,
+                reason = "tests may panic"
+            )]
             if let Some(error) = self.injected_prune_store_failure.lock().unwrap().take() {
                 Err(velnor_control::store::retention::PruneFailure::PreCommit(
                     error,
@@ -809,6 +927,15 @@ impl OpsSink {
             }
         }
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         if committed && self.injected_prune_failure.swap(false, Ordering::Relaxed) {
             committed = true;
             self.clear_prune_retry();
@@ -964,12 +1091,30 @@ impl OpsSink {
         write: impl FnOnce(&Store) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         let mut test_failure = self
             .test_store_failure_trigger_armed
             .lock()
             .expect("test store failure trigger lock is not poisoned");
         let result = write(&self.store);
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         if *test_failure {
             self.clear_test_store_failure_trigger();
             *test_failure = false;
@@ -978,6 +1123,15 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     /// Arrange a SQLite abort inside the next real durable store transaction.
     pub(crate) fn fail_next_durable_store_write(&self, _class: ExitClass, reason: &'static str) {
         let mut armed = self.test_store_failure_trigger_armed.lock().unwrap();
@@ -1011,6 +1165,15 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn clear_test_store_failure_trigger(&self) {
         let connection =
             Connection::open(self.store.path()).expect("open store trigger cleanup connection");
@@ -1025,16 +1188,43 @@ impl OpsSink {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn sqlite_string_literal(value: &str) -> String {
         value.replace('\'', "''")
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn fail_next_prune_accounting(&self) {
         self.injected_prune_failure.store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn fail_next_prune_store(&self, class: ExitClass, reason: &'static str) {
         self.injected_prune_store_failure
             .lock()
@@ -1048,7 +1238,12 @@ impl OpsSink {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn forensic_failures(&self) -> Vec<String> {
-        self.forensic_failures.lock().unwrap().clone()
+        // A poisoned forensics lock recovers its guard: the buffer is plain
+        // data, so no broken invariant can survive inside it.
+        self.forensic_failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn record_forensic_failure(&self, code: &str, detail: &str) {
@@ -1057,7 +1252,7 @@ impl OpsSink {
         #[cfg(any(test, feature = "test-support"))]
         self.forensic_failures
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(forensic_failure_line(code, detail));
     }
 
@@ -1235,6 +1430,15 @@ fn sanitize_event_detail(raw: &str, masks: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

@@ -197,6 +197,8 @@ impl Runner {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             wall,
         });
+        // Proof: `push` on the lines above guarantees a last element.
+        #[allow(clippy::expect_used, reason = "invocation just pushed")]
         Ok(self.invocations.last().expect("just pushed"))
     }
 
@@ -303,6 +305,9 @@ fn command_output(command: &mut Command, timeout: Option<Duration>) -> io::Resul
         if !stderr.is_empty() && !stderr.ends_with(b"\n") {
             stderr.push(b'\n');
         }
+        // Proof: `wait4_child` sets `timed_out` only under a `Some`
+        // deadline, which requires `timeout.is_some()`.
+        #[allow(clippy::expect_used, reason = "timeout implies a deadline")]
         let timeout = timeout.expect("timed-out child had a deadline");
         stderr.extend_from_slice(
             format!("command timed out after {} ms", timeout.as_millis()).as_bytes(),
@@ -479,6 +484,15 @@ pub fn tree_bytes(root: &std::path::Path) -> u64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

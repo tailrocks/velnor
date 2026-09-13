@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! The two shipped binaries must never disagree about the trust boundary.
 //!
 //! `--trust-scope` used to be declared twice: `velnor-runner` declared it with

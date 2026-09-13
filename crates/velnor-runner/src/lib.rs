@@ -35,6 +35,15 @@ pub mod execution;
 mod executor;
 mod expression;
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod fault_injection;
 mod fs_copy;
 pub(crate) mod gha_cache;
@@ -142,6 +151,15 @@ pub mod scaffold {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     mod tests {
         #[test]
         fn operational_identity_uses_the_host_slug_projection() {

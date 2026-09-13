@@ -26,3 +26,11 @@ toml.workspace = true
 velnor-client = { path = "../velnor-client", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 zip.workspace = true
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

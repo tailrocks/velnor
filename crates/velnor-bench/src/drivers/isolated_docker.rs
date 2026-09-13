@@ -340,6 +340,10 @@ impl IsolatedDockerDaemon {
     }
 
     fn stderr_log_path(&self) -> &Path {
+        // Proof: both callers run inside `wait_ready`, which `start` calls
+        // immediately after constructing `Some(layout)` and before the only
+        // `None` assignment in `shutdown` can run.
+        #[allow(clippy::expect_used, reason = "layout retained until shutdown")]
         &self
             .layout
             .as_ref()
@@ -414,6 +418,15 @@ fn with_cleanup(primary: anyhow::Error, cleanup: Result<()>) -> anyhow::Error {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

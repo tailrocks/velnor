@@ -1489,6 +1489,9 @@ impl Journal {
     /// SQLite write failures.
     pub fn apply(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
         let mut outcomes = self.apply_many(std::iter::once(event))?;
+        // Proof: `apply_many` pushes exactly one outcome per input event and
+        // `apply` passes exactly one, so `pop` is always `Some`.
+        #[allow(clippy::expect_used, reason = "one event always yields one outcome")]
         Ok(outcomes
             .pop()
             .expect("one event must produce one reduction outcome"))
@@ -2818,6 +2821,15 @@ pub fn payload_checksum(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;

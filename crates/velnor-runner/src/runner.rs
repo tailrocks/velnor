@@ -225,6 +225,10 @@ async fn acquire_action_admission_slot(
 ) -> std::result::Result<(tokio::sync::OwnedSemaphorePermit, Duration), Duration> {
     let started = Instant::now();
     match tokio::time::timeout(budget, action_admission_limiter().acquire_owned()).await {
+        // Proof: the limiter is a process-static `Semaphore` that is never
+        // closed (no `close` call exists), so acquisition only fails on
+        // timeout, which is the `Err` arm.
+        #[allow(clippy::expect_used, reason = "static semaphore is never closed")]
         Ok(permit) => Ok((
             permit.expect("the action admission limiter is never closed"),
             started.elapsed(),
@@ -1742,6 +1746,8 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         Some(_) if args.pool_id_pre_resolved => args.pool_id.ok_or_else(|| {
             anyhow::anyhow!("pre-resolved runner group identity is missing its numeric id")
         })?,
+        // Proof: the match guard requires `args.pool_id.is_some()`.
+        #[allow(clippy::expect_used, reason = "match guard proved pool_id is Some")]
         Some(_) if args.dry_run && args.pool_id.is_some() => args.pool_id.expect("checked above"),
         Some(pool_name) => {
             let pat = pat.ok_or_else(|| {
@@ -1770,6 +1776,10 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let jit_config = if args.dry_run {
         None
     } else {
+        // Proof: `pat` is `Some` whenever `!dry_run` by construction above
+        // (the `else` arm bails on a missing PAT), and this is the
+        // `!dry_run` arm.
+        #[allow(clippy::expect_used, reason = "live path always carries a PAT")]
         let pat = pat.expect("live JIT config requires PAT");
         write_pending_jit_registration(
             &dir,
@@ -1839,6 +1849,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         Some((_, config)) => match stored_jit_credentials(config) {
             Ok(credentials) => Some(credentials),
             Err(error) => {
+                // Proof: `jit_config` is `Some` only on the `!dry_run` path,
+                // where `pat` is `Some` by construction.
+                #[allow(clippy::expect_used, reason = "live path always carries a PAT")]
                 let pat = pat.expect("live JIT config has a PAT");
                 return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
             }
@@ -1891,6 +1904,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         let error = anyhow::anyhow!(
             "GitHub JIT config did not return required V2 runner settings (UseV2Flow/ServerUrlV2); Velnor uses the hosted GitHub broker/run-service protocol only"
         );
+        // Proof: this block requires `jit_config.is_some()`, which holds only
+        // on the `!dry_run` path, where `pat` is `Some` by construction.
+        #[allow(clippy::expect_used, reason = "live path always carries a PAT")]
         let pat = pat.expect("live JIT config has a PAT");
         return Err(cleanup_failed_jit_registration(&dir, &scope, pat, error).await);
     }
@@ -3953,6 +3969,15 @@ async fn recycle_daemon_slot(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
     let _configure_lock = ConfigureLock::acquire(slot_dir)?;
     remove_completed_daemon_slot_jit_config_locked(slot_dir)
@@ -4050,6 +4075,9 @@ fn daemon_slot_cleanup_degradation(
         (false, false) => "slot and successor cleanup failed",
         (false, true) => "slot cleanup failed",
         (true, false) => "successor cleanup failed",
+        // Proof: the `(true, true)` case returns above, so it never reaches
+        // this match.
+        #[allow(clippy::unreachable, reason = "both-succeeded returns above")]
         (true, true) => unreachable!("successful cleanup handled above"),
     };
     Some(format!(
@@ -6705,6 +6733,10 @@ async fn handle_job_request(
                 ),
             ) {
                 crate::capacity::PreExecutionWaitDecision::Reserved => {
+                    // Proof: `pre_execution_wait_decision` returns `Reserved`
+                    // only when its `reserve_ok` argument — `reserve_result.is_ok()`
+                    // here — is true.
+                    #[allow(clippy::expect_used, reason = "Reserved implies reserve_ok")]
                     let reservation = reserve_result.expect("reserve_ok");
                     println!(
                         "Reserved host disk peak {} bytes for active job {}.",
@@ -7954,6 +7986,15 @@ impl StreamedStepLogMirror {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn take_logs(&mut self) -> Vec<StepLog> {
         let drained = self.drain();
         Self::unwrap_drained(drained)
@@ -7969,6 +8010,15 @@ impl StreamedStepLogMirror {
     /// Test-only shorthand: wrap, measure, and push. Production must
     /// measure before locking (see the struct docs), never in here.
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn push_owned(&mut self, log: StepLog) {
         let log = Arc::new(log);
         let bytes = step_log_mirror_bytes(&log);
@@ -7976,11 +8026,29 @@ impl StreamedStepLogMirror {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn len(&self) -> usize {
         self.logs.len()
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -8643,6 +8711,9 @@ fn power_shell_pre_ampersand_escape(value: &str) -> String {
     if value.is_empty() || !value.contains('&') {
         return String::new();
     }
+    // Proof: the guard above returns unless `value.contains('&')`, so the
+    // `rfind('&')` in the `None` arm below is always `Some`.
+    #[allow(clippy::expect_used, reason = "value provably contains '&'")]
     let section = match value.find("&+") {
         Some(index) => &value[..index + 2],
         None => &value[..value.rfind('&').expect("value contains '&'") + 1],
@@ -8660,6 +8731,9 @@ fn power_shell_post_ampersand_escape(value: &str) -> String {
     if value.is_empty() || !value.contains('&') {
         return String::new();
     }
+    // Proof: the guard above returns unless `value.contains('&')`, so the
+    // `rfind('&')` in the `None` arm below is always `Some`.
+    #[allow(clippy::expect_used, reason = "value provably contains '&'")]
     let section = match value.find("&+") {
         Some(index) => {
             let after = &value[index + 2..];
@@ -8730,11 +8804,29 @@ impl Masker {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn mask_single_value(line: &str, masks: &[String]) -> String {
     Masker::new(masks.iter().cloned()).mask(line)
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String> {
     let masks = MaskPatterns::new(job_secret_mask_values(job));
     mask_log_lines_with(&log.lines, &masks.with_extra(&log.masks))
@@ -13506,11 +13598,29 @@ fn timeline_records_for_step_logs(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn mask_log_lines(lines: &[String], masks: &[String]) -> Vec<String> {
     mask_log_lines_with(lines, &Masker::new(masks.iter().cloned()))
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn mask_value(value: &str, masks: &[String]) -> String {
     Masker::new(masks.iter().cloned()).mask(value)
 }
@@ -14491,6 +14601,15 @@ fn default_agent_name() -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use crate::slot_log::LIFECYCLE_LOG;

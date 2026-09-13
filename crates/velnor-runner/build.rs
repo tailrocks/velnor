@@ -28,6 +28,16 @@
 //!   version`. This is the empty-slack gate that makes a mismatched
 //!   package/manifest structurally impossible to ship.
 
+// Fail-closed by design: every `panic!` below aborts a release or preview
+// build rather than embedding an ambiguous, dirty, or version-drifted
+// identity. A build script cannot return a recoverable error for these
+// gates — panicking (failing the build) is the only sound outcome — so the
+// whole module keeps `panic!` under one allow instead of per-site noise.
+#![allow(
+    clippy::panic,
+    reason = "fail-closed release identity gates must abort the build"
+)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

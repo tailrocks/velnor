@@ -22,6 +22,15 @@ pub mod store;
 pub mod telemetry;
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     #[test]
     fn service_marker_is_stable() {

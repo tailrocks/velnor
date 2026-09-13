@@ -956,6 +956,9 @@ impl Workload for DockerWorkload {
             write_build_context(&dir, image)?;
             if self.kind == Kind::BuildCached {
                 // Warm the layer cache once, outside the measurement.
+                // Proof: construction sets `Some` for every build kind
+                // (including `BuildCached`), and no production path clears it.
+                #[allow(clippy::expect_used, reason = "build kinds own an image tag")]
                 let tag = self
                     .build_tag
                     .as_deref()
@@ -1455,6 +1458,8 @@ impl DockerWorkload {
         // Never retarget the warmup or a prior measured build tag. A fresh tag
         // keeps each immutable build identity independently recoverable.
         self.build_tag = Some(unique_build_tag());
+        // Proof: assigned `Some` on the line above.
+        #[allow(clippy::expect_used, reason = "tag just assigned")]
         let tag = self
             .build_tag
             .clone()
@@ -1600,6 +1605,15 @@ fn write_build_context(dir: &Path, base_image: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

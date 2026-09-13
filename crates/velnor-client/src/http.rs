@@ -415,6 +415,15 @@ async fn exchange(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn parse_response(bytes: &[u8]) -> Result<Response, ClientError> {
     let marker = b"\r\n\r\n";
     let header_end = bytes
@@ -747,6 +756,15 @@ impl ClientError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

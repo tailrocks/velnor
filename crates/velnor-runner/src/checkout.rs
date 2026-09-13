@@ -159,6 +159,15 @@ pub(crate) fn checkout_plan(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
     steps.iter().any(|step| {
         step.enabled
@@ -168,6 +177,15 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub fn execute_checkout<R>(
     runner: &mut R,
     plan: &CheckoutPlan,
@@ -518,6 +536,15 @@ thread_local! {
 
 fn credential_journal_dir() -> PathBuf {
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     if let Some(dir) = TEST_JOURNAL_DIR.with(|dir| dir.borrow().clone()) {
         return dir;
     }
@@ -1939,6 +1966,15 @@ fn format_git_args(args: &[String]) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use crate::executor::{CommandResult, ProcessCommandRunner};

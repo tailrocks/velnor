@@ -701,6 +701,15 @@ pub(crate) fn release_and_stop_if_last(
 /// caller can prove dead. Maintenance callers pass no slot and get the raw
 /// set; job callers pass their own slot for the exclusivity repair.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn builder_holders(
     run_root: &Path,
     builder: &str,
@@ -723,6 +732,15 @@ pub(crate) fn builder_holders(
 /// (including a crashed job's still-running ghost) keeps its hold, which is
 /// exactly the pre-existing container-recovery boundary.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn repair_absent_holders(
     run_root: &Path,
     builder: &str,
@@ -1631,6 +1649,15 @@ fn running_container_names() -> Result<BTreeSet<String>> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

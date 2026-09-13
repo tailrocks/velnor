@@ -136,6 +136,7 @@ macro_rules! define_telemetry_contracts {
             }
 
             #[cfg(test)]
+            #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::todo, clippy::unimplemented, reason = "tests may panic")]
             fn contracts() -> &'static [TelemetryEventContract] {
                 TELEMETRY_EVENT_CONTRACTS
             }
@@ -1527,6 +1528,15 @@ fn matches_field_kind(kind: TelemetryFieldKind, value: &Value) -> bool {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use serde_json::json;

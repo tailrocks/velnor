@@ -55,6 +55,12 @@ impl TelemetryService {
     /// Open a reader for one instance-owned NDJSON path.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        // Proof: `TelemetryFileReader::new` fails only on a zero byte bound
+        // and `DEFAULT_TELEMETRY_FILE_BYTES` is a nonzero constant (8 MiB).
+        #[allow(
+            clippy::expect_used,
+            reason = "telemetry byte bound is a nonzero constant"
+        )]
         Self {
             reader: TelemetryFileReader::new(path, DEFAULT_TELEMETRY_FILE_BYTES)
                 .expect("fixed telemetry file bound is valid"),
@@ -108,6 +114,15 @@ fn map_reader_error(error: TelemetryFileError) -> PortError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

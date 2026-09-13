@@ -537,9 +537,17 @@ pub fn format_number(value: f64) -> String {
     // .NET's "G" specifier does: fixed-point only while the decimal exponent
     // is greater than -5 and less than the precision specifier.
     let scientific = format!("{:.*e}", SIGNIFICANT_DIGITS - 1, value);
+    // Proof: NaN, infinite, and zero values return above, so the value is a
+    // finite nonzero float whose `:e` rendering always contains 'e' followed
+    // by ASCII digits with an optional `-`.
+    #[allow(
+        clippy::expect_used,
+        reason = "finite :e rendering always contains 'e'"
+    )]
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("rust exponential formatting always contains 'e'");
+    #[allow(clippy::expect_used, reason = ":e exponent is always a small integer")]
     let exponent: i32 = exponent.parse().expect("exponent is an integer");
 
     if exponent <= -5 || exponent >= SIGNIFICANT_DIGITS as i32 {

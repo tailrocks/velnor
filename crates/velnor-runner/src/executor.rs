@@ -1543,10 +1543,40 @@ struct PostJavaScriptAction {
     step_id: String,
     display_name: String,
     invocation: JavaScriptActionInvocation,
+    /// Post entrypoint cloned from `invocation.post_container_path` at
+    /// construction. The constructor returns `None` without one, so the
+    /// type proves the post drain never unwraps a missing entrypoint.
+    post_entrypoint: String,
     condition: Option<String>,
     continue_on_error: bool,
     timeout_minutes: Option<u64>,
     umbrella_display: Option<String>,
+}
+
+impl PostJavaScriptAction {
+    /// Register a post action only when the invocation carries a post
+    /// entrypoint. `None` means "no post to run", not an error.
+    fn new(
+        step_id: String,
+        display_name: String,
+        invocation: JavaScriptActionInvocation,
+        condition: Option<String>,
+        continue_on_error: bool,
+        timeout_minutes: Option<u64>,
+        umbrella_display: Option<String>,
+    ) -> Option<Self> {
+        let post_entrypoint = invocation.post_container_path.clone()?;
+        Some(Self {
+            step_id,
+            display_name,
+            invocation,
+            post_entrypoint,
+            condition,
+            continue_on_error,
+            timeout_minutes,
+            umbrella_display,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1599,6 +1629,15 @@ impl PostAction {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     fn step_id(&self) -> &str {
         match self {
             PostAction::JavaScript(post) => post.step_id.as_str(),
@@ -2813,18 +2852,18 @@ where
                 && let Some(pre_container_path) = invocation.pre_container_path.as_deref()
                 && matches!(pre_condition, Some(Ok(true)))
             {
-                if invocation.post_container_path.is_some() {
-                    post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
-                        step_id: step_id.clone(),
-                        display_name: display_name.clone(),
-                        invocation: invocation.clone(),
-                        condition: invocation.post_condition.clone(),
-                        continue_on_error: *continue_on_error,
-                        timeout_minutes: *timeout_minutes,
-                        umbrella_display: composite_frames
-                            .first()
-                            .map(|frame| frame.display_name.clone()),
-                    }));
+                if let Some(post) = PostJavaScriptAction::new(
+                    step_id.clone(),
+                    display_name.clone(),
+                    invocation.clone(),
+                    invocation.post_condition.clone(),
+                    *continue_on_error,
+                    *timeout_minutes,
+                    composite_frames
+                        .first()
+                        .map(|frame| frame.display_name.clone()),
+                ) {
+                    post_actions.push(PostAction::JavaScript(post));
                     post_registered = true;
                 }
                 let pre_step_id = uuid::Uuid::new_v4().to_string();
@@ -3049,19 +3088,19 @@ where
                     timeout_minutes,
                     ..
                 } = step
-                && invocation.post_container_path.is_some()
-            {
-                post_actions.push(PostAction::JavaScript(PostJavaScriptAction {
-                    step_id: step_context_id.clone(),
-                    display_name: display_name.clone(),
-                    invocation: invocation.clone(),
-                    condition: invocation.post_condition.clone(),
-                    continue_on_error: *continue_on_error,
-                    timeout_minutes: *timeout_minutes,
-                    umbrella_display: composite_frames
+                && let Some(post) = PostJavaScriptAction::new(
+                    step_context_id.clone(),
+                    display_name.clone(),
+                    invocation.clone(),
+                    invocation.post_condition.clone(),
+                    *continue_on_error,
+                    *timeout_minutes,
+                    composite_frames
                         .first()
                         .map(|frame| frame.display_name.clone()),
-                }));
+                )
+            {
+                post_actions.push(PostAction::JavaScript(post));
             }
             if !post_registered
                 && let ExecutableStep::Docker {
@@ -3142,6 +3181,10 @@ where
             let mut script_plan: Option<ScriptStepPlan> = None;
             let mut streamed_masks: Vec<String> = Vec::new();
             let result = (|| match step {
+                // Proof: the outer step dispatch matches boundary steps in
+                // earlier arms that always `continue`, so execution only sees
+                // non-boundary steps.
+                #[allow(clippy::unreachable, reason = "boundaries dispatch before execution")]
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
                 }
@@ -3444,6 +3487,10 @@ where
         // parent, then flush (failed) instead of silently dropping the
         // step from the UI, and still record the umbrella.
         while composite_frames.len() > 1 {
+            // Proof: the loop condition holds at least two frames, and the
+            // body pushes to (never pops from) the remaining frames after
+            // this pop, so `pop` is `Some`.
+            #[allow(clippy::expect_used, reason = "loop holds at least two frames")]
             let nested = composite_frames.pop().expect("nested frame");
             let nested_result = nested.umbrella_result(state.is_cancelled());
             if let Some(parent) = composite_frames.last_mut() {
@@ -3581,11 +3628,7 @@ where
                         container,
                         &js_post_step_id,
                         &post_action.invocation,
-                        post_action
-                            .invocation
-                            .post_container_path
-                            .as_deref()
-                            .expect("post action must have post entrypoint"),
+                        &post_action.post_entrypoint,
                         &state.action_state_env(&post_action.step_id),
                         temp_host,
                         &state,
@@ -3666,12 +3709,18 @@ where
                     // post entrypoint substituted
                     // (`ContainerActionHandler.cs:120-123`).
                     let mut post_invocation = post_action.invocation.clone();
-                    post_invocation.entrypoint = Some(
-                        post_invocation
-                            .post_entrypoint
-                            .clone()
-                            .expect("post action must have post entrypoint"),
-                    );
+                    // Proof: both registration sites push a Docker post only
+                    // under `post_entrypoint.is_some()`, so the drain always
+                    // finds `Some`.
+                    #[allow(
+                        clippy::expect_used,
+                        reason = "registration requires a post entrypoint"
+                    )]
+                    let post_entrypoint = post_invocation
+                        .post_entrypoint
+                        .clone()
+                        .expect("post action must have post entrypoint");
+                    post_invocation.entrypoint = Some(post_entrypoint);
                     let result = self.execute_docker_action_in_started_container(
                         container,
                         &docker_post_step_id,
@@ -3752,8 +3801,11 @@ where
                             if candidate.umbrella_display.as_deref() == Some(umbrella.as_str())
                     )
                 }) {
-                    let Some(PostDrainItem::Run(PostAction::Native(next))) = post_iter.next()
-                    else {
+                    // Proof: the `while` condition peeked `Some` matching this
+                    // exact pattern with no iterator mutation between peek
+                    // and `next`, so `next` returns it.
+                    #[allow(clippy::unreachable, reason = "peek just matched this pattern")]
+                    let Some(PostDrainItem::Run(PostAction::Native(next))) = post_iter.next() else {
                         unreachable!("peeked a native post sharing the umbrella");
                     };
                     group.push(next);
@@ -10437,6 +10489,11 @@ fn preflight_prepared_artifact_zip<R: Read + std::io::Seek>(
     Ok(entries)
 }
 
+// Proof: the retry guard `attempt < MAX_ATTEMPTS` forbids `continue` on the
+// final attempt, and every other path returns or bails, so the loop never
+// falls through to the trailing `unreachable!`. (Function-level: lint
+// attributes do not attach to a trailing macro call.)
+#[allow(clippy::unreachable, reason = "bounded retry loop always returns")]
 fn repository_artifact_archive_response(
     mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
     operation: &str,
@@ -10478,6 +10535,11 @@ fn repository_artifact_archive_response(
     unreachable!("repository artifact retry loop always returns")
 }
 
+// Proof: the retry guard `attempt < MAX_ATTEMPTS` forbids `continue` on the
+// final attempt, and every other path returns or bails, so the loop never
+// falls through to the trailing `unreachable!`. (Function-level: lint
+// attributes do not attach to a trailing macro call.)
+#[allow(clippy::unreachable, reason = "bounded retry loop always returns")]
 fn repository_artifact_response(
     mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
     operation: &str,
@@ -12113,6 +12175,9 @@ impl BuildSecretFile {
             .join("build-secrets")
             .join(uuid::Uuid::new_v4().to_string());
         let host_path = temp_host.join(&relative);
+        // Proof: the path ends in a generated UUID file name, so it always
+        // has a parent.
+        #[allow(clippy::expect_used, reason = "secret path always has a parent")]
         fs::create_dir_all(host_path.parent().expect("secret file has parent"))
             .context("create BuildKit secret directory")?;
         let mut options = OpenOptions::new();
@@ -14475,6 +14540,15 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 
@@ -30212,6 +30286,7 @@ bitcoin-processor-app.push=true")
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
+                post_entrypoint: "/__a/_actions/guarded/dist/post.js".into(),
                 condition: Some("failure()".into()),
                 continue_on_error: false,
                 timeout_minutes: None,

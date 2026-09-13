@@ -273,17 +273,44 @@ impl Drop for JobDockerScope {
 // facade routing tests in `super::client` through
 // [`lock_serial_for_test`].
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Hold while asserting counter values in tests, here or in the facade
 /// routing tests: without one shared lock a parallel test's `begin_job`
 /// resets the counters mid-assertion and the suite flakes.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn lock_serial_for_test() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

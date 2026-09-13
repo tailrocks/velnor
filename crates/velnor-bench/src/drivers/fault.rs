@@ -211,6 +211,9 @@ fn is_not_found(stderr: &str) -> bool {
 
 impl Workload for FaultWorkload {
     fn prepare(&mut self, context: &mut Context) -> Result<()> {
+        // Proof: the match is exhaustive over the four fault kinds and each
+        // arm names an id declared in the static scenario matrix.
+        #[allow(clippy::expect_used, reason = "fault scenarios are declared")]
         let scenario = crate::scenario::find(match self.kind {
             Kind::KilledMidStep => "fault/container-killed-mid-step",
             Kind::StepFails => "fault/step-command-fails",
@@ -765,6 +768,15 @@ impl FaultWorkload {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

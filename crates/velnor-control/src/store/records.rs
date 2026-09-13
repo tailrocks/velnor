@@ -2506,11 +2506,29 @@ fn summary_decode(field: &'static str) -> StoreError {
 
 /// Direct connection access used by migration tests only.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn test_connection(store: &Store) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
     store.lock_conn().expect("store lock poisoned")
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod event_tests {
     use std::path::PathBuf;
 
@@ -2786,6 +2804,15 @@ mod event_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod lifecycle_tests {
     use super::*;
 

@@ -25,6 +25,15 @@ pub fn live_job_executor(backend: velnor_model::ExecutionBackendKind) -> JobExec
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use velnor_model::{IsolationRejected, MicroVmControl, MicroVmKind};

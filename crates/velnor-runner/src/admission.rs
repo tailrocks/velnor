@@ -375,6 +375,15 @@ impl ContentsApiMetadataSource {
     }
 
     #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::todo,
+        clippy::unimplemented,
+        reason = "tests may panic"
+    )]
     pub(crate) fn new_for_test(
         token: impl Into<String>,
         api_url: impl Into<String>,
@@ -1552,6 +1561,15 @@ fn metadata_retained_bytes(metadata: &ActionMetadata) -> usize {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

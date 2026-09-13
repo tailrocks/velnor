@@ -126,6 +126,9 @@ pub async fn run_daemon(args: DaemonArgs) -> anyhow::Result<()> {
     let endpoint = velnor_client::UnixEndpoint::from_instance(instance)?;
     let control_path = endpoint.socket_path(velnor_client::SocketKind::Control);
     let admin_path = endpoint.socket_path(velnor_client::SocketKind::Admin);
+    // Proof: `socket_path` appends a `control.sock` file name to the
+    // instance root, so the path always has a parent.
+    #[allow(clippy::expect_used, reason = "socket path always has an instance dir")]
     crate::http::prepare_instance_dir(
         control_path
             .parent()
@@ -273,6 +276,9 @@ impl OwnedUnixListener {
         router: axum::Router,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), std::io::Error> {
+        // Proof: the only constructor stores `Some`, and `serve` consumes
+        // `self`, so this is the first take (`Drop` only takes afterwards).
+        #[allow(clippy::expect_used, reason = "listener present until first serve")]
         let listener = self
             .listener
             .take()
@@ -757,6 +763,15 @@ impl From<StatusArgs> for rt::StatusArgs {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use std::fs;

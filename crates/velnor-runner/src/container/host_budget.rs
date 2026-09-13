@@ -186,6 +186,15 @@ impl HostBudget {
     /// Observe the budget of the host this process is running on.
     pub(crate) fn observe_host() -> Self {
         #[cfg(test)]
+        #[allow(
+            clippy::unwrap_used,
+            clippy::expect_used,
+            clippy::panic,
+            clippy::unreachable,
+            clippy::todo,
+            clippy::unimplemented,
+            reason = "tests may panic"
+        )]
         if let Some((root, parallelism)) = TEST_BUDGET_SOURCE.with(|slot| slot.borrow().clone()) {
             return Self::observe(&root, parallelism);
         }
@@ -241,11 +250,29 @@ thread_local! {
 /// parallel tests on other threads keep observing the real host — but a
 /// test that observes from a spawned thread observes the host, not the pin.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) struct TestBudgetGuard {
     _sealed: (),
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl TestBudgetGuard {
     pub(crate) fn pin(root: &Path, parallelism: Option<u32>) -> Self {
         TEST_BUDGET_SOURCE.with(|slot| {
@@ -256,6 +283,15 @@ impl TestBudgetGuard {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 impl Drop for TestBudgetGuard {
     fn drop(&mut self) {
         TEST_BUDGET_SOURCE.with(|slot| slot.borrow_mut().take());
@@ -540,6 +576,15 @@ pub(crate) fn format_cpu_milli(milli: u64) -> String {
 /// pass to `--slots`. The larger of the two wins, because a slot whose
 /// directory has not been created yet still competes for the machine.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 pub(crate) fn observe_slots(
     slot_dir: Option<&Path>,
     env_hint: Option<&str>,
@@ -562,6 +607,15 @@ pub(crate) fn observe_slots(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn count_sibling_slots(slot_dir: &Path) -> Option<NonZeroU32> {
     if !is_slot_dir_name(slot_dir) {
         return None;
@@ -578,6 +632,15 @@ fn count_sibling_slots(slot_dir: &Path) -> Option<NonZeroU32> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn is_slot_dir_name(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -714,6 +777,15 @@ fn read_mem_total_bytes(root: &Path) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use std::fs;

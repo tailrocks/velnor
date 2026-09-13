@@ -177,6 +177,9 @@ fn main() -> Result<()> {
                     "{id} cannot run on this host: missing {}",
                     match &runnability {
                         Runnability::Unrunnable { missing } => join_requirements(missing),
+                        // Proof: `Runnability::driver` returns `None` only
+                        // for `Unrunnable`, and this arm requires `None`.
+                        #[allow(clippy::unreachable, reason = "driver None implies Unrunnable")]
                         _ => unreachable!("driver() is None only for Unrunnable"),
                     }
                 );
@@ -266,6 +269,9 @@ fn main() -> Result<()> {
                     "{id} cannot soak on this host: missing {}",
                     match &runnability {
                         Runnability::Unrunnable { missing } => join_requirements(missing),
+                        // Proof: `Runnability::driver` returns `None` only
+                        // for `Unrunnable`, and this arm requires `None`.
+                        #[allow(clippy::unreachable, reason = "driver None implies Unrunnable")]
                         _ => unreachable!("driver() is None only for Unrunnable"),
                     }
                 );

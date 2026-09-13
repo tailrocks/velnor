@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Plan 065 fixture-integration proof: a sanitized model of a real
 //! `tailrocks/velnor-actions-fixture` control-plane success run
 //! (run 32724621332) is serialized and rendered through every format while

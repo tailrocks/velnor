@@ -1,3 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 //! Golden serde tests: prove exact wire field names, fail-closed unknown
 //! enum handling, RFC 3339 timestamps, and byte-identical round trips for a
 //! representative fixture of every resource noun.

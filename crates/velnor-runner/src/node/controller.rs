@@ -346,10 +346,13 @@ impl MetricsPublisher {
         reconcile_duration_ms: u64,
     ) {
         let (job_processes, waiter_processes) = job_process_counts(jobs.keys());
+        // A poisoned metrics lock must not crash the controller: the state is
+        // plain data (counters, a sequence, a flag), so no broken invariant
+        // can survive inside it and recovering the guard is always sound.
         let mut state = self
             .state
             .lock()
-            .expect("metrics snapshot mutex is not poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.snapshot.slot_processes = slots.len();
         state.snapshot.job_processes = job_processes;
         state.snapshot.waiter_processes = waiter_processes;
@@ -357,9 +360,11 @@ impl MetricsPublisher {
     }
 
     async fn stop_and_publish(&mut self) -> anyhow::Result<()> {
+        // See `update`: metrics state is plain data, so a poisoned lock
+        // recovers its guard instead of crashing the controller shutdown.
         self.state
             .lock()
-            .expect("metrics snapshot mutex is not poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stopped = true;
         self.stop.notify_one();
         if let Some(task) = self.task.take() {
@@ -386,9 +391,11 @@ fn publish_metrics_snapshot(
     state: &Arc<Mutex<MetricsPublisherState>>,
     allow_stopped: bool,
 ) -> anyhow::Result<bool> {
+    // See `MetricsPublisher::update`: metrics state is plain data, so a
+    // poisoned lock recovers its guard instead of crashing the publish loop.
     let mut state = state
         .lock()
-        .expect("metrics snapshot mutex is not poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if state.stopped && !allow_stopped {
         return Ok(false);
     }
@@ -693,6 +700,9 @@ async fn reconcile_once(
             continue;
         }
         if fenced && args.spawn_slots {
+            // Proof: `fenced` is `slot.is_some_and(...)`, so `slot` is `Some`
+            // in this arm.
+            #[allow(clippy::expect_used, reason = "fenced implies slot is Some")]
             terminate_fenced_slot_actor(args, slots, &id, slot.expect("fenced slot")).await?;
         }
         let fenced_generation = fenced_slot_recovery_generation(slot, &state, jobs);
@@ -2272,10 +2282,17 @@ async fn terminate_fenced_slot_actor(
     slot: &SlotRecord,
 ) -> anyhow::Result<()> {
     if slots.contains_key(&slot_id.0) {
+        // Proof: the `contains_key` guard above holds with no `await` between
+        // it and this lookup (shutdown is synchronous), so the entry is `Some`.
+        #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
         request_child_shutdown(slots.get(&slot_id.0).expect("child still present"))?;
         let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
         let mut escalated = false;
         loop {
+            // Proof: `slots` is exclusively borrowed, so no other task can
+            // remove the entry; the loop's only `remove` returns immediately,
+            // so the entry is present on every iteration.
+            #[allow(clippy::expect_used, reason = "child retained until reap")]
             if slots
                 .get_mut(&slot_id.0)
                 .expect("child retained until reap")
@@ -2292,6 +2309,9 @@ async fn terminate_fenced_slot_actor(
                         slot_id
                     );
                 }
+                // Proof: same as above — exclusive borrow plus remove-then-return
+                // means the entry is present on every loop iteration.
+                #[allow(clippy::expect_used, reason = "child retained until escalation")]
                 slots
                     .get_mut(&slot_id.0)
                     .expect("child retained until escalation")
@@ -2681,6 +2701,15 @@ pub async fn supervise_from_daemon(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use crate::args::DaemonArgs;
@@ -2919,6 +2948,26 @@ mod tests {
         assert_eq!(metrics["job_processes"], json!(2));
         assert_eq!(metrics["waiter_processes"], json!(1));
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_publisher_recovers_from_a_poisoned_lock() {
+        let dir = metrics_test_dir("poison-recovery");
+        let mut publisher = MetricsPublisher::start(&dir);
+        // Poison the shared lock the way any panicking holder would. Poison
+        // is sticky, so one poisoning exercises every lock site below.
+        let shared = publisher.state.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = shared.lock().unwrap();
+            panic!("poison the metrics lock");
+        }));
+        assert!(publisher.state.is_poisoned());
+        // Each of these recovered its guard via `into_inner` instead of
+        // crashing the controller on the poisoned lock.
+        publisher.update(&HashMap::new(), &HashMap::new(), 5);
+        publisher.stop_and_publish().await.unwrap();
+        assert!(dir.join("controller-metrics.json").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -823,6 +823,9 @@ fn audit_concern_contract(
                 let rule = match concern.classification {
                     ConcernClassification::NonApplicable => "non-applicable",
                     ConcernClassification::RepoSpecific => "repo-specific",
+                    // Proof: the outer arm already restricted the value to
+                    // these two variants.
+                    #[allow(clippy::unreachable, reason = "outer arm fixed the variants")]
                     _ => unreachable!(),
                 };
                 findings.push(Finding::info(
@@ -938,6 +941,15 @@ fn concern_implementations<'a>(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 fn audit_repo(root: &Path, offline: bool) -> Result<Vec<Finding>> {
     audit_repo_profile(root, offline, None, true, None)
 }
@@ -1924,6 +1936,9 @@ fn runner_group_api_mutation(tokens: &[&str], command: &str, curl: bool) -> Opti
                 "PATCH" => "PATCH",
                 "PUT" => "PUT",
                 "DELETE" => "DELETE",
+                // Proof: the arm guard restricted the value to these four
+                // methods.
+                #[allow(clippy::unreachable, reason = "guard fixed the four methods")]
                 _ => unreachable!(),
             })
         }
@@ -3194,6 +3209,15 @@ fn compact(value: &Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

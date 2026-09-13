@@ -188,6 +188,11 @@ fn parse_repository_visibility(body: &Value) -> Result<&str> {
     }
 }
 
+// Proof: every match arm returns on the final attempt (success, terminal
+// client error, last-attempt Ok, last-attempt Err), so the bounded loop
+// never falls through to the trailing `unreachable!`. (Function-level: lint
+// attributes do not attach to a trailing macro call.)
+#[allow(clippy::unreachable, reason = "bounded retry loop always returns")]
 fn upload_attestation(client: &Client, url: &str, token: &str, bundle: &Value) -> Result<Value> {
     const MAX_RETRIES: u32 = 5;
     for attempt in 0..=MAX_RETRIES {
@@ -576,6 +581,15 @@ fn unique_output_dir(runner_temp: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 

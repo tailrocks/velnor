@@ -24,3 +24,11 @@ velnor-runner = { path = "../velnor-runner", version = "0.1.269" }
 [dev-dependencies]
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

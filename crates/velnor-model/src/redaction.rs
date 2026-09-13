@@ -318,6 +318,9 @@ fn power_shell_pre_ampersand_escape(value: &str) -> String {
     if value.is_empty() || !value.contains('&') {
         return String::new();
     }
+    // Proof: the guard above returns unless `value.contains('&')`, so the
+    // `rfind('&')` in the `None` arm below is always `Some`.
+    #[allow(clippy::expect_used, reason = "value provably contains '&'")]
     let section = match value.find("&+") {
         Some(index) => &value[..index + 2],
         None => &value[..value.rfind('&').expect("value contains '&'") + 1],
@@ -333,6 +336,9 @@ fn power_shell_post_ampersand_escape(value: &str) -> String {
     if value.is_empty() || !value.contains('&') {
         return String::new();
     }
+    // Proof: the guard above returns unless `value.contains('&')`, so the
+    // `rfind('&')` in the `None` arm below is always `Some`.
+    #[allow(clippy::expect_used, reason = "value provably contains '&'")]
     let section = match value.find("&+") {
         Some(index) => {
             let after = &value[index + 2..];
@@ -351,6 +357,15 @@ fn power_shell_post_ampersand_escape(value: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented,
+    reason = "tests may panic"
+)]
 mod tests {
     use super::*;
 
