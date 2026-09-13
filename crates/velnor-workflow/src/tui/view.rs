@@ -721,6 +721,7 @@ mod tests {
                 targets: Vec::new(),
                 profile: None,
             }),
+            services: Vec::new(),
         };
         let config = crate::ProjectConfig {
             repository: "example/project".to_owned(),

@@ -1627,6 +1627,7 @@ mod tests {
                 ],
                 profile: None,
             }),
+            services: Vec::new(),
         }
     }
 

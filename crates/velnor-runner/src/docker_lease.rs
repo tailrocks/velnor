@@ -4371,12 +4371,18 @@ mod tests {
     fn claimed_container_rm_args_preserve_force_mode() {
         let non_force = remove_container_args(&["id-a".into(), "id-b".into()]);
         assert_eq!(
-            docker_client::container_rm_args_with_claimed_ids(&non_force, &["id-a".into()]),
+            docker_client::container_rm_args_with_claimed_ids(
+                docker_client::NonEmptyDockerArgs::new(&non_force).unwrap(),
+                &["id-a".into()],
+            ),
             remove_container_args(&["id-a".into()])
         );
         let force = force_remove_container_args(&["id-a".into(), "id-b".into()]);
         assert_eq!(
-            docker_client::container_rm_args_with_claimed_ids(&force, &["id-b".into()]),
+            docker_client::container_rm_args_with_claimed_ids(
+                docker_client::NonEmptyDockerArgs::new(&force).unwrap(),
+                &["id-b".into()],
+            ),
             force_remove_container_args(&["id-b".into()])
         );
     }

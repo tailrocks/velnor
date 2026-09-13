@@ -976,6 +976,7 @@ mod tests {
                 targets: Vec::new(),
                 profile: None,
             }),
+            services: Vec::new(),
         }
     }
 
