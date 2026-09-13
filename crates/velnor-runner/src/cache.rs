@@ -343,9 +343,30 @@ fn print_leftover_workspace_candidates() {
     }
 }
 
+#[derive(Debug)]
 struct GcLeaderLock {
     _file: File,
 }
+
+/// Another daemon holds the GC leader lock: contention to back off from, not
+/// a failure. Produced at the flock boundary from the `WOULDBLOCK` errno so
+/// the reclaim caller matches on the type instead of error text.
+#[derive(Debug)]
+struct GcLeaderLockHeld {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for GcLeaderLockHeld {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "another gc holds the lock ({})",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for GcLeaderLockHeld {}
 
 impl GcLeaderLock {
     fn acquire(run_root: &Path) -> Result<Self> {
@@ -359,9 +380,15 @@ impl GcLeaderLock {
             .truncate(false)
             .open(&path)
             .with_context(|| format!("open GC leader lock {}", path.display()))?;
-        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .with_context(|| "another gc holds the lock")?;
-        Ok(Self { _file: file })
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(rustix::io::Errno::WOULDBLOCK) => Err(GcLeaderLockHeld { path }.into()),
+            // Any other flock errno keeps its context and aborts (fail
+            // closed — an unexpected lock error is not proven contention).
+            Err(other) => {
+                Err(anyhow::Error::new(other).context(format!("lock GC leader {}", path.display())))
+            }
+        }
     }
 }
 
@@ -790,7 +817,7 @@ fn reclaim_work_root_with_layout(
 ) -> Result<ReclaimReport> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
-        Err(error) if error.to_string().contains("another gc holds the lock") => {
+        Err(error) if error.downcast_ref::<GcLeaderLockHeld>().is_some() => {
             eprintln!("capacity reclaim already running in another daemon; rechecking later");
             return Ok(ReclaimReport::default());
         }
@@ -1781,7 +1808,13 @@ mod tests {
     fn gc_leader_lock_excludes_second_reaper() {
         let root = std::env::temp_dir().join(format!("velnor-gc-lock-{}", uuid::Uuid::new_v4()));
         let first = GcLeaderLock::acquire(&root).unwrap();
-        assert!(GcLeaderLock::acquire(&root).is_err());
+        // Contention is typed at the flock boundary: the reclaim caller
+        // backs off on this type, never on error text.
+        let contention = GcLeaderLock::acquire(&root).unwrap_err();
+        assert!(
+            contention.downcast_ref::<GcLeaderLockHeld>().is_some(),
+            "expected typed contention, got {contention:#}"
+        );
         drop(first);
         assert!(GcLeaderLock::acquire(&root).is_ok());
         fs::remove_dir_all(root).unwrap();
