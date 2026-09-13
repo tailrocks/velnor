@@ -27,26 +27,8 @@
       ]
     },
     {
-      "name": "sccache",
-      "description": "The job image asserts the installed sccache version in its build. The assertion is a second copy of the pin and goes stale silently unless it is compared.",
-      "authority": {
-        "file": "docker/job-mise.toml",
-        "pattern": "sccache = \"(?<version>[0-9][0-9.]*)\""
-      },
-      "mirrors": [
-        {
-          "file": "docker/job-ubuntu.Dockerfile",
-          "pattern": "grep -F 'sccache (?<version>[0-9][0-9.]*)'"
-        },
-        {
-          "file": "crates/velnor-runner/src/executor.rs",
-          "pattern": "sccache v?(?<version>[0-9][0-9.]*)"
-        }
-      ]
-    },
-    {
       "name": "mr-boxington",
-      "description": "Same shape as sccache: the job image greps mbx --version for a literal that repeats the mise pin.",
+      "description": "The job image greps mbx --version for a literal that repeats the mise pin.",
       "authority": {
         "file": "docker/job-mise.toml",
         "pattern": "mr-boxington = \"(?<version>[0-9][0-9.]*)\""
