@@ -1558,8 +1558,9 @@ fn reject_unsafe_nested_host_controls(
                 _ => true,
             },
             "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
-            | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
-            | "publishallports" | "containeridfile" => is_strict_value_present(value),
+            | "volumedriver" | "volumesfrom" | "volumeoptions" | "containeridfile" => {
+                is_strict_value_present(value)
+            }
             // Live API 1.55: `{"Name":"no","MaximumRetryCount":0}` is the
             // default (no restart). `always` / `on-failure` stay denied.
             "restartpolicy" => !is_default_restart_policy(value)?,
@@ -1586,6 +1587,12 @@ fn reject_unsafe_nested_host_controls(
             | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
             | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
             | "maskedpaths" | "readonlypaths" => false,
+            // Testcontainers publishes ephemeral host ports (`-P` /
+            // PortBindings) so the guest can reach Postgres/Redis/RabbitMQ.
+            // The lease still labels every create and reclaims by
+            // velnor.job-id. Untrusted jobs never receive this socket.
+            // Host-path binds, privileged, and host-network stay denied.
+            "portbindings" | "publishallports" => false,
             // Docker CLI serializes unused HostConfig fields as empty
             // defaults (live API 1.55: `BlkioDeviceReadBps: []`,
             // `BlkioWeight: 0`, `ConsoleSize: [0,0]`,
@@ -3936,6 +3943,24 @@ mod tests {
     }
 
     #[test]
+    fn container_create_allows_testcontainers_published_ports() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        for body in [
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"AutoRemove":true,"NetworkMode":"bridge","PublishAllPorts":true}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"0"}]},"NetworkMode":"bridge"}}"#
+                .as_slice(),
+        ] {
+            let request = api_request("POST", "/v1.43/containers/create?name=tc-pg", body);
+            let result = policy.authorize(&request);
+            assert!(
+                result.is_ok(),
+                "testcontainers port publish must be a labeled lease create, not a host-control deny: {result:#?}"
+            );
+        }
+    }
+
+    #[test]
     fn container_create_empty_device_requests_are_absent() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
@@ -4565,6 +4590,24 @@ mod tests {
             let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
                 .expect_err("nested Docker host control access must fail closed");
             assert!(error.to_string().contains("host control access"));
+        }
+    }
+
+    #[test]
+    fn rewrite_allows_testcontainers_published_ports() {
+        for body in [
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"AutoRemove":true,"NetworkMode":"bridge","PublishAllPorts":true}}"#
+                .as_slice(),
+            br#"{"Image":"postgres:18-alpine","HostConfig":{"PortBindings":{"5432/tcp":[{"HostIp":"0.0.0.0","HostPort":"0"}]},"NetworkMode":"bridge"}}"#
+                .as_slice(),
+        ] {
+            let request = format!(
+                "POST /v1.43/containers/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            );
+            rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+                .expect("testcontainers port publish must rewrite, not fail closed");
         }
     }
 
