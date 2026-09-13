@@ -7071,7 +7071,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let config = scanned_fixture(RunnerMode::Both);
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("name: CI\nrun-name: CI / main"));
-        assert!(workflow.contains("  ci-required:\n    name: Required"));
+        assert!(workflow.contains("  ci-required:\n    name: ci-required"));
+        assert!(workflow.contains("  required:\n    name: Required"));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
         assert!(workflow.contains("github.event_name == 'workflow_dispatch'"));
@@ -7164,7 +7165,12 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let required_block = must_some(
             large_workflow
                 .split_once("  ci-required:\n")
-                .map(|(_, block)| block),
+                .map(|(_, block)| {
+                    block
+                        .split_once("\n  required:\n")
+                        .map(|(aggregator, _)| aggregator)
+                        .unwrap_or(block)
+                }),
             "large required-check block",
         );
         let required_script = must_some(
@@ -7709,7 +7715,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
-        assert!(pr.contains("  ci-required:\n    name: Required"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
+        assert!(pr.contains("  required:\n    name: Required"));
         assert!(!pr.contains("branches: [main]"));
         assert!(main.contains("name: CI\nrun-name: CI / main"));
         assert!(main.contains("branches: [main]"));
@@ -9989,8 +9996,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(main.contains("workflow_dispatch:"));
         assert!(main.contains("refs/heads/main"));
         assert!(main.contains(&fixture_lane_selector()));
-        assert!(pr.contains("  ci-required:\n    name: Required"));
-        assert!(main.contains("  ci-required:\n    name: Required"));
+        assert!(pr.contains("  ci-required:\n    name: ci-required"));
+        assert!(pr.contains("  required:\n    name: Required"));
+        assert!(main.contains("  ci-required:\n    name: ci-required"));
+        assert!(main.contains("  required:\n    name: Required"));
         assert!(!nightly.contains("name: ci-required"));
         assert!(nightly.contains("schedule:"));
         assert_eq!(

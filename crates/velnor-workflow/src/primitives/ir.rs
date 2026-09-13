@@ -1086,11 +1086,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         needs.extend(units);
-        let display_name = if check_name == "ci-required" {
-            "Required"
-        } else {
-            check_name
-        };
+        let display_name = check_name;
         let if_condition = "always()";
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
@@ -1128,6 +1124,13 @@ impl WorkflowIr {
             let _ = writeln!(
                 output,
                 "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+            );
+        }
+        if check_name == "ci-required" {
+            let _ = writeln!(
+                output,
+                "  required:\n    name: Required\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                self.runner_for(RunnerMode::Github)
             );
         }
     }
@@ -2026,7 +2029,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         trusted: bool,
         include_policy: bool,
     ) {
-        let display_name = "Required";
+        let display_name = "ci-required";
         let lanes = match runners {
             RunnerMode::Github => vec![RunnerMode::Github],
             RunnerMode::Velnor => vec![RunnerMode::Velnor],
@@ -2078,5 +2081,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
             );
         }
+        let _ = writeln!(
+            output,
+            "  required:\n    name: Required\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+            self.runner_for(RunnerMode::Github)
+        );
     }
 }

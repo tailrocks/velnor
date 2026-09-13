@@ -169,6 +169,8 @@ fn pull_request_and_merge_group_publish_required() {
     assert!(pr.contains("  merge_group:"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
+    assert!(pr.contains("    name: ci-required"));
+    assert!(pr.contains("  required:"));
     assert!(pr.contains("    name: Required"));
     assert!(!pr.contains("default: velnor"), "{pr}");
     assert!(pr.contains("default: github"), "{pr}");
