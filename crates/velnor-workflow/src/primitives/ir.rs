@@ -1070,37 +1070,42 @@ impl WorkflowIr {
         } else {
             "always()".to_owned()
         };
+        let needs_json = github_expression("toJSON(needs)");
+        let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  {check_name}:\n    name: {check_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
+            "  {check_name}:\n    name: {check_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
             needs.join(", "),
             self.runner_for(self.runners)
         );
         if simulate_failure {
             let simulate = github_expression("inputs.simulate_failure");
-            let _ = writeln!(
-                output,
-                "          if [[ \"{simulate}\" == true ]]; then\n            echo \"nightly red-to-signal simulation requested\" >&2\n            exit 1\n          fi"
+            let _ = writeln!(output, "          SIMULATE_FAILURE: {simulate}");
+        }
+        output.push_str("        shell: bash\n        run: |\n          set -euo pipefail\n");
+        if simulate_failure {
+            output.push_str(
+                "          if [[ \"$SIMULATE_FAILURE\" == true ]]; then\n            echo \"nightly red-to-signal simulation requested\" >&2\n            exit 1\n          fi\n",
             );
         }
+        output.push_str(
+            "          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n",
+        );
         for job in needs
             .iter()
             .filter(|job| matches!(job.as_str(), "plan" | "policy"))
         {
-            let result = github_expression(&format!("needs['{job}'].result"));
             let _ = writeln!(
                 output,
-                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+                "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
-        let selected = github_expression("needs.plan.outputs.units");
-        let _ = writeln!(output, "          selected=\",{selected},\"");
+        output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         for (unit_id, job_id, _, _) in nodes.iter().filter_map(GraphNode::as_unit) {
             let job = job_id;
-            let result = github_expression(&format!("needs['{job}'].result"));
             let _ = writeln!(
                 output,
-            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
             );
         }
     }
@@ -1895,9 +1900,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             "always()".to_owned()
         };
+        let needs_json = github_expression("toJSON(needs)");
+        let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
-            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        shell: bash\n        run: |",
+            "  ci-required:\n    name: {check_name}\n    if: ${{{{ {gate} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated unit results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n        shell: bash\n        run: |\n          set -euo pipefail\n          result_for_job() {{\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }}",
             needs.join(", "),
             self.runner_for(runners),
         );
@@ -1905,16 +1912,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             .iter()
             .filter(|job| matches!(job.as_str(), "plan" | "policy"))
         {
-            let result = github_expression(&format!("needs['{job}'].result"));
             let _ = writeln!(
                 output,
-                "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
+                "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
-        let selected = github_expression("needs.plan.outputs.units");
-        let _ = writeln!(output, "          selected=\",{selected},\"");
+        output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         for (unit, job, allow_selected_skip) in job_checks {
-            let result = github_expression(&format!("needs['{job}'].result"));
             let selected_case = if allow_selected_skip {
                 "success|skipped"
             } else {
@@ -1922,7 +1926,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             };
             let _ = writeln!(
                 output,
-                "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+                "          if [[ \"$selected\" == *\",{unit},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              {selected_case}) ;;\n              *) echo \"selected CI job {job} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI job {job} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi"
             );
         }
     }
