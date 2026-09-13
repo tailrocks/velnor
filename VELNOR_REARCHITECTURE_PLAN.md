@@ -6638,9 +6638,9 @@ log, not guessed. Prior entries untouched.
 Adjacent session merges touching goal code (concurrent effort, not goal
 branches): #771 `63a6141f` (deny panicking APIs workspace-wide, panic
 plan), #721 `54eb813e` (stable workspaces vs unclean checkouts),
-#714 `e44112f9` (adapt #702; claims the 360-min watchdog removed, but
+\#714 `e44112f9` (adapt #702; claims the 360-min watchdog removed, but
 `JobTimeoutEnforcer` is still present at tip — contention unresolved),
-#718 `6db9bb2a` (semantic + benchmark correctness gaps).
+\#718 `6db9bb2a` (semantic + benchmark correctness gaps).
 
 ### Final verifier verdicts with FAIL-to-PR traceability
 

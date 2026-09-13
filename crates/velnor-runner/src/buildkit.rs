@@ -1065,21 +1065,16 @@ pub(crate) fn claims_run_root() -> Option<PathBuf> {
 // Daemon operations (host engine, every call deadline-bounded)
 // ---------------------------------------------------------------------------
 
-/// Stop one builder's daemon. Returns true when a stop acted; a missing
+/// Stop one builder's daemon. Returns true when the daemon exists (a stop
+/// acted or it was already stopped — exit 0 meant true here before the
+/// migration, and the CLI leg still cannot distinguish); a missing
 /// daemon reads as already stopped. Only ever called with zero holders.
 pub(crate) fn stop_builder_daemon(builder: &str) -> Result<bool> {
     let daemon = daemon_container_name(builder);
-    let args = vec!["stop".to_string(), daemon.clone()];
-    match crate::docker::client::host_call(&args) {
+    match crate::docker::Docker::host().container_stop(&daemon, None) {
         Ok(_) => Ok(true),
-        Err(error) => {
-            let detail = format!("{error:#}");
-            if crate::docker::client::daemon_reports_missing(&detail) {
-                Ok(false)
-            } else {
-                Err(error).with_context(|| format!("stop BuildKit daemon {daemon}"))
-            }
-        }
+        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("stop BuildKit daemon {daemon}")),
     }
 }
 
@@ -1140,17 +1135,10 @@ pub(crate) fn resize_builder_daemon(
 /// holders that arrived mid-stop, this brings the daemon back for them.
 pub(crate) fn start_builder_daemon(builder: &str) -> Result<bool> {
     let daemon = daemon_container_name(builder);
-    let args = vec!["start".to_string(), daemon.clone()];
-    match crate::docker::client::host_call(&args) {
+    match crate::docker::Docker::host().container_start(&daemon) {
         Ok(_) => Ok(true),
-        Err(error) => {
-            let detail = format!("{error:#}");
-            if crate::docker::client::daemon_reports_missing(&detail) {
-                Ok(false)
-            } else {
-                Err(error).with_context(|| format!("start BuildKit daemon {daemon}"))
-            }
-        }
+        Err(error) if crate::docker::client::is_not_found(&error) => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("start BuildKit daemon {daemon}")),
     }
 }
 
@@ -1233,15 +1221,8 @@ pub(crate) fn remove_builder_and_claims(run_root: &Path, builder: &str) -> Resul
 /// daemon from the same stable name.
 pub(crate) fn remove_builder(builder: &str) -> Result<()> {
     let daemon = daemon_container_name(builder);
-    let rm = vec!["rm".to_string(), "--force".to_string(), daemon.clone()];
-    match crate::docker::client::host_call(&rm) {
-        Ok(_) => {}
-        Err(error) => {
-            let detail = format!("{error:#}");
-            if !(crate::docker::client::daemon_reports_missing(&detail)) {
-                return Err(error).with_context(|| format!("remove BuildKit daemon {daemon}"));
-            }
-        }
+    if let Err(error) = crate::docker::Docker::host().container_remove(&daemon, true, false) {
+        return Err(error).with_context(|| format!("remove BuildKit daemon {daemon}"));
     }
     let volume = daemon_state_volume(builder);
     let rm_volume = vec![
