@@ -713,6 +713,7 @@ mod tests {
             pinned_lockfile: true,
             cache: None,
             tool_version: Some("1.97.1".to_owned()),
+            mise_tools: Vec::new(),
             // Generation refuses a Rust unit without a recorded pin, so the
             // fixture records the pin its workflows are rendered against.
             toolchain: Some(crate::RustToolchain {

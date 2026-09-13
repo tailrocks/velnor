@@ -1183,6 +1183,7 @@ mod tests {
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
+            mise_tools: Vec::new(),
             // The scan guarantees this fact on every Rust unit of a real
             // repository; the test config carries the same contract, pinning
             // the targets the fixture's release contract builds for.

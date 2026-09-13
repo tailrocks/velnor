@@ -220,6 +220,12 @@ pub(crate) struct UnitSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pinned_lockfile: Option<bool>,
     tool_version: Option<String>,
+    /// Additional mise tool ids the unit's jobs install (for example a code
+    /// generator its tests shell out to). The scan cannot see tools a test
+    /// invokes at runtime, so the repository declares them; they render into
+    /// the job's mise `install_args` beside the detected ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mise_tools: Option<Vec<String>>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -383,6 +389,10 @@ impl UnitSection {
 
     pub(crate) fn tool_version(&self) -> Option<&str> {
         self.tool_version.as_deref()
+    }
+
+    pub(crate) fn mise_tools(&self) -> Option<&[String]> {
+        self.mise_tools.as_deref()
     }
 }
 
@@ -848,6 +858,18 @@ fn validate_workflow_files(files: Option<&[String]>) -> Result<(), GeneratorErro
     Ok(())
 }
 
+/// A mise tool id renders verbatim into a job's `install_args`, so it must be
+/// a plain id: backend qualifiers, paths, and versions, but no whitespace
+/// or shell metacharacters that could escape the argument.
+fn valid_mise_tool_id(value: &str) -> bool {
+    // No `@version`: versions resolve from the repository's mise manifest,
+    // never from an ad-hoc install argument.
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
+        })
+}
+
 /// Unit rows either override a scanned unit by id or add one. Two rows for one
 /// id would make the effective contract depend on which one the reader trusts,
 /// so the second row is refused instead of merged.
@@ -874,6 +896,15 @@ fn validate_units(units: &[UnitSection]) -> Result<(), GeneratorError> {
             return Err(GeneratorError::usage(format!(
                     "[[unit]] {id} declares `[unit.cache]` without both `key_files` and `paths`; a partial cache contract cannot be keyed"
                 )));
+        }
+        if let Some(tools) = row.mise_tools.as_deref() {
+            for tool in tools {
+                if !valid_mise_tool_id(tool) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[unit]] {id} declares mise tool `{tool}`, which is not a plain tool id; use backend-qualified ids such as `github:owner/repo` without whitespace or shell metacharacters"
+                    )));
+                }
+            }
         }
     }
     for (index, left) in units.iter().enumerate() {
@@ -1373,6 +1404,41 @@ mod tests {
             error.contains(&format!("available units: {available}")),
             "error lists the scanned units: {error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unit_mise_tools_rejects_shell_metacharacters() {
+        let root = scanned_root("mise-tools");
+        let shape = shape_for(&root);
+        let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
+        let unit = unit_ids.first().cloned().unwrap_or_default();
+        let valid = format!(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [\"github:open-telemetry/weaver\"]\n"
+        );
+        must(
+            config_for(&valid).validate(&unit_ids, &package_update_blocks()),
+            "plain tool ids validate",
+        );
+        for rejected in [
+            "weaver; touch pwned",
+            "github:open-telemetry/weaver@0.24.2",
+            "",
+        ] {
+            let text = format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [\"{rejected}\"]\n"
+            );
+            let error = must_some_error(
+                config_for(&text)
+                    .validate(&unit_ids, &package_update_blocks())
+                    .err(),
+                "metacharacters must fail",
+            );
+            assert!(
+                error.contains("mise tool"),
+                "error names the tool contract: {error}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 
