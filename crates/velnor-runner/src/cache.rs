@@ -36,6 +36,7 @@ const PERSISTENT_TARGET_MAX_PATH_BYTES: u64 = 64 * 1024 * 1024;
 /// This entry lock is the final integrity boundary: even if a reclaim pass
 /// selected the generation before the job published its lease, it cannot
 /// delete files while restore verification is reading them.
+#[derive(Debug)]
 pub(crate) struct CacheEntryLock {
     _file: File,
 }
@@ -47,6 +48,44 @@ impl CacheEntryLock {
 
     pub(crate) fn exclusive(cache_dir: &Path) -> Result<Self> {
         Self::acquire(cache_dir, rustix::fs::FlockOperation::LockExclusive)
+    }
+
+    /// Exclusive lock with a bounded wait: poll non-blocking flock until
+    /// `timeout`, then fail loud instead of parking the holder forever. A
+    /// re-entrant acquisition in one process (a second open of the same lock
+    /// file) times out rather than deadlocking, which is what lets callers
+    /// prove their critical sections end before slow work starts.
+    pub(crate) fn exclusive_timeout(cache_dir: &Path, timeout: Duration) -> Result<Self> {
+        let store = cache_dir
+            .parent()
+            .context("cache entry has no store parent")?;
+        let locks = store.join(".velnor-locks");
+        fs::create_dir_all(&locks)
+            .with_context(|| format!("create cache lock directory {}", locks.display()))?;
+        let name = cache_dir.file_name().context("cache entry has no name")?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(locks.join(name))
+            .with_context(|| format!("open cache entry lock for {}", cache_dir.display()))?;
+        let start = std::time::Instant::now();
+        loop {
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => return Ok(Self { _file: file }),
+                Err(_) if start.elapsed() < timeout => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "lock cache entry {} within {}ms",
+                        cache_dir.display(),
+                        timeout.as_millis()
+                    )));
+                }
+            }
+        }
     }
 
     fn acquire(cache_dir: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
@@ -1745,6 +1784,30 @@ mod tests {
         assert!(GcLeaderLock::acquire(&root).is_err());
         drop(first);
         assert!(GcLeaderLock::acquire(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn exclusive_timeout_fails_loud_on_a_held_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-entry-lock-timeout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let entry = root.join("scope/entry.json");
+        fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        fs::write(&entry, b"{}").unwrap();
+        let _held = CacheEntryLock::exclusive(&entry).unwrap();
+        let start = std::time::Instant::now();
+        let error =
+            CacheEntryLock::exclusive_timeout(&entry, Duration::from_millis(50)).unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "wait was not bounded"
+        );
+        assert!(
+            format!("{error:#}").contains("within 50ms"),
+            "unexpected: {error:#}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
