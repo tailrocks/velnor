@@ -167,7 +167,10 @@ fn parse_workflow_commands_with_policy(
     policy: CommandPolicy,
     scope: &mut DeprecatedCommandScope,
 ) -> StepCommandState {
-    let mut state = StepCommandState::default();
+    let mut state = StepCommandState {
+        allow_unsecure_stop_command_tokens: policy.allow_unsecure_stop_command_tokens,
+        ..StepCommandState::default()
+    };
     let mut stopped_token = None::<String>;
     for line in output.lines() {
         let Some(command) = parse_workflow_command(line, stopped_token.as_deref()) else {
@@ -239,9 +242,7 @@ fn process_stop_commands(
     policy: CommandPolicy,
     stopped_token: &mut Option<String>,
 ) {
-    let token_invalid = token.is_empty()
-        || is_registered_command(&token)
-        || token.eq_ignore_ascii_case("pause-logging");
+    let token_invalid = stop_command_token_is_invalid(&token);
     if token_invalid {
         state.telemetry.push(StepCommandTelemetry {
             message: format!("Invoked ::stopCommand:: with token: [{token}]"),
@@ -482,11 +483,25 @@ pub(crate) fn step_debug_enabled(env: &BTreeMap<String, String>) -> bool {
 /// invisibly unless echo is on, `::debug::` renders only under step
 /// debug, and everything else (including user ANSI) passes verbatim.
 pub(crate) fn rendered_output_lines(stdout: &str, stderr: &str, step_debug: bool) -> Vec<String> {
+    rendered_output_lines_with_policy(
+        stdout,
+        stderr,
+        step_debug,
+        CommandPolicy::from_runner_env().allow_unsecure_stop_command_tokens,
+    )
+}
+
+pub(crate) fn rendered_output_lines_with_policy(
+    stdout: &str,
+    stderr: &str,
+    step_debug: bool,
+    allow_unsecure_stop_command_tokens: bool,
+) -> Vec<String> {
     let mut echo = CommandEcho::new(step_debug);
     stdout
         .lines()
         .chain(stderr.lines())
-        .flat_map(|line| echo.render_line(line, step_debug))
+        .flat_map(|line| echo.render_line(line, step_debug, allow_unsecure_stop_command_tokens))
         .collect()
 }
 
@@ -515,7 +530,12 @@ impl CommandEcho {
     /// zero, one, or two lines: with echo on, an echoed command
     /// contributes its raw input line plus its normal rendering (upstream
     /// outputs the input first, then processes).
-    fn render_line(&mut self, line: &str, step_debug: bool) -> Vec<String> {
+    fn render_line(
+        &mut self,
+        line: &str,
+        step_debug: bool,
+        allow_unsecure_stop_command_tokens: bool,
+    ) -> Vec<String> {
         // `ActionCommand.TryParseV2` trims leading whitespace before
         // testing for the `::` keyword
         // (src/Runner.Common/ActionCommand.cs:61-66), and
@@ -540,11 +560,10 @@ impl CommandEcho {
         // stop line itself is likewise output (`context.Output(input)`),
         // unconditionally in both cases.
         //
-        // Simplification: the render pass has no opt-in policy, so it stops
-        // on any `::stop-commands::` line while the parse pass (which owns
-        // effects) still refuses invalid tokens. An invalid token therefore
-        // renders subsequent commands verbatim even though upstream consumes
-        // them — display-only, effects stay exact.
+        // The render pass carries the same opt-in bit as the parser. Without
+        // it, invalid tokens are rejected before they can stop rendering;
+        // otherwise the log would diverge from command processing even though
+        // the command effects stayed exact.
         if self
             .stopped
             .as_deref()
@@ -557,7 +576,10 @@ impl CommandEcho {
             return vec![line.to_string()];
         }
         if keyword.eq_ignore_ascii_case("stop-commands") {
-            self.stopped = Some(unescape_data(value));
+            let token = unescape_data(value);
+            if !stop_command_token_is_invalid(&token) || allow_unsecure_stop_command_tokens {
+                self.stopped = Some(token);
+            }
             return vec![line.to_string()];
         }
         match keyword {
@@ -643,6 +665,10 @@ impl CommandEcho {
             Vec::new()
         }
     }
+}
+
+fn stop_command_token_is_invalid(token: &str) -> bool {
+    token.is_empty() || is_registered_command(token) || token.eq_ignore_ascii_case("pause-logging")
 }
 
 fn push_error(state: &mut StepCommandState, message: String) {
@@ -1447,6 +1473,39 @@ mod tests {
                 "::warning::muted".to_string(),
                 "::pause::".to_string(),
                 "##[warning]heard".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_stop_command_tokens_do_not_hide_rendered_commands() {
+        assert_eq!(
+            rendered_output_lines_with_policy(
+                "::stop-commands::pause-logging\n::warning::heard\n",
+                "",
+                false,
+                false,
+            ),
+            vec![
+                "::stop-commands::pause-logging".to_string(),
+                "##[warning]heard".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rendered_stop_command_policy_matches_parser_opt_in() {
+        assert_eq!(
+            rendered_output_lines_with_policy(
+                "::stop-commands::pause-logging\n::warning::muted\n::pause-logging::\n",
+                "",
+                false,
+                true,
+            ),
+            vec![
+                "::stop-commands::pause-logging".to_string(),
+                "::warning::muted".to_string(),
+                "::pause-logging::".to_string(),
             ]
         );
     }
