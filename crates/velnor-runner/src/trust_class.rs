@@ -14,9 +14,10 @@
 //!
 //! * A missing, empty, or malformed event signal fails closed to
 //!   [`TrustClass::Unknown`]: no event name, no base repository, no plan
-//!   scope, no head repository on a pull-request or `workflow_run` event, an
-//!   unparseable event payload, or a repository resource that contradicts the
-//!   base repository.
+//!   reference (scope identifier on V1 orchestration messages, plan id on V2
+//!   broker messages), no head repository on a pull-request or `workflow_run`
+//!   event, an unparseable event payload, or a repository resource that
+//!   contradicts the base repository.
 //! * Any event whose name starts with `pull_request` (case-insensitive:
 //!   `pull_request`, `pull_request_target`, `pull_request_review`, …) is a
 //!   pull-request event. Same-repo (`head == base`, compared
@@ -244,10 +245,17 @@ fn base_repository(job: &AgentJobRequestMessage) -> Option<&str> {
 /// trust content of its own; it proves the message is structurally complete
 /// enough to bind the job to its collection scope.
 fn plan_scope_present(job: &AgentJobRequestMessage) -> bool {
+    // V1 orchestration messages carry a `ScopeIdentifier` GUID alongside the
+    // plan id; V2 broker messages carry only the plan id (`Version: 0`,
+    // `ScopeIdentifier` absent). Requiring the scope alone classified every
+    // real V2 job as `TrustClass::Unknown`, so the whole estate ran under the
+    // untrusted floor. The plan reference is complete when either identity is
+    // present; a message with neither is not a real plan and stays fail-closed.
     job.plan
         .scope_identifier
         .as_deref()
         .is_some_and(|scope| !scope.trim().is_empty())
+        || !job.plan.plan_id.trim().is_empty()
 }
 
 /// `owner/repo` with both sides non-empty and no inner whitespace, trimmed.
@@ -1007,13 +1015,21 @@ mod tests {
     }
 
     #[test]
-    fn trust_class_regression_missing_plan_scope_is_unknown() {
+    fn trust_class_regression_v2_plan_without_scope_identifier_is_trusted() {
+        // Real V2 broker messages carry `Version: 0` and no
+        // `ScopeIdentifier`; the plan id is the only plan identity. Captured
+        // from a live workflow_dispatch job message.
         let mut baseline = trusted_baseline();
-        baseline["plan"] = json!({ "planId": "plan" });
-        assert_eq!(derive_json(baseline), TrustClass::Unknown);
+        baseline["plan"] = json!({ "planId": "559b5dd3-cee0-47e3-9096-994b510ae4c1", "scopeIdentifier": null, "version": 0 });
+        assert_eq!(derive_json(baseline), TrustClass::Trusted);
+    }
 
+    #[test]
+    fn trust_class_regression_missing_plan_scope_is_unknown() {
+        // `PlanId` is schema-required, so the only expressible "no plan
+        // reference" message is a blank plan id beside an absent scope.
         let mut baseline = trusted_baseline();
-        baseline["plan"]["scopeIdentifier"] = json!("   ");
+        baseline["plan"] = json!({ "planId": "   ", "scopeIdentifier": null });
         assert_eq!(derive_json(baseline), TrustClass::Unknown);
     }
 
