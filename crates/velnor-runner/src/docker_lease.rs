@@ -1496,6 +1496,10 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             // Docker's zero value means "unset" for this known field. Do
             // not generalize that exception to future numeric fields.
             "blkioweight" => !is_zero_number(value),
+            // API 1.55 CLI sends `ConsoleSize: [0,0]` on every create
+            // (live preview.63 probe/backend-parity). That is "no TTY
+            // size", not host control. A nonzero size stays denied.
+            "consolesize" => !is_default_console_size(value),
             "autoremove" | "cgroupparent" | "cpucount" | "cpupercent" | "cpushares"
             | "cpuquota" | "cpuperiod" | "cpurealtimeperiod" | "cpurealtimeruntime"
             | "cpusetcpus" | "cpusetmems" | "memory" | "memoryreservation" | "memoryswap"
@@ -1542,6 +1546,15 @@ fn is_zero_number(value: &Value) -> bool {
         Value::Number(number)
             if number.as_i64() == Some(0) || number.as_u64() == Some(0)
     )
+}
+
+fn is_default_console_size(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(values) if values.is_empty() => true,
+        Value::Array(values) if values.len() == 2 => values.iter().all(is_zero_number),
+        _ => false,
+    }
 }
 
 fn value_is_present(value: &Value) -> bool {
@@ -3603,7 +3616,7 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"NetworkMode":"none","AutoRemove":true}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"NetworkMode":"none","AutoRemove":true}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
@@ -3625,6 +3638,32 @@ mod tests {
             .expect("unknown numeric field denial must answer as LeaseDeny");
         assert_eq!(deny.status, 403);
         assert!(deny.message.contains("FutureHostControl"));
+    }
+
+    #[test]
+    fn container_create_allows_only_zero_console_size_as_known_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"ConsoleSize":[0,0]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"ConsoleSize":[80,24]}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("nonzero ConsoleSize is a capability request");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("nonzero ConsoleSize denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("ConsoleSize"));
     }
 
     #[test]
