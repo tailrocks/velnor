@@ -6122,3 +6122,37 @@ strict clippy clean on bench and on runner with `test-support`
 serial runner lib 1775 passed, 0 failed, 1 ignored (1772 + 3 new); serial
 runner lib with `test-support` 1820 passed, 0 failed, 1 ignored
 (1817 + 3 new).
+
+## 111. R0-identity-env: runner build identity in every job step env — 2026-09-13
+
+Every job step now observes the release it runs under:
+`VELNOR_SOURCE_SHA` (the `env!`-stamped build commit from `build.rs`) and
+`VELNOR_MANIFEST_VERSION` (`manifest::MANIFEST_VERSION`) are published by
+`job_runtime_env()` beside the `RUNNER_*` block
+(`crates/velnor-runner/src/runtime_env.rs`).
+
+Trust handling follows the existing runner-owned-env pattern, extended to
+both vars rather than invented anew:
+
+- Step-scope spoofing is closed in `is_protected_default_env` by EXACT
+  match, not a `VELNOR_` prefix rule: jobs legitimately carry
+  `VELNOR_APP_ID` and `VELNOR_APP_PRIVATE_KEY`, which must pass through.
+- Container-scope spoofing is closed in `backend_advertising_env`
+  (`github_adapter.rs`), which strips workflow values and pushes the
+  authoritative pair into the job container spec env.
+- `GITHUB_ENV`/step-env spoofing at exec time is closed in
+  `append_authoritative_runner_env` (`container.rs`), which re-asserts the
+  spec values after step env on both the `exec` and Node-action `run`
+  paths (last `-e` wins).
+
+Tests: `runtime_env::tests::build_identity_env_is_runner_owned` (spoof
+drop mirroring the `MISE_LOCKED` assertions, plus `VELNOR_APP_*`
+passthrough); `container::tests::build_identity_env_cannot_be_overridden_by_step_environment`
+(docker-exec re-assertion); `backend_advertising_env_overrides_repo_controlled_value`
+extended to strip spoofed identity values.
+
+Gates observed in this worktree (base `4e67b6fa`, branch
+`r0-identity-env`): `mbx fmt -- --check` clean; `mbx clippy --locked
+--all-targets --all-features -D warnings` clean; `mbx nextest run
+--locked --all-features --package velnor-runner` 1924 passed, 0 failed,
+1 skipped (2 new tests).

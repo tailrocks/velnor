@@ -688,17 +688,20 @@ impl JobContainerSpec {
         }
     }
 
-    /// Re-assert the daemon-owned backend after workflow and step env. The
-    /// value is injected by `backend_advertising_env`; a workflow must not be
-    /// able to switch a Velnor job to the GitHub command contract through
-    /// `env:` or `GITHUB_ENV`.
+    /// Re-assert the daemon-owned backend and build identity after workflow
+    /// and step env. The values are injected by `backend_advertising_env`; a
+    /// workflow must not be able to switch a Velnor job to the GitHub command
+    /// contract through `env:` or `GITHUB_ENV`, nor spoof the release it runs
+    /// under.
     fn append_authoritative_runner_env(&self, command: &mut DockerCommand) {
-        if let Some((_, value)) = self
-            .env
-            .iter()
-            .find(|(name, _)| name == "VELNOR_EXECUTION_BACKEND")
-        {
-            command.env("VELNOR_EXECUTION_BACKEND", value.clone());
+        for name in [
+            "VELNOR_EXECUTION_BACKEND",
+            "VELNOR_SOURCE_SHA",
+            "VELNOR_MANIFEST_VERSION",
+        ] {
+            if let Some((_, value)) = self.env.iter().find(|(env_name, _)| env_name == name) {
+                command.env(name, value.clone());
+            }
         }
     }
 
@@ -2471,6 +2474,46 @@ mod tests {
             .iter()
             .rfind(|argument| argument.starts_with("VELNOR_EXECUTION_BACKEND="));
         assert_eq!(backend, Some(&"VELNOR_EXECUTION_BACKEND=docker".to_owned()));
+    }
+
+    #[test]
+    fn build_identity_env_cannot_be_overridden_by_step_environment() {
+        let mut spec = spec();
+        spec.env
+            .push(("VELNOR_SOURCE_SHA".into(), env!("VELNOR_SOURCE_SHA").into()));
+        spec.env.push((
+            "VELNOR_MANIFEST_VERSION".into(),
+            crate::manifest::MANIFEST_VERSION.to_string(),
+        ));
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w/repo",
+                &[
+                    ("VELNOR_SOURCE_SHA".into(), "spoofed".into()),
+                    ("VELNOR_MANIFEST_VERSION".into(), "spoofed".into()),
+                ],
+                &[],
+                &["sh".into(), "-c".into(), "true".into()],
+            )
+            .unwrap();
+        let rendered = rendered(&prepared);
+        let sha = rendered
+            .iter()
+            .rfind(|argument| argument.starts_with("VELNOR_SOURCE_SHA="));
+        assert_eq!(
+            sha,
+            Some(&format!("VELNOR_SOURCE_SHA={}", env!("VELNOR_SOURCE_SHA")))
+        );
+        let version = rendered
+            .iter()
+            .rfind(|argument| argument.starts_with("VELNOR_MANIFEST_VERSION="));
+        assert_eq!(
+            version,
+            Some(&format!(
+                "VELNOR_MANIFEST_VERSION={}",
+                crate::manifest::MANIFEST_VERSION
+            ))
+        );
     }
 
     #[test]
