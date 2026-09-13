@@ -653,8 +653,9 @@ impl WorkflowIr {
         // default-branch gate needed for Velnor execution.
         let trusted_event = kind != WorkflowKind::PullRequest;
         let runners = self.runners;
-        // Velnor control-plane jobs are trusted-event gated. GitHub and Both
-        // retain their hosted control-plane behavior.
+        // Velnor-only control-plane jobs admit pull requests through the
+        // untrusted Velnor path. GitHub/Both retain their hosted PR behavior
+        // and trusted-only Velnor lane.
         self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
@@ -876,10 +877,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!(
-                "always() && github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-                self.default_branch
-            )
+            format!("always() && ({})", self.velnor_event_expression())
         } else {
             "always()".to_owned()
         };
@@ -960,7 +958,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     /// The lane jobs a nested unit workflow emits: the hosted lane saves the
-    /// cache and is untrusted, the self-hosted lane is the trusted event lane.
+    /// cache and is untrusted. Velnor-only pull requests use the untrusted
+    /// Velnor path; trusted event gates still guard persistent cache writes.
     pub(crate) fn default_lane_jobs(&self, cache_save: bool) -> Vec<LaneJob> {
         let mut lanes = Vec::new();
         if matches!(self.runners, RunnerMode::Github | RunnerMode::Both) {
@@ -1047,11 +1046,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let id = lane.as_str();
         let _ = writeln!(output, "  {id}:\n    name: {}", lane.display_name());
         if trusted {
-            let _ = writeln!(
-                output,
-                "    if: ${{{{ github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}",
-                self.default_branch
-            );
+            let gate = if lane == RunnerMode::Velnor && self.runners == RunnerMode::Velnor {
+                self.velnor_event_expression()
+            } else {
+                self.trusted_event_expression()
+            };
+            let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         }
         let _ = writeln!(
             output,
@@ -1192,12 +1192,30 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
             format!(
-                "    if: ${{{{ github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n",
-                self.default_branch
+                "    if: ${{{{ {} }}}}\n",
+                if self.runners == RunnerMode::Velnor {
+                    self.velnor_event_expression()
+                } else {
+                    self.trusted_event_expression()
+                }
             )
         } else {
             String::new()
         }
+    }
+
+    fn trusted_event_expression(&self) -> String {
+        format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+            self.default_branch
+        )
+    }
+
+    fn velnor_event_expression(&self) -> String {
+        format!(
+            "github.event_name == 'pull_request' || ({})",
+            self.trusted_event_expression()
+        )
     }
 
     pub(crate) fn render_verify_github(
@@ -1222,11 +1240,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        // Self-hosted runners never receive untrusted pull-request code.
-        let condition = Some(format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            self.default_branch
-        ));
+        let condition = Some(if self.runners == RunnerMode::Velnor {
+            self.velnor_event_expression()
+        } else {
+            self.trusted_event_expression()
+        });
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,
