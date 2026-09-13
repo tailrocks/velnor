@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
 use std::{
+    fmt::Write as _,
     fs, io,
     num::NonZeroU32,
     path::{Path, PathBuf},
 };
+
+use sha2::{Digest, Sha256};
 
 use crate::container::host_budget::{BuildkitSize, HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
@@ -18,6 +21,8 @@ pub use crate::docker_argv::PreparedDockerArgs;
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
+const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
 
 /// Daemon-owned runner identity. Dropped from step env by exact match in
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
@@ -172,6 +177,10 @@ pub struct JobContainerSpec {
     pub node_action_image: String,
     pub docker_cli_host_path: Option<PathBuf>,
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
+    /// Host path of the apt-packaged `velnor-workflow` CLI. Jobs bind-mount it
+    /// over the image copy so `apt install velnor-runner` is enough to update
+    /// plan/run. `None` skips the mount (tests).
+    pub packaged_workflow_cli_host: Option<PathBuf>,
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
@@ -560,6 +569,7 @@ impl JobContainerSpec {
 
         self.append_docker_socket_mount(args);
         self.append_docker_cli_mounts(args);
+        self.append_packaged_workflow_cli_mounts(args)?;
 
         // The per-job network is runner policy. Keep it after expanded job
         // and daemon resource options so the job cannot be displaced from the
@@ -1124,6 +1134,38 @@ impl JobContainerSpec {
                 format!("{}:/usr/local/lib/docker/cli-plugins:ro", path.display()),
             );
         }
+    }
+
+    fn append_packaged_workflow_cli_mounts(&self, args: &mut impl FlagSink) -> io::Result<()> {
+        let Some(host) = self.packaged_workflow_cli_host.as_deref() else {
+            return Ok(());
+        };
+        if !host.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "packaged velnor-workflow missing at {}; install velnor-runner from apt",
+                    host.display()
+                ),
+            ));
+        }
+        fs::create_dir_all(&self.temp_host)?;
+        let digest = Sha256::digest(fs::read(host)?);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        let sidecar = self.temp_host.join("velnor-workflow.sha256");
+        fs::write(&sidecar, format!("{hex}  {JOB_WORKFLOW_CLI}\n"))?;
+        args.pair(
+            "-v",
+            format!("{}:ro", self.mount_arg(host, JOB_WORKFLOW_CLI)),
+        );
+        args.pair(
+            "-v",
+            format!("{}:ro", self.mount_arg(&sidecar, JOB_WORKFLOW_CLI_SHA256)),
+        );
+        Ok(())
     }
 
     fn mount_arg(&self, host_path: &Path, container_path: &str) -> String {
@@ -1732,6 +1774,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
@@ -1740,6 +1783,45 @@ mod tests {
             mbx_store_host: Some(work.join("_velnor_mbx/trusted")),
             sccache_store_host: None,
         }
+    }
+
+    #[test]
+    fn packaged_workflow_cli_is_bind_mounted_over_the_image_copy() {
+        let mut job = spec();
+        fs::create_dir_all(&job.temp_host).unwrap();
+        let cli = job.temp_host.join("packaged-velnor-workflow");
+        fs::write(&cli, b"workflow-cli").unwrap();
+        job.packaged_workflow_cli_host = Some(cli.clone());
+        let prepared = job.start_args().unwrap();
+        assert!(has_read_only_mount(
+            &rendered(&prepared),
+            &cli,
+            "/usr/local/bin/velnor-workflow"
+        ));
+        let sidecar = job.temp_host.join("velnor-workflow.sha256");
+        assert!(has_read_only_mount(
+            &rendered(&prepared),
+            &sidecar,
+            "/usr/local/share/velnor/velnor-workflow.sha256"
+        ));
+        let sidecar_text = fs::read_to_string(&sidecar).unwrap();
+        assert!(
+            sidecar_text.ends_with("  /usr/local/bin/velnor-workflow\n"),
+            "{sidecar_text}"
+        );
+        assert_eq!(
+            sidecar_text.len(),
+            64 + "  /usr/local/bin/velnor-workflow\n".len()
+        );
+    }
+
+    #[test]
+    fn packaged_workflow_cli_missing_from_apt_fails_closed() {
+        let mut job = spec();
+        job.packaged_workflow_cli_host = Some(job.temp_host.join("missing-velnor-workflow"));
+        let error = job.start_args().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("install velnor-runner from apt"));
     }
 
     #[test]

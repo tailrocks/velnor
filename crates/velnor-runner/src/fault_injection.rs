@@ -780,6 +780,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: false,
             clean: false,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,

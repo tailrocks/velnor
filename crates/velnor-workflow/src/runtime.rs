@@ -533,7 +533,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     let selection = selection_for_diff(&root, &config, scope, &base, &head)?;
     let units = selection
         .units
-        .into_iter()
+        .iter()
         .map(|unit| unit.id.as_str())
         .collect::<Vec<_>>()
         .join(",");
@@ -566,6 +566,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "full_units={full_units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        write_kind_matrices(&mut file, &config, &selection, &output_path)?;
     }
     println!("scope={}", scope_name(scope));
     println!("units={units}");
@@ -573,9 +574,50 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn write_kind_matrices(
+    file: &mut fs::File,
+    config: &CiConfig,
+    selection: &UnitSelection<'_>,
+    output_path: &Path,
+) -> Result<(), GeneratorError> {
+    let selected = selection
+        .units
+        .iter()
+        .map(|unit| unit.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut kinds = BTreeSet::new();
+    for unit in &config.unit {
+        if !unit.kind.is_empty() {
+            kinds.insert(unit.kind.as_str());
+        }
+    }
+    for kind in kinds {
+        let entries = config
+            .unit
+            .iter()
+            .filter(|unit| unit.kind == kind && selected.contains(unit.id.as_str()))
+            .map(|unit| {
+                let label = if unit.label.is_empty() {
+                    unit.id.clone()
+                } else {
+                    unit.label.clone()
+                };
+                serde_json::json!({ "unit": unit.id, "label": label })
+            })
+            .collect::<Vec<_>>();
+        let json = serde_json::to_string(&entries)
+            .map_err(|error| GeneratorError::usage(format!("serialize {kind} matrix: {error}")))?;
+        writeln!(file, "{kind}_matrix={json}")
+            .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
+    }
+    Ok(())
+}
+
 fn scope_for_event() -> Result<Option<String>, GeneratorError> {
     let event = env::var("EVENT_NAME").unwrap_or_default();
-    let override_scope = env::var("CI_SCOPE_OVERRIDE").ok();
+    let override_scope = env::var("CI_SCOPE_OVERRIDE")
+        .ok()
+        .filter(|value| !value.is_empty());
     scope_for_event_values(&event, override_scope.as_deref())
 }
 
@@ -584,7 +626,7 @@ pub(crate) fn scope_for_event_values(
     override_scope: Option<&str>,
 ) -> Result<Option<String>, GeneratorError> {
     match event {
-        "push" | "workflow_dispatch" | "schedule" => {
+        "push" | "schedule" => {
             if override_scope.is_some_and(|scope| scope != "full") {
                 return Err(GeneratorError::usage(
                     "trusted events require full CI scope",
@@ -592,6 +634,13 @@ pub(crate) fn scope_for_event_values(
             }
             Ok(Some("full".to_owned()))
         }
+        "workflow_dispatch" => match override_scope {
+            None | Some("full") => Ok(Some("full".to_owned())),
+            Some("affected") => Ok(Some("affected".to_owned())),
+            Some(other) => Err(GeneratorError::usage(format!(
+                "unsupported CI scope override `{other}`"
+            ))),
+        },
         "pull_request" => Ok(override_scope
             .map(ToOwned::to_owned)
             .or_else(|| Some("affected".to_owned()))),
@@ -775,10 +824,7 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    if matches!(
-        env::var("EVENT_NAME").as_deref(),
-        Ok("push" | "workflow_dispatch" | "schedule")
-    ) && scope != Scope::Full
+    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
@@ -1594,31 +1640,8 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
 }
 
-fn is_static_velnor_runner(job: &Mapping) -> bool {
-    let Some(runs_on) = mapping_value(job, "runs-on") else {
-        return false;
-    };
-    let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(runs_on, None, &mut resolving);
-    analysis.self_hosted
-        && !analysis.dynamic
-        && !analysis.invalid
-        && contains_velnor_runner_label(runs_on)
-}
-
-fn contains_velnor_runner_label(value: &Value) -> bool {
-    match value {
-        Value::String(value) => value.to_ascii_lowercase().contains("velnor"),
-        Value::Mapping(mapping) => mapping.values().any(contains_velnor_runner_label),
-        Value::Sequence(sequence) => sequence.iter().any(contains_velnor_runner_label),
-        Value::Tagged(tagged) => contains_velnor_runner_label(tagged.value()),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
-    }
-}
-
-fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
+fn has_safe_runner_gate(condition: &str, _job: &Mapping) -> bool {
     has_trusted_runner_gate(condition)
-        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1996,6 +2019,9 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     {
         return has_trusted_runner_gate(trusted);
     }
+    if let Some(trusted) = strip_reusable_unit_selector(&value) {
+        return has_trusted_runner_gate(trusted);
+    }
     let marker = "github.ref=='refs/heads/";
     let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
         return false;
@@ -2013,8 +2039,13 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let release_gate = format!(
         "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
     );
+    let velnor_lane_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
+        || value == velnor_lane_gate
+        || value == format!("always()&&{velnor_lane_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
@@ -2030,29 +2061,14 @@ fn has_trusted_runner_gate(value: &str) -> bool {
             .is_some_and(is_safe_trusted_gate_conjunction)
 }
 
-fn has_untrusted_pull_request_gate(value: &str) -> bool {
-    let value = value.trim();
-    let value = value
-        .strip_prefix("${{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .map_or(value, str::trim)
-        .split_whitespace()
-        .collect::<String>();
-    let value = value.strip_prefix("always()&&").unwrap_or(&value);
-    let value = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-        .unwrap_or(value);
-    if value == "github.event_name=='pull_request'" {
-        return true;
+fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    let value = value.strip_prefix("inputs.unit=='")?;
+    let separator = value.find("'&&(")?;
+    let unit = &value[..separator];
+    if !is_unit_id(unit) {
+        return None;
     }
-    let Some(trusted) = value
-        .strip_prefix("github.event_name=='pull_request'||(")
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return false;
-    };
-    has_trusted_runner_gate(trusted)
+    value[separator + "'&&(".len()..].strip_suffix(')')
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -3034,8 +3050,7 @@ jobs:
     }
 
     #[test]
-    fn policy_accepts_the_generated_untrusted_velnor_pull_request_gate(
-    ) -> Result<(), Box<dyn Error>> {
+    fn policy_rejects_untrusted_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Velnor PR
 on:
@@ -3048,7 +3063,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Velnor PR aggregate
@@ -3061,7 +3076,20 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
+
+        let workflow = r"
+name: Velnor kind reusable
+on: workflow_call
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
@@ -3095,8 +3123,8 @@ jobs:
         let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
         assert!(!run_policy(root)?);
 
-        // Velnor policy uses the local cache backend and a pull-request-safe
-        // event gate, while preserving the same pinned revision.
+        // Velnor policy uses the local cache backend and a trusted event gate,
+        // while preserving the same pinned revision.
         let trusted_gate = "    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
@@ -3123,6 +3151,34 @@ jobs:
             )
         );
         let root = policy_fixture("inline-velnor-pull-request", &workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+
+        let lane_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}\n";
+        let workflow = format!(
+            "name: Velnor dispatch policy\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(lane_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-dispatch", &workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let unit_gate = "    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}\n";
+        let workflow = format!(
+            "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(unit_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-unit", &workflow, "velnor")?;
         assert!(run_policy(root)?);
 
         // The Velnor lane remains fail-closed for both revision drift and

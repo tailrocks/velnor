@@ -269,7 +269,7 @@ pub fn catalog(layout: &StorageLayout) -> Result<Vec<CatalogEntry>> {
     Ok(entries)
 }
 
-fn dir_size(path: &Path) -> Result<u64> {
+pub(crate) fn dir_size(path: &Path) -> Result<u64> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),

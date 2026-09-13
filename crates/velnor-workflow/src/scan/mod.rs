@@ -62,7 +62,7 @@ pub(crate) fn scan_shape(
     file_walk::detect(&context, &mut shape);
     rust::detect(&context, &mut shape)?;
     signals::detect(&context, &mut shape);
-    gradle::detect(&context, &mut shape);
+    gradle::detect(&context, &mut shape)?;
     node::detect(&context, &mut shape)?;
     swift::detect(&context, &mut shape);
     opentofu::detect(&context, &mut shape);

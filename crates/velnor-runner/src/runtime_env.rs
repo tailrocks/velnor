@@ -245,7 +245,7 @@ pub(crate) fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(St
         .collect()
 }
 
-fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
+pub(crate) fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
     match value {
         Value::Object(object) => environment_object_pairs(object),
         Value::Array(values) => values.iter().flat_map(environment_token_pairs).collect(),
