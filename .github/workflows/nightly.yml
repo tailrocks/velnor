@@ -65,11 +65,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@f6c84657a1440e12592cbf43af75c8e5f1483a4b
         with:
-          rev: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          rev: f6c84657a1440e12592cbf43af75c8e5f1483a4b
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=f6c84657a1440e12592cbf43af75c8e5f1483a4b" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -115,7 +115,7 @@ jobs:
         with:
           backend: github
           version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-172845cf0307d99b2af1e29f58d4880519c6fb31
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-f6c84657a1440e12592cbf43af75c8e5f1483a4b
           restore-keys: |
             velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -134,7 +134,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev 172845cf0307d99b2af1e29f58d4880519c6fb31 \
+            --rev f6c84657a1440e12592cbf43af75c8e5f1483a4b \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -142,7 +142,7 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-          VELNOR_WORKFLOW_POLICY_REVISION: 172845cf0307d99b2af1e29f58d4880519c6fb31
+          VELNOR_WORKFLOW_POLICY_REVISION: f6c84657a1440e12592cbf43af75c8e5f1483a4b
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   group-bun:
     name: "Bun / Packages"
