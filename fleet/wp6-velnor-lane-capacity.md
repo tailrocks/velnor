@@ -60,18 +60,24 @@ All 17 Velnor-lane jobs on that run, ordered by `started_at`:
 | Rust · Rust dependency policy / Velnor | [103697787001](https://github.com/tailrocks/velnor/actions/runs/34747340103/job/103697787001) | velnor-dogfood-slot-5-next-89257-19 | 4649 | 136 | 79 | success |
 | Rust · velnor-model / Velnor | [103697787086](https://github.com/tailrocks/velnor/actions/runs/34747340103/job/103697787086) | velnor-dogfood-slot-1-next-180744-13 | 4637 | 136 | 75 | success |
 
-Stats (n=17):
+Stats, recomputed from the table above (odd-n median = 9th ordered value;
+even-n median = mean of the two central values):
 
-- **queue_s:** min 2s, median 43s, max 136s
-- **exec_s:** median 28s, range 11–130s excluding the 601s protocol-fail
-  (job 103697787039). Including that job, max is 601s.
-- **queue > exec** on 10/17 jobs: Documentation (103697786991, 43s > 14s),
-  OpenTofu (103697786994, 43s > 11s), velnor-tools (103697787045, 58s > 27s),
-  Bun (103697787042, 60s > 30s), velnor-bench (103697787131, 61s > 34s),
-  velnor-workflow-contract (103697787103, 97s > 20s), velnorctl
-  (103697787114, 100s > 28s), Rust production topology (103697787196,
-  122s > 34s), Rust dependency policy (103697787001, 136s > 79s),
-  velnor-model (103697787086, 136s > 75s).
+- **queue_s (n=17):** min 2s, median 43s, max 136s. Ordered:
+  2, 2, 2, 2, 3, 29, 41, 43, **43**, 58, 60, 61, 97, 100, 122, 136, 136.
+- **exec_s (n=17, including protocol-fail job 103697787039):** min 11s,
+  median 30s, max 601s. Ordered: 11, 14, 15, 20, 27, 28, 28, 28, **30**,
+  34, 34, 36, 37, 75, 79, 130, 601.
+- **exec_s excluding the 601s job (n=16):** min 11s, median 29s
+  ((28+30)/2), max 130s. Ordered: 11, 14, 15, 20, 27, 28, 28, **28**,
+  **30**, 34, 34, 36, 37, 75, 79, 130.
+- **queue > exec** on 11/17 jobs: velnor-workflow (103697787057, 29s > 28s),
+  Documentation (103697786991, 43s > 14s), OpenTofu (103697786994, 43s > 11s),
+  velnor-tools (103697787045, 58s > 27s), Bun (103697787042, 60s > 30s),
+  velnor-bench (103697787131, 61s > 34s), velnor-workflow-contract
+  (103697787103, 97s > 20s), velnorctl (103697787114, 100s > 28s),
+  Rust production topology (103697787196, 122s > 34s), Rust dependency
+  policy (103697787001, 136s > 79s), velnor-model (103697787086, 136s > 75s).
 
 The 5-slot fleet fills immediately, then queues. First wave (five jobs,
 08:20:08Z–08:20:09Z) queued 2–3s. Later jobs wait for a slot (29–136s).
@@ -255,7 +261,7 @@ stopped after the first wave.
 
 | Claim | Evidence |
 | --- | --- |
-| Queue often exceeds exec on the 5-slot pool | Nightly 34747340103, 17 jobs 103697786991–103697787196: median queue 43s, median exec 28s; queue > exec on 10/17 |
+| Queue often exceeds exec on the 5-slot pool | Nightly 34747340103, 17 jobs 103697786991–103697787196: median queue 43s; median exec 30s (n=17) / 29s excluding 601s job 103697787039; queue > exec on 11/17 |
 | Physical slot reused, runner identity not | Slot-5 jobs 103697787138 then 103697787057 (`runner_id` 4626 then 4636); slot-4 jobs 103697787030 then 103697786991 (`runner_id` 4622 then 4638) |
 | Host cache persistent | Job 103697787049: `Cache paths live on Velnor host-persistent storage (always warm)` |
 | Persistent builder *cache* yes | Docker jobs 103684693084 (run 34739692833, mbx 0 hits, exec 213s) → 103697887744 (run 34745867993, layers #6–#29 CACHED, mbx 1651 hits / 66 misses, exec 97s) |
