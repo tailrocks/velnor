@@ -22,6 +22,9 @@ use serde_yaml::{Mapping, Value};
 
 use sha2::{Digest, Sha256};
 
+use super::primitives::snapshot::{
+    plan_evictions, CacheEntry as SnapshotCacheEntry, RetentionPolicy,
+};
 use super::GeneratorError;
 
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
@@ -246,8 +249,96 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             release(&arguments[1..])?;
             Ok(true)
         }
+        "cache-plan" => {
+            let options = parse_options(&arguments[1..], &["entries", "now", "mode"])?;
+            let mode = options.get("mode").map_or("plan", String::as_str);
+            if !matches!(mode, "plan" | "budget") {
+                return Err(GeneratorError::usage(format!(
+                    "unsupported cache-plan mode: {mode}; use --mode=plan or --mode=budget"
+                )));
+            }
+            if mode == "budget" {
+                println!("{}", RetentionPolicy::default_policy().total_bytes);
+                return Ok(true);
+            }
+            cache_plan(
+                options.get("entries").map(String::as_str),
+                options.get("now").map(String::as_str),
+            )?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
+}
+
+/// One Actions cache entry as the maintenance job collects it from the API.
+#[derive(Deserialize)]
+struct CacheEntryRecord {
+    id: String,
+    key: String,
+    size_in_bytes: u64,
+    created_at: String,
+}
+
+/// Compute the retention eviction plan for the Actions cache account: the same
+/// [`RetentionPolicy`] and the same `plan_evictions` the generator's tests
+/// exercise, run against the account snapshot the maintenance job collects.
+/// The plan is the workflow's only eviction decision — the job applies it
+/// verbatim and records every eviction's class and reason in the summary.
+///
+/// `--now` pins the clock for tests; a live run uses the system clock.
+fn cache_plan(entries_path: Option<&str>, now: Option<&str>) -> Result<(), GeneratorError> {
+    let entries_text = if let Some(path) = entries_path {
+        fs::read_to_string(path).map_err(|error| {
+            GeneratorError::io("read cache account snapshot", Path::new(path), &error)
+        })?
+    } else {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text).map_err(|error| {
+            GeneratorError::usage(format!("read cache account snapshot: {error}"))
+        })?;
+        text
+    };
+    let records: Vec<CacheEntryRecord> = serde_json::from_str(&entries_text).map_err(|error| {
+        GeneratorError::usage(format!(
+            "the cache account snapshot is not an array of cache records: {error}"
+        ))
+    })?;
+    let entries = records
+        .into_iter()
+        .map(|record| SnapshotCacheEntry {
+            id: record.id,
+            key: record.key,
+            size_in_bytes: record.size_in_bytes,
+            created_at: record.created_at,
+        })
+        .collect::<Vec<_>>();
+    let now_epoch = match now {
+        Some(pinned) => parse_pinned_epoch(pinned)?,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| GeneratorError::usage(format!("resolve current time: {error}")))?
+            .as_secs()
+            .cast_signed(),
+    };
+    let plan = plan_evictions(&entries, &RetentionPolicy::default_policy(), now_epoch);
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    serde_json::to_writer(&mut handle, &plan)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    writeln!(handle)
+        .map_err(|error| GeneratorError::usage(format!("write eviction plan: {error}")))?;
+    Ok(())
+}
+
+/// Parse the pinned `--now` clock as seconds since the epoch, so a test run
+/// names a reproducible instant.
+fn parse_pinned_epoch(pinned: &str) -> Result<i64, GeneratorError> {
+    pinned.parse::<i64>().map_err(|_| {
+        GeneratorError::usage(format!(
+            "unsupported --now value {pinned}: name seconds since the epoch"
+        ))
+    })
 }
 
 fn parse_options(

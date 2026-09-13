@@ -506,21 +506,24 @@ jobs:
 __VELNOR_PINNED_TOOLCHAIN_STEPS__
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -633,21 +636,24 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -1028,21 +1034,24 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
 __VELNOR_PINNED_TOOLCHAIN_STEPS__
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -1226,21 +1235,24 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -2098,21 +2110,24 @@ jobs:
 __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -2283,21 +2298,24 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-metadata-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
@@ -2429,21 +2447,24 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       # Compiler persistence: this lane runs on disposable hosted runners, so
-      # the mbx closure travels through the GitHub object cache. The key is
-      # the release-family compatibility identity - mbx generation and
-      # version, OS and arch, the job variant, the dependency inputs - and
-      # the preview lane saves under the same namespace, so a release run on
-      # unchanged inputs restores that snapshot instead of rebuilding cold
-      # (immutable keys make a duplicate write a no-op).
+      # the mbx closure travels through the GitHub object cache. The primary
+      # key names a compatibility digest plus runtime segments, the job
+      # variant, dependency inputs, and the freshness digest; compatibility
+      # decides whether a snapshot may be imported, freshness decides whether
+      # it is new state. An exact hit is already saved, so its write is a
+      # no-op; advanced source state mints a new immutable generation. Prefix
+      # restores choose the newest compatible generation, and maintenance
+      # bounds the generations each variant keeps.
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: github
           github-cache-mode: objects
           version: 1.8.3
-          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          cache-key: velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-__VELNOR_SNAPSHOT_STATE__
           restore-keys: |
-            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}-
+            velnor-release-mbx-__VELNOR_SNAPSHOT_COMPATIBILITY__-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
           save-on-workflow-dispatch: true
 
       # Cargo sources ride the release-family namespace: the content is a
