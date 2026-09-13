@@ -6,7 +6,7 @@ use crate::{GeneratorError, RunnerMode};
 /// Render the `plan:` job.
 ///
 /// Planning follows the configured lane. Velnor uses the image-provided
-/// runtime. GitHub planning pins `uses:` to SOURCE_REV and installs
+/// runtime. GitHub planning pins `uses:` to `SOURCE_REV` and installs
 /// `${{ github.sha }}` so `plan` matches the checked-out tree.
 pub(crate) struct AffectedPlan;
 
