@@ -1507,11 +1507,12 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
             | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
             | "maskedpaths" | "readonlypaths" => false,
-            // Docker CLI releases routinely add benign HostConfig fields and
-            // serialize their null, false, string, array, or object defaults
-            // (observed live: API 1.55 sends `BlkioDeviceReadBps: []`). A
-            // populated unknown field is a capability request. Unknown
-            // numeric values remain denied, including zero.
+            // Docker CLI serializes unused HostConfig fields as empty
+            // defaults (live API 1.55: `BlkioDeviceReadBps: []`,
+            // `BlkioWeight: 0`, `ConsoleSize: [0,0]`,
+            // `IOMaximumBandwidth: 0`, `DeviceRequests: []`). Empty grants
+            // no host control. A populated unknown field is a capability
+            // request.
             _ => value_is_present(value),
         };
         if unsafe_control {
@@ -1562,9 +1563,9 @@ fn value_is_present(value: &Value) -> bool {
         Value::Null => false,
         Value::Bool(value) => *value,
         Value::String(value) => !value.trim().is_empty(),
-        Value::Array(values) => !values.is_empty(),
-        Value::Object(object) => !object.is_empty(),
-        Value::Number(_) => true,
+        Value::Array(values) => values.iter().any(value_is_present),
+        Value::Object(object) => object.values().any(value_is_present),
+        Value::Number(_) => !is_zero_number(value),
     }
 }
 
@@ -3616,23 +3617,35 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"NetworkMode":"none","AutoRemove":true}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"IOMaximumBandwidth":0,"DeviceRequests":[],"NetworkMode":"none","AutoRemove":true}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
     }
 
     #[test]
-    fn container_create_rejects_unknown_numeric_zero_hostconfig_field() {
+    fn container_create_unknown_numeric_zero_is_empty_default() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":0}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"IOMaximumBandwidth":0,"FutureHostControl":0}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_rejects_unknown_numeric_nonzero_hostconfig_field() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":1}}"#,
         );
         let error = policy
             .authorize(&request)
-            .expect_err("unknown numeric HostConfig fields must fail closed");
+            .expect_err("unknown nonzero HostConfig fields must fail closed");
         let deny = error
             .downcast_ref::<LeaseDeny>()
             .expect("unknown numeric field denial must answer as LeaseDeny");
