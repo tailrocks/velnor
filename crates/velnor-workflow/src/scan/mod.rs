@@ -172,6 +172,7 @@ pub(crate) fn unit(
         cache,
         pinned_lockfile: false,
         tool_version: None,
+        toolchain: None,
     }
 }
 

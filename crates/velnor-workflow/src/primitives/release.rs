@@ -12,9 +12,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use super::{
-    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note, Args,
-    CacheBackend, Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE,
-    RELEASE_SIGNER, STATIC_WORKFLOW,
+    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
+    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
@@ -113,7 +113,10 @@ impl Primitive for StaticWorkflow {
             "__VELNOR_GITHUB_RUNNER__",
             &yaml_scalar(&ctx.config.github_runner),
         );
-        let content = crate::render_static_template(&template);
+        let content = crate::render_pinned_toolchain_fill(
+            ctx.config,
+            &crate::render_static_template(&template),
+        )?;
         Ok(Rendered {
             files: std::iter::once((
                 std::path::PathBuf::from(".github/workflows").join(file),
@@ -405,6 +408,27 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             "{GENERATED_HEADER}# Preview is omitted: no complete Rust binary release contract.\n"
         );
     };
+    // The scan refuses a Rust repository without a pin, so this is only
+    // unreachable for hand-built configs; without the pin there is no
+    // toolchain contract to build the binary under, so fail closed.
+    let Some(toolchain) = crate::config_rust_toolchain(config) else {
+        return format!(
+            "{GENERATED_HEADER}# Preview is omitted: the repository pins no Rust toolchain.\n"
+        );
+    };
+    // The build jobs run only from trusted pushes to the default branch, so
+    // that — and nothing broader — is what may save the toolchain cache.
+    let mut toolchain_steps = String::new();
+    render_pinned_toolchain_steps(
+        &mut toolchain_steps,
+        ActionPin::CacheRestore.reference(),
+        ActionPin::CacheSave.reference(),
+        &toolchain,
+        Some(&format!(
+            "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
+            config.default_branch
+        )),
+    );
     let mut matrix = String::new();
     for target in &release.targets {
         for (lane, runner) in release_lanes(config, target) {
@@ -437,7 +461,9 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     )
     .replace(
         "          persist-credentials: false\\n      - name: Set up sccache",
-        "          persist-credentials: false\\n      - name: Enforce workflow policy\\n        env:\\n          EVENT_NAME: ${{ github.event_name }}\\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\\n      - name: Set up sccache",
+        &format!(
+            "          persist-credentials: false\\n      - name: Enforce workflow policy\\n        env:\\n          EVENT_NAME: ${{{{ github.event_name }}}}\\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\\n{toolchain_steps}      - name: Set up sccache"
+        ),
     )
     .replace(
         "      - name: Build preview binary",
@@ -567,7 +593,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 );
             }
             render_cargo_source_preparation(&mut output, unit);
-            let cargo_offline = cargo_offline_env(unit);
+            let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,
                 "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
@@ -1064,6 +1090,13 @@ mod tests {
             ),
             "write release fixture manifest",
         );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.91.1\"\n",
+            ),
+            "write release fixture toolchain pin",
+        );
         root
     }
 
@@ -1084,6 +1117,18 @@ mod tests {
             depends_on: Vec::new(),
             cache: None,
             tool_version: None,
+            // The scan guarantees this fact on every Rust unit of a real
+            // repository; the test config carries the same contract, pinning
+            // the targets the fixture's release contract builds for.
+            toolchain: Some(crate::RustToolchain {
+                channel: "1.91.1".to_owned(),
+                components: Vec::new(),
+                targets: vec![
+                    "x86_64-unknown-linux-gnu".to_owned(),
+                    "aarch64-unknown-linux-gnu".to_owned(),
+                ],
+                profile: None,
+            }),
         }
     }
 
@@ -1196,11 +1241,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "bb7af344828e3249f134152387340eac4721ee820c5095b06789000546676404",
+                "532e2c3e0b842ef84057030d1af74e8ae9e12e282b0b57b0719ba8d2e9ccf717",
             ),
             (
                 "preview.yml",
-                "2fa8e25f56d4f0540f9778651baf95005dbf205149f7c9ced5ef40a2563dcbba",
+                "2e9fbdd5575f49f983873d6101281d05aa721a2143c97d3b9904433660f7497e",
             ),
             (
                 "maintenance.yml",
@@ -1212,8 +1257,15 @@ mod tests {
             ),
         ];
         let root = scanned_root("default");
-        let files = PINNED.iter().map(|(file, _)| *file).collect::<Vec<_>>();
-        let config = config(&files, Some(binary_spec()));
+        let config = config(
+            &[
+                "release.yml",
+                "preview.yml",
+                "maintenance.yml",
+                "ci-release-package-signer.yml",
+            ],
+            Some(binary_spec()),
+        );
         let surface = generate(&root, &config, None);
         for (file, digest) in PINNED {
             let rendered = rendered(&surface, file);
@@ -1385,6 +1437,7 @@ mod tests {
     /// legacy renderer for every scanned unit, so a row that slips past the
     /// pipeline family — here narrowed with `coverage = "explicit"` — would
     /// otherwise be emitted and then silently overwritten.
+
     #[test]
     fn a_declared_file_a_nested_unit_renderer_owns_is_rejected() {
         let root = scanned_root("owned-nested");

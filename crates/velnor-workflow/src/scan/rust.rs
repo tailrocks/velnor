@@ -11,13 +11,200 @@ use super::file_walk::{
 use super::{RepositoryShape, ScanContext};
 use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
-    GeneratorError, Unit, UnitKind,
+    GeneratorError, RustToolchain, Unit, UnitKind,
 };
 
 /// The scanner's Rust dependency-policy unit. Its commands resolve the
 /// advisory databases themselves, so the Cargo-network restrictions applied to
 /// ordinary Rust units deliberately do not apply to it.
 const POLICY_UNIT_ID: &str = "rust-policy";
+
+/// Installation profiles `rustup toolchain install --profile` accepts. Any
+/// other value fails the install, so the scan rejects it up front.
+const RUSTUP_PROFILES: [&str; 3] = ["minimal", "default", "complete"];
+
+/// Read the repository's pinned toolchain from a repository directory,
+/// statting the two candidate files. For callers that already hold the walked
+/// file set, prefer [`parse_rust_toolchain`].
+pub(crate) fn parse_rust_toolchain_from_dir(
+    root: &Path,
+) -> Result<Option<RustToolchain>, GeneratorError> {
+    if root.join("rust-toolchain.toml").is_file() || root.join("rust-toolchain").is_file() {
+        let files = super::file_walk::repository_files(root, &[])?;
+        let file_set: BTreeSet<String> = files.iter().cloned().collect();
+        return parse_rust_toolchain(root, &file_set);
+    }
+    Ok(None)
+}
+
+/// Parse the repository's pinned Rust toolchain, if it declares one.
+///
+/// `rust-toolchain.toml` is the canonical form and carries the contract under
+/// its `[toolchain]` table; the legacy bare `rust-toolchain` file carries only
+/// a channel. Everything the renderer later feeds to `rustup` is validated
+/// here, so an unparsable pin fails the scan instead of failing a workflow
+/// step on a runner.
+pub(crate) fn parse_rust_toolchain(
+    root: &Path,
+    file_set: &BTreeSet<String>,
+) -> Result<Option<RustToolchain>, GeneratorError> {
+    if file_set.contains("rust-toolchain.toml") {
+        let path = root.join("rust-toolchain.toml");
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| GeneratorError::io("read rust-toolchain.toml", &path, &error))?;
+        return parse_toolchain_table(&contents, &path).map(Some);
+    }
+    if file_set.contains("rust-toolchain") {
+        let path = root.join("rust-toolchain");
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| GeneratorError::io("read rust-toolchain", &path, &error))?;
+        return Ok(Some(RustToolchain {
+            channel: validate_toolchain_value("channel", contents.trim(), &path)?,
+            components: Vec::new(),
+            targets: Vec::new(),
+            profile: None,
+        }));
+    }
+    Ok(None)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the toolchain table keeps validation next to parsing"
+)]
+fn parse_toolchain_table(contents: &str, path: &Path) -> Result<RustToolchain, GeneratorError> {
+    let mut channel = None;
+    let mut profile = None;
+    let mut components = Vec::new();
+    let mut targets = Vec::new();
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut section = String::new();
+    let mut index = 0_usize;
+    while index < lines.len() {
+        let trimmed = strip_toml_comment(lines[index]).trim().to_owned();
+        index += 1;
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(header) = trimmed.strip_prefix('[') {
+            let Some(header) = header.strip_suffix(']') else {
+                return Err(GeneratorError::usage(format!(
+                    "malformed table header in {}: {trimmed}",
+                    path.display()
+                )));
+            };
+            header.trim().clone_into(&mut section);
+            continue;
+        }
+        if section != "toolchain" {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(GeneratorError::usage(format!(
+                "expected `key = value` under [toolchain] in {}: {trimmed}",
+                path.display()
+            )));
+        };
+        let key = key.trim();
+        let mut value = value.trim().to_owned();
+        while toml_array_is_open(&value) {
+            let Some(next) = lines.get(index) else {
+                break;
+            };
+            index += 1;
+            value.push(' ');
+            value.push_str(strip_toml_comment(next).trim());
+        }
+        match key {
+            "channel" => {
+                channel = Some(toml_string_value(&value).ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "[toolchain].channel must be a quoted string in {}",
+                        path.display()
+                    ))
+                })?);
+            }
+            "profile" => {
+                let parsed = toml_string_value(&value).ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "[toolchain].profile must be a quoted string in {}",
+                        path.display()
+                    ))
+                })?;
+                if !RUSTUP_PROFILES.contains(&parsed.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[toolchain].profile is `{parsed}` in {}, but rustup only accepts {}",
+                        path.display(),
+                        RUSTUP_PROFILES
+                            .map(|profile| format!("`{profile}`"))
+                            .join(", ")
+                    )));
+                }
+                profile = Some(parsed);
+            }
+            // `toml_array_values` already unwraps each quoted entry.
+            "components" | "targets" => {
+                let parsed = toml_array_values(&value);
+                if key == "components" {
+                    components = parsed;
+                } else {
+                    targets = parsed;
+                }
+            }
+            other => {
+                return Err(GeneratorError::usage(format!(
+                    "unknown [toolchain] key `{other}` in {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    let Some(channel) = channel else {
+        return Err(GeneratorError::usage(format!(
+            "[toolchain] declares no channel in {}",
+            path.display()
+        )));
+    };
+    for (field, values) in [
+        ("channel", std::slice::from_ref(&channel)),
+        ("components", &components),
+        ("targets", &targets),
+    ] {
+        for value in values {
+            validate_toolchain_value(field, value, path)?;
+        }
+    }
+    Ok(RustToolchain {
+        channel,
+        components,
+        targets,
+        profile,
+    })
+}
+
+/// Reject anything that would not survive being rendered into a quoted shell
+/// word on a runner: whitespace, control characters, and shell metacharacters.
+fn validate_toolchain_value(
+    field: &str,
+    value: &str,
+    path: &Path,
+) -> Result<String, GeneratorError> {
+    let valid = !value.is_empty()
+        && !value.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || !matches!(character,
+                    'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '-' | '_' | '/' | ':' | '+')
+        });
+    if valid {
+        Ok(value.to_owned())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "[toolchain].{field} value `{value}` is not a safe toolchain identifier in {}",
+            path.display()
+        )))
+    }
+}
 
 fn cargo_deny_has_license_policy(root: &Path, file_set: &BTreeSet<String>) -> bool {
     ["deny.toml", ".cargo/deny.toml"].into_iter().any(|path| {
@@ -113,6 +300,21 @@ fn analyze_rust_manifests(
         file_set.contains(".config/nextest.toml") || file_set.contains("nextest.toml");
     let has_cargo_deny = file_set.contains("deny.toml") || file_set.contains(".cargo/deny.toml");
     let has_cargo_audit = file_set.contains("audit.toml") || file_set.contains(".cargo/audit.toml");
+    let toolchain = match parse_rust_toolchain(root, file_set)? {
+        Some(toolchain) => toolchain,
+        // A Rust repository without a pin has no toolchain contract to
+        // render: provisioning would silently fall back to whatever mise or
+        // the runner image resolves, which is exactly the drift the pin
+        // exists to prevent. Fail the scan where the fix belongs.
+        None if facts.iter().any(|manifest| manifest.has_package) => {
+            return Err(GeneratorError::usage(
+                "the repository contains Rust packages but pins no Rust toolchain; add \
+                 rust-toolchain.toml with a [toolchain] channel (plus any components and \
+                 targets) so every workflow provisions exactly that toolchain",
+            ));
+        }
+        None => RustToolchain::default(),
+    };
     let mut result = RustAnalysis::default();
 
     if workspace_root.is_some() {
@@ -132,12 +334,13 @@ fn analyze_rust_manifests(
     if has_cargo_audit {
         result.detected.push("cargo-audit-policy".to_owned());
     }
+    // Detected, never "mise provides rust": the Rust toolchain is rustup's
+    // job and mise only ever contributes task-runner tools here.
     if files
         .iter()
         .any(|file| matches!(file.rsplit('/').next(), Some("mise.toml" | "mise.lock")))
-        && facts.iter().any(|manifest| manifest.has_package)
     {
-        result.detected.push("mise-rust-toolchain".to_owned());
+        result.detected.push("mise-present".to_owned());
     }
 
     let package_facts = facts
@@ -303,6 +506,7 @@ fn analyze_rust_manifests(
                 mbx_output_cache_justification: None,
             }),
             tool_version: None,
+            toolchain: Some(toolchain.clone()),
         });
     }
 
@@ -354,6 +558,7 @@ fn analyze_rust_manifests(
                 mbx_output_cache_justification: None,
             }),
             tool_version: None,
+            toolchain: Some(toolchain.clone()),
         });
     }
 

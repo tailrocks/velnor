@@ -79,7 +79,7 @@ fn generate(root: &Path) -> Generated {
     // surface it did not write, which is exactly the behavior under test
     // elsewhere.
     let _ = fs::remove_dir_all(&output);
-    let status = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
         .args([
             "--plain",
             "--default-branch",
@@ -88,9 +88,14 @@ fn generate(root: &Path) -> Generated {
             output.to_str().unwrap(),
             root.to_str().unwrap(),
         ])
-        .status()
+        .output()
         .expect("run velnor-workflow");
-    assert!(status.success(), "generation failed for {}", root.display());
+    assert!(
+        outcome.status.success(),
+        "generation failed for {}:\n{}",
+        root.display(),
+        String::from_utf8_lossy(&outcome.stderr)
+    );
     Generated { output }
 }
 
@@ -471,6 +476,71 @@ fn a_declared_release_lane_adds_exactly_the_release_files() {
     );
     let preview = with.workflow("preview.yml");
     assert!(preview.contains("Publish rolling preview"), "{preview}");
+}
+
+/// The toolchain contract is structural, not incidental bytes: the release
+/// publisher provisions the pinned toolchain but never saves it (a tag push
+/// can never satisfy the trusted default-branch gate), the preview lane saves
+/// exactly from that gate, and no Rust unit ever asks mise for `rust`.
+#[test]
+fn tool_provisioning_is_pinned_and_minimal() {
+    let workspace = tempfile();
+    let root = copy_release_fixture(&workspace.join("fixture"));
+    write_config(&root, RELEASE_CONFIG);
+    let with = generate(&root);
+
+    let release = with.workflow("release.yml");
+    assert!(
+        release.contains("name: Restore Rust toolchain"),
+        "{release}"
+    );
+    assert!(
+        release.contains("name: Provision Rust toolchain"),
+        "{release}"
+    );
+    assert!(
+        !release.contains("name: Save Rust toolchain"),
+        "the release publisher must never save the toolchain cache: {release}"
+    );
+
+    let preview = with.workflow("preview.yml");
+    assert!(
+        preview.contains(
+            "if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'"
+        ),
+        "the preview save must sit behind the trusted default-branch gate: {preview}"
+    );
+
+    for unit in with
+        .unit_ids()
+        .into_iter()
+        .filter(|id| id.starts_with("rust-"))
+    {
+        let workflow = with.workflow(&nested_file(&unit));
+        let install_args = workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("install_args:"))
+            .collect::<Vec<_>>();
+        for line in &install_args {
+            let tools = line
+                .trim()
+                .strip_prefix("install_args:")
+                .unwrap()
+                .split_whitespace();
+            assert!(
+                !tools.clone().any(|tool| tool == "rust"),
+                "{unit} must never install the Rust toolchain through mise: {line}"
+            );
+        }
+        let checks_envs = workflow
+            .lines()
+            .filter(|line| line.trim() == "MISE_AUTO_INSTALL: \"false\"")
+            .count();
+        assert!(
+            checks_envs >= 2,
+            "{unit} runs two lanes and both must switch mise auto-install off: {workflow}"
+        );
+    }
 }
 
 #[test]

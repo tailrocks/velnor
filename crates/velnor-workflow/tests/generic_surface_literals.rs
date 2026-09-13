@@ -3,9 +3,10 @@
 //! was deleted from the crate during the estate ports; if one reaches the
 //! generic engine again, the scan + config split is broken.
 //!
-//! The one admitted boundary is `src/estate.rs`: it still carries the catalog
-//! entries of consumers that have not adopted a repo-owned generation config
-//! yet, and each of those entries is a port away from this file.
+//! The one admitted code boundary is `src/estate.rs`: it still carries the
+//! legacy runner selector the earliest generated surfaces embedded, which
+//! static-template adoption replaces with the adopting repository's own
+//! selector.
 
 #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 
@@ -63,9 +64,10 @@ const DENY_LIST: &[&str] = &[
     "package-release.v1",
 ];
 
-/// The estate boundary: the only module allowed to name a repository, plus the
-/// files whose bytes document the rule itself rather than engine behavior.
-/// This test is one of them: the deny list has to spell out what it forbids.
+/// The estate boundary: the one module allowed to name the retired estate
+/// selector, plus the files whose bytes document the rule itself rather than
+/// engine behavior. This test is one of them: the deny list has to spell out
+/// what it forbids.
 const ADMITTED_FILES: &[&str] = &[
     "src/estate.rs",
     "tests/generic_surface_literals.rs",
@@ -123,7 +125,7 @@ fn scanned_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether a path is exempt from the deny list. The estate module is the only
-/// code allowed to name a repository.
+/// code allowed to name the retired estate runner selector.
 fn admitted(root: &Path, path: &Path) -> bool {
     let _ = root;
     ADMITTED_FILES.iter().any(|file| path.ends_with(file))

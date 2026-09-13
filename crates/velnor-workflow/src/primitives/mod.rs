@@ -31,8 +31,8 @@ use crate::{
 };
 
 pub(crate) use ir::{
-    cargo_offline_env, render_cargo_source_preparation, render_retained_output_cache_note,
-    WorkflowIr, WorkflowKind,
+    checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
+    render_retained_output_cache_note, WorkflowIr, WorkflowKind,
 };
 
 /// Default `timeout-minutes` for a unit verification job.
@@ -139,16 +139,21 @@ pub(crate) enum CacheBackend {
 impl CacheBackend {
     /// Whether the actions cache restore and save steps are emitted for `unit`.
     ///
-    /// The detected policy classifies by purpose: Cargo-source and tool caches
-    /// ride the actions cache even when the unit compiles under Mr. Boxington
-    /// — the object transport moves compiler state, not Cargo's registry
-    /// archives, extracted sources, or Git dependencies. Raw output caches are
-    /// the one suppression: the object transport already carries workspace
-    /// state, so a declared output cache needs its justification on record.
+    /// The detected policy classifies by purpose: Cargo-source and generic
+    /// tool caches ride the actions cache even when the unit compiles under
+    /// Mr. Boxington — the object transport moves compiler state, not Cargo's
+    /// registry archives, extracted sources, or Git dependencies. Raw output
+    /// caches are the one suppression: the object transport already carries
+    /// workspace state, so a declared output cache needs its justification on
+    /// record.
     pub(crate) fn enables_actions_cache(self, ir: &WorkflowIr, unit: &Unit) -> bool {
         match self {
             Self::Detected => match unit.cache.as_ref().map(|cache| cache.purpose) {
-                None => false,
+                // The Rust-toolchain cache is generator-internal:
+                // `render_pinned_toolchain_steps` emits it directly and never
+                // hangs it off a unit's declared contract, so it cannot arrive
+                // through this match. Refuse rather than silently enable it.
+                None | Some(CachePurpose::Toolchains) => false,
                 Some(CachePurpose::CargoSources | CachePurpose::Generic) => true,
                 Some(CachePurpose::Outputs) => {
                     !ir.uses_mr_boxington(unit)
