@@ -20,12 +20,19 @@ Docker, or a job — every number it produced was a statement about `cargo`.
 
 ## Honest runnability contract
 
-Every matrix row names `velnor-job` as its preferred driver, but a
-`VelnorJob` row remains **unrun** until the real runner-owned VelnorJob driver
-exists. A registered runner, GitHub credentials, a fixture checkout, Docker,
-network access, or any other external prerequisite does not authorize a
-preferred measurement by itself. Those capabilities can establish that the
-environment is ready; they cannot make an unimplemented driver runnable.
+Every matrix row names `velnor-job` as its preferred driver. Rows whose
+lifecycle is measurable without a broker or a git remote — the lifecycle
+and persistent-host families — run on the **local** `velnor-job` driver
+(`drivers::velnor_job`), which dispatches a real job through the runner's
+own admission and capacity primitives and a real container lifecycle, and
+leaves the broker, acquisition and checkout stages honestly unobserved
+(absent from the record, named in its notes). Every other `VelnorJob` row
+remains **unrun** until the real runner-owned remote-dispatch driver
+exists. A registered runner, GitHub credentials, a fixture checkout,
+Docker, network access, or any other external prerequisite does not
+authorize a preferred measurement by itself. Those capabilities can
+establish that the environment is ready; they cannot make an
+unimplemented driver runnable.
 
 Where the matrix declares an honest fallback, the result is explicitly marked
 `degraded` and records the fallback driver plus the missing preferred-driver
@@ -107,7 +114,8 @@ version, job image digest, and the runner configuration including slot count.
 
 | driver | observes | notes |
 | --- | --- | --- |
-| `velnor-job` | every stage | the authoritative driver; needs a registered runner and dispatch credentials |
+| `velnor-job` (local) | every Velnor-lane stage; broker, acquisition and checkout unobserved | real local dispatch; needs Docker only; lifecycle and persistent-host rows |
+| `velnor-job` (remote) | every stage | the authoritative driver; needs a registered runner and dispatch credentials; unimplemented |
 | `docker-direct` | docker setup, create, start, first user command, completion, teardown | real containers, no broker or acquisition |
 | `cargo-direct` | first user command only | a build measured on the host; the scope of the replaced script, and never a claim about Velnor |
 
