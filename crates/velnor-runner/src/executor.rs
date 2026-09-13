@@ -4316,39 +4316,38 @@ where
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
                     }
                 }
-                // Holders remain: shrink the daemon ceiling for those that do,
-                // so a once-shared builder does not keep a machine-sized
-                // ceiling for one job. Best-effort like the stop — sizing is
-                // an optimization, never a release failure — and skipped when
-                // the remaining holders cannot be counted. A final release
-                // resizes nothing: the daemon is stopped or already gone.
+                // Holders remain: shrink the daemon ceiling for those that
+                // do, so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. The ceiling sums the remaining
+                // holders' own recordings — the releaser's limits are not
+                // theirs — with the same per-dimension static fallback
+                // setup uses. Best-effort like the stop: sizing is an
+                // optimization, never a release failure. Unreadable
+                // holders resize nothing, and a final release resizes
+                // nothing either: the daemon is stopped or already gone.
                 if matches!(outcome, Some(outcome) if !outcome.removed_last)
                     && let Some(run_root) = run_root.as_ref()
-                    && let Some(remaining) = crate::buildkit::builder_holder_count(run_root, &name)
-                    && remaining > 0
+                    && let Some(remaining) =
+                        crate::buildkit::builder_holders_for_sizing(run_root, &name)
+                    && !remaining.is_empty()
                 {
-                    match container.buildkit_size(u32::try_from(remaining).unwrap_or(u32::MAX)) {
-                        Ok(size) if !size.is_empty() => {
-                            if let Err(error) = crate::buildkit::resize_builder_daemon(
-                                &name,
-                                size.cpu_milli,
-                                size.memory_bytes,
-                            ) {
-                                use std::fmt::Write as _;
-                                let _ = writeln!(
-                                    stderr,
-                                    "buildx post: resize of {name} failed ({error:#})"
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            use std::fmt::Write as _;
-                            let _ = writeln!(
-                                stderr,
-                                "buildx post: resize of {name} skipped ({error:#})"
-                            );
-                        }
+                    let entitlements: Vec<_> = remaining
+                        .iter()
+                        .map(|holder| holder.entitlement())
+                        .collect();
+                    let derived = container.buildkit_size_summed(&entitlements);
+                    let (static_cpu, static_memory) = container.static_buildkit_fallback();
+                    let size = derived.with_fallback(static_cpu, static_memory);
+                    if !size.is_empty()
+                        && let Err(error) = crate::buildkit::resize_builder_daemon(
+                            &name,
+                            size.cpu_milli,
+                            size.memory_bytes,
+                        )
+                    {
+                        use std::fmt::Write as _;
+                        let _ =
+                            writeln!(stderr, "buildx post: resize of {name} failed ({error:#})");
                     }
                 }
                 Ok(StepExecutionResult {
@@ -4903,12 +4902,18 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
-        // The holder count below sizes the daemon for the jobs sharing it
-        // now; without a run root there is nothing to count, so a created
+        // This job's own entitlement, recorded in its claim below so the
+        // daemon ceiling sums what each holder measured for itself. Computed
+        // before the claim: a malformed declared limit fails setup here —
+        // the same rejection `start_args` applies — instead of claiming a
+        // builder this setup then refuses to size.
+        let own_entitlement = container.own_buildkit_entitlement()?;
+        // The holder set below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to read, so a created
         // daemon is sized for this job alone and an existing daemon is left
         // untouched — resizing it to a single share could throttle sharers
         // this setup cannot see.
-        let mut holders: u32 = 1;
+        let mut entitlements = vec![own_entitlement];
         let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
@@ -4925,6 +4930,7 @@ where
                 },
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
+                own_entitlement,
             )?;
             // Cap the workflow-minted builders in this scope/tier/repository:
             // per-victim failures are best-effort, but an over-cap group with
@@ -4956,31 +4962,42 @@ where
                     );
                 }
             }
-            // Count after the claim above, so this job is included. The read
+            // Read after the claim above, so this job is included. The read
             // only fails when the file this setup just wrote cannot be read
             // back; a created daemon is then sized for this job alone rather
             // than failing the step, while an existing daemon is left
             // untouched — an uncounted resize could throttle unseen sharers.
-            match crate::buildkit::builder_holder_count(&run_root, &name) {
-                Some(count) => {
-                    holders = u32::try_from(count.max(1)).unwrap_or(1);
+            // The job's own recording is appended when the read somehow
+            // misses it, so sizing never drops the holder standing here.
+            match crate::buildkit::builder_holders_for_sizing(&run_root, &name) {
+                Some(holders) => {
+                    entitlements = holders.iter().map(|holder| holder.entitlement()).collect();
+                    if !holders
+                        .iter()
+                        .any(|holder| holder.container == container.name)
+                    {
+                        entitlements.push(own_entitlement);
+                    }
                     holders_known = true;
                 }
                 None => {
-                    holders = 1;
+                    entitlements = vec![own_entitlement];
                 }
             }
         }
-        // The derived slot budget sizes the daemon for its current holders.
-        // The static operator policy survives only as the total-absence
-        // fallback when the budget is unobservable: a budget that knows
-        // anything sizes the daemon, and mixing one invented dimension with
-        // one derived dimension would silently reintroduce the unsized
-        // daemon this replaces.
-        let buildkit_size = container.buildkit_size(holders)?;
+        // The summed holder entitlements size the daemon for the jobs
+        // sharing it now. The static operator policy fills each dimension
+        // the derived budget could not observe: total absence keeps the
+        // verbatim static spelling, while a partially observed budget
+        // inherits only its unknown dimensions — dropping the static
+        // ceiling for an unobserved dimension would silently uncap it.
+        let buildkit_size = container.buildkit_size_summed(&entitlements);
         let mut driver_opts = buildkit_size.driver_opts();
         if driver_opts.is_empty() {
             driver_opts = buildx_driver_resource_options(&container.resource_options)?;
+        } else if buildkit_size.cpu_milli.is_none() || buildkit_size.memory_bytes.is_none() {
+            let static_opts = buildx_driver_resource_options(&container.resource_options)?;
+            driver_opts = merge_buildkit_driver_opts(&buildkit_size, &static_opts);
         }
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -5006,15 +5023,22 @@ where
             let result =
                 self.container_docker(container, &action_state, &use_args, None, timeout)?;
             // An existing daemon keeps whatever ceiling it was born with, so
-            // resize it for the counted holders present now. Best-effort: a
-            // wrong ceiling slows builds, it never breaks them, and the next
-            // setup converges it. Uncounted holders resize nothing.
+            // resize it for the holders present now, with the same
+            // per-dimension static fallback creation uses: an unobservable
+            // budget resizes an existing daemon exactly as it would create
+            // one. Best-effort: a wrong ceiling slows builds, it never
+            // breaks them, and the next setup converges it. Uncounted
+            // holders resize nothing, and a dimension with neither a
+            // derived nor a static value keeps the daemon's existing
+            // ceiling there.
+            let (static_cpu, static_memory) = container.static_buildkit_fallback();
+            let effective = buildkit_size.with_fallback(static_cpu, static_memory);
             if holders_known
-                && !buildkit_size.is_empty()
+                && !effective.is_empty()
                 && let Err(error) = crate::buildkit::resize_builder_daemon(
                     &name,
-                    buildkit_size.cpu_milli,
-                    buildkit_size.memory_bytes,
+                    effective.cpu_milli,
+                    effective.memory_bytes,
                 )
             {
                 eprintln!("buildx setup: resize of {name}: {error:#}");
@@ -11901,6 +11925,43 @@ fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<Str
     Ok(options)
 }
 
+/// Merge a partially observed derived daemon size with the static
+/// `resource_options` spelling: derived wins per dimension, static fills
+/// only dimensions the budget could not observe. Total absence never
+/// reaches here — the caller uses the static spelling verbatim then, flag
+/// order included — so this only ever appends static entries for unknown
+/// dimensions. Entries outside the `cpu-*`/`memory=` vocabulary the strict
+/// parser emits pass through untouched rather than vanishing.
+fn merge_buildkit_driver_opts(
+    derived: &crate::container::host_budget::BuildkitSize,
+    static_opts: &[String],
+) -> Vec<String> {
+    let mut opts = derived.driver_opts();
+    if derived.cpu_milli.is_none_or(|milli| milli == 0) {
+        opts.extend(
+            static_opts
+                .iter()
+                .filter(|opt| opt.starts_with("cpu-"))
+                .cloned(),
+        );
+    }
+    if derived.memory_bytes.is_none_or(|bytes| bytes == 0) {
+        opts.extend(
+            static_opts
+                .iter()
+                .filter(|opt| opt.starts_with("memory="))
+                .cloned(),
+        );
+    }
+    opts.extend(
+        static_opts
+            .iter()
+            .filter(|opt| !opt.starts_with("cpu-") && !opt.starts_with("memory="))
+            .cloned(),
+    );
+    opts
+}
+
 fn job_scope_from_temp(temp: Option<&Path>) -> String {
     let scope_path = temp
         .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
@@ -16669,6 +16730,28 @@ esac
     }
 
     #[test]
+    fn partial_derived_size_inherits_only_unknown_static_dimensions() {
+        use crate::container::host_budget::BuildkitSize;
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let static_opts = buildx_driver_resource_options(&[
+            "--cpus".into(),
+            "8".into(),
+            "--memory".into(),
+            "12g".into(),
+        ])
+        .unwrap();
+        // Derived CPU wins over static `--cpus 8`; unobserved memory keeps
+        // the static `memory=12g` instead of silently uncapping.
+        assert_eq!(
+            merge_buildkit_driver_opts(&derived, &static_opts),
+            ["cpu-period=100000", "cpu-quota=400000", "memory=12g",]
+        );
+    }
+
+    #[test]
     fn precreated_environment_skips_lazy_container_start() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -19352,6 +19435,25 @@ type=sha,format=long,prefix=,enable=true"
         let mut spec = container(&temp);
         spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
+        // Pin the host budget to a synthetic 16-CPU/16-GiB tree: the
+        // expected daemon ceiling below is hand-derived from it, so this
+        // test asserts an exact argv instead of recomputing one from the
+        // machine it happens to run on.
+        let budget_root = temp.join("synthetic-budget");
+        fs::create_dir_all(budget_root.join("proc")).unwrap();
+        fs::create_dir_all(budget_root.join("sys/fs/cgroup/velnor-jobs.slice")).unwrap();
+        fs::write(
+            budget_root.join("proc/meminfo"),
+            "MemTotal:       16777216 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            budget_root.join("sys/fs/cgroup/velnor-jobs.slice/cpu.max"),
+            "1600000 100000\n",
+        )
+        .unwrap();
+        let _budget = crate::container::host_budget::TestBudgetGuard::pin(&budget_root, Some(16));
+
         let results = executor
             .execute_ordered_steps_with_context(
                 &spec,
@@ -19405,34 +19507,28 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        // The derived slot budget sizes the daemon: recompute the size from
-        // the same host observation and require it on the create argv. The
-        // static `resource_options` survive only as the total-absence
-        // fallback when the budget is unobservable on this machine.
-        let size = spec.buildkit_size(1).unwrap();
-        let mut expected_opts = size.driver_opts();
-        if expected_opts.is_empty() {
-            expected_opts = buildx_driver_resource_options(&spec.resource_options).unwrap();
-        }
-        assert!(!expected_opts.is_empty());
-        let expected_driver_opt = expected_opts.join(",");
+        // The synthetic budget pins this job to 16 CPUs and the 85% memory
+        // pool of 16 GiB on one slot; the declared `--cpus 4` narrows CPU
+        // to 4000 milli and the declared `--memory 12g` narrows memory to
+        // exactly 12 GiB. No run root exists in tests, so the daemon is
+        // sized for this job alone: the exact derived ceiling, asserted
+        // literally instead of recomputed from the same helpers.
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
         assert!(
-            create.contains(&format!("'--driver-opt' '{expected_driver_opt}'")),
+            create
+                .contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12884901888'"),
             "derived budget must reach buildkitd, got: {create}"
         );
         assert!(create.contains(&format!(
             "'--config' '/__t/buildkitd-config-{builder}.toml'"
         )));
-        if !size.is_empty() {
-            assert!(
-                !create.contains("memory=12g"),
-                "derived budget wins over the static spelling, got: {create}"
-            );
-        }
+        assert!(
+            !create.contains("memory=12g"),
+            "derived budget wins over the static spelling, got: {create}"
+        );
         assert_eq!(
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"

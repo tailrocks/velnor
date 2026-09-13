@@ -61,7 +61,24 @@ impl Driver {
     #[must_use]
     pub const fn observable_stages(self) -> &'static [Stage] {
         match self {
-            Self::VelnorJob => &Stage::ALL,
+            // The local driver observes the Velnor lane only: broker
+            // delivery, acquisition payload and checkout need remote
+            // dispatch, which does not exist yet, so a `velnor-job` record
+            // carrying them is a simulated claim and must not validate.
+            // This set widens back to `Stage::ALL` when the remote
+            // dispatch driver lands.
+            Self::VelnorJob => &[
+                Stage::Ready,
+                Stage::Admission,
+                Stage::Capacity,
+                Stage::CheckoutStart,
+                Stage::DockerSetup,
+                Stage::ContainerCreate,
+                Stage::ContainerStart,
+                Stage::FirstUserCommand,
+                Stage::CompletionOverhead,
+                Stage::Teardown,
+            ],
             Self::DockerDirect => &[
                 Stage::DockerSetup,
                 Stage::ContainerCreate,
@@ -342,7 +359,7 @@ scenarios! {
     "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Stage breakdown while every configured slot is busy";
     "lifecycle/trust-partition", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
-        "Trust-partition cost: same workload as trusted vs fork-pr jobs; compare the admission, capacity and checkout stages of the two records";
+        "Trust-partition cost: same workload as trusted vs fork-pr jobs in separate trust-scoped partitions; stages carry the per-stage slower of the pair";
 
     // Rust cache behaviour. These rows require a real Velnor job: host Cargo
     // can measure compilation, but cannot establish Velnor acceleration.
@@ -403,8 +420,9 @@ scenarios! {
 
     // Persistent host behaviour: properties of runner state across jobs. The
     // local driver establishes the precondition really — N-1 unmeasured jobs
-    // before the measured Nth, a scoped owned-object GC for after-gc — so
-    // these run anywhere Docker does.
+    // before the measured Nth, each retaining its workspace and one stopped
+    // container; after-gc's scoped GC removes exactly that retained state —
+    // so these run anywhere Docker does.
     "persistent-host/job-1", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "First job on a freshly provisioned host";
     "persistent-host/job-2", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
@@ -414,7 +432,7 @@ scenarios! {
     "persistent-host/job-100", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Hundredth job; accumulation, leak and fragmentation behaviour";
     "persistent-host/after-gc", PersistentHost, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
-        "First job after a full disk and image garbage collection";
+        "First job after a scoped GC of retained warmup state (owned objects only; no host-wide prune)";
 
     // Fault scenarios: the preferred driver injects into a real job, but the
     // four classes below are measurable today through docker-direct, where the

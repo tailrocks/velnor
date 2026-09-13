@@ -22,20 +22,25 @@
 //!   idle past [`IDLE_DELETE_AFTER`]. Builders are a cache: every destructive
 //!   action degrades the next build to cold, never to wrong.
 //! * **Sizing.** A builder daemon is not free compute: its CPU/memory ceiling
-//!   is the derived slot share times its current holder count, capped at the
-//!   host budget ([`crate::container::host_budget::SlotBudget::buildkit_size`]).
-//!   Creation sizes the daemon for the holders present at birth, every setup
-//!   resizes the live daemon for the holders present now, and every
-//!   post-action release shrinks it for the holders that remain — a ceiling
-//!   fixed at creation would leave a once-shared builder permanently
-//!   oversized or a new sharer permanently throttled. (The teardown backstop
-//!   release resizes nothing; the next setup converges it.) Concurrent setups
-//!   race here by design; each
+//!   is the sum of its current holders' recorded entitlements, capped at the
+//!   host budget
+//!   ([`crate::container::host_budget::SlotBudget::buildkit_size_summed`]).
+//!   Each claim records what its own job measured for itself, so one job's
+//!   declared workflow limits narrow only its own share instead of being
+//!   multiplied across strangers. Creation sizes the daemon for the holders
+//!   present at birth, every setup resizes the live daemon for the holders
+//!   present now, and every post-action release shrinks it for the holders
+//!   that remain — a ceiling fixed at creation would leave a once-shared
+//!   builder permanently oversized or a new sharer permanently throttled.
+//!   (The teardown backstop release resizes nothing; the next setup
+//!   converges it.) Concurrent setups race here by design; each
 //!   resize is one idempotent `docker update`, so the last writer wins and
 //!   the ceiling converges instead of needing a lock. An unreadable claim
 //!   file skips the resize (the size stays whatever it was) rather than
-//!   guessing a holder count, and an unobservable budget falls back to the
-//!   static operator policy instead of inventing a ceiling.
+//!   guessing at holders, and an unobservable dimension falls back to the
+//!   static operator policy for that dimension instead of inventing a
+//!   ceiling. A dimension with neither a derived nor a static value keeps
+//!   the daemon's existing ceiling (creation omits it: unconstrained).
 //!
 //! Trust partitioning: the scope segment namespaces builders exactly like the
 //! persistent stores, so a fork-PR job never shares a builder with a trusted
@@ -286,6 +291,28 @@ pub(crate) struct BuilderHolder {
     pub slot: String,
     /// When the hold was taken, unix seconds.
     pub claimed_unix: u64,
+    /// The holder's own CPU entitlement in milli-CPUs, measured by the
+    /// holding job for itself at claim time. `None` is "unknown":
+    /// unobservable then, or recorded before entitlements were tracked
+    /// (legacy claim files predate these fields and parse as unknown).
+    /// Unknown dimensions contribute nothing to the summed daemon ceiling.
+    #[serde(default)]
+    pub cpu_milli: Option<u64>,
+    /// The holder's own memory entitlement in bytes, same provenance as
+    /// [`Self::cpu_milli`].
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+}
+
+impl BuilderHolder {
+    /// This holder's recorded entitlement for the summed daemon ceiling:
+    /// what the holding job measured for itself at claim time.
+    pub(crate) fn entitlement(&self) -> crate::container::host_budget::BuildkitSize {
+        crate::container::host_budget::BuildkitSize {
+            cpu_milli: self.cpu_milli,
+            memory_bytes: self.memory_bytes,
+        }
+    }
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -441,14 +468,16 @@ fn repair_absent_unlocked(claims: &mut BuilderClaims, present: &BTreeSet<String>
 
 /// Claim `builder` for the calling job. Idempotent: claiming twice (two
 /// setup-buildx steps, one name) holds once. The claim records the
-/// builder's canonical identity for cap enforcement; a torn claim file
-/// fails the claim loud rather than dropping unknown holds.
+/// builder's canonical identity for cap enforcement and the holder's own
+/// measured entitlement for daemon sizing; a torn claim file fails the
+/// claim loud rather than dropping unknown holds.
 pub(crate) fn claim_builder(
     run_root: &Path,
     builder: &str,
     identity: &BuilderIdentity<'_>,
     slot: &str,
     container: &str,
+    entitlement: crate::container::host_budget::BuildkitSize,
 ) -> Result<()> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path)?;
@@ -467,6 +496,8 @@ pub(crate) fn claim_builder(
             container: container.to_string(),
             slot: slot.to_string(),
             claimed_unix: now,
+            cpu_milli: entitlement.cpu_milli,
+            memory_bytes: entitlement.memory_bytes,
         },
     );
     claims.builder = builder.to_string();
@@ -625,17 +656,26 @@ pub(crate) fn repair_absent_holders(
     Ok(holders)
 }
 
-/// How many jobs currently hold `builder`. Sizing input only: creation and
-/// every claim/release resize the daemon ceiling for this many holders.
-/// `None` is "unreadable" — the caller skips the resize and leaves the
-/// ceiling whatever it was. A torn file still ERROR-logs with its recovery
-/// step through the shared path; unlike the reclaim paths, sizing has no
-/// fail-closed holder count to assume, so it assumes none.
-pub(crate) fn builder_holder_count(run_root: &Path, builder: &str) -> Option<usize> {
+/// The jobs currently holding `builder`, with the entitlement each
+/// recorded for itself. Sizing input only: creation and every
+/// claim/release sum these recordings into the daemon ceiling for exactly
+/// this holder set. `None` is "unreadable" — the caller skips the resize
+/// and leaves the ceiling whatever it was. A torn file still ERROR-logs
+/// with its recovery step through the shared path; unlike the reclaim
+/// paths, sizing has no fail-closed holder set to assume, so it assumes
+/// none.
+pub(crate) fn builder_holders_for_sizing(
+    run_root: &Path,
+    builder: &str,
+) -> Option<Vec<BuilderHolder>> {
     let path = claims_file(run_root, builder);
     let _lock = lock_claims(builder, &path).ok()?;
     match read_claims(&path) {
-        Ok(claims) => Some(claims.holders.len()),
+        Ok(claims) => {
+            let mut holders: Vec<BuilderHolder> = claims.holders.into_values().collect();
+            holders.sort_by(|left, right| left.container.cmp(&right.container));
+            Some(holders)
+        }
         Err(error) => {
             log_torn_claims(builder, &path, &error);
             None
@@ -946,9 +986,12 @@ pub(crate) fn stop_builder_daemon(builder: &str) -> Result<bool> {
 /// Resize one builder's daemon ceiling to the aggregate entitlement of its
 /// current holders. One idempotent `docker update`: concurrent setups each
 /// write the size for the holders they saw, and the last writer wins, so no
-/// lock is held across the call. Unknown dimensions are left alone, and a
-/// fully unknown size is a silent no-op — sizing never invents a ceiling.
-/// Missing reads as already gone. Returns true when an update acted.
+/// lock is held across the call. Unknown dimensions are left at the daemon's
+/// existing ceiling, and a fully unknown size is a silent no-op — sizing
+/// never invents a ceiling. The caller fills unknown derived dimensions
+/// from the static operator policy first, so a dimension still unknown here
+/// means neither source knew it. Missing reads as already gone. Returns
+/// true when an update acted.
 pub(crate) fn resize_builder_daemon(
     builder: &str,
     cpu_milli: Option<u64>,
@@ -1544,6 +1587,13 @@ mod tests {
         persistent_builder_name("velnor-builder", "trusted", TRUST_TIER_BRANCH, Some("o/r"))
     }
 
+    fn test_entitlement() -> crate::container::host_budget::BuildkitSize {
+        crate::container::host_budget::BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: Some(1024),
+        }
+    }
+
     /// Test helper: drop every hold on `builder` and set its LRU clock, so
     /// cap tests control claimed-ness and recency without wall-clock sleeps.
     fn abandon_claims(run_root: &Path, builder: &str, updated_unix: u64) {
@@ -1727,10 +1777,34 @@ mod tests {
         let builder = test_builder();
         let identity = test_identity();
 
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-a",
+            test_entitlement(),
+        )
+        .unwrap();
         // Idempotent: a second setup step in the same job holds once.
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").unwrap();
-        claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-b").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-a",
+            test_entitlement(),
+        )
+        .unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-2",
+            "velnor-job-b",
+            test_entitlement(),
+        )
+        .unwrap();
         assert_eq!(builder_holders(&run_root, &builder, None).unwrap().len(), 2);
 
         // First release: another holder remains, no stop.
@@ -1806,21 +1880,49 @@ mod tests {
     }
 
     #[test]
-    fn holder_count_tracks_claims_for_sizing() {
-        let root = temp_root("holder-count");
+    fn holder_set_tracks_claims_with_entitlements_for_sizing() {
+        let root = temp_root("holder-set");
         let run_root = root.join("run");
         let builder = test_builder();
         let identity = test_identity();
 
         // No claim file yet: zero holders, not "unreadable".
-        assert_eq!(builder_holder_count(&run_root, &builder), Some(0));
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").unwrap();
-        assert_eq!(builder_holder_count(&run_root, &builder), Some(1));
-        claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-b").unwrap();
-        assert_eq!(builder_holder_count(&run_root, &builder), Some(2));
+        assert_eq!(
+            builder_holders_for_sizing(&run_root, &builder),
+            Some(Vec::new())
+        );
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-a",
+            test_entitlement(),
+        )
+        .unwrap();
+        let holders = builder_holders_for_sizing(&run_root, &builder).unwrap();
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0].container, "velnor-job-a");
+        assert_eq!(holders[0].cpu_milli, Some(4000));
+        assert_eq!(holders[0].memory_bytes, Some(1024));
+        let other = crate::container::host_budget::BuildkitSize {
+            cpu_milli: Some(2000),
+            memory_bytes: None,
+        };
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-2",
+            "velnor-job-b",
+            other,
+        )
+        .unwrap();
+        let holders = builder_holders_for_sizing(&run_root, &builder).unwrap();
+        assert_eq!(holders.len(), 2);
         // A torn file is unreadable: the resize is skipped, never guessed.
         std::fs::write(claims_file(&run_root, &builder), "{torn").unwrap();
-        assert_eq!(builder_holder_count(&run_root, &builder), None);
+        assert_eq!(builder_holders_for_sizing(&run_root, &builder), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1831,7 +1933,15 @@ mod tests {
         let run_root = root.join("run");
         let builder = test_builder();
         let identity = test_identity();
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-a",
+            test_entitlement(),
+        )
+        .unwrap();
 
         // The stop closure claims as a racing setup would. Under the old
         // lock-across-stop this deadlocks (same-process re-entrant flock
@@ -1842,7 +1952,15 @@ mod tests {
             &builder,
             "velnor-job-a",
             || {
-                claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-b").unwrap();
+                claim_builder(
+                    &run_root,
+                    &builder,
+                    &identity,
+                    "slot-2",
+                    "velnor-job-b",
+                    test_entitlement(),
+                )
+                .unwrap();
                 Ok(true)
             },
             || Ok(true),
@@ -1875,13 +1993,30 @@ mod tests {
             &identity,
             "slot-1",
             "velnor-job-crashed",
+            test_entitlement(),
         )
         .unwrap();
-        claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-live").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-2",
+            "velnor-job-live",
+            test_entitlement(),
+        )
+        .unwrap();
 
         // The next job on slot-1 claims: the crashed hold drops, the live
         // cross-slot hold survives.
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-next").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-next",
+            test_entitlement(),
+        )
+        .unwrap();
         let holders = builder_holders(&run_root, &builder, None).unwrap();
         let held: Vec<&str> = holders
             .iter()
@@ -1899,8 +2034,24 @@ mod tests {
         let builder = test_builder();
         let identity = test_identity();
 
-        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-gone").unwrap();
-        claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-here").unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-gone",
+            test_entitlement(),
+        )
+        .unwrap();
+        claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-2",
+            "velnor-job-here",
+            test_entitlement(),
+        )
+        .unwrap();
 
         let present: BTreeSet<String> = ["velnor-job-here".to_string()].into_iter().collect();
         let holders = repair_absent_holders(&run_root, &builder, &present).unwrap();
@@ -1923,7 +2074,15 @@ mod tests {
         // Torn reads fail closed: holders queries error, claims refuse to
         // drop unknown holds, and releases stop nothing.
         assert!(builder_holders(&run_root, &builder, None).is_err());
-        assert!(claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").is_err());
+        assert!(claim_builder(
+            &run_root,
+            &builder,
+            &identity,
+            "slot-1",
+            "velnor-job-a",
+            test_entitlement()
+        )
+        .is_err());
         let outcome = release_and_stop_if_last(
             &run_root,
             &builder,
@@ -1943,7 +2102,15 @@ mod tests {
         // Atomic writes leave no temp files behind: a successful claim on
         // a sibling builder writes and renames, then the temp is gone.
         let sibling = persistent_builder_name("sibling", "trusted", TRUST_TIER_BRANCH, Some("o/r"));
-        claim_builder(&run_root, &sibling, &identity, "slot-9", "velnor-job-s").unwrap();
+        claim_builder(
+            &run_root,
+            &sibling,
+            &identity,
+            "slot-9",
+            "velnor-job-s",
+            test_entitlement(),
+        )
+        .unwrap();
         let leftover: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .flatten()
@@ -1980,6 +2147,7 @@ mod tests {
                 &identity,
                 &format!("slot-{index}"),
                 &format!("velnor-job-{index}"),
+                test_entitlement(),
             )
             .unwrap();
             builders.push(builder);
@@ -2083,6 +2251,7 @@ mod tests {
                 &identity,
                 &format!("slot-{index}"),
                 &format!("velnor-job-{index}"),
+                test_entitlement(),
             )
             .unwrap();
         }
@@ -2125,6 +2294,7 @@ mod tests {
                 &branch,
                 &format!("slot-{index}"),
                 &format!("velnor-job-{index}"),
+                test_entitlement(),
             )
             .unwrap();
             abandon_claims(&run_root, &builder, 1_000 + index as u64);
@@ -2138,6 +2308,7 @@ mod tests {
             &release,
             "slot-r",
             "velnor-job-r",
+            test_entitlement(),
         )
         .unwrap();
         abandon_claims(&run_root, &release_builder, 1);
@@ -2180,6 +2351,7 @@ mod tests {
                 &identity,
                 &format!("slot-{index}"),
                 &format!("velnor-job-{index}"),
+                test_entitlement(),
             )
             .unwrap();
             abandon_claims(&run_root, &builder, 1_000 + index as u64);
