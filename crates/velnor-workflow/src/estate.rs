@@ -6,6 +6,24 @@
 
 use crate::ProjectConfig;
 
+pub(crate) const APPROVED_VELNOR_RUNNER_GROUP: &str = "velnor-trusted";
+pub(crate) const APPROVED_VELNOR_RUNNER_LABELS: &[&str] = &["self-hosted", "velnor-target-mvp"];
+
+pub(crate) fn approved_velnor_runner_group() -> &'static str {
+    APPROVED_VELNOR_RUNNER_GROUP
+}
+
+pub(crate) fn approved_velnor_runner_labels() -> &'static [&'static str] {
+    APPROVED_VELNOR_RUNNER_LABELS
+}
+
+pub(crate) fn approved_velnor_runner_contract_matches(
+    labels: &[&str],
+    group: Option<&str>,
+) -> bool {
+    group == Some(APPROVED_VELNOR_RUNNER_GROUP) && labels == APPROVED_VELNOR_RUNNER_LABELS
+}
+
 /// The runner selector the generator's earliest generated surfaces embedded
 /// before the group and the labels moved into each repository's generation
 /// config. Static-template adoption replaces it with the declaring
