@@ -257,28 +257,37 @@ where
 /// before the next write, and that no window ever again spans a network
 /// fetch.
 fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(workspace_host)
-        .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
-    let workspace = fs::canonicalize(workspace_host)
-        .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
-    let mut existing: &Path = destination;
-    while !existing.exists() {
-        existing = existing.parent().with_context(|| {
-            format!(
-                "checkout destination '{}' has no existing ancestor",
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout containment requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(workspace_host)
+            .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
+        let workspace = fs::canonicalize(workspace_host)
+            .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
+        let mut existing: &Path = destination;
+        while !existing.exists() {
+            existing = existing.parent().with_context(|| {
+                format!(
+                    "checkout destination '{}' has no existing ancestor",
+                    destination.display()
+                )
+            })?;
+        }
+        let canonical = fs::canonicalize(existing)
+            .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
+        if !canonical.starts_with(&workspace) {
+            bail!(
+                "refusing checkout destination '{}': resolves outside the workspace",
                 destination.display()
-            )
-        })?;
+            );
+        }
+        Ok(())
     }
-    let canonical = fs::canonicalize(existing)
-        .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
-    if !canonical.starts_with(&workspace) {
-        bail!(
-            "refusing checkout destination '{}': resolves outside the workspace",
-            destination.display()
-        );
-    }
-    Ok(())
 }
 
 /// Create the checkout destination without letting a swapped path component
@@ -290,10 +299,19 @@ fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Pa
 /// with ancestor-pinned, no-follow semantics, then re-assert with the
 /// destination itself existing.
 fn create_contained_dir_all(workspace_host: &Path, destination: &Path) -> Result<()> {
-    ensure_checkout_destination_contained(workspace_host, destination)?;
-    create_pinned_dir_all(workspace_host, destination)?;
-    ensure_checkout_destination_contained(workspace_host, destination)?;
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = (workspace_host, destination);
+        bail!("checkout directory creation requires Unix no-follow filesystem support");
+    }
+
+    #[cfg(unix)]
+    {
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        create_pinned_dir_all(workspace_host, destination)?;
+        ensure_checkout_destination_contained(workspace_host, destination)?;
+        Ok(())
+    }
 }
 
 /// Create `destination` component by component below the canonical workspace
@@ -322,17 +340,6 @@ fn create_pinned_dir_all(workspace_host: &Path, destination: &Path) -> Result<()
             destination.display()
         )
     })?;
-    Ok(())
-}
-
-/// Non-unix fallback: no descriptor-pinned creation exists here, so the
-/// surrounding check-first / re-assert pair is the whole containment. A swap
-/// racing this call can still redirect creation; symlinks need elevated
-/// privilege on this platform, which keeps that race out of reach of the
-/// concurrent workspace writer the unix path defends against.
-#[cfg(not(unix))]
-fn create_pinned_dir_all(_workspace_host: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
     Ok(())
 }
 
