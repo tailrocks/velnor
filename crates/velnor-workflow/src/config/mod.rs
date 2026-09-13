@@ -12,7 +12,7 @@
 //! directory it renders from, and the repository-local files the generated
 //! output owns. Nothing about a specific repository lives in the generator.
 
-mod canonical;
+pub(crate) mod canonical;
 
 use std::collections::BTreeMap;
 use std::fs;

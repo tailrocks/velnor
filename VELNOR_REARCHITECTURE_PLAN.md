@@ -882,6 +882,31 @@ host-global state that already persists, with no `/proc/sys/fs/binfmt_misc` chec
 `doctor` (`runner.rs:3826-3841`, `:11513-11527`), so a crashed worker leaks a buildkitd
 container and a multi-gigabyte volume indefinitely.
 
+#### 2026-09-13 — R2-perf red-team hardening of persistent builders
+
+Persistent builders shipped (stable trust/repository names, claims, pressure
+prune, horizon reap) and the red-team pass found five P0/P1s, fixed in
+`crates/velnor-runner/src/buildkit.rs` (+ `cache.rs` lock timeout,
+`executor.rs` builder setup):
+
+- **P0 cache poisoning across tiers.** The key ignored branch and event, so a
+  branch job shared the release daemon's ID-keyed cache mounts. The key now
+  carries a trust tier (`builder_trust_tier`: `release` / `branch` /
+  `unknown`) derived from immutable `GITHUB_REF` / `REF_TYPE` / `EVENT_NAME` /
+  `REF_PROTECTED`; release shares only with release.
+- **Lock held across Docker.** Release/prune/horizon held the claim lock
+  across slow daemon calls with unbounded waits. Critical sections now cover
+  only the claim mutation (bounded 30s waits, `velnor.buildkit` telemetry);
+  Docker runs unlocked with a recheck that restarts the daemon when a setup
+  raced the stop.
+- **Unbounded workflow names, immortal claims.** Each (scope, repository)
+  keeps at most 8 builders with LRU eviction of unclaimed ones; claim files
+  die with their builder; the setup path runs the horizon pass every 6h.
+- **Torn claims failed open.** Claim writes are atomic rename; torn files
+  read as claimed (stop/prune/delete nothing).
+- **Stopped corpses pinned claims.** The repair listing was `ps --all`, so
+  stopped cross-slot containers kept their holds; it is running-only now.
+
 ### Correction to BC-8 — checkout admission is already fail-closed
 
 The claim that `submodules`, `sparse-checkout`, `filter`, `ssh-key`, `github-server-url` and
