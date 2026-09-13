@@ -319,22 +319,7 @@ impl Store {
             "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
              FROM instances WHERE instance_slug = ?1",
             [instance_slug],
-            |row| {
-                let version = row.get::<_, i64>(3)?;
-                Ok(LifecycleInstanceRow {
-                    instance_slug: row.get(0)?,
-                    desired_state: row.get(1)?,
-                    observed_state: row.get(2)?,
-                    resource_version: version
-                        .try_into()
-                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
-                    desired_slots: row
-                        .get::<_, Option<i64>>(4)?
-                        .map(|slots| slots.try_into())
-                        .transpose()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                })
-            },
+            lifecycle_instance_row,
         )
         .optional()
         .map_err(Into::into)
@@ -468,6 +453,66 @@ impl Store {
                 resource_version: next_version,
                 phase: "accepted".to_owned(),
                 created_at: accepted_at,
+            },
+            true,
+        ))
+    }
+
+    /// Record one observed lifecycle projection write with optimistic
+    /// concurrency against `expected_version`.
+    ///
+    /// Returns the committed row with `true` for a fresh write, or the
+    /// current row with `false` when the caller's version is stale. A stale
+    /// version is convergence, not an error: another writer already advanced
+    /// the projection past this observation, so the caller adopts the
+    /// re-read row and performs no retry loop. Observed writes share the
+    /// instance's monotonic version with desired writes, so neither writer
+    /// can silently clobber the other.
+    pub fn record_lifecycle_observed(
+        &self,
+        instance_slug: &str,
+        observed_state: &str,
+        expected_version: u64,
+    ) -> StoreResult<(LifecycleInstanceRow, bool)> {
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<LifecycleInstanceRow> = transaction
+            .query_row(
+                "SELECT instance_slug, desired_state, observed_state, resource_version, desired_slots
+                 FROM instances WHERE instance_slug = ?1",
+                [instance_slug],
+                lifecycle_instance_row,
+            )
+            .optional()?;
+        let Some(current) = current else {
+            return Err(StoreError::new(
+                ExitClass::Usage,
+                "store.lifecycle.instance.unknown",
+            ));
+        };
+        if current.resource_version != expected_version {
+            transaction.commit()?;
+            return Ok((current, false));
+        }
+        let next_version = current.resource_version.saturating_add(1);
+        transaction.execute(
+            "UPDATE instances SET observed_state = ?1, resource_version = ?2, updated_at = ?3
+             WHERE instance_slug = ?4",
+            params![
+                observed_state,
+                next_version as i64,
+                rfc3339(Timestamp::now()),
+                instance_slug,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok((
+            LifecycleInstanceRow {
+                instance_slug: current.instance_slug,
+                desired_state: current.desired_state,
+                observed_state: observed_state.to_owned(),
+                resource_version: next_version,
+                desired_slots: current.desired_slots,
             },
             true,
         ))
@@ -744,10 +789,20 @@ impl Store {
     /// `(instance_slug, job_uid)`.
     ///
     /// Admission is gated on the run/attempt identity: a row missing
-    /// either (or carrying a negative) is rejected with
-    /// `store.job.summary.unidentified` (`store.job.summary.range`),
-    /// because such a row could never be read back or driven to terminal
-    /// and would sit nonterminal forever.
+    /// either is rejected with `store.job.summary.unidentified`, and a
+    /// row carrying a negative (or an attempt above `u32::MAX`) with
+    /// `store.job.summary.range`. Such a row would stay readable via
+    /// [`Store::job_summaries`] and drivable via
+    /// [`Store::record_job_transition`]; only the `decode_summary_row`
+    /// paths (`fetch_summary*`) break on it. The gate covers new
+    /// admissions (and refreshes) only: pre-existing rows are untouched,
+    /// since no backfill can invent their external identity and deleting
+    /// them would destroy legitimate records.
+    ///
+    /// This is the out-of-band seeding seam: `phase` is written verbatim
+    /// with no edge check (pre-existing wart, preserved not introduced).
+    /// Only the transition paths project through
+    /// [`project_job_transition`].
     ///
     /// # Errors
     /// Envelope-classified persistence failures.
@@ -1976,6 +2031,23 @@ fn lifecycle_operation_query(
         .map_err(Into::into)
 }
 
+fn lifecycle_instance_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LifecycleInstanceRow> {
+    let version = row.get::<_, i64>(3)?;
+    Ok(LifecycleInstanceRow {
+        instance_slug: row.get(0)?,
+        desired_state: row.get(1)?,
+        observed_state: row.get(2)?,
+        resource_version: version
+            .try_into()
+            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, version))?,
+        desired_slots: row
+            .get::<_, Option<i64>>(4)?
+            .map(|slots| slots.try_into())
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    })
+}
+
 fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> StoreResult<()> {
     let Some(run_id) = summary.run_id() else {
         return Err(unidentified_summary());
@@ -2037,20 +2109,25 @@ fn insert_summary(transaction: &Transaction<'_>, summary: &ModelJobSummary) -> S
 }
 
 fn validate_job_row(row: &JobRow) -> StoreResult<()> {
-    // Admission gate: a row without its run/attempt identity can never be
-    // read back (`decode_summary_row` requires both) nor driven to terminal
-    // through the identity key, so it would sit nonterminal forever while
-    // holding a storage reservation. Reject it here, like `insert_summary`.
+    // Admission gate: `decode_summary_row` requires both run_id and
+    // attempt (`u64`/`u32`), so an admitted-yet-undecodable row would
+    // break the `fetch_summary*` paths. Reject it here, like
+    // `insert_summary`. The row would stay readable via `job_summaries`
+    // and drivable via `record_job_transition`; only the decode paths
+    // break. New admissions (and refreshes) only: pre-existing rows are
+    // untouched, since no backfill can invent their external identity.
     let Some(run_id) = row.run_id else {
         return Err(unidentified_summary());
     };
     let Some(attempt) = row.attempt else {
         return Err(unidentified_summary());
     };
+    // run_id needs no upper bound: a non-negative i64 always fits the
+    // decode target u64.
     if run_id < 0 {
         return Err(summary_out_of_range("run_id"));
     }
-    if attempt < 0 {
+    if attempt < 0 || attempt > i64::from(u32::MAX) {
         return Err(summary_out_of_range("attempt"));
     }
     let invalid = || {
@@ -2284,11 +2361,16 @@ pub struct IllegalJobEdge {
 /// Project the observable [`JobState`] from one materialized job row's
 /// phase cell.
 ///
-/// The `jobs.phase` column is a materialized view: writers store exactly
-/// what [`project_job_transition`] returns for the applied edge, and every
-/// reader — including this write path's own `from` state — projects
+/// The `jobs.phase` column is a materialized view on the transition
+/// paths: [`Store::record_job_transition`] stores exactly what
+/// [`project_job_transition`] returns for the applied edge, and every
+/// reader — including that write path's own `from` state — projects
 /// through this function, so a stored phase the closed taxonomy cannot
 /// produce fails closed instead of drifting.
+///
+/// [`Store::record_job`] is the out-of-band seeding seam: it writes
+/// `phase` verbatim with no edge check. Pre-existing wart, preserved
+/// here, not introduced.
 pub fn project_job_state(materialized_phase: &str) -> StoreResult<JobState> {
     JobState::try_from(materialized_phase).map_err(|_| {
         StoreError::new(ExitClass::Operation, "store.job.state.unknown")
@@ -3035,6 +3117,75 @@ mod lifecycle_tests {
                 .expect("secondary has independent quota")
                 .1
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    fn open_observed_store(label: &str) -> (std::path::PathBuf, Store) {
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-lifecycle-{label}-{}-{}",
+            std::process::id(),
+            Timestamp::now()
+                .as_offset_datetime()
+                .unix_timestamp_nanos()
+                .unsigned_abs()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("state.db");
+        let store = Store::open(&path).expect("open store");
+        (directory, store)
+    }
+
+    fn seed_instance(store: &Store, slug: &str) {
+        store
+            .upsert_instance(&InstanceRow {
+                instance_slug: slug.to_owned(),
+                host: "test-host".to_owned(),
+                daemon_version: "test".to_owned(),
+                slots_configured: 1,
+                slots_busy: 0,
+                updated_at: Timestamp::UNIX_EPOCH,
+            })
+            .expect("seed instance");
+    }
+
+    #[test]
+    fn observed_write_advances_and_stale_version_converges_without_retry() {
+        let (directory, store) = open_observed_store("observed");
+        seed_instance(&store, "primary");
+
+        let (written, fresh) = store
+            .record_lifecycle_observed("primary", "draining", 1)
+            .expect("observed write");
+        assert!(fresh);
+        assert_eq!(written.observed_state, "draining");
+        assert_eq!(written.desired_state, "ready");
+        assert_eq!(written.resource_version, 2);
+
+        // Stale version: convergence, not an error. The caller adopts the
+        // re-read row and performs no retry loop.
+        let (converged, updated) = store
+            .record_lifecycle_observed("primary", "ready", 1)
+            .expect("stale observed converges");
+        assert!(!updated);
+        assert_eq!(converged.observed_state, "draining");
+        assert_eq!(converged.resource_version, 2);
+
+        let (rewritten, fresh) = store
+            .record_lifecycle_observed("primary", "ready", 2)
+            .expect("fresh observed write");
+        assert!(fresh);
+        assert_eq!(rewritten.observed_state, "ready");
+        assert_eq!(rewritten.resource_version, 3);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn observed_write_for_unknown_instance_fails_closed() {
+        let (directory, store) = open_observed_store("observed-unknown");
+        let error = store
+            .record_lifecycle_observed("ghost", "draining", 1)
+            .expect_err("unknown instance must fail");
+        assert_eq!(error.envelope.reason, "store.lifecycle.instance.unknown");
         let _ = std::fs::remove_dir_all(directory);
     }
 

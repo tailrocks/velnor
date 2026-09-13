@@ -2108,4 +2108,38 @@ mod tests {
         // counter only counts refused edges.
         assert_eq!(store.illegal_transition_edges(), 0);
     }
+
+    #[test]
+    fn admission_gate_rejects_attempt_above_u32_max() {
+        let temp = TempDb::new("admission-gate-attempt-bound");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("ab")).unwrap();
+
+        // `decode_summary_row` narrows attempt to u32, so an oversized
+        // attempt is the same admitted-yet-undecodable stuck class as a
+        // negative one.
+        let mut oversized = job("ab", "big-attempt", "org/gate");
+        oversized.attempt = Some(i64::from(u32::MAX) + 1);
+        let error = store
+            .record_job(&oversized)
+            .expect_err("oversized attempt is rejected");
+        assert_eq!(error.envelope.reason, "store.job.summary.range");
+        assert!(
+            store.job_summaries("ab").unwrap().is_empty(),
+            "rejected admission persists nothing"
+        );
+
+        // The boundary itself still decodes: u32::MAX round-trips through
+        // the `fetch_summary_by_job_uid` decode path.
+        let mut boundary = job("ab", "max-attempt", "org/gate");
+        boundary.attempt = Some(i64::from(u32::MAX));
+        store.record_job(&boundary).unwrap();
+        let fetched = store
+            .fetch_summary_by_job_uid("ab", "max-attempt")
+            .unwrap()
+            .expect("boundary row decodes");
+        assert_eq!(fetched.attempt(), Some(u32::MAX));
+
+        assert_eq!(store.illegal_transition_edges(), 0);
+    }
 }

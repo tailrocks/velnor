@@ -16,6 +16,8 @@ use anyhow::Context;
 use clap::Args;
 use serde_json::json;
 use velnor_control::journal::{Event, Journal, SideEffect, SlotRecord};
+use velnor_control::lifecycle::LifecycleService;
+use velnor_control::store::Store;
 use velnor_model::{FleetHealthState, Generation, JobId, JobPhase2, SlotId, SlotPhase2};
 
 use crate::config;
@@ -265,6 +267,53 @@ pub struct ControllerArgs {
     /// Spawn slot OS processes (production and isolation tests).
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub spawn_slots: bool,
+    /// Durable lifecycle ledger for unified drain. Daemon-wired only (the
+    /// controller CLI leaves this `None` and drains on latch plus journal).
+    #[arg(skip)]
+    pub lifecycle: Option<ControllerLifecycle>,
+}
+
+/// Durable lifecycle identity for one supervised controller.
+///
+/// `instance` is the lifecycle ledger slug (the hostname-derived daemon
+/// slug), which differs from the controller `scope` (the slot-id prefix).
+/// The daemon maps both explicitly at the `supervise_from_daemon` call site.
+#[derive(Debug, Clone)]
+pub struct ControllerLifecycle {
+    pub store: Arc<Store>,
+    pub instance: String,
+}
+
+/// Lifecycle ledger as the drain loop consumes it: a read-through service
+/// plus the raw store handle for observed-projection writes.
+struct ActiveLifecycle {
+    service: LifecycleService,
+    store: Arc<Store>,
+    instance: String,
+}
+
+impl ActiveLifecycle {
+    /// Bind the threaded lifecycle handle, or `None` when the configured
+    /// slug is not a canonical instance identity (the loop then drains on
+    /// latch plus journal only, and says so once).
+    fn bind(lifecycle: &ControllerLifecycle) -> Option<Self> {
+        match LifecycleService::with_store_for_instance(
+            Arc::clone(&lifecycle.store),
+            lifecycle.instance.clone(),
+        ) {
+            Ok(service) => Some(Self {
+                service,
+                store: Arc::clone(&lifecycle.store),
+                instance: lifecycle.instance.clone(),
+            }),
+            Err(error) => {
+                eprintln!(
+                    "lifecycle drain unavailable: configured instance is not a canonical identity: {error}; draining on signal plus journal only"
+                );
+                None
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -432,7 +481,22 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut last_reconcile_duration_ms = 1;
     publish_controller_metrics(&args.state_dir, 0, 0, 0, 0, 1)?;
     let mut metrics = MetricsPublisher::start(&args.state_dir);
+    let lifecycle = args.lifecycle.as_ref().and_then(ActiveLifecycle::bind);
     loop {
+        // Unified drain (flag-gated, default off): the signal latch, the
+        // durable journal marker, or a fresh lifecycle `draining` desired
+        // state all converge on the same child-drain exit. With the flag
+        // off this arm is dead and the static latch path below is
+        // byte-identical to before.
+        if crate::runner::journal_drain_enabled()
+            && should_drain(crate::runner::draining(), &journal, lifecycle.as_ref())
+        {
+            drain_edge(&mut journal, lifecycle.as_ref())?;
+            drain_children(&journal, &mut slots, &mut jobs).await?;
+            metrics.update(&slots, &jobs, last_reconcile_duration_ms);
+            metrics.stop_and_publish().await?;
+            return Ok(());
+        }
         if crate::runner::draining() {
             drain_children(&journal, &mut slots, &mut jobs).await?;
             metrics.update(&slots, &jobs, last_reconcile_duration_ms);
@@ -555,6 +619,80 @@ fn job_process_counts<'a>(job_ids: impl Iterator<Item = &'a String>) -> (usize, 
     })
 }
 
+/// Unified drain signal: the process signal latch, the durable journal
+/// marker, or a store-read-through lifecycle desired state of `draining`.
+/// Unreadable inputs are not drain orders: a store or journal blip must not
+/// tear down supervision, while the latch and the latched marker still do.
+fn should_drain(latch: bool, journal: &Journal, lifecycle: Option<&ActiveLifecycle>) -> bool {
+    if latch {
+        return true;
+    }
+    if journal
+        .materialized_state()
+        .map(|state| state.drain_active)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let Some(lifecycle) = lifecycle else {
+        return false;
+    };
+    match lifecycle.service.desired_fresh(&lifecycle.instance) {
+        Ok(fresh) => fresh.desired == "draining",
+        Err(error) => {
+            eprintln!(
+                "forensics.lifecycle event=drain-desired-unreadable instance={} error={error:?}",
+                lifecycle.instance
+            );
+            false
+        }
+    }
+}
+
+/// Run once on the drain edge before `drain_children`: latch the journal
+/// marker when this controller is newly draining, and record the observed
+/// `draining` projection exactly once. Both writes are best-effort around
+/// the exit they precede: a failed write is forensic, never a reason to
+/// keep supervising through a drain.
+fn drain_edge(journal: &mut Journal, lifecycle: Option<&ActiveLifecycle>) -> anyhow::Result<()> {
+    let journal_active = journal.materialized_state()?.drain_active;
+    let fresh = lifecycle.as_ref().and_then(|lifecycle| {
+        lifecycle
+            .service
+            .desired_fresh(&lifecycle.instance)
+            .map_err(|error| {
+                eprintln!(
+                    "forensics.lifecycle event=drain-desired-unreadable instance={} error={error:?}",
+                    lifecycle.instance
+                );
+            })
+            .ok()
+    });
+    if !journal_active {
+        // The lifecycle version ties the marker to the drain request; a
+        // latch-only drain with no ledger row still latches at version 1 so
+        // slot readers observe one marker shape.
+        let version = fresh.as_ref().map(|state| state.version).unwrap_or(1);
+        journal.set_drain(version)?;
+    }
+    if let (Some(lifecycle), Some(fresh)) = (lifecycle, fresh)
+        && fresh.observed != "draining"
+        && let Err(error) = lifecycle.store.record_lifecycle_observed(
+            &lifecycle.instance,
+            "draining",
+            fresh.version,
+        )
+    {
+        // A version conflict cannot surface here: it converges inside the
+        // store call. Only IO and missing-row failures land here.
+        eprintln!(
+            "forensics.lifecycle event=drain-observed-unrecorded instance={} error={error}",
+            lifecycle.instance
+        );
+    }
+    Ok(())
+}
+
 /// Stop controller-owned slots, waiters, and stale job workers when the daemon
 /// receives SIGTERM. Active in-flight job workers remain alive for completion.
 async fn drain_children(
@@ -669,7 +807,15 @@ async fn reconcile_once(
     // heartbeat is the only fresh local proof that prevents a double spawn.
     ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
     let state = journal.materialized_state()?;
+    // Unified drain (flag-gated, default off): the loop top already exits on
+    // drain, so this only closes the race where another process latches the
+    // marker after this cycle's check. No new permits while draining; the
+    // reducer would reject them anyway.
+    let permits_gated = crate::runner::journal_drain_enabled() && state.drain_active;
     for index in 1..=total {
+        if permits_gated {
+            continue;
+        }
         let id = slot_id(&args.scope, index as usize);
         let slot = state.slots.iter().find(|slot| slot.slot_id == id);
         let generation = slot
@@ -2670,11 +2816,17 @@ fn kill_draining_jobs(
 
 /// Daemon production path: spawn one OS process per configured slot instead
 /// of a shared-process `JoinSet`.
+///
+/// `lifecycle` carries the operational-store handle plus the explicit
+/// lifecycle ledger slug. That slug is the hostname-derived daemon slug and
+/// differs from `scope` (the slot-id prefix); the daemon maps both at its
+/// call site. `None` (or flag off) drains on latch plus journal only.
 pub async fn supervise_from_daemon(
     state_dir: PathBuf,
     scope: String,
     desired_ready: u32,
     once: bool,
+    lifecycle: Option<ControllerLifecycle>,
 ) -> anyhow::Result<()> {
     run(ControllerArgs {
         state_dir,
@@ -2682,6 +2834,7 @@ pub async fn supervise_from_daemon(
         desired_ready,
         once,
         spawn_slots: true,
+        lifecycle,
     })
     .await
 }
@@ -2806,6 +2959,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         }
     }
 
@@ -3100,6 +3254,183 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    fn drain_test_lifecycle(
+        dir: &std::path::Path,
+        slug: &str,
+        desired: velnor_control::ports::MutationKind,
+    ) -> ActiveLifecycle {
+        use velnor_control::ports::{MutationPort, MutationRequest};
+        let store = Arc::new(Store::open(dir.join("state.db")).unwrap());
+        let service = LifecycleService::with_store_for_instance(Arc::clone(&store), slug).unwrap();
+        service
+            .mutate(MutationRequest {
+                kind: desired,
+                target: slug.to_owned(),
+                reason: "test".to_owned(),
+                idempotency_key: format!("drain-test-{slug}"),
+                expected_version: None,
+                scale_to: None,
+            })
+            .unwrap();
+        ActiveLifecycle {
+            service,
+            store,
+            instance: slug.to_owned(),
+        }
+    }
+
+    #[test]
+    fn should_drain_combines_latch_journal_and_fresh_desired() {
+        use velnor_control::ports::MutationKind;
+        let dir = metrics_test_dir("should-drain");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+
+        assert!(!should_drain(false, &journal, None));
+        assert!(should_drain(true, &journal, None));
+
+        journal.set_drain(2).unwrap();
+        assert!(should_drain(false, &journal, None));
+
+        let draining = drain_test_lifecycle(&dir, "draining", MutationKind::Drain);
+        let ready = drain_test_lifecycle(&dir, "ready", MutationKind::Uncordon);
+        let fresh_journal = Journal::open(dir.join("other.db")).unwrap();
+        assert!(should_drain(false, &fresh_journal, Some(&draining)));
+        assert!(!should_drain(false, &fresh_journal, Some(&ready)));
+
+        // An unreadable ledger row is not a drain order.
+        let store = Arc::new(Store::open(dir.join("state.db")).unwrap());
+        let missing = ActiveLifecycle {
+            service: LifecycleService::with_store_for_instance(Arc::clone(&store), "ghost")
+                .unwrap(),
+            store,
+            instance: "ghost".to_owned(),
+        };
+        assert!(!should_drain(false, &fresh_journal, Some(&missing)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drain_edge_latches_marker_and_records_observed_once() {
+        use velnor_control::ports::MutationKind;
+        let dir = metrics_test_dir("drain-edge");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let lifecycle = drain_test_lifecycle(&dir, "primary", MutationKind::Drain);
+
+        drain_edge(&mut journal, Some(&lifecycle)).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 2);
+        let row = lifecycle
+            .store
+            .lifecycle_instance("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.desired_state, "draining");
+        assert_eq!(row.observed_state, "draining");
+        assert_eq!(row.resource_version, 3);
+
+        // Edge-triggered: a second pass writes neither the marker nor the
+        // observed projection again.
+        drain_edge(&mut journal, Some(&lifecycle)).unwrap();
+        let row = lifecycle
+            .store
+            .lifecycle_instance("primary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.resource_version, 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drain_edge_preserves_an_existing_marker_and_needs_no_ledger() {
+        let dir = metrics_test_dir("drain-edge-static");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.set_drain(9).unwrap();
+        drain_edge(&mut journal, None).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert_eq!(state.drain_version, 9);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_skips_new_permits_while_journal_drain_is_latched() {
+        // Flag on for this process. Never unset: sibling tests create no
+        // drain markers, so the leaked flag cannot change their outcome.
+        unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
+        let dir = metrics_test_dir("reconcile-drain-gate");
+        std::fs::write(
+            dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        };
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        journal.apply(Event::DesiredCapacity { ready: 1 }).unwrap();
+        journal.set_drain(2).unwrap();
+        let server = HealthServer::bind(&dir).unwrap();
+        let mut metrics = MetricsPublisher::start(&dir);
+        let mut pacing = GithubPacing::default();
+        let mut slots = HashMap::new();
+        let mut jobs = HashMap::new();
+        let mut heartbeats = HashMap::new();
+        let mut startup_deadlines = HashMap::new();
+        // Skip the remote and outbox scans: this cycle only proves the
+        // permit loop observes the latched marker.
+        let mut last_registration_reconcile = Instant::now();
+        let mut last_outbox_reconcile = Instant::now();
+
+        reconcile_once(
+            &args,
+            &mut journal,
+            &server,
+            &mut slots,
+            &mut jobs,
+            &mut heartbeats,
+            &mut startup_deadlines,
+            &mut last_registration_reconcile,
+            &mut last_outbox_reconcile,
+            &mut pacing,
+            &metrics,
+        )
+        .await
+        .unwrap();
+        metrics.stop_and_publish().await.unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert!(
+            state.slots.iter().all(|slot| !slot.permit_held),
+            "no permit may be reserved while draining: {:?}",
+            state.slots
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn active_lifecycle_bind_rejects_a_noncanonical_slug() {
+        let dir = metrics_test_dir("drain-bind");
+        let store = Arc::new(Store::open(dir.join("state.db")).unwrap());
+        assert!(ActiveLifecycle::bind(&ControllerLifecycle {
+            store: Arc::clone(&store),
+            instance: "primary".to_owned(),
+        })
+        .is_some());
+        assert!(ActiveLifecycle::bind(&ControllerLifecycle {
+            store,
+            instance: "not a slug!!".to_owned(),
+        })
+        .is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn metrics_publisher_synchronously_writes_the_final_snapshot() {
         let dir = metrics_test_dir("final-snapshot");
@@ -3352,6 +3683,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         reclaim_orphaned_jobs(
             &args,
@@ -3480,6 +3812,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         reclaim_orphaned_jobs(
             &args,
@@ -3509,6 +3842,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         let error = reclaim_orphaned_jobs(
             &args,
@@ -3539,6 +3873,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         let error = reclaim_orphaned_jobs(
             &args,
@@ -3678,6 +4013,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         reconcile_remote_registrations(
             &args,
@@ -3779,6 +4115,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         let reconciliation = reconcile_remote_registrations(
             &args,
@@ -3863,6 +4200,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
 
         let error = reconcile_remote_registrations(
@@ -3889,6 +4227,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
 
         reconcile_remote_registrations(
@@ -3918,6 +4257,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
 
         let error = reconcile_remote_registrations(
@@ -4104,6 +4444,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         let mut pacing = GithubPacing::default();
         reconcile_remote_registrations(&args, &mut journal, &mut HashMap::new(), &mut pacing)
@@ -4233,6 +4574,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         journal
             .apply(Event::DesiredCapacity {
@@ -4566,6 +4908,7 @@ mod tests {
             desired_ready: 1,
             once: true,
             spawn_slots: false,
+            lifecycle: None,
         };
         journal
             .apply(Event::DesiredCapacity {

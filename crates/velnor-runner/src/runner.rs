@@ -2584,6 +2584,98 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Lifecycle drain unification (steps 1-4), gated by `VELNOR_JOURNAL_DRAIN=1`
+/// and default off. With the flag off every reader below collapses to the
+/// static latch and the pre-unification path is byte-identical.
+pub(crate) fn journal_drain_enabled() -> bool {
+    std::env::var("VELNOR_JOURNAL_DRAIN").is_ok_and(|value| value == "1")
+}
+
+/// Cached journal-drain reads: one zero-timeout `SELECT` per journal path at
+/// most this often. Poll boundaries tick every ~2s, so a 2s TTL bounds each
+/// boundary to one SQLite open without letting a drain order go stale.
+const DRAIN_HINT_TTL: Duration = Duration::from_secs(2);
+
+/// Last `(journal path, hint, read time)`. Single-entry and last-path-wins:
+/// a daemon owns one journal, and a path switch simply re-reads.
+static DRAIN_HINT_CACHE: std::sync::Mutex<Option<(PathBuf, bool, Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Non-blocking journal-drain hint for slot and daemon poll boundaries.
+/// False with the flag off, on any read failure, or when no marker is
+/// latched; never blocks on a writer's lock.
+pub(crate) fn journal_drain_hint(journal_path: &Path) -> bool {
+    if !journal_drain_enabled() {
+        return false;
+    }
+    let now = Instant::now();
+    if let Ok(cache) = DRAIN_HINT_CACHE.lock()
+        && let Some((path, hint, at)) = cache.as_ref()
+        && path == journal_path
+        && now.duration_since(*at) < DRAIN_HINT_TTL
+    {
+        return *hint;
+    }
+    let hint =
+        velnor_control::journal::read_drain_state(journal_path).is_some_and(|state| state.active);
+    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = Some((journal_path.to_path_buf(), hint, now));
+    }
+    hint
+}
+
+/// Effective drain signal at a poll boundary: the static signal latch, or
+/// (flag-gated) the cached journal hint. `None` degrades to the latch for
+/// paths that cannot name their journal.
+pub(crate) fn effective_draining(journal_path: Option<&Path>) -> bool {
+    draining() || journal_path.is_some_and(journal_drain_hint)
+}
+
+/// Best-effort journal path for gates that hold typed daemon args but no
+/// resolved config base yet. `None` degrades those gates to the latch.
+fn daemon_drain_journal(args: &DaemonArgs) -> Option<PathBuf> {
+    daemon_config_dir(args)
+        .map(|base| base.join("journal.db"))
+        .ok()
+}
+
+/// Thread the operational store plus the explicit lifecycle ledger slug to
+/// the supervised controller. `None` with the flag off (or when the store
+/// cannot be reopened for supervision): the controller then drains on the
+/// signal latch plus the journal marker only.
+fn controller_lifecycle_for_daemon(
+    args: &DaemonArgs,
+    sink: &crate::ops::OpsSink,
+) -> Option<crate::node::controller::ControllerLifecycle> {
+    if !journal_drain_enabled() {
+        return None;
+    }
+    let path = args
+        .state_db
+        .clone()
+        .unwrap_or_else(crate::ops::state_db_path);
+    match velnor_control::store::Store::open(&path) {
+        Ok(store) => Some(crate::node::controller::ControllerLifecycle {
+            store: std::sync::Arc::new(store),
+            instance: sink.instance_slug().to_owned(),
+        }),
+        Err(error) => {
+            eprintln!(
+                "lifecycle drain unavailable: cannot reopen operational store {} for supervision: {error}; draining on signal plus journal only",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_drain_hint_cache_for_tests() {
+    if let Ok(mut cache) = DRAIN_HINT_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 /// Emit `drain.completed` exactly once per process, from whichever exit
 /// path observes the drain finishing.
 fn emit_drain_completed_once() {
@@ -2667,8 +2759,11 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
     }
 }
 
-async fn wait_for_drain_signal() {
-    while !draining() {
+/// Cancel an in-flight acquire when the daemon drains. The journal leg is
+/// TTL-cached, so this 100ms poll costs one zero-timeout `SELECT` per TTL
+/// window at most.
+async fn wait_for_drain_signal_in(journal_path: Option<&Path>) {
+    while !effective_draining(journal_path) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -2730,10 +2825,14 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         start_drain_listener(config_base);
     }
 
+    // Journal path for the flag-gated drain leg of the daemon gates below.
+    // `None` (unresolvable config dir) degrades them to the static latch.
+    let drain_journal = daemon_drain_journal(&args);
+
     // Reclaim credentials abandoned by a prior daemon before any slot can
     // accept a job. This runs once per daemon process, outside pass retries.
     reap_checkout_credentials_at_startup(supervised).await?;
-    if draining() {
+    if effective_draining(drain_journal.as_deref()) {
         return Ok(());
     }
 
@@ -2783,7 +2882,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     let mut retention_lifecycle = Some(start_retention_lifecycle());
     let mut attempt: u32 = 0;
     loop {
-        if draining() {
+        if effective_draining(drain_journal.as_deref()) {
             stop_retention_lifecycle(&mut retention_lifecycle).await;
             println!("drain complete during registration retry: exiting");
             return Ok(());
@@ -2815,7 +2914,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                     delay.as_secs()
                 ));
                 for _ in 0..delay.as_secs().max(1) {
-                    if draining() {
+                    if effective_draining(drain_journal.as_deref()) {
                         stop_retention_lifecycle(&mut retention_lifecycle).await;
                         println!("drain complete during registration backoff: exiting");
                         return Ok(());
@@ -2866,7 +2965,7 @@ async fn reap_checkout_credentials_at_startup(supervised: bool) -> Result<()> {
 /// effect after permit+routing+session+executor proof, not a bulk configure
 /// before those checks. Dry-run still calls `configure_daemon_slots`.
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
-    if draining() {
+    if effective_draining(daemon_drain_journal(args).as_deref()) {
         return Ok(());
     }
     // Store open/migration belongs inside the pass so supervised startup
@@ -2915,7 +3014,8 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     // Startup preflight covered every executable slot before supervision.
     // Child cycles must not repeat the same expensive check.
     resolved_args.skip_preflight = true;
-    if draining() {
+    let drain_journal_path = config_base.join("journal.db");
+    if effective_draining(Some(&drain_journal_path)) {
         return Ok(());
     }
     let sink = crate::ops::global().ok_or_else(|| {
@@ -2953,11 +3053,15 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         .name
         .clone()
         .unwrap_or_else(|| "velnor".to_owned());
+    // The lifecycle ledger slug (hostname-derived daemon identity) differs
+    // from the controller scope (slot-id prefix): map both explicitly.
+    let lifecycle = controller_lifecycle_for_daemon(&resolved_args, sink);
     let result = crate::node::controller::supervise_from_daemon(
         config_base.clone(),
         scope,
         slots as u32,
         resolved_args.once,
+        lifecycle,
     )
     .await;
     if let Some(sink) = crate::ops::global()
@@ -2965,7 +3069,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     {
         daemon_forensic_log(&config_base, "ops-store=degraded after slot supervision");
     }
-    if draining() {
+    if effective_draining(Some(&drain_journal_path)) {
         emit_drain_completed_once();
     }
     result
@@ -3103,9 +3207,16 @@ fn slot_retry_delay_for_error(attempt: u32, slot_index: usize, error: &anyhow::E
 /// Wait for a slot retry without making SIGTERM drain wait behind a long
 /// capacity/JIT backoff. Returns true as soon as drain is requested.
 async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
+    sleep_slot_retry_or_drain_in(delay, None).await
+}
+
+/// Backoff sleep that a drain order short-circuits. The journal leg is
+/// TTL-cached, so the 1s wakeups cost one zero-timeout `SELECT` per TTL
+/// window at most.
+async fn sleep_slot_retry_or_drain_in(delay: Duration, journal_path: Option<&Path>) -> bool {
     let deadline = tokio::time::Instant::now() + delay;
     loop {
-        if draining() {
+        if effective_draining(journal_path) {
             return true;
         }
         let now = tokio::time::Instant::now();
@@ -3274,8 +3385,11 @@ pub(crate) async fn run_daemon_slot(
     let disk_root = args.work_dir.clone().unwrap_or_else(|| config_base.clone());
     let mut disk_pressure =
         crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
+    let drain_journal_path = config_base.join("journal.db");
     loop {
-        if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
+        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), false)
+            == SlotAction::DeregisterAndExit
+        {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
@@ -3345,7 +3459,7 @@ pub(crate) async fn run_daemon_slot(
                     crate::sd_notify::status(&message);
                     daemon_forensic_log(&config_base, &message);
                     let nap = remaining.min(Duration::from_secs(60));
-                    sleep_slot_retry_or_drain(nap).await;
+                    sleep_slot_retry_or_drain_in(nap, Some(&drain_journal_path)).await;
                     continue;
                 }
                 crate::host_capacity::DiskAction::Drain
@@ -3471,7 +3585,9 @@ pub(crate) async fn run_daemon_slot(
                 )
                 .await;
                 cycle += 1;
-                if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
+                if sleep_slot_retry_or_drain_in(Duration::from_secs(5), Some(&drain_journal_path))
+                    .await
+                {
                     continue;
                 }
                 continue;
@@ -3492,7 +3608,7 @@ pub(crate) async fn run_daemon_slot(
                         "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error_detail}"
                     ),
                 );
-                if sleep_slot_retry_or_drain(delay).await {
+                if sleep_slot_retry_or_drain_in(delay, Some(&drain_journal_path)).await {
                     continue;
                 }
                 continue;
@@ -3526,7 +3642,8 @@ pub(crate) async fn run_daemon_slot(
             )
             .await;
             cycle += 1;
-            if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
+            if sleep_slot_retry_or_drain_in(Duration::from_secs(5), Some(&drain_journal_path)).await
+            {
                 continue;
             }
             continue;
@@ -3535,7 +3652,9 @@ pub(crate) async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        if slot_action_on_poll(draining(), true) == SlotAction::FinishJobThenExit {
+        if slot_action_on_poll(effective_draining(Some(&drain_journal_path)), true)
+            == SlotAction::FinishJobThenExit
+        {
             let note =
                 format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
             println!("{note}");
@@ -3822,7 +3941,8 @@ async fn reconfigure_daemon_slot_forever(
                     "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error_detail}.{diagnosis} Retrying in {}s.",
                     delay.as_secs()
                 );
-                if sleep_slot_retry_or_drain(delay).await {
+                if sleep_slot_retry_or_drain_in(delay, Some(&config_base.join("journal.db"))).await
+                {
                     return;
                 }
             }
@@ -3843,7 +3963,7 @@ async fn prewarm_successor_after_job(
     slots: usize,
     cycle: u64,
 ) -> Result<()> {
-    if receiver.await.is_err() || draining() {
+    if receiver.await.is_err() || effective_draining(Some(&config_base.join("journal.db"))) {
         return Ok(());
     }
 
@@ -4191,8 +4311,9 @@ async fn configure_daemon_slots(
     let mut usable_slots = 0usize;
     let mut skipped_slots = Vec::new();
     let mut pending = Vec::new();
+    let drain_journal_path = config_base.join("journal.db");
     for slot_index in 1..=slots {
-        if draining() {
+        if effective_draining(Some(&drain_journal_path)) {
             return Ok(usable_slots);
         }
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
@@ -4214,7 +4335,7 @@ async fn configure_daemon_slots(
         pending.push((slot_index, configure_args));
     }
 
-    if draining() {
+    if effective_draining(Some(&drain_journal_path)) {
         return Ok(usable_slots);
     }
 
@@ -4248,7 +4369,7 @@ async fn configure_daemon_slots(
         usable_slots += 1;
     }
 
-    if draining() {
+    if effective_draining(Some(&drain_journal_path)) {
         cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
         return Ok(usable_slots);
     }
@@ -4272,6 +4393,16 @@ fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32)
     std::fs::create_dir_all(config_base)?;
     let mut journal = Journal::open(config_base.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    // Unified drain (flag-gated, default off): a draining daemon reserves no
+    // fresh capacity. The reducer would reject the permits anyway.
+    if journal_drain_enabled()
+        && journal
+            .materialized_state()
+            .map(|state| state.drain_active)
+            .map_err(|error| anyhow::anyhow!("journal: {error}"))?
+    {
+        return Ok(());
+    }
     journal
         .apply(Event::ControlLive)
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
@@ -5310,6 +5441,8 @@ async fn run_v2(
 
     let run_result = async {
         'poll: loop {
+            let poll_drain_journal =
+                crate::node::complete::journal_dir_near(&config_dir).join("journal.db");
             let message = poll_broker_message(
                 &mut broker,
                 &mut run_service,
@@ -5322,12 +5455,15 @@ async fn run_v2(
                 &mut poll_state,
                 &mut health,
                 &forensics,
+                &poll_drain_journal,
             )
             .await?;
 
             let Some(message) = message else {
                 println!("No broker message received.");
-                if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
+                if slot_action_on_poll(effective_draining(Some(&poll_drain_journal)), false)
+                    == SlotAction::DeregisterAndExit
+                {
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
                     // boundary; the slot loop above deletes the registration.
                     forensics.lifecycle("idle slot exiting: daemon drain requested");
@@ -5867,6 +6003,7 @@ async fn poll_broker_message(
     poll_state: &mut BrokerPollState,
     health: &mut IdleSlotHealth,
     forensics: &SlotForensics,
+    drain_journal: &Path,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
     loop {
         match broker
@@ -5906,7 +6043,7 @@ async fn poll_broker_message(
                 }
             },
             Err(error) => {
-                if draining() {
+                if effective_draining(Some(drain_journal)) {
                     forensics.lifecycle(&format!(
                         "idle slot exiting after broker poll error during daemon drain: {}",
                         sanitized_retry_error(&error)
@@ -6068,6 +6205,17 @@ async fn handle_v2_message(
     // recorded, do not make the request: an unrecorded acquisition is the exact
     // failure this write exists to prevent, and the broker redelivers.
     let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    // Unified drain (flag-gated, default off): never start an acquisition
+    // while draining. The broker redelivers to a live runner; this slot
+    // exits at its next idle poll boundary.
+    let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
+    if journal_drain_hint(&acquisition_drain_journal) {
+        forensics.broker(&format!(
+            "acquire SKIPPED request={} journal drain active",
+            reference.runner_request_id
+        ));
+        return Ok(V2MessageAction::None);
+    }
     if let Err(error) = intend_run_service_acquisition_in_journal(
         &acquisition_journal_dir,
         config_dir,
@@ -6098,7 +6246,7 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .instrument(pickup_span) => result,
-        _ = wait_for_drain_signal() => {
+        _ = wait_for_drain_signal_in(Some(&acquisition_drain_journal)) => {
             forensics.lifecycle(&format!(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
@@ -15187,6 +15335,81 @@ mod tests {
             slot_action_on_poll(true, true),
             SlotAction::FinishJobThenExit
         );
+    }
+
+    #[test]
+    fn effective_draining_without_journal_is_exactly_the_latch() {
+        // No journal path degrades to the static latch however the latch is
+        // set, so latch-only paths observe no behavior change.
+        assert_eq!(effective_draining(None), draining());
+    }
+
+    #[test]
+    fn journal_drain_hint_caches_per_path_with_ttl() {
+        // Flag on for this process. Never unset: sibling tests create no
+        // drain markers, so the leaked flag cannot change their outcome.
+        unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
+        reset_drain_hint_cache_for_tests();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("velnor-drain-hint-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let drained = dir.join("drained.db");
+        let mut journal = velnor_control::journal::Journal::open(&drained).unwrap();
+        journal.set_drain(4).unwrap();
+        drop(journal);
+        let idle = dir.join("idle.db");
+        velnor_control::journal::Journal::open(&idle).unwrap();
+
+        assert!(journal_drain_hint(&drained));
+        assert!(!journal_drain_hint(&idle));
+        assert!(!journal_drain_hint(&dir.join("missing.db")));
+
+        // Within the TTL the cached verdict survives the file's removal:
+        // the second read is served without touching SQLite.
+        reset_drain_hint_cache_for_tests();
+        assert!(journal_drain_hint(&drained));
+        std::fs::remove_file(&drained).unwrap();
+        assert!(journal_drain_hint(&drained));
+
+        // Past the TTL the entry expires and the missing file reads false.
+        std::thread::sleep(DRAIN_HINT_TTL + Duration::from_millis(100));
+        assert!(!journal_drain_hint(&drained));
+        reset_drain_hint_cache_for_tests();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reserve_capacity_permits_reserves_nothing_while_draining() {
+        // Flag on for this process. Never unset: sibling tests create no
+        // drain markers, so the leaked flag cannot change their outcome.
+        unsafe { std::env::set_var("VELNOR_JOURNAL_DRAIN", "1") };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let config_base = std::env::temp_dir().join(format!(
+            "velnor-reserve-gate-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&config_base).unwrap();
+        let mut journal =
+            velnor_control::journal::Journal::open(config_base.join("journal.db")).unwrap();
+        journal.set_drain(2).unwrap();
+        drop(journal);
+
+        reserve_capacity_permits(&config_base, &daemon_args(2), 2).unwrap();
+
+        let journal =
+            velnor_control::journal::Journal::open(config_base.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert!(state.drain_active);
+        assert!(state.slots.is_empty());
+        assert_eq!(state.desired_ready, 0);
+        std::fs::remove_dir_all(config_base).unwrap();
     }
 
     use crate::protocol::TaskAgentMessage;

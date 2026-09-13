@@ -500,7 +500,10 @@ pub struct Unit {
     pub(crate) cache: Option<CacheSpec>,
     pub(crate) tool_version: Option<String>,
     /// Additional mise tool ids the repository declares for the unit's jobs,
-    /// beyond what the scan detects from the unit's own commands.
+    /// beyond what the scan detects from the unit's own commands. Each id
+    /// renders verbatim into `install_args` and must equal a key the root
+    /// `mise.lock` pins, bare or backend-qualified exactly as the lock spells
+    /// it; validation enforces the match while the lock exists.
     pub(crate) mise_tools: Vec<String>,
     /// The Rust toolchain the repository pins, as the scan parsed it. The scan
     /// refuses a Rust repository without one, so a `None` here is legal only
@@ -701,6 +704,12 @@ pub struct ProjectConfig {
     /// checked-in `.github/workflows` are outputs and are never adopted as
     /// inputs.
     pub(crate) declared_surface: bool,
+    /// Tool keys the root `mise.lock` pins, read at scan time. Declared
+    /// `mise_tools` must equal one of these, and detected `install_args`
+    /// resolve their spelling from these; empty when the scan root has no
+    /// lock, in which case identity checking is skipped. Never serialized:
+    /// the lock itself is the source of truth.
+    pub(crate) mise_lock_keys: BTreeSet<String>,
 }
 
 /// A repository-local file the generated output owns verbatim: the repository
@@ -926,6 +935,13 @@ fn scan_target(
         }
     }
     let mut config = load_workflow_templates(root, config, generation.as_ref())?;
+    // The root lock's tool keys pin every mise id the surface may install:
+    // `mise --locked` requires install args to equal the lock keys, so both
+    // validation and rendering resolve against these instead of mandating a
+    // spelling. Only the root lock is consulted; see
+    // `config::mise_lock_keys_for_root` for the per-unit-lock gap.
+    let mise_lock_keys = config::mise_lock_keys_for_root(root)?;
+    config.mise_lock_keys.clone_from(&mise_lock_keys);
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
     // channel grant for an owner block the render does not declare, is a hard
@@ -939,8 +955,12 @@ fn scan_target(
             .collect::<Vec<_>>();
         let blocks = package_update_owner_blocks(&config);
         let blocks = blocks.iter().map(String::as_str).collect::<Vec<_>>();
-        generation.validate(&unit_ids, &blocks)?;
+        generation.validate(&unit_ids, &blocks, &mise_lock_keys)?;
     }
+    // A unit that needs nextest while the lock pins neither spelling would
+    // render `install_args` the runner's own lock check rejects; refuse it at
+    // generation time instead of shipping a failing job.
+    crate::primitives::validate_nextest_tools_are_locked(&config.units, &mise_lock_keys)?;
     // Every surface that renders a self-hosted lane must name its labels,
     // whether the rest of the contract is scanned or declared.
     validate_runner_labels(&config)?;
@@ -5616,6 +5636,7 @@ mod tests {
             velnor_runner_group: None,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         }
     }
 
@@ -6886,6 +6907,180 @@ channel = "stable"
                 "install_args: aqua:nextest-rs/nextest/cargo-nextest github:open-telemetry/weaver"
             ),
             "declared tools render beside detected ids: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The scanned Rust unit id a `[[units]]` override row must name. The scan
+    /// derives the id from the package, so tests learn it from a first scan
+    /// instead of hardcoding the derivation.
+    fn scanned_rust_unit_id(root: &Path) -> String {
+        let scanned = must(
+            scan_repository(root, RunnerMode::Github),
+            "scan for unit id",
+        );
+        must_some(
+            scanned
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust),
+            "Rust unit",
+        )
+        .id
+        .clone()
+    }
+
+    fn write_generation_config(root: &Path, unit: &str, tools: &str) {
+        let directory = root.join(".github-gen");
+        must(fs::create_dir_all(&directory), "create config directory");
+        must(
+            fs::write(
+                directory.join("velnor-workflow.toml"),
+                format!(
+                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[[units]]\nid = \"{unit}\"\nmise_tools = [{tools}]\n"
+                ),
+            ),
+            "write generation config",
+        );
+    }
+
+    #[test]
+    fn mixed_lock_keys_drive_declared_and_detected_install_args() {
+        let root = nextest_fixture_repository("mise-mixed-lock");
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n",
+            ),
+            "write mixed lock",
+        );
+        let id = scanned_rust_unit_id(&root);
+        write_generation_config(
+            &root,
+            &id,
+            "\"cargo-binstall\", \"github:open-telemetry/weaver\"",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "rescan with lock and config",
+        );
+        assert_eq!(
+            config.mise_lock_keys,
+            BTreeSet::from([
+                "cargo-binstall".to_owned(),
+                "cargo-nextest".to_owned(),
+                "github:open-telemetry/weaver".to_owned(),
+            ]),
+            "scan carries the root lock keys"
+        );
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
+        assert!(
+            workflow.contains("install_args: cargo-nextest cargo-binstall github:open-telemetry/weaver"),
+            "detected nextest resolves to the bare lock spelling beside declared bare ids: {workflow}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emitted_install_args_pass_the_runner_lock_gate() {
+        const LOCK: &str = "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.cargo-nextest]]\nversion = \"0.9.0\"\n\n[[tools.\"github:open-telemetry/weaver\"]]\nversion = \"0.24.2\"\n";
+        let root = nextest_fixture_repository("mise-runner-contract");
+        must(fs::write(root.join("mise.lock"), LOCK), "write mixed lock");
+        let id = scanned_rust_unit_id(&root);
+        write_generation_config(
+            &root,
+            &id,
+            "\"cargo-binstall\", \"github:open-telemetry/weaver\"",
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Github),
+            "rescan with lock and config",
+        );
+        // Both sides parse the same keys: the generator's mirror must agree
+        // with the runner's own parser byte for byte.
+        let runner_keys = must(velnor_runner::lock_tool_keys(LOCK), "runner parses lock");
+        assert_eq!(
+            config.mise_lock_keys, runner_keys,
+            "generator and runner agree on the lock keys"
+        );
+        // Every install_args line the generator emits must pass the runner's
+        // own lock gate against the same lock.
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
+        let rendered_args = workflow
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("install_args: "))
+            .collect::<Vec<_>>();
+        assert!(
+            !rendered_args.is_empty(),
+            "fixture renders install_args: {workflow}"
+        );
+        for args in rendered_args {
+            must(
+                velnor_runner::validate_install_args_against_lock(args, LOCK),
+                "runner accepts emitted install_args",
+            );
+        }
+        // The pre-fix generator emitted the qualified spelling for a bare
+        // lock; the runner rejects exactly that, proving the gate is live.
+        assert!(
+            velnor_runner::validate_install_args_against_lock(
+                "aqua:cargo-bins/cargo-binstall",
+                LOCK
+            )
+            .is_err(),
+            "runner still rejects the qualified-for-bare mismatch"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nextest_need_without_a_locked_runner_fails_the_scan() {
+        let root = nextest_fixture_repository("mise-nextest-gap");
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n",
+            ),
+            "write lock without nextest",
+        );
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "nextest gap must fail",
+        );
+        assert!(
+            error.to_string().contains("pins neither"),
+            "error names the unpinned runner: {error}"
+        );
+        assert!(
+            error.to_string().contains("cargo-binstall"),
+            "error lists the known keys: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn qualified_declared_tool_missing_from_bare_lock_fails_the_scan() {
+        let root = nextest_fixture_repository("mise-scan-reject");
+        must(
+            fs::write(
+                root.join("mise.lock"),
+                "[[tools.cargo-binstall]]\nversion = \"1.0.0\"\n\n[[tools.\"aqua:nextest-rs/nextest/cargo-nextest\"]]\nversion = \"0.9.0\"\n",
+            ),
+            "write bare lock",
+        );
+        let id = scanned_rust_unit_id(&root);
+        write_generation_config(&root, &id, "\"aqua:cargo-bins/cargo-binstall\"");
+        let error = must_fail(
+            scan_repository(&root, RunnerMode::Github),
+            "unpinned declared tool must fail",
+        );
+        assert!(
+            error.to_string().contains("mise.lock does not pin"),
+            "error names the lock mismatch: {error}"
+        );
+        assert!(
+            error.to_string().contains("cargo-binstall"),
+            "error lists the known keys: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
@@ -8494,6 +8689,7 @@ channel = "stable"
             pull_request_on_velnor: false,
             static_files: Vec::new(),
             declared_surface: false,
+            mise_lock_keys: BTreeSet::new(),
         };
         must(
             fs::write(root.join(".github/ci/project.toml"), config.toml()),
