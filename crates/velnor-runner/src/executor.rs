@@ -622,24 +622,6 @@ fn reap_spawned_child(child: &mut Child, pid: u32) {
     }
 }
 
-/// Direct `kill(pid, SIGTERM)` for a pid with no retained `Child` handle.
-///
-/// One syscall: no fork+exec of `kill(1)` per signal, no PATH lookup, no
-/// argv to smuggle through. ESRCH means already gone, which is success —
-/// the same contract as the cancel ladder's `signal_process_group`, and
-/// what lets a `stop_jailer` retry converge after the entry is dropped.
-fn signal_spawned_pid(pid: u32) -> Result<()> {
-    let raw = i32::try_from(pid).with_context(|| format!("pid {pid} out of range"))?;
-    let Some(target) = rustix::process::Pid::from_raw(raw) else {
-        bail!("refusing to signal pid 0");
-    };
-    match rustix::process::kill_process(target, rustix::process::Signal::TERM) {
-        Ok(()) => Ok(()),
-        Err(rustix::io::Errno::SRCH) => Ok(()),
-        Err(error) => Err(anyhow::anyhow!("kill {pid}: {error}")),
-    }
-}
-
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
@@ -808,35 +790,46 @@ impl CommandRunner for ProcessCommandRunner {
         // A pid key must never silently drop a live handle: dropping a
         // `Child` without `wait` leaks a zombie that holds its pid. Reap
         // any stale entry first (defensive — a zombie holds its pid, so a
-        // collision already implies a prior leak).
-        if let Some(mut stale) = spawned_children()
+        // collision already implies a prior leak). The map guard drops at
+        // the end of this statement: the blocking `wait` inside the reap
+        // below never runs under the lock.
+        let stale = spawned_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(pid, child)
-        {
+            .insert(pid, child);
+        if let Some(mut stale) = stale {
             reap_spawned_child(&mut stale, pid);
         }
         Ok(SpawnedProcess { pid })
     }
 
     fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
-        if let Some(mut child) = spawned_children()
+        // Take the entry under the lock, then drop the guard BEFORE the
+        // blocking `wait` below: a temporary in the `if let` scrutinee
+        // would live across the whole block and serialize every kill and
+        // spawn behind one child's exit.
+        let child = spawned_children()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&process.pid)
-        {
+            .remove(&process.pid);
+        if let Some(mut child) = child {
             // Wait on every path: a `kill` that fails because the child
             // already exited still leaves a zombie until `wait` reaps it,
             // and the old `?` between them leaked exactly that. The entry
-            // is already removed, so a retry falls through to the
-            // direct-signal path below and reports ESRCH as gone.
+            // is already removed, so a retry falls through to the no-entry
+            // path below and reports gone as gone.
             let _ = child.kill();
             child
                 .wait()
                 .with_context(|| format!("wait for {}", process.pid))?;
             return Ok(());
         }
-        signal_spawned_pid(process.pid)
+        // Unknown to the daemon means gone: entries are removed only here,
+        // after `wait` reaps the child, so no-entry implies already reaped
+        // by us. Never signal the bare numeric pid — after the reap the pid
+        // is free for reuse and the signal could land on an unrelated
+        // recycled process. All risk, no coverage: return Ok.
+        Ok(())
     }
 
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
@@ -14472,15 +14465,142 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
-        // Second kill takes the direct-signal fallback: already gone is Ok,
-        // so a `stop_jailer` retry converges instead of erroring forever.
+        // Second kill takes the no-entry path: already gone is Ok without
+        // signaling, so a `stop_jailer` retry converges instead of erroring
+        // forever — and never risks a recycled pid.
         runner.kill(&child).unwrap();
-        // A pid that can never exist exercises the same ESRCH arm.
+        // A pid that can never exist exercises the same no-entry arm.
         runner
             .kill(&SpawnedProcess {
                 pid: i32::MAX as u32,
             })
             .unwrap();
+    }
+
+    /// Block until `pid` is a zombie (exited but not yet reaped),
+    /// failing loudly past the deadline. A fixed sleep here can silently
+    /// cover the live-kill path instead; observing the `Z` state proves
+    /// the caller is really testing kill-after-exit.
+    #[cfg(unix)]
+    fn wait_for_zombie(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let ps = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("ps must run for the zombie-state poll");
+            let state = String::from_utf8_lossy(&ps.stdout);
+            if state.contains('Z') {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child {pid} never reached zombie state; refusing to silently test live-kill instead (last ps state: {state:?})"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Assert `pid` is reaped (no zombie left): `kill(pid, 0)` still
+    /// succeeds for a zombie, so ESRCH proves reap, not mere death.
+    #[cfg(unix)]
+    fn assert_pid_reaped(pid: u32) {
+        // SAFETY: signal 0 sends nothing; the pid was our child, just waited.
+        let probed = unsafe { libc::kill(pid as i32, 0) };
+        assert_eq!(probed, -1, "pid {pid} must be gone");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "pid {pid} must be reaped, not a lingering zombie"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_reaps_an_already_exited_child_without_error() {
+        let mut runner = ProcessCommandRunner;
+        let child = runner
+            .spawn("sh", &["-c".to_string(), "exit 3".to_string()])
+            .unwrap();
+        // The child exits on its own in milliseconds, but only the
+        // observed zombie state proves kill runs against an
+        // already-exited child: a fixed sleep can silently cover the
+        // live-kill path instead. This pins the entry-present
+        // kill-after-exit behavior; it is not differential against the
+        // pre-fix code (that path is unchanged there).
+        wait_for_zombie(child.pid);
+        // Must not error on the already-exited child: `kill` is ignored,
+        // `wait` reaps, the entry drops.
+        runner.kill(&child).unwrap();
+        assert!(
+            !spawned_children()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&child.pid),
+            "kill must drop the map entry"
+        );
+        // Reaped, not a zombie: `kill(pid, 0)` still succeeds for a zombie.
+        // SAFETY: signal 0 sends nothing; the pid was our child, just waited.
+        let probed = unsafe { libc::kill(child.pid as i32, 0) };
+        assert_eq!(probed, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    /// Concurrent slow-exit plus spawn/kill timing probe.
+    ///
+    /// A slow-exiting child (`sleep 30`, SIGKILLed from a second thread)
+    /// runs while this thread performs a timed burst of spawn/kill
+    /// cycles: every burst op must complete promptly and every pid must
+    /// be reaped (no leaked zombies, no dropped entries, no stall).
+    ///
+    /// Proof boundary (read before citing): this is NOT differential
+    /// against the pre-fix map-guard scope. `kill` SIGKILLs before
+    /// `wait`, and no userspace-arrangeable mechanism delays death from
+    /// SIGKILL (probed: vfork parents are TASK_KILLABLE, stopped/traced
+    /// processes die promptly, a userns init is unavailable in
+    /// containers) — so there is no arrangeable window where the old
+    /// guard scope would stall a concurrent op. The guard scope is
+    /// proven by construction instead (the `let` binding ends before the
+    /// blocking `wait`); this test pins live concurrent progress so a
+    /// future serialization regression fails here loudly.
+    #[cfg(unix)]
+    #[test]
+    fn kill_and_spawn_stay_live_under_concurrent_slow_exit() {
+        let mut killer_runner = ProcessCommandRunner;
+        // `exec` so the shell's pid IS the sleeper: no orphaned grandchild
+        // outlives the kill.
+        let slow = killer_runner
+            .spawn("sh", &["-c".to_string(), "exec sleep 30".to_string()])
+            .unwrap();
+        let killer = std::thread::spawn(move || {
+            killer_runner.kill(&slow).unwrap();
+            slow.pid
+        });
+        // Timed burst concurrent with the slow child's kill: prompt
+        // completion proves spawns/kills are not serialized behind it.
+        let started = Instant::now();
+        let mut runner = ProcessCommandRunner;
+        let mut pids = Vec::new();
+        for _ in 0..25 {
+            let child = runner
+                .spawn("sh", &["-c".to_string(), "exit 0".to_string()])
+                .unwrap();
+            runner.kill(&child).unwrap();
+            pids.push(child.pid);
+        }
+        let elapsed = started.elapsed();
+        let slow_pid = killer.join().unwrap();
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "spawn/kill burst stalled behind the concurrent slow exit: {elapsed:?}"
+        );
+        assert_pid_reaped(slow_pid);
+        for pid in pids {
+            assert_pid_reaped(pid);
+        }
     }
 
     #[test]
