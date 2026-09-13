@@ -12,9 +12,12 @@ use crate::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
     execution::{
-        apply_command_result, parse_workflow_commands_from_output,
-        rewrite_command_file_env_for_action_container, skipped_step_log_lines, step_log_lines,
-        CompositeConclusionScopes, StepOutcome,
+        apply_command_result, docker_post_log_prelude, drain_post_stack,
+        javascript_post_log_prelude, native_post_condition, native_post_log_prelude,
+        parse_workflow_commands_from_output, post_step_display_name,
+        reserve_github_post_step_orders, rewrite_command_file_env_for_action_container,
+        skipped_step_log_lines, step_log_lines, CompositeConclusionScopes, PostAction,
+        PostDockerAction, PostDrainItem, PostJavaScriptAction, PostNativeAction, StepOutcome,
     },
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -1540,135 +1543,6 @@ enum UmbrellaVerdict {
     Run(String),
     Skip(String),
     EvalFailed { display: String, message: String },
-}
-
-#[derive(Debug, Clone)]
-struct PostJavaScriptAction {
-    step_id: String,
-    display_name: String,
-    invocation: JavaScriptActionInvocation,
-    /// Post entrypoint cloned from `invocation.post_container_path` at
-    /// construction. The constructor returns `None` without one, so the
-    /// type proves the post drain never unwraps a missing entrypoint.
-    post_entrypoint: String,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-    umbrella_display: Option<String>,
-}
-
-impl PostJavaScriptAction {
-    /// Register a post action only when the invocation carries a post
-    /// entrypoint. `None` means "no post to run", not an error.
-    fn new(
-        step_id: String,
-        display_name: String,
-        invocation: JavaScriptActionInvocation,
-        condition: Option<String>,
-        continue_on_error: bool,
-        timeout_minutes: Option<u64>,
-        umbrella_display: Option<String>,
-    ) -> Option<Self> {
-        let post_entrypoint = invocation.post_container_path.clone()?;
-        Some(Self {
-            step_id,
-            display_name,
-            invocation,
-            post_entrypoint,
-            condition,
-            continue_on_error,
-            timeout_minutes,
-            umbrella_display,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PostNativeAction {
-    step_id: String,
-    display_name: String,
-    invocation: NativeActionInvocation,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-    /// Display name of the enclosing composite, when the owning step was
-    /// embedded: GitHub runs embedded posts under ONE `Post Run <composite>`
-    /// step (EmbeddedStepsWithPostRegistered).
-    umbrella_display: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct PostDockerAction {
-    step_id: String,
-    display_name: String,
-    invocation: DockerActionInvocation,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-}
-
-/// One registered post step on the unified LIFO stack.
-///
-/// Upstream keeps a single `Stack<IStep> PostJobSteps` on the job context
-/// (`src/Runner.Worker/ExecutionContext.cs:222`) which StepsRunner drains
-/// with `TryPop` (`src/Runner.Worker/StepsRunner.cs`), so a mixed job runs
-/// native and JavaScript posts in exact reverse registration order. Two
-/// separately-reversed lists ran every native post before every JavaScript
-/// post regardless of registration order; this enum is what makes that
-/// mis-ordering unrepresentable — there is only one stack to drain.
-#[derive(Debug, Clone)]
-enum PostAction {
-    JavaScript(PostJavaScriptAction),
-    Native(PostNativeAction),
-    Docker(PostDockerAction),
-}
-
-impl PostAction {
-    fn condition(&self) -> Option<&str> {
-        match self {
-            PostAction::JavaScript(post) => post.condition.as_deref(),
-            PostAction::Native(post) => post.condition.as_deref(),
-            PostAction::Docker(post) => post.condition.as_deref(),
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::unreachable,
-        clippy::todo,
-        clippy::unimplemented,
-        reason = "tests may panic"
-    )]
-    fn step_id(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.step_id.as_str(),
-            PostAction::Native(post) => post.step_id.as_str(),
-            PostAction::Docker(post) => post.step_id.as_str(),
-        }
-    }
-
-    fn display_name(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.display_name.as_str(),
-            PostAction::Native(post) => post.display_name.as_str(),
-            PostAction::Docker(post) => post.display_name.as_str(),
-        }
-    }
-}
-
-/// One LIFO drain position after its post condition was evaluated.
-///
-/// A post whose condition cannot be evaluated is not dropped: upstream fails
-/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
-/// emits a failed record in position and keeps draining — the failed result
-/// flips the job conclusion exactly like a main-step failure.
-#[derive(Debug, Clone)]
-enum PostDrainItem {
-    Run(PostAction),
-    ConditionFailed { action: PostAction, message: String },
 }
 
 impl ExecutableStep {
@@ -3519,32 +3393,7 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        // Registration order above is step order, so reverse is upstream's
-        // `TryPop` sequence; every entry keeps its own post condition
-        // evaluated against the job's final status. False drops the entry;
-        // unevaluable keeps its LIFO position as a failed record (never a
-        // silent skip — upstream fails the post step).
-        let post_actions = post_actions
-            .into_iter()
-            .rev()
-            .filter_map(|post_action| {
-                match state.evaluate_post_condition(post_action.condition()) {
-                    Ok(true) => Some(PostDrainItem::Run(post_action)),
-                    Ok(false) => None,
-                    Err(error) => {
-                        let message = format!(
-                            "Post step '{}' condition could not be evaluated: {error}",
-                            post_action.display_name()
-                        );
-                        eprintln!("{message}");
-                        Some(PostDrainItem::ConditionFailed {
-                            action: post_action,
-                            message,
-                        })
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+        let post_actions = drain_post_stack(post_actions, &state);
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
         // cancelled job. Their *execution* then runs under a fresh unlinked
@@ -6226,10 +6075,6 @@ fn emit_live_step_log(
     });
 }
 
-fn post_step_display_name(display_name: &str) -> String {
-    format!("Post {display_name}")
-}
-
 pub(crate) fn github_backend_step_id(context_step_id: &str) -> String {
     if uuid::Uuid::parse_str(context_step_id).is_ok() {
         context_step_id.to_string()
@@ -6762,29 +6607,6 @@ fn setup_just_script() -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn native_post_condition(
-    adapter: NativeActionAdapter,
-    cache_kind: Option<CacheActionKind>,
-) -> Option<&'static str> {
-    match adapter {
-        // Only the root cache action saves in post; `/restore` and `/save` do
-        // not register a post step. Absent kind defaults to root.
-        NativeActionAdapter::Cache => match cache_kind {
-            Some(CacheActionKind::Restore) | Some(CacheActionKind::Save) => None,
-            Some(CacheActionKind::Root) | None => Some("success()"),
-        },
-        NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
-        // Sccache post step stops the server (always run, matches GitHub's behavior).
-        NativeActionAdapter::Sccache => Some("always()"),
-        // GitHub's setup-buildx post removes the builder it created.
-        NativeActionAdapter::DockerSetupBuildx => Some("always()"),
-        // GitHub's login-action post logs out (drops registry credentials).
-        NativeActionAdapter::DockerLogin => Some("always()"),
-        NativeActionAdapter::CreateGitHubAppToken => Some("always()"),
-        _ => None,
-    }
 }
 
 /// Dispatch an `actions/cache` main step by lifecycle. Root and `/restore`
@@ -13377,15 +13199,6 @@ fn job_output_expression(value: &Value) -> Option<String> {
         .and_then(job_output_expression)
 }
 
-fn reserve_github_post_step_orders(current_order: &mut i32, visible_post_step_count: usize) {
-    if visible_post_step_count == 0 {
-        return;
-    }
-    let complete_order = (*current_order * 2) + 1;
-    let first_post_order = complete_order - visible_post_step_count as i32;
-    *current_order = (*current_order).max(first_post_order - 1);
-}
-
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult, step_debug: bool) -> StepLog {
     let now = unix_now_rfc3339();
     step_log_with_name(step_id, "", order, &now, &now, result, &[], step_debug)
@@ -13408,27 +13221,6 @@ fn step_log_prelude(step: &ExecutableStep, state: &JobExecutionState) -> Vec<Str
             action_log_prelude(&invocation.inputs, &invocation.env, state)
         }
     }
-}
-
-fn native_post_log_prelude(
-    action: &NativeActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
-}
-
-fn javascript_post_log_prelude(
-    action: &JavaScriptActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
-}
-
-fn docker_post_log_prelude(
-    action: &DockerActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
 }
 
 fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
@@ -13508,7 +13300,7 @@ fn append_with_pairs(
     }
 }
 
-fn action_log_prelude(
+pub(crate) fn action_log_prelude(
     inputs: &BTreeMap<String, String>,
     env: &[(String, String)],
     state: &JobExecutionState,
@@ -29806,84 +29598,6 @@ bitcoin-processor-app.push=true")
             ]
         );
         fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn unified_post_stack_drain_benchmark() {
-        use std::hint::black_box;
-
-        // A mixed stack like the conformance tests above: two `always()`
-        // native posts around one `failure()` JavaScript post.
-        let native = |step_id: &str| {
-            PostAction::Native(PostNativeAction {
-                step_id: step_id.into(),
-                display_name: step_id.into(),
-                invocation: NativeActionInvocation {
-                    git_ref: "v1".into(),
-                    adapter: NativeActionAdapter::Sccache,
-                    cache_kind: None,
-                    source_path: None,
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                condition: Some("always()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-                umbrella_display: None,
-            })
-        };
-        let stack = vec![
-            native("sccache-first"),
-            PostAction::JavaScript(PostJavaScriptAction {
-                step_id: "guarded".into(),
-                display_name: "guarded".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node20".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
-                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
-                    post_condition: Some("failure()".into()),
-                    action_container_path: "/__a/_actions/guarded".into(),
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                post_entrypoint: "/__a/_actions/guarded/dist/post.js".into(),
-                condition: Some("failure()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-                umbrella_display: None,
-            }),
-            native("sccache-last"),
-        ];
-        let state = JobExecutionState::default();
-        // LIFO survivors on a successful job: the `failure()` post drops out.
-        assert_eq!(
-            stack
-                .iter()
-                .rev()
-                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
-                .map(PostAction::step_id)
-                .collect::<Vec<_>>(),
-            vec!["sccache-last", "sccache-first"]
-        );
-
-        // 20k drains of the mixed stack; pure expression evaluation must stay
-        // far below the bound even on a loaded serial-gate runner.
-        let started = Instant::now();
-        for _ in 0..20_000 {
-            let drained: Vec<&PostAction> = black_box(&stack)
-                .iter()
-                .rev()
-                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
-                .collect();
-            assert_eq!(drained.len(), 2);
-        }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "20k mixed post-stack drains took {elapsed:?}",
-        );
     }
 
     #[test]
