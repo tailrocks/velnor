@@ -12,9 +12,12 @@ use crate::{
         classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
     },
     execution::{
-        apply_command_result, parse_workflow_commands_from_output,
-        rewrite_command_file_env_for_action_container, skipped_step_log_lines, step_log_lines,
-        CompositeConclusionScopes, StepOutcome,
+        apply_command_result, docker_post_log_prelude, drain_post_stack,
+        javascript_post_log_prelude, native_post_condition, native_post_log_prelude,
+        parse_workflow_commands_from_output, post_step_display_name,
+        reserve_github_post_step_orders, rewrite_command_file_env_for_action_container,
+        skipped_step_log_lines, step_log_lines, CompositeConclusionScopes, PostAction,
+        PostDockerAction, PostDrainItem, PostJavaScriptAction, PostNativeAction, StepOutcome,
     },
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -1547,135 +1550,6 @@ enum UmbrellaVerdict {
     Run(String),
     Skip(String),
     EvalFailed { display: String, message: String },
-}
-
-#[derive(Debug, Clone)]
-struct PostJavaScriptAction {
-    step_id: String,
-    display_name: String,
-    invocation: JavaScriptActionInvocation,
-    /// Post entrypoint cloned from `invocation.post_container_path` at
-    /// construction. The constructor returns `None` without one, so the
-    /// type proves the post drain never unwraps a missing entrypoint.
-    post_entrypoint: String,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-    umbrella_display: Option<String>,
-}
-
-impl PostJavaScriptAction {
-    /// Register a post action only when the invocation carries a post
-    /// entrypoint. `None` means "no post to run", not an error.
-    fn new(
-        step_id: String,
-        display_name: String,
-        invocation: JavaScriptActionInvocation,
-        condition: Option<String>,
-        continue_on_error: bool,
-        timeout_minutes: Option<u64>,
-        umbrella_display: Option<String>,
-    ) -> Option<Self> {
-        let post_entrypoint = invocation.post_container_path.clone()?;
-        Some(Self {
-            step_id,
-            display_name,
-            invocation,
-            post_entrypoint,
-            condition,
-            continue_on_error,
-            timeout_minutes,
-            umbrella_display,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PostNativeAction {
-    step_id: String,
-    display_name: String,
-    invocation: NativeActionInvocation,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-    /// Display name of the enclosing composite, when the owning step was
-    /// embedded: GitHub runs embedded posts under ONE `Post Run <composite>`
-    /// step (EmbeddedStepsWithPostRegistered).
-    umbrella_display: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct PostDockerAction {
-    step_id: String,
-    display_name: String,
-    invocation: DockerActionInvocation,
-    condition: Option<String>,
-    continue_on_error: bool,
-    timeout_minutes: Option<u64>,
-}
-
-/// One registered post step on the unified LIFO stack.
-///
-/// Upstream keeps a single `Stack<IStep> PostJobSteps` on the job context
-/// (`src/Runner.Worker/ExecutionContext.cs:222`) which StepsRunner drains
-/// with `TryPop` (`src/Runner.Worker/StepsRunner.cs`), so a mixed job runs
-/// native and JavaScript posts in exact reverse registration order. Two
-/// separately-reversed lists ran every native post before every JavaScript
-/// post regardless of registration order; this enum is what makes that
-/// mis-ordering unrepresentable — there is only one stack to drain.
-#[derive(Debug, Clone)]
-enum PostAction {
-    JavaScript(PostJavaScriptAction),
-    Native(PostNativeAction),
-    Docker(PostDockerAction),
-}
-
-impl PostAction {
-    fn condition(&self) -> Option<&str> {
-        match self {
-            PostAction::JavaScript(post) => post.condition.as_deref(),
-            PostAction::Native(post) => post.condition.as_deref(),
-            PostAction::Docker(post) => post.condition.as_deref(),
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::unreachable,
-        clippy::todo,
-        clippy::unimplemented,
-        reason = "tests may panic"
-    )]
-    fn step_id(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.step_id.as_str(),
-            PostAction::Native(post) => post.step_id.as_str(),
-            PostAction::Docker(post) => post.step_id.as_str(),
-        }
-    }
-
-    fn display_name(&self) -> &str {
-        match self {
-            PostAction::JavaScript(post) => post.display_name.as_str(),
-            PostAction::Native(post) => post.display_name.as_str(),
-            PostAction::Docker(post) => post.display_name.as_str(),
-        }
-    }
-}
-
-/// One LIFO drain position after its post condition was evaluated.
-///
-/// A post whose condition cannot be evaluated is not dropped: upstream fails
-/// the post step (`src/Runner.Worker/StepsRunner.cs:231-242`), so the drain
-/// emits a failed record in position and keeps draining — the failed result
-/// flips the job conclusion exactly like a main-step failure.
-#[derive(Debug, Clone)]
-enum PostDrainItem {
-    Run(PostAction),
-    ConditionFailed { action: PostAction, message: String },
 }
 
 impl ExecutableStep {
@@ -3526,32 +3400,7 @@ where
             self.emit_step_log(&log);
             step_logs.push(log);
         }
-        // Registration order above is step order, so reverse is upstream's
-        // `TryPop` sequence; every entry keeps its own post condition
-        // evaluated against the job's final status. False drops the entry;
-        // unevaluable keeps its LIFO position as a failed record (never a
-        // silent skip — upstream fails the post step).
-        let post_actions = post_actions
-            .into_iter()
-            .rev()
-            .filter_map(|post_action| {
-                match state.evaluate_post_condition(post_action.condition()) {
-                    Ok(true) => Some(PostDrainItem::Run(post_action)),
-                    Ok(false) => None,
-                    Err(error) => {
-                        let message = format!(
-                            "Post step '{}' condition could not be evaluated: {error}",
-                            post_action.display_name()
-                        );
-                        eprintln!("{message}");
-                        Some(PostDrainItem::ConditionFailed {
-                            action: post_action,
-                            message,
-                        })
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
+        let post_actions = drain_post_stack(post_actions, &state);
         // Every post step's condition above was evaluated against the job's
         // real status, so `always()` and `cancelled()` posts are selected on a
         // cancelled job. Their *execution* then runs under a fresh unlinked
@@ -6233,10 +6082,6 @@ fn emit_live_step_log(
     });
 }
 
-fn post_step_display_name(display_name: &str) -> String {
-    format!("Post {display_name}")
-}
-
 pub(crate) fn github_backend_step_id(context_step_id: &str) -> String {
     if uuid::Uuid::parse_str(context_step_id).is_ok() {
         context_step_id.to_string()
@@ -6769,29 +6614,6 @@ fn setup_just_script() -> String {
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn native_post_condition(
-    adapter: NativeActionAdapter,
-    cache_kind: Option<CacheActionKind>,
-) -> Option<&'static str> {
-    match adapter {
-        // Only the root cache action saves in post; `/restore` and `/save` do
-        // not register a post step. Absent kind defaults to root.
-        NativeActionAdapter::Cache => match cache_kind {
-            Some(CacheActionKind::Restore) | Some(CacheActionKind::Save) => None,
-            Some(CacheActionKind::Root) | None => Some("success()"),
-        },
-        NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
-        // Sccache post step stops the server (always run, matches GitHub's behavior).
-        NativeActionAdapter::Sccache => Some("always()"),
-        // GitHub's setup-buildx post removes the builder it created.
-        NativeActionAdapter::DockerSetupBuildx => Some("always()"),
-        // GitHub's login-action post logs out (drops registry credentials).
-        NativeActionAdapter::DockerLogin => Some("always()"),
-        NativeActionAdapter::CreateGitHubAppToken => Some("always()"),
-        _ => None,
-    }
 }
 
 /// Dispatch an `actions/cache` main step by lifecycle. Root and `/restore`
@@ -12434,7 +12256,7 @@ pub(crate) struct JobExecutionState {
     /// state is built; cache and artifact paths namespace by it. Empty reads
     /// as fail-closed: states built without a scope resolve untrusted stores.
     trust_scope: String,
-    env: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
     /// Snapshot of runner-authoritative job values. Action-local env and
     /// workflow command state must never rewrite identity or credentials used
     /// for authenticated artifact operations.
@@ -12443,25 +12265,25 @@ pub(crate) struct JobExecutionState {
     workflow_env: Vec<(String, String)>,
     /// Env accumulated at runtime via GITHUB_ENV / ::set-env, in set order —
     /// GitHub appends these after the workflow env in the `env:` block.
-    dynamic_env: Vec<(String, String)>,
+    pub(crate) dynamic_env: Vec<(String, String)>,
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
-    outputs: BTreeMap<String, BTreeMap<String, String>>,
-    action_states: BTreeMap<String, BTreeMap<String, String>>,
-    outcomes: BTreeMap<String, StepOutcome>,
-    conclusions: BTreeMap<String, StepOutcome>,
+    pub(crate) outputs: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) action_states: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) outcomes: BTreeMap<String, StepOutcome>,
+    pub(crate) conclusions: BTreeMap<String, StepOutcome>,
     /// Nested composite conclusion scopes (open-umbrella stack plus the
     /// ignored-umbrella conversion set). The scope machinery lives in
     /// `execution::composite_scopes`; this state only delegates to it.
-    composite_scopes: CompositeConclusionScopes,
-    path: Vec<String>,
-    masks: Vec<String>,
+    pub(crate) composite_scopes: CompositeConclusionScopes,
+    pub(crate) path: Vec<String>,
+    pub(crate) masks: Vec<String>,
     /// The running job's cancellation, so `success()`, `failure()` and
     /// `cancelled()` answer from the job's real status instead of from a
     /// constant. The engine installs its own required token here before the
     /// first step runs.
-    cancellation: crate::execution::cancel::JobCancellation,
+    pub(crate) cancellation: crate::execution::cancel::JobCancellation,
 }
 
 impl JobExecutionState {
@@ -12664,66 +12486,6 @@ impl JobExecutionState {
         self.composite_scopes.convert_open_scopes();
     }
 
-    pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
-        let outcome = if result.skipped {
-            StepOutcome::Skipped
-        } else if result.exit_code == 0 {
-            StepOutcome::Success
-        } else {
-            StepOutcome::Failure
-        };
-        let conclusion = if result.failure_ignored && outcome == StepOutcome::Failure {
-            StepOutcome::Success
-        } else {
-            outcome
-        };
-        self.outcomes.insert(step_id.to_string(), outcome);
-        self.conclusions.insert(step_id.to_string(), conclusion);
-        self.composite_scopes.record(step_id, conclusion);
-
-        if !result.state.outputs.is_empty() {
-            self.outputs
-                .insert(step_id.to_string(), result.state.outputs.clone());
-        }
-        if !result.state.state.is_empty() {
-            self.action_states
-                .entry(step_id.to_string())
-                .or_default()
-                .extend(result.state.state.clone());
-        }
-        for (name, value) in &result.state.env {
-            self.env.insert(name.clone(), value.clone());
-            if let Some(existing) = self
-                .dynamic_env
-                .iter_mut()
-                .find(|(existing_name, _)| existing_name == name)
-            {
-                existing.1 = value.clone();
-            } else {
-                self.dynamic_env.push((name.clone(), value.clone()));
-            }
-        }
-        for path in result.state.path.iter().rev() {
-            self.path.insert(0, path.clone());
-        }
-        self.masks.extend(result.state.masks.iter().cloned());
-    }
-
-    /// Record a step killed by cancellation. Upstream completes it
-    /// `TaskResult.Canceled` (`src/Runner.Worker/StepsRunner.cs:331-337`),
-    /// so `steps.<id>.outcome` and `steps.<id>.conclusion` read `cancelled`
-    /// — never `failure`, and never converted by `continue-on-error`
-    /// (`ApplyContinueOnError` only converts `Failed`).
-    pub(crate) fn apply_cancelled(&mut self, step_id: &str, result: &StepExecutionResult) {
-        self.apply(step_id, result);
-        self.outcomes
-            .insert(step_id.to_string(), StepOutcome::Cancelled);
-        self.conclusions
-            .insert(step_id.to_string(), StepOutcome::Cancelled);
-        self.composite_scopes
-            .record(step_id, StepOutcome::Cancelled);
-    }
-
     fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
         self.action_states
             .get(step_id)
@@ -12890,17 +12652,6 @@ impl JobExecutionState {
         Ok(rendered)
     }
 
-    /// Whether this job has been cancelled.
-    ///
-    /// Upstream sets `JobContext.Status` to `cancelled` on the cancellation
-    /// callback and re-evaluates every remaining step's condition against it
-    /// (`src/Runner.Worker/StepsRunner.cs:146-187`). Velnor evaluates each
-    /// step's condition immediately before dispatching it, so reading the live
-    /// token here gives the same result without a separate re-evaluation pass.
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancellation.is_cancelled()
-    }
-
     /// Whether step-debug output (`::debug::` lines, command echo) is on
     /// for this job. Upstream reads the server `Step_Debug` variable, so
     /// this reads the runner-authoritative snapshot: the mutable env is
@@ -12908,64 +12659,6 @@ impl JobExecutionState {
     /// flip debug rendering for later steps would be a spoofing hole.
     fn step_debug(&self) -> bool {
         step_debug_enabled(&self.immutable_env)
-    }
-
-    /// Install the running job's cancellation.
-    pub(crate) fn set_cancellation(
-        &mut self,
-        cancellation: crate::execution::cancel::JobCancellation,
-    ) {
-        self.cancellation = cancellation;
-    }
-
-    /// `success()` — `src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`
-    /// reads the status of the enclosing scope, which cancellation sets to
-    /// `cancelled`. A cancelled job is therefore not successful, which is what
-    /// stops its remaining ordinary steps: their implicit condition is
-    /// `success()`.
-    fn success_status(&self) -> bool {
-        !self.is_cancelled() && !self.status_scope_has_failure()
-    }
-
-    /// `failure()` — `src/Runner.Worker/Expressions/FailureFunction.cs:28-39`.
-    /// Also false under cancellation: the status is `cancelled`, not `failure`,
-    /// so `if: failure()` cleanup does not run on a cancelled job.
-    fn failure_status(&self) -> bool {
-        !self.is_cancelled() && self.status_scope_has_failure()
-    }
-
-    /// `job.status` — `cancelled` once the job is cancelled, otherwise
-    /// `success` unless a step has already concluded failed. Converted
-    /// inner ids (see `convert_conclusions`) do not count: upstream
-    /// derives the status from top-level step results only.
-    fn job_status(&self) -> &'static str {
-        if self.is_cancelled() {
-            "cancelled"
-        } else if self
-            .composite_scopes
-            .top_level_has_failure(&self.conclusions)
-        {
-            "failure"
-        } else {
-            "success"
-        }
-    }
-
-    /// `github.action_status` — the composite-scoped equivalent of
-    /// `job.status`, matching how `SuccessFunction` picks its source
-    /// (`src/Runner.Worker/Expressions/SuccessFunction.cs:28-39`).
-    fn action_status(&self) -> &'static str {
-        if self.is_cancelled() {
-            "cancelled"
-        } else if self.status_scope_has_failure() {
-            "failure"
-        } else {
-            "success"
-        }
-    }
-
-    fn status_scope_has_failure(&self) -> bool {
-        self.composite_scopes.scope_has_failure(&self.conclusions)
     }
 
     /// Read a dotted context path (e.g. `github.event.pull_request.number`)
@@ -12983,85 +12676,9 @@ impl JobExecutionState {
         (!rendered.is_empty()).then_some(rendered)
     }
 
-    fn expression_context(&self) -> JobExpressionContext<'_> {
+    pub(crate) fn expression_context(&self) -> JobExpressionContext<'_> {
         JobExpressionContext { state: self }
     }
-
-    /// Evaluate a step condition.
-    ///
-    /// The default condition is `success()`, and a condition that does not
-    /// itself reference a status function is implicitly `success() && (...)`
-    /// — how the service composes `if:` before handing the runner a
-    /// `Condition` string.
-    ///
-    /// A condition that fails to evaluate returns `Err`, which callers must
-    /// turn into a failed step, matching
-    /// `src/Runner.Worker/StepsRunner.cs:231-242`.
-    pub(crate) fn evaluate_condition(
-        &self,
-        condition: Option<&str>,
-    ) -> Result<bool, expression::ExpressionError> {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return Ok(self.success_status());
-        };
-        self.evaluate_condition_expression(strip_expression(condition))
-    }
-
-    /// Pre/post step conditions. An absent condition runs unconditionally
-    /// (`ActionRunner` only registers a pre/post step when its condition is
-    /// satisfied), otherwise the `success()` default applies as above.
-    ///
-    /// A condition that fails to evaluate returns `Err`, which callers turn
-    /// into a failed pre/post record — upstream fails the owning step
-    /// (`src/Runner.Worker/StepsRunner.cs:231-242`), never silently skips it.
-    fn evaluate_post_condition(
-        &self,
-        condition: Option<&str>,
-    ) -> Result<bool, expression::ExpressionError> {
-        let Some(condition) = condition
-            .map(str::trim)
-            .filter(|condition| !condition.is_empty())
-        else {
-            return Ok(true);
-        };
-        self.evaluate_condition_expression(strip_expression(condition))
-    }
-
-    fn evaluate_condition_expression(
-        &self,
-        expression: &str,
-    ) -> Result<bool, expression::ExpressionError> {
-        let context = self.expression_context();
-        let Some(node) = expression::parse(expression, &context)? else {
-            return Ok(self.success_status());
-        };
-        // `success() && (...)` short-circuits, so a job that has already failed
-        // — or been cancelled — never evaluates, and therefore never errors on,
-        // the rest.
-        if !node_references_status_function(&node) && !self.success_status() {
-            return Ok(false);
-        }
-        Ok(expression::evaluate_node(&node, &context)?.is_truthy())
-    }
-}
-
-/// Whether the tree calls one of the runner's status functions, which is what
-/// suppresses the implicit `success() &&` prefix.
-fn node_references_status_function(node: &expression::Node) -> bool {
-    if let expression::Node::Function { name, .. } = node
-        && matches!(
-            name.to_ascii_lowercase().as_str(),
-            "success" | "failure" | "always" | "cancelled"
-        )
-    {
-        return true;
-    }
-    node.children()
-        .iter()
-        .any(|child| node_references_status_function(child))
 }
 
 /// Whether the tree reads state that may only be authoritative once the job
@@ -13092,8 +12709,8 @@ fn node_reads_runtime_context(node: &expression::Node) -> bool {
 /// The root contexts and extension functions an expression is evaluated
 /// against, mirroring `IExecutionContext.ExpressionValues` /
 /// `ExpressionFunctions` (`src/Runner.Worker/StepsRunner.cs:92-106`).
-struct JobExpressionContext<'a> {
-    state: &'a JobExecutionState,
+pub(crate) struct JobExpressionContext<'a> {
+    pub(crate) state: &'a JobExecutionState,
 }
 
 /// The root contexts GitHub always defines for a step. Referencing anything
@@ -13223,62 +12840,6 @@ impl JobExpressionContext<'_> {
         ))
     }
 
-    /// `steps.<id>.{outputs,outcome,conclusion}`, built from the runtime
-    /// step state rather than parsed out of the expression text.
-    fn steps_context(&self) -> expression::Value {
-        let mut ids: Vec<&String> = Vec::new();
-        for id in self
-            .state
-            .outputs
-            .keys()
-            .chain(self.state.outcomes.keys())
-            .chain(self.state.conclusions.keys())
-        {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-
-        let entries = ids
-            .into_iter()
-            .map(|id| {
-                let mut step: Vec<(String, expression::Value)> = Vec::new();
-                let outputs = self
-                    .state
-                    .outputs
-                    .get(id)
-                    .map(|outputs| {
-                        outputs
-                            .iter()
-                            .map(|(name, value)| (name.clone(), expression::Value::string(value)))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                step.push((
-                    "outputs".to_string(),
-                    expression::Value::Object(expression::ObjectValue::new(outputs)),
-                ));
-                if let Some(outcome) = self.state.outcomes.get(id) {
-                    step.push((
-                        "outcome".to_string(),
-                        expression::Value::string(outcome.as_str()),
-                    ));
-                }
-                if let Some(conclusion) = self.state.conclusions.get(id) {
-                    step.push((
-                        "conclusion".to_string(),
-                        expression::Value::string(conclusion.as_str()),
-                    ));
-                }
-                (
-                    id.clone(),
-                    expression::Value::Object(expression::ObjectValue::new(step)),
-                )
-            })
-            .collect();
-        expression::Value::Object(expression::ObjectValue::new(entries))
-    }
-
     fn job_context(&self) -> expression::Value {
         let mut entries = self.context_data_entries("job");
         upsert_entry(
@@ -13394,86 +12955,6 @@ impl expression::EvaluationContext for JobExpressionContext<'_> {
             ))),
         }
     }
-}
-
-/// Return true only when a step condition is provably false from immutable
-/// GitHub job context before execution begins. Local composite actions are
-/// prepared mid-job by actions/runner, after their parent condition has been
-/// evaluated; this narrow preflight proof lets the planner preserve that
-/// behavior without treating runtime `steps`, `needs`, or `env` state as
-/// known early.
-pub(crate) fn condition_is_statically_false(
-    condition: Option<&str>,
-    base_env: &[(String, String)],
-    context_data: &[(String, Value)],
-) -> bool {
-    let Some(condition) = condition else {
-        return false;
-    };
-    let Ok(state) = JobExecutionState::try_new_with_context(base_env, context_data) else {
-        // A malformed immutable expression is not proof that a condition is
-        // false; leave the step for normal fail-closed lifecycle handling.
-        return false;
-    };
-    let context = state.expression_context();
-    let Ok(Some(node)) = expression::parse(strip_expression(condition), &context) else {
-        // An expression that does not even parse is not provably false.
-        return false;
-    };
-    immutable_expression_is_false(&node, &context)
-}
-
-/// Walk the parsed condition rather than its text: a conjunction is provably
-/// false when any operand is, a disjunction only when every operand is, and a
-/// leaf counts only when it reads exclusively immutable `github` context.
-fn immutable_expression_is_false(
-    node: &expression::Node,
-    context: &JobExpressionContext<'_>,
-) -> bool {
-    match node {
-        expression::Node::And(parameters) => parameters
-            .iter()
-            .any(|parameter| immutable_expression_is_false(parameter, context)),
-        expression::Node::Or(parameters) => parameters
-            .iter()
-            .all(|parameter| immutable_expression_is_false(parameter, context)),
-        node => {
-            if !reads_only_immutable_github(node) {
-                return false;
-            }
-            matches!(
-                expression::evaluate_node(node, context),
-                Ok(value) if value.is_falsy()
-            )
-        }
-    }
-}
-
-/// True when the subtree reads the `github` context and nothing that only
-/// exists once the job is running: other root contexts, the status functions,
-/// or `hashFiles`.
-fn reads_only_immutable_github(node: &expression::Node) -> bool {
-    fn walk(node: &expression::Node, saw_github: &mut bool, immutable: &mut bool) {
-        match node {
-            expression::Node::NamedValue(name) => {
-                if name.eq_ignore_ascii_case("github") {
-                    *saw_github = true;
-                } else {
-                    *immutable = false;
-                }
-            }
-            expression::Node::Function { .. } => *immutable = false,
-            _ => {}
-        }
-        for child in node.children() {
-            walk(child, saw_github, immutable);
-        }
-    }
-
-    let mut saw_github = false;
-    let mut immutable = true;
-    walk(node, &mut saw_github, &mut immutable);
-    saw_github && immutable
 }
 
 fn evaluate_job_outputs(
@@ -13609,15 +13090,6 @@ fn job_output_expression(value: &Value) -> Option<String> {
         .and_then(job_output_expression)
 }
 
-fn reserve_github_post_step_orders(current_order: &mut i32, visible_post_step_count: usize) {
-    if visible_post_step_count == 0 {
-        return;
-    }
-    let complete_order = (*current_order * 2) + 1;
-    let first_post_order = complete_order - visible_post_step_count as i32;
-    *current_order = (*current_order).max(first_post_order - 1);
-}
-
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult, step_debug: bool) -> StepLog {
     let now = unix_now_rfc3339();
     step_log_with_name(step_id, "", order, &now, &now, result, &[], step_debug)
@@ -13640,27 +13112,6 @@ fn step_log_prelude(step: &ExecutableStep, state: &JobExecutionState) -> Vec<Str
             action_log_prelude(&invocation.inputs, &invocation.env, state)
         }
     }
-}
-
-fn native_post_log_prelude(
-    action: &NativeActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
-}
-
-fn javascript_post_log_prelude(
-    action: &JavaScriptActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
-}
-
-fn docker_post_log_prelude(
-    action: &DockerActionInvocation,
-    state: &JobExecutionState,
-) -> Vec<String> {
-    action_log_prelude(&action.inputs, &action.env, state)
 }
 
 fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
@@ -13740,7 +13191,7 @@ fn append_with_pairs(
     }
 }
 
-fn action_log_prelude(
+pub(crate) fn action_log_prelude(
     inputs: &BTreeMap<String, String>,
     env: &[(String, String)],
     state: &JobExecutionState,
@@ -14216,14 +13667,6 @@ fn normalize_path(path: &Path) -> String {
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn strip_expression(condition: &str) -> &str {
-    condition
-        .strip_prefix("${{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .map(str::trim)
-        .unwrap_or(condition)
 }
 
 fn github_string_eq(left: &str, right: &str) -> bool {
@@ -20948,6 +20391,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         // The rm bail attaches DockerCommandError like every other
         // docker-failure production point: the retry policy reads the chain,
         // never the text. The message itself is unchanged.
+        // A live-object refusal is Conflict: another writer holds the object
+        // (the daemon's 409 sentence, shared by the Engine API leg).
         let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
             vec![1],
             vec!["Error response from daemon: cannot remove a running container"],
@@ -20973,56 +20418,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 .any(|cause| cause.downcast_ref::<DockerCommandError>().is_some()),
             "rm failure must carry DockerCommandError: {error:#}"
         );
-        assert_eq!(docker_error_category(&error), DockerErrorCategory::Terminal);
-    }
-
-    #[test]
-    fn job_state_flows_env_and_path_to_later_steps() {
-        let mut state = JobExecutionState::default();
-        state.apply(
-            "producer",
-            &StepExecutionResult {
-                exit_code: 0,
-                skipped: false,
-                failure_ignored: false,
-                state: StepCommandState {
-                    outputs: [("answer".to_string(), "42".to_string())].into(),
-                    env: [("NAME".to_string(), "value".to_string())].into(),
-                    path: vec!["/opt/tool".to_string()],
-                    masks: vec!["secret".to_string()],
-                    ..Default::default()
-                },
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-
-        let env = state.step_env(&[("GITHUB_OUTPUT".into(), "/__t/out".into())]);
-
-        assert!(env.contains(&("NAME".into(), "value".into())));
-        assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
-        assert!(!env.iter().any(|(name, _)| name == "PATH"));
-        assert_eq!(state.path, vec!["/opt/tool"]);
-        assert_eq!(state.masks, vec!["secret"]);
-        assert_eq!(
-            state
-                .resolve_expressions("value=${{ steps.producer.outputs.answer }}")
-                .unwrap(),
-            "value=42"
-        );
-        assert_eq!(
-            state
-                .resolve_expressions("value=${{ steps.producer.outputs['answer'] }}")
-                .unwrap(),
-            "value=42"
-        );
-        // A context value that is not set is null, and null renders as the
-        // empty string (EvaluationResult.cs:140-141). The deleted evaluator
-        // rendered the source text instead, which is divergence D-4.
-        assert_eq!(
-            state.resolve_expressions("keep=${{ github.ref }}").unwrap(),
-            "keep="
-        );
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Conflict);
     }
 
     #[test]
@@ -21122,31 +20518,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .iter()
             .any(|arg| arg.contains("steps.source.outputs.sha")));
         fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn resolves_step_outputs_in_later_action_env() {
-        let mut state = JobExecutionState::default();
-        state.apply(
-            "meta",
-            &StepExecutionResult {
-                exit_code: 0,
-                skipped: false,
-                failure_ignored: false,
-                state: StepCommandState {
-                    outputs: [("tags".to_string(), "image:latest".to_string())].into(),
-                    ..Default::default()
-                },
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-
-        let env = state
-            .resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())])
-            .unwrap();
-
-        assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
     }
 
     #[test]
@@ -25463,69 +24834,6 @@ fi"#
                 .unwrap(),
             "a+b"
         );
-    }
-
-    /// D-7: a condition that cannot be evaluated was fail-open and ran the
-    /// step. Upstream fails the step (src/Runner.Worker/StepsRunner.cs:231-242),
-    /// which requires a typed error out of the evaluator.
-    #[test]
-    fn condition_evaluation_failure_is_reported() {
-        let state = JobExecutionState::default();
-
-        for condition in [
-            "unknownContext.value",
-            "noSuchFunction('a')",
-            "contains('a')",
-            "github.ref ==",
-            // The live dual-lane pin evaluates `fromJSON` over a runtime
-            // output holding invalid JSON, behind an `always() &&` guard so
-            // the implicit `success() &&` prefix cannot short-circuit it to
-            // a skip after the designed failure; upstream throws out of
-            // `JToken.ReadFrom` (`FromJson.cs`) exactly like the serde
-            // failure below, so both runners fail the step.
-            "fromJSON('not json')",
-        ] {
-            assert!(
-                state.evaluate_condition(Some(condition)).is_err(),
-                "{condition} must fail the step rather than run it"
-            );
-        }
-        // Failed-state trap the live pin must avoid: after the designed
-        // failure the implicit `success() &&` prefix short-circuits a bare
-        // `fromJSON(...)` condition to a skip on both runners (GitHub docs;
-        // `evaluate_condition_expression`), so the pin would assert nothing.
-        // The `always() &&` guard forces evaluation of the RHS instead.
-        let mut failed = JobExecutionState::default();
-        failed.apply(
-            "real-failure",
-            &StepExecutionResult {
-                exit_code: 1,
-                state: StepCommandState::default(),
-                skipped: false,
-                failure_ignored: false,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-        assert!(
-            !failed
-                .evaluate_condition(Some("fromJSON('not json')"))
-                .unwrap(),
-            "bare fromJSON skips after a failure — the live pin must not use this shape"
-        );
-        assert!(
-            failed
-                .evaluate_condition(Some("always() && fromJSON('not json') == ''"))
-                .is_err(),
-            "the live-pin shape must fail the step, not skip it"
-        );
-        // A failed condition is not "provably false" either: the planner must
-        // not prune the step on it.
-        assert!(!condition_is_statically_false(
-            Some("noSuchFunction('a')"),
-            &[],
-            &[]
-        ));
     }
 
     /// Requests job cancellation on the Nth `docker exec`, then optionally
@@ -30112,84 +29420,6 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn unified_post_stack_drain_benchmark() {
-        use std::hint::black_box;
-
-        // A mixed stack like the conformance tests above: two `always()`
-        // native posts around one `failure()` JavaScript post.
-        let native = |step_id: &str| {
-            PostAction::Native(PostNativeAction {
-                step_id: step_id.into(),
-                display_name: step_id.into(),
-                invocation: NativeActionInvocation {
-                    git_ref: "v1".into(),
-                    adapter: NativeActionAdapter::Sccache,
-                    cache_kind: None,
-                    source_path: None,
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                condition: Some("always()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-                umbrella_display: None,
-            })
-        };
-        let stack = vec![
-            native("sccache-first"),
-            PostAction::JavaScript(PostJavaScriptAction {
-                step_id: "guarded".into(),
-                display_name: "guarded".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node20".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path: "/__a/_actions/guarded/dist/main.js".into(),
-                    post_container_path: Some("/__a/_actions/guarded/dist/post.js".into()),
-                    post_condition: Some("failure()".into()),
-                    action_container_path: "/__a/_actions/guarded".into(),
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                post_entrypoint: "/__a/_actions/guarded/dist/post.js".into(),
-                condition: Some("failure()".into()),
-                continue_on_error: false,
-                timeout_minutes: None,
-                umbrella_display: None,
-            }),
-            native("sccache-last"),
-        ];
-        let state = JobExecutionState::default();
-        // LIFO survivors on a successful job: the `failure()` post drops out.
-        assert_eq!(
-            stack
-                .iter()
-                .rev()
-                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
-                .map(PostAction::step_id)
-                .collect::<Vec<_>>(),
-            vec!["sccache-last", "sccache-first"]
-        );
-
-        // 20k drains of the mixed stack; pure expression evaluation must stay
-        // far below the bound even on a loaded serial-gate runner.
-        let started = Instant::now();
-        for _ in 0..20_000 {
-            let drained: Vec<&PostAction> = black_box(&stack)
-                .iter()
-                .rev()
-                .filter(|post| state.evaluate_post_condition(post.condition()) == Ok(true))
-                .collect();
-            assert_eq!(drained.len(), 2);
-        }
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "20k mixed post-stack drains took {elapsed:?}",
-        );
-    }
-
-    #[test]
     fn executes_javascript_pre_action_before_main() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -31633,38 +30863,5 @@ bitcoin-processor-app.push=true")
             github_app_identifier(String::new(), "12345".to_string()),
             "12345"
         );
-    }
-
-    #[test]
-    fn immutable_github_condition_can_prove_local_action_is_skipped() {
-        let context = vec![(
-            "github".to_string(),
-            serde_json::json!({
-                "ref": "refs/heads/perf/subminute-ci",
-                "event_name": "workflow_dispatch"
-            }),
-        )];
-        let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
-
-        assert!(condition_is_statically_false(
-            Some(condition),
-            &[],
-            &context
-        ));
-        assert!(condition_is_statically_false(
-            Some(&format!("success() && ({condition})")),
-            &[],
-            &context
-        ));
-        assert!(!condition_is_statically_false(
-            Some("steps.changes.outputs.docs == 'true'"),
-            &[],
-            &context
-        ));
-        assert!(!condition_is_statically_false(
-            Some("success() && github.ref != ''"),
-            &[],
-            &context
-        ));
     }
 }

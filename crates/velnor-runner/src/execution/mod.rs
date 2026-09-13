@@ -19,7 +19,10 @@ mod guest_image;
 mod guest_runtime;
 mod isolation;
 mod net;
+mod post_drain;
 mod snapshot;
+mod step_conditions;
+mod step_outcome;
 mod unix_api;
 
 pub use artifacts::{
@@ -74,7 +77,13 @@ pub use net::{
     nftables_commands, setup_net_invocations, teardown_is_exact, teardown_net_commands,
     teardown_net_invocations,
 };
+pub(crate) use post_drain::{
+    docker_post_log_prelude, drain_post_stack, javascript_post_log_prelude, native_post_condition,
+    native_post_log_prelude, post_step_display_name, reserve_github_post_step_orders, PostAction,
+    PostDockerAction, PostDrainItem, PostJavaScriptAction, PostNativeAction,
+};
 pub use snapshot::{GuestReady, SnapshotIdentity};
+pub(crate) use step_conditions::condition_is_statically_false;
 pub use unix_api::UnixFirecrackerClient;
 
 /// Guest-agent entry: decode a vsock plan and run it on the local Docker daemon.

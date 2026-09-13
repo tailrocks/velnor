@@ -3124,6 +3124,77 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+        match result {
+            Ok(_) => panic!("{context}: expected a failure, got success"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn package_deb_rejects_bad_inputs_before_any_cargo_call() {
+        // Every case below fails on option validation, before package-deb
+        // shells out: no cargo, no filesystem writes, no network.
+        let args = |options: &[&str]| options.iter().map(OsString::from).collect::<Vec<_>>();
+        let error = must_fail(
+            package_deb(&args(&["--version", "1.2.3"])),
+            "package-deb without --package",
+        );
+        assert!(
+            error.to_string().contains("--package needs a value"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "v1.2.3",
+            ])),
+            "package-deb with a v-prefixed version",
+        );
+        assert!(
+            error.to_string().contains("invalid package or version"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--guest",
+                "/nonexistent-velnor-guest-payload",
+            ])),
+            "package-deb with a missing guest directory",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("guest payload directory is missing"),
+            "unexpected error: {error}"
+        );
+        let error = must_fail(
+            package_deb(&args(&[
+                "--package",
+                "velnor-runner",
+                "--version",
+                "1.2.3",
+                "--target",
+                "x86_64!",
+            ])),
+            "package-deb with an invalid target",
+        );
+        assert!(
+            error.to_string().contains("invalid package target"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn policy_fixture(
         name: &str,
         workflow: &str,

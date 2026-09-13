@@ -6575,3 +6575,129 @@ Gates observed in this worktree: `cargo fmt --all -- --check` clean;
 `cargo check --workspace --locked` clean; strict clippy clean on runner
 (`--all-targets --locked --features test-support -- -D warnings`); serial
 runner lib with `test-support` 1925 passed, 0 failed, 1 ignored.
+
+## 118. Session status: final-verifier wave merged, FAIL traceability, remaining blockers — 2026-09-13
+
+Base `origin/main` at `408e4262` (`fix(control): drain-unification
+corrections (#790)`). All SHAs below resolved from the `origin/main`
+log, not guessed. Prior entries untouched.
+
+### Merged goal PRs this session
+
+- #678 `4e67b6fa` — trust F-V2..F-V5, R1 post/cond/cmd, R2-perf.
+- #695 `96b67b39` — buildkit trust tiers, bounded locks, atomic claims.
+- #698 `7a74d746` — buildkit corrections H1-H6, N1/N2.
+- #697 `f340e07d` — build identity (`VELNOR_SOURCE_SHA`,
+  `VELNOR_MANIFEST_VERSION`) in every job step env.
+- #699 `f841ced2` — semantic parity F1-F7.
+- #705 `7778d1eb` — semantic nested-scope corrections to F1-F7.
+- #722 `93174e62` — ignored-umbrella conversion, cancelled gate,
+  umbrella row flag.
+- #702 `91defe66` — checkout containment + concurrency F1-F3 (service
+  ladder, job wall clock, bounded terminal uploads).
+- #724 `07fba776` — checkout TOCTOU re-assert + service-guard job scope.
+- #704 `11302b22` — red-team P2 round (lifecycle bound, mirror Arc,
+  child reap).
+- #720 CLOSED unmerged (superseded by #728).
+- #728 `2c670e42` — carries #720 production changes (async mirror mutex,
+  no-signal kill, map-guard scoping) plus test-honesty corrections.
+- #707 `abd9f05c` — buildkit slot-budget sizing + local velnor-job bench
+  driver.
+- #725 `e879470e` — sizing/bench-honesty corrections for #707.
+- #713 `ba263ca1` — stable per-slot workspaces for non-mbx Rust warm
+  builds (8 staleness corrections in-branch; verified live on main at
+  `da459a8d`: 8/8 correction tests green, checkout + stable_workspace
+  66/66 serial green; parallel-only lease/span flakes proven
+  pre-existing).
+- #726 `b140a14f` — explicit sccache isolated behind compat mode, dropped
+  from default image.
+- #733 `3448549c` — typed error categories at the docker boundary
+  (GOAL 31/58 pilot).
+- #741 `772a1fa1` — decomposition slice 1: composite scopes out of
+  executor.rs.
+- #772 `2e320bd5` — decomposition slice 2: step-output commands out of
+  executor.rs.
+- #743 `430364de` — Engine API slice 1: single-object reads with CLI
+  fallback.
+- #750 `fa1175aa` — Engine API hardening: panics to fallback, port-order
+  parity, cancellation, live latency (~16-23x on macOS/OrbStack).
+- #774 `05a23ed2` — Engine API slice 2: owned-list queries with CLI
+  fallback (~13-17 subprocess calls/job eliminated with slice 1).
+- #754 `87cdab15` — lifecycle unification steps 1-3.
+- #770 `39f8d4fe` — lifecycle step 4: SlotPhase2/JobPhase2 split.
+- #779 `a73c5f0b` — lifecycle step 5: store writes as projections,
+  admission gated on identity.
+- #782 `da459a8d` — step-5 corrections: gate scope, attempt bound.
+- #780 `f54db787` — main-CI fix for goal-caused breakage.
+- #784 `04821ed9` — index BUGs: checked arithmetic, fail-closed arms.
+- #787 `1d8fb039` — drain unification steps 1-4 behind
+  `VELNOR_JOURNAL_DRAIN` (default off).
+- #790 `408e4262` — drain corrections (infallible edge, flag-off
+  fail-closed, R1-R7 race list).
+
+Adjacent session merges touching goal code (concurrent effort, not goal
+branches): #771 `63a6141f` (deny panicking APIs workspace-wide, panic
+plan), #721 `54eb813e` (stable workspaces vs unclean checkouts),
+\#714 `e44112f9` (adapt #702; claims the 360-min watchdog removed, but
+`JobTimeoutEnforcer` is still present at tip — contention unresolved),
+\#718 `6db9bb2a` (semantic + benchmark correctness gaps).
+
+### Final verifier verdicts with FAIL-to-PR traceability
+
+Inspected refs: velnor `fa6d2dee` + #678 head `5ae83fd3` (r0-fv2v5);
+fixture `efd5695`, #142 `cb2bac1`, #143 `617b1da`. Every verifier
+returned FIX (no ACCEPT); corrections merged per below.
+
+- **Semantic** — F1 umbrella scope, F2 loop break, F3 post drain, F4
+  docker lifecycle, F5 killed-step outcome, F6 umbrella outputs, F7
+  echo/debug: all → #699, then #705 (nested), then #722
+  (conversion/gate/row flag). #678 fixed the delta-dependent main FAILs
+  (R1-post/cond/cmd).
+- **Perf** — Engine API gap → #743 + #750 + #774 (read path; write path
+  open, see below). Buildkit sizing → #707 + #725. Bench driver →
+  #707 + #725.
+- **Concurrency** — F1 service ladder → #702 + #724. F2 job timeout →
+  #702 (live at tip; #714 contention noted above). F3 blob bound →
+  #702.
+- **Security** — checkout symlink traversal → #702 + #724. Trust/cache
+  items already PASS on the #678 head.
+- **Arch** — (1) state machines → #754 + #770 + #779 + #782 + #787 +
+  #790, step 6 open. (2) giant modules → #741 + #772, continuation
+  open. (3) sccache → #726. (4) typed errors → #733 pilot.
+  (6) `allow(dead_code)` (33 sites) unaddressed, open. (7) panic policy
+  → #771 + #784, follow-ups open.
+- **Coverage** (fixture-side) — FAILs 1 (baseline provenance), 2
+  (`overwrite` drift), 3 (rust-default), 6 (fault/soak), 7
+  (`test_audits.py` not in CI) all need fixture merges, blocked (see
+  below). #697 publishes build identity into step env; binary-to-commit
+  attestation stays out of scope per the verifier caveat.
+- **Red-team** — P0 F1 poisoning → #695 + #698. P1 F2 locks → #695 +
+  #698. P1 F3 unbounded builders → #695 + #698. P1 F4 warm regression
+  → #713 (+ #721, live-verified). P1 F5 torn claims → #695 + #698. P2
+  F6 lifecycle spin → #704. P2 F7 stopped ghosts → #695
+  (running-only listing). P2 F8 mirror clone → #704 + #728. P2 F9
+  killed outcome → #699. P2 F10 child reap → #704 + #728.
+
+### Remaining blockers and next work
+
+1. **Engine-API write-path migration.** Removals stay CLI by design.
+   Open per slice-2 plan: retry/orphan/daemon-scoped listing migration,
+   job BuildKit cleanup pair, `system df` reporting, on-demand
+   single-object network inspect/version, connection reuse,
+   consecutive-failure short-circuit.
+2. **Lifecycle step 6 enable/soak/flip.** Flag default-off; step 5
+   (`mutate_instance`, drain-clear path) still open; R1-R7 race list
+   published in the s6a plan. Enable → soak → flip sequence pending.
+3. **Decomposition continuation.** executor.rs still ~31.8k lines. Next
+   candidates: command-state application half (slice 3),
+   CompositeFrame execution-frame domain.
+4. **Panic follow-ups.** `velnor-workflow-contract` out of scope (not a
+   workspace member); `expect`-to-`let-else` pass; flaky
+   lease/quarantine tests owned elsewhere; Linux prod-socket latency
+   run (from #750); rust/warm + rust/noop bench runs pending (from
+   #713).
+5. **Fixture merges human-blocked.** Fixture PRs #142-#148 all OPEN
+   (verified live): baseline refresh, dual-lane pins, build-identity
+   evidence, rust-default ordinary cargo, audit label fix,
+   fault/soak suites, sccache compare leg. Blocked on pool outage plus
+   no-bypass ruleset; needs a human, not another agent loop.

@@ -8,12 +8,14 @@
 //! snapshot in one place and silently pass in another — there was no single
 //! owner of what the output means.
 //!
-//! [`Docker`] is that owner. Every query here returns a typed value; the
+//! [`Docker`] is that owner. Every call here returns a typed value; the
 //! argument vectors and their parsers live in this file and nowhere else.
 //! Control-plane methods take no timeout: the [`crate::executor`] runner seam
 //! and the host transport below both apply
 //! [`crate::docker::deadline_for`], so a step deadline is inexpressible at
-//! these signatures by construction, not by convention.
+//! these signatures by construction, not by convention. (`container_stop`'s
+//! grace is the daemon's own SIGKILL wait, not a client timeout: the class
+//! deadline still bounds the call above it.)
 //!
 //! Two transports, one policy. The job path borrows the job's
 //! [`CommandRunner`](crate::executor::CommandRunner) ([`Docker::job`]), which
@@ -29,10 +31,14 @@
 //!
 //! * `run`/`exec`/`create` argument construction. That stays at its single
 //!   sites (`crate::docker_argv`, `crate::container`) per the one-construction-site
-//!   rule; this client owns queries, not workload configuration.
-//! * Removal tolerance. `rm` failure handling differs per path (teardown
-//!   tolerates in-flight deletes and bounded timeouts, orphan sweeps do not),
-//!   so removals stay at their owned call sites, all deadline-wired.
+//!   rule; this client owns queries and idempotent lifecycle mutations,
+//!   not workload configuration.
+//! * Teardown's bounded-timeout remove tolerance. `rm` under exit 124
+//!   succeeds in teardown (the object is converging; doctor/boot retry
+//!   until it is gone) but is a typed timeout everywhere else, so that
+//!   tolerance stays at teardown's owned call site while the shared
+//!   in-flight and already-removed tolerance lives in
+//!   [`Docker::container_remove`].
 //!
 //! A missing `{{.Label}}` renders as an empty field on current Engines
 //! (proven live on 29.4.0); the row parsers treat empty as absent.
@@ -179,6 +185,36 @@ pub(crate) struct ExitInfo {
     pub finished: Option<std::time::SystemTime>,
 }
 
+/// What an idempotent container start did. Both variants are success: the
+/// container is running either way. The API leg distinguishes precisely
+/// (204 vs 304); the CLI leg reports [`Self::Started`] on any exit 0
+/// because `docker start` prints the name identically whether it started
+/// the container or found it running (proven live on 29.4.0) — the
+/// already-bit is exact on API, conservative on CLI, and success on both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StartOutcome {
+    Started,
+    AlreadyStarted,
+}
+
+/// What an idempotent container stop did. Same already-bit rule as
+/// [`StartOutcome`]: `docker stop` prints the name identically for a
+/// fresh and a redundant stop (proven live on 29.4.0).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopOutcome {
+    Stopped,
+    AlreadyStopped,
+}
+
+/// What an idempotent container remove did. Both legs agree exactly
+/// here: the API maps 404 to [`Self::AlreadyRemoved`] and the CLI maps
+/// its missing-object answer to the same variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoveOutcome {
+    Removed,
+    AlreadyRemoved,
+}
+
 /// A `docker` object the daemon positively reports missing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct NotFound {
@@ -253,9 +289,17 @@ const DOCKER_TRANSIENT_NEEDLES: &[&str] = &[
 ];
 
 /// Resource-contention vocabulary: another writer (a previous attempt, a
-/// concurrent daemon) holds the object this invocation wanted to own.
-const DOCKER_CONFLICT_NEEDLES: &[&str] =
-    &["already exists", "already in use", "already in progress"];
+/// concurrent daemon) holds the object this invocation wanted to own, or
+/// the object is live in a way the invocation cannot take over (`docker
+/// rm` on a running container: `cannot remove container ...: container
+/// is running`, the daemon's 409 sentence on both transports, proven
+/// live on 29.4.0).
+const DOCKER_CONFLICT_NEEDLES: &[&str] = &[
+    "already exists",
+    "already in use",
+    "already in progress",
+    "cannot remove",
+];
 
 /// Boundary classifier: raw daemon/CLI stderr becomes a retry category.
 /// Transient is checked first; anything unrecognized is terminal (fail
@@ -412,6 +456,46 @@ pub(crate) fn daemon_cgroup_args() -> Vec<String> {
 
 pub(crate) fn mapped_ports_args(name: &str) -> Vec<String> {
     vec!["port".to_string(), "--".to_string(), name.to_string()]
+}
+
+/// Detached `docker start` of one container: the historical CLI leg of
+/// [`Docker::container_start`]. Classifies `DockerOp::Start`.
+pub(crate) fn container_start_args(name: &str) -> Vec<String> {
+    vec!["start".to_string(), "--".to_string(), name.to_string()]
+}
+
+/// `docker stop` of one container, with the SIGKILL grace when given:
+/// the historical CLI leg of [`Docker::container_stop`]. The `-t`
+/// form is the non-deprecated spelling (`--time` warns on 29.4.0);
+/// `None` omits the flag so the daemon default applies, exactly as the
+/// API leg omits `t`. Classifies `DockerOp::Stop`, whose deadline
+/// clears the explicit grace plus headroom.
+pub(crate) fn container_stop_args(name: &str, timeout: Option<u64>) -> Vec<String> {
+    let mut args = vec!["stop".to_string()];
+    if let Some(secs) = timeout {
+        args.push("-t".to_string());
+        args.push(secs.to_string());
+    }
+    args.push("--".to_string());
+    args.push(name.to_string());
+    args
+}
+
+/// `docker rm` of one container: the historical CLI leg of
+/// [`Docker::container_remove`]. `force` is `--force`, `volumes` is
+/// `--volumes` (anonymous volumes; named volumes survive on both
+/// transports, proven live on 29.4.0). Classifies `DockerOp::Remove`.
+pub(crate) fn container_remove_args(name: &str, force: bool, volumes: bool) -> Vec<String> {
+    let mut args = vec!["rm".to_string()];
+    if force {
+        args.push("--force".to_string());
+    }
+    if volumes {
+        args.push("--volumes".to_string());
+    }
+    args.push("--".to_string());
+    args.push(name.to_string());
+    args
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,16 +1370,18 @@ enum Transport<'r> {
     Host,
 }
 
-/// The typed owner of host Docker control-plane queries.
+/// The typed owner of host Docker control-plane calls.
 ///
 /// Construct with [`Docker::job`] on the job path (cancellation-aware,
 /// metrics-attributed) or [`Docker::host`] on the maintenance/cancel path.
 /// Every method returns a typed value; a daemon that positively reports an
-/// object missing surfaces as [`NotFound`], never as an empty success.
-/// Migrated queries try the Engine API first ([`Docker::engine_or_cli`]) and run
-/// their historical one-`docker`-process CLI query only when the API does
-/// not affirmatively succeed — unmigrated queries (the buildx pair, which
-/// have no Engine equivalent) always run the CLI.
+/// object missing surfaces as [`NotFound`], never as an empty success —
+/// except [`Docker::container_remove`], where missing is the desired end
+/// state and succeeds as already-removed.
+/// Migrated calls try the Engine API first ([`Docker::engine_or_cli`]) and run
+/// their historical one-`docker`-process CLI call only when the API does
+/// not affirmatively succeed — unmigrated calls (the buildx pair, which
+/// has no Engine equivalent) always run the CLI.
 pub(crate) struct Docker<'r> {
     transport: Transport<'r>,
 }
@@ -1318,6 +1404,19 @@ impl<'r> Docker<'r> {
     /// (exit 124) becomes the operation's [`crate::docker::DockerTimeout`],
     /// anything else carries the stderr plus its [`DockerErrorCategory`].
     fn call(&mut self, args: &[String], object: &str) -> Result<String> {
+        self.call_as(args, object, "query")
+    }
+
+    /// Run one mutation and return its stdout, with the verb in the failure
+    /// messages instead of "query". Same error contract as [`Self::call`]:
+    /// [`NotFound`] for daemon missing-object answers, typed
+    /// [`crate::docker::DockerTimeout`] for exit 124, classified
+    /// [`DockerCommandError`] otherwise.
+    fn mutate(&mut self, args: &[String], object: &str, verb: &str) -> Result<String> {
+        self.call_as(args, object, verb)
+    }
+
+    fn call_as(&mut self, args: &[String], object: &str, action: &str) -> Result<String> {
         match &mut self.transport {
             Transport::Host => host_call(args).map_err(|error| {
                 if daemon_reports_missing(&format!("{error:#}")) {
@@ -1331,7 +1430,7 @@ impl<'r> Docker<'r> {
             Transport::Job(runner) => {
                 let result: CommandResult = runner
                     .run("docker", args)
-                    .with_context(|| format!("query docker {object}"))?;
+                    .with_context(|| format!("{action} docker {object}"))?;
                 if result.code == 0 {
                     return Ok(result.stdout);
                 }
@@ -1349,7 +1448,7 @@ impl<'r> Docker<'r> {
                 }
                 Err(anyhow::Error::new(DockerCommandError::classified(
                     format!(
-                        "docker query {object} exited {}: {}",
+                        "docker {action} {object} exited {}: {}",
                         result.code,
                         result.stderr.trim()
                     ),
@@ -1359,10 +1458,10 @@ impl<'r> Docker<'r> {
         }
     }
 
-    /// Engine-API fast path for one read-only query. `cli_args` is the query's
+    /// Engine-API fast path for one migrated call. `cli_args` is the call's
     /// historical CLI vector: it classifies the operation and its class
     /// deadline exactly as the CLI call would, so the API attempt and its
-    /// metrics carry the same class the policy always assigned this query.
+    /// metrics carry the same class the policy always assigned this call.
     ///
     /// Returns the API value on success. On ANY API failure — transport,
     /// timeout, status, framing, JSON, schema, dead runtime, or a job
@@ -1401,7 +1500,7 @@ impl<'r> Docker<'r> {
             crate::docker::deadline_for(cli_args, crate::executor::DEFAULT_STEP_TIMEOUT);
         debug_assert!(
             op.is_control_plane(),
-            "engine fast path serves control-plane queries only"
+            "engine fast path serves control-plane calls only"
         );
         let budget = super::engine::api_budget(class_deadline);
         let engine = super::engine::EngineClient::new(super::engine::socket_path());
@@ -1636,6 +1735,90 @@ impl<'r> Docker<'r> {
         let args = crate::docker_lease::list_owned_volumes_args(job_id);
         Ok(parse_id_list(&self.call(&args, job_id)?))
     }
+
+    /// Idempotently start one container. Starting an already-running
+    /// container succeeds on both legs; a missing container is [`NotFound`]
+    /// (Conflict-shaped: another writer removed it mid-flight), never an
+    /// empty success.
+    pub(crate) fn container_start(&mut self, name: &str) -> Result<StartOutcome> {
+        if let Some(outcome) = self
+            .engine_or_cli(&container_start_args(name), |engine, budget| async move {
+                engine.start_container(name, budget).await
+            })
+        {
+            return Ok(outcome);
+        }
+        let args = container_start_args(name);
+        self.mutate(&args, name, "start")?;
+        Ok(StartOutcome::Started)
+    }
+
+    /// Idempotently stop one container, waiting up to `timeout` seconds
+    /// before SIGKILL (`None` is the daemon default on both legs).
+    /// Stopping an already-stopped container succeeds on both legs; a
+    /// missing container is [`NotFound`], never an empty success.
+    pub(crate) fn container_stop(
+        &mut self,
+        name: &str,
+        timeout: Option<u64>,
+    ) -> Result<StopOutcome> {
+        if let Some(outcome) = self.engine_or_cli(
+            &container_stop_args(name, timeout),
+            |engine, budget| async move { engine.stop_container(name, timeout, budget).await },
+        ) {
+            return Ok(outcome);
+        }
+        let args = container_stop_args(name, timeout);
+        self.mutate(&args, name, "stop")?;
+        Ok(StopOutcome::Stopped)
+    }
+
+    /// Idempotently remove one container. Removing a missing container
+    /// succeeds as [`RemoveOutcome::AlreadyRemoved`] on both legs, and a
+    /// removal already in flight succeeds as [`RemoveOutcome::Removed`]
+    /// (the desired end state is converging — the same tolerance the
+    /// host and teardown paths apply). A running container without
+    /// `force` is a genuine conflict: typed [`DockerErrorCategory::Conflict`]
+    /// on both legs, never swallowed as success.
+    pub(crate) fn container_remove(
+        &mut self,
+        name: &str,
+        force: bool,
+        volumes: bool,
+    ) -> Result<RemoveOutcome> {
+        if let Some(outcome) =
+            self.engine_or_cli(
+                &container_remove_args(name, force, volumes),
+                |engine, budget| async move {
+                    engine.remove_container(name, force, volumes, budget).await
+                },
+            )
+        {
+            return Ok(outcome);
+        }
+        let args = container_remove_args(name, force, volumes);
+        match self.mutate(&args, name, "remove") {
+            Ok(_) => Ok(RemoveOutcome::Removed),
+            Err(error) if is_not_found(&error) => Ok(RemoveOutcome::AlreadyRemoved),
+            Err(error) if removal_in_flight_error(&error) => Ok(RemoveOutcome::Removed),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// True when `error` is the daemon's removal-in-progress answer: Conflict
+/// category narrowed to the in-progress needle, the same tolerance the
+/// host transport ([`host_call`]) and teardown apply. A stderr that also
+/// matches Transient surfaces instead of masking as success.
+fn removal_in_flight_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<DockerCommandError>()
+            .is_some_and(|command| {
+                command.category() == DockerErrorCategory::Conflict
+                    && command.to_string().contains("already in progress")
+            })
+    })
 }
 
 #[cfg(test)]
@@ -1650,7 +1833,7 @@ impl<'r> Docker<'r> {
 )]
 mod tests {
     use super::*;
-    use crate::docker::engine::mock::json_response;
+    use crate::docker::engine::mock::{error_response, json_response, status_response};
     use crate::docker::engine::{EngineTestGuard, FailRuntimeBuildGuard, MockEngine};
     use crate::docker::{begin_job, snapshot};
     use crate::execution::cancel::{set_active, CancelReason, JobCancellation};
@@ -1808,6 +1991,9 @@ mod tests {
             r#"Error response from daemon: network with name "net" already exists"#,
             "Conflict. The container name \"/job\" is already in use by container abc123",
             "Error response from daemon: removal of container abc is already in progress",
+            // Live `docker rm` on a running container, Engine 29.4.0
+            // verbatim: the daemon's 409 sentence, shared with the API leg.
+            "Error response from daemon: cannot remove container \"velnor-job-1\": container is running: stop the container before removing or force remove",
         ] {
             assert_eq!(classify_docker_stderr(stderr), Conflict, "{stderr:?}");
         }
@@ -2676,5 +2862,475 @@ Total:\t\t6.054MB
         let counts = snapshot();
         assert_eq!(counts.api_calls, 0);
         assert_eq!(counts.api_fallbacks, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Lifecycle routing: idempotent mutations, subprocesses only on
+    // fallback. CLI text below is Engine 29.4.0 verbatim; API bodies
+    // are its error documents verbatim.
+    // ------------------------------------------------------------------
+
+    /// `docker start` on a missing container answers two lines, not one.
+    const CLI_START_MISSING: &str =
+        "Error response from daemon: No such container: svc\nfailed to start containers: svc\n";
+    const CLI_RM_MISSING: &str = "Error response from daemon: No such container: svc\n";
+    const CLI_RM_RUNNING: &str = "Error response from daemon: cannot remove container \"svc\": container is running: stop the container before removing or force remove\n";
+    const CLI_RM_IN_FLIGHT: &str =
+        "Error response from daemon: removal of container svc is already in progress\n";
+    const API_NO_SUCH: &str = r#"{"message":"No such container: svc"}"#;
+    const API_RUNNING: &str = r#"{"message":"cannot remove container \"svc\": container is running: stop the container before removing or force remove"}"#;
+    const API_IN_FLIGHT: &str = r#"{"message":"removal of container svc is already in progress"}"#;
+
+    type LifecycleValues = (StartOutcome, StopOutcome, RemoveOutcome);
+
+    fn lifecycle_sequence(docker: &mut Docker<'_>) -> Result<LifecycleValues> {
+        Ok((
+            docker.container_start("svc")?,
+            docker.container_stop("svc", Some(5))?,
+            docker.container_remove("svc", true, false)?,
+        ))
+    }
+
+    fn lifecycle_mock(connections: usize) -> MockEngine {
+        MockEngine::serve(|_| status_response("204 No Content"), connections)
+    }
+
+    #[test]
+    fn lifecycle_cycle_is_identical_with_zero_subprocess_on_api() {
+        // Before: engine off, one start/stop/remove cycle is three CLI calls.
+        let cli_values = {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("lifecycle-cli");
+            let mut runner =
+                ScriptRunner::scripted_host(vec![ok("svc\n"), ok("svc\n"), ok("svc\n")]);
+            let values = {
+                let mut docker = Docker::job(&mut runner);
+                lifecycle_sequence(&mut docker).expect("cli cycle serves")
+            };
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                *runner
+                    .seen_args
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()),
+                vec![
+                    container_start_args("svc"),
+                    container_stop_args("svc", Some(5)),
+                    container_remove_args("svc", true, false),
+                ]
+            );
+            values
+        };
+
+        // After: engine on, the same outcomes with no runner call at all.
+        let mock = lifecycle_mock(3);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("lifecycle-api");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let api_values = {
+            let mut docker = Docker::job(&mut runner);
+            lifecycle_sequence(&mut docker).expect("api cycle serves")
+        };
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no CLI call may run while the API serves"
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 3);
+        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(api_values, cli_values, "transports must agree exactly");
+        assert_eq!(
+            api_values,
+            (
+                StartOutcome::Started,
+                StopOutcome::Stopped,
+                RemoveOutcome::Removed
+            )
+        );
+    }
+
+    #[test]
+    fn already_states_succeed_on_both_legs() {
+        // CLI leg: exit 0 reads as acted (the CLI prints the name
+        // identically for fresh and redundant starts/stops), missing on
+        // remove reads as already-removed.
+        let cli_values = {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("lifecycle-cli-already");
+            let mut runner = ScriptRunner::scripted_host(vec![
+                ok("svc\n"),
+                ok("svc\n"),
+                failed(1, CLI_RM_MISSING),
+            ]);
+            let values = {
+                let mut docker = Docker::job(&mut runner);
+                lifecycle_sequence(&mut docker).expect("cli already-states serve")
+            };
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 3);
+            values
+        };
+        assert_eq!(
+            cli_values,
+            (
+                StartOutcome::Started,
+                StopOutcome::Stopped,
+                RemoveOutcome::AlreadyRemoved
+            )
+        );
+
+        // API leg: 304/304/404 distinguish precisely, with no subprocess.
+        let mock = MockEngine::serve(
+            |head| {
+                if head.contains("DELETE /containers/") {
+                    error_response("404 Not Found", API_NO_SUCH)
+                } else {
+                    status_response("304 Not Modified")
+                }
+            },
+            3,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("lifecycle-api-already");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let api_values = {
+            let mut docker = Docker::job(&mut runner);
+            lifecycle_sequence(&mut docker).expect("api already-states serve")
+        };
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            api_values,
+            (
+                StartOutcome::AlreadyStarted,
+                StopOutcome::AlreadyStopped,
+                RemoveOutcome::AlreadyRemoved
+            )
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 3);
+        assert_eq!(counts.api_fallbacks, 0);
+    }
+
+    #[test]
+    fn genuine_conflicts_surface_typed_conflict() {
+        // Removing a running container without force: the API 409 falls
+        // back, and the CLI re-derives Conflict — never success.
+        {
+            let mock = MockEngine::serve(|_| error_response("409 Conflict", API_RUNNING), 1);
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-conflict-rm");
+            let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_RUNNING)]);
+            let error = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_remove("svc", false, false)
+                    .expect_err("running rm without force must fail")
+            };
+            assert!(!is_not_found(&error));
+            assert_eq!(
+                docker_error_category(&error),
+                DockerErrorCategory::Conflict,
+                "{error:#}"
+            );
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 0);
+            assert_eq!(counts.api_fallbacks, 1);
+        }
+
+        // Starting a missing container: the API 404 falls back, and the
+        // CLI re-derives NotFound, which is Conflict-shaped (another
+        // writer removed the object mid-flight).
+        {
+            let mock = MockEngine::serve(|_| error_response("404 Not Found", API_NO_SUCH), 1);
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-conflict-start");
+            let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_START_MISSING)]);
+            let error = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_start("svc")
+                    .expect_err("missing start must fail")
+            };
+            assert!(is_not_found(&error), "{error:#}");
+            assert_eq!(
+                docker_error_category(&error),
+                DockerErrorCategory::Conflict,
+                "{error:#}"
+            );
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(snapshot().api_fallbacks, 1);
+        }
+    }
+
+    #[test]
+    fn mutation_api_failure_falls_back_to_one_cli_call() {
+        // A daemon 500 on stop: one CLI call serves the stop.
+        {
+            let mock = MockEngine::serve(
+                |_| b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                1,
+            );
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-fallback-status");
+            let mut runner = ScriptRunner::scripted_host(vec![ok("svc\n")]);
+            let outcome = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_stop("svc", Some(5))
+                    .expect("fallback serves")
+            };
+            assert_eq!(outcome, StopOutcome::Stopped);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(snapshot().api_fallbacks, 1);
+        }
+
+        // A slow daemon on start: the capped API budget falls back instead
+        // of riding the class deadline on the socket.
+        {
+            let mock = MockEngine::serve(
+                |_| {
+                    std::thread::sleep(Duration::from_millis(300));
+                    status_response("204 No Content")
+                },
+                1,
+            );
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), Some(30));
+            let _scope = begin_job("lifecycle-fallback-timeout");
+            let mut runner = ScriptRunner::scripted_host(vec![ok("svc\n")]);
+            let outcome = {
+                let mut docker = Docker::job(&mut runner);
+                docker.container_start("svc").expect("fallback serves")
+            };
+            assert_eq!(outcome, StartOutcome::Started);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(snapshot().api_fallbacks, 1);
+        }
+    }
+
+    #[test]
+    fn removal_in_flight_succeeds_but_transient_surfaces() {
+        // Pure CLI leg: an in-flight removal is the desired end state
+        // converging, so remove succeeds.
+        {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("lifecycle-cli-inflight");
+            let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_IN_FLIGHT)]);
+            let outcome = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_remove("svc", true, false)
+                    .expect("in-flight remove succeeds")
+            };
+            assert_eq!(outcome, RemoveOutcome::Removed);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        }
+
+        // API leg: a 409 carrying the in-progress sentence falls back, and
+        // the CLI leg tolerates it the same way.
+        {
+            let mock = MockEngine::serve(|_| error_response("409 Conflict", API_IN_FLIGHT), 1);
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-api-inflight");
+            let mut runner = ScriptRunner::scripted_host(vec![failed(1, CLI_RM_IN_FLIGHT)]);
+            let outcome = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_remove("svc", true, false)
+                    .expect("in-flight remove succeeds")
+            };
+            assert_eq!(outcome, RemoveOutcome::Removed);
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(snapshot().api_fallbacks, 1);
+        }
+
+        // A stderr that also matches Transient is a sick daemon, not a
+        // converging removal: it surfaces instead of masking as success.
+        {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("lifecycle-cli-transient");
+            let mut runner = ScriptRunner::scripted_host(vec![failed(
+                1,
+                "Error response from daemon: removal of container svc is already in progress: connection reset by peer\n",
+            )]);
+            let error = {
+                let mut docker = Docker::job(&mut runner);
+                docker
+                    .container_remove("svc", true, false)
+                    .expect_err("transient must surface")
+            };
+            assert_eq!(
+                docker_error_category(&error),
+                DockerErrorCategory::Transient,
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_lifecycle_races_all_succeed_idempotently() {
+        // Two racers, one object: the first acts, the second observes the
+        // already-state. Both succeed; any fallback would exhaust the
+        // empty scripts and fail the test.
+        {
+            let hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let hits_server = std::sync::Arc::clone(&hits);
+            let mock = MockEngine::serve(
+                move |_| {
+                    if hits_server.fetch_add(1, Ordering::SeqCst) == 0 {
+                        status_response("204 No Content")
+                    } else {
+                        status_response("304 Not Modified")
+                    }
+                },
+                2,
+            );
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-race-start");
+            let (first, second) = std::thread::scope(|scope| {
+                // Non-capturing closures: nothing borrowed into the scope.
+                let first = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_start("svc")
+                });
+                let second = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_start("svc")
+                });
+                (
+                    first.join().expect("racer joins"),
+                    second.join().expect("racer joins"),
+                )
+            });
+            let outcomes = [
+                first.expect("racing start succeeds"),
+                second.expect("racing start succeeds"),
+            ];
+            assert!(outcomes.contains(&StartOutcome::Started));
+            assert!(outcomes.contains(&StartOutcome::AlreadyStarted));
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 2);
+            assert_eq!(counts.api_fallbacks, 0);
+        }
+
+        {
+            let hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let hits_server = std::sync::Arc::clone(&hits);
+            let mock = MockEngine::serve(
+                move |_| {
+                    if hits_server.fetch_add(1, Ordering::SeqCst) == 0 {
+                        status_response("204 No Content")
+                    } else {
+                        status_response("304 Not Modified")
+                    }
+                },
+                2,
+            );
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-race-stop");
+            let (first, second) = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_stop("svc", Some(5))
+                });
+                let second = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_stop("svc", Some(5))
+                });
+                (
+                    first.join().expect("racer joins"),
+                    second.join().expect("racer joins"),
+                )
+            });
+            let outcomes = [
+                first.expect("racing stop succeeds"),
+                second.expect("racing stop succeeds"),
+            ];
+            assert!(outcomes.contains(&StopOutcome::Stopped));
+            assert!(outcomes.contains(&StopOutcome::AlreadyStopped));
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 2);
+            assert_eq!(counts.api_fallbacks, 0);
+        }
+
+        {
+            let hits = std::sync::Arc::new(AtomicUsize::new(0));
+            let hits_server = std::sync::Arc::clone(&hits);
+            let mock = MockEngine::serve(
+                move |_| {
+                    if hits_server.fetch_add(1, Ordering::SeqCst) == 0 {
+                        status_response("204 No Content")
+                    } else {
+                        error_response("404 Not Found", API_NO_SUCH)
+                    }
+                },
+                2,
+            );
+            let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+            let _scope = begin_job("lifecycle-race-remove");
+            let (first, second) = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_remove("svc", true, false)
+                });
+                let second = scope.spawn(|| {
+                    let mut runner = ScriptRunner::scripted_host(Vec::new());
+                    Docker::job(&mut runner).container_remove("svc", true, false)
+                });
+                (
+                    first.join().expect("racer joins"),
+                    second.join().expect("racer joins"),
+                )
+            });
+            let outcomes = [
+                first.expect("racing remove succeeds"),
+                second.expect("racing remove succeeds"),
+            ];
+            assert!(outcomes.contains(&RemoveOutcome::Removed));
+            assert!(outcomes.contains(&RemoveOutcome::AlreadyRemoved));
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 2);
+            assert_eq!(counts.api_fallbacks, 0);
+        }
+    }
+
+    #[test]
+    fn every_facade_mutation_is_a_bounded_control_plane_call() {
+        const SIX_HOURS: Duration = Duration::from_secs(6 * 3600);
+        let calls = vec![
+            container_start_args("svc"),
+            container_stop_args("svc", None),
+            container_stop_args("svc", Some(5)),
+            container_stop_args("svc", Some(300)),
+            container_remove_args("svc", false, false),
+            container_remove_args("svc", true, false),
+            container_remove_args("svc", false, true),
+            container_remove_args("svc", true, true),
+        ];
+        for args in &calls {
+            let (op, deadline) = crate::docker::deadline_for(args, SIX_HOURS);
+            assert!(
+                op.is_control_plane(),
+                "{args:?} must classify as control plane, got {op}"
+            );
+            assert!(
+                deadline < SIX_HOURS,
+                "{args:?} ({op}) inherited the step deadline"
+            );
+        }
+        assert_eq!(
+            crate::docker::deadline_for(&container_start_args("svc"), SIX_HOURS),
+            (crate::docker::DockerOp::Start, Duration::from_secs(120))
+        );
+        // An explicit 300s grace clears the grace plus headroom, exactly as
+        // the class policy promises.
+        assert_eq!(
+            crate::docker::deadline_for(&container_stop_args("svc", Some(300)), SIX_HOURS),
+            (crate::docker::DockerOp::Stop, Duration::from_secs(360))
+        );
+        assert_eq!(
+            crate::docker::deadline_for(&container_remove_args("svc", true, true), SIX_HOURS),
+            (crate::docker::DockerOp::Remove, Duration::from_secs(20))
+        );
     }
 }
