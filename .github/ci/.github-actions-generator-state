@@ -3,7 +3,7 @@ schema = 2
 [inputs]
 config	dee90542d277db41
 scan	3539b3be981c4bf6
-generator	18
+generator	19
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	02089ff9fee52b2a
@@ -18,7 +18,7 @@ generator	18
 .github/workflows/ci-unit-docs.yml	12c9cd6a78e0f6f4
 .github/workflows/ci-unit-opentofu.yml	0f439da605d3c1d5
 .github/workflows/ci-unit-rust.yml	f5a82bceac385192
-.github/workflows/maintenance.yml	5cc015a511b2aa48
+.github/workflows/maintenance.yml	34459cb80488265b
 .github/workflows/nightly.yml	5ac6a1c3723b2c14
 .github/workflows/preview.yml	6ae4829136d0abbc
 .github/workflows/release.yml	708521879f0c66bb

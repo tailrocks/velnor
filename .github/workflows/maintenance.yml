@@ -59,10 +59,17 @@ jobs:
           fi
   cache-budget:
     name: Cache retention
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Set up Velnor workflow runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8
+        with:
+          rev: ${{ github.sha }}
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=8c84b39d1f39e3fd7b3b450edc6e5dafa50383f8" >> "$GITHUB_ENV"
       - name: Collect Actions cache account
         env:
           GH_TOKEN: ${{ github.token }}
