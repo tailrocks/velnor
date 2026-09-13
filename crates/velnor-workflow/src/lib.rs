@@ -8671,6 +8671,9 @@ channel = "stable"
             .render(WorkflowKind::PullRequest);
         assert!(velnor_pr.contains("on:\n  pull_request:"));
         assert!(velnor_pr.contains("  merge_group:"));
+        assert!(velnor_pr.contains("github.ref == 'refs/heads/main'"));
+        assert!(velnor_pr.contains("github.event.inputs.runner == 'velnor'"));
+        assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
         assert!(!velnor_pr.contains("runs-on: ubuntu-24.04"));
         assert!(velnor_pr.contains("default: velnor"));

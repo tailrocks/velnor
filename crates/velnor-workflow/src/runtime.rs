@@ -1752,6 +1752,33 @@ fn has_safe_runner_gate(
         && is_static_self_hosted_runner(job, velnor_policy)
 }
 
+fn generation_pull_request_on_velnor(root: &Path) -> Result<bool, GeneratorError> {
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read generation workflow config",
+                &path,
+                &error,
+            ));
+        }
+    };
+    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
+        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+    })?;
+    value
+        .get("workflow")
+        .and_then(toml::Value::as_table)
+        .and_then(|workflow| workflow.get("pull_request_on_velnor"))
+        .map_or(Ok(false), |value| {
+            value.as_bool().ok_or_else(|| {
+                GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
+            })
+        })
+}
+
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
     let content = match fs::read_to_string(&path) {
@@ -1789,15 +1816,22 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
             })
         })
         .transpose()?;
-    let pull_request_on_velnor = workflow
+    let runtime_pull_request_on_velnor = workflow
         .and_then(|workflow| workflow.get("pull_request_on_velnor"))
         .map(|enabled| {
             enabled.as_bool().ok_or_else(|| {
                 GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
             })
         })
-        .transpose()?
-        .unwrap_or(false);
+        .transpose()?;
+    // The runtime contract carries the opt-in when the generating revision
+    // writes it; otherwise fall back to the generation input so repositories
+    // whose checked-in project.toml predates the field keep their decision.
+    let pull_request_on_velnor = if let Some(enabled) = runtime_pull_request_on_velnor {
+        enabled
+    } else {
+        generation_pull_request_on_velnor(root)?
+    };
     let policy = VelnorPolicyContract {
         runners: value
             .get("runners")
@@ -1857,10 +1891,14 @@ fn is_generated_velnor_pr_gate(value: &str, default_branch: &str) -> bool {
     let automatic = format!(
         "github.event_name=='pull_request'&&github.event.pull_request.head.repo.full_name==github.repository||(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
     );
-    let dispatch = format!(
+    let explicit_dispatch = format!(
         "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
     );
-    value == format!("{automatic}||{dispatch}")
+    let default_dispatch = format!(
+        "(github.ref=='refs/heads/{default_branch}'&&(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'||github.event.inputs.runner=='')))"
+    );
+    value == format!("{automatic}||{explicit_dispatch}")
+        || value == format!("{automatic}||{default_dispatch}")
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -4213,4 +4251,99 @@ jobs:
         assert!(!run_policy(root)?);
         Ok(())
     }
+
+    #[test]
+    fn policy_accepts_opt_in_from_generation_input_when_runtime_contract_predates_the_field() -> Result<(), Box<dyn Error>>
+    {
+        let group = crate::estate::approved_velnor_runner_group();
+        let yaml_labels = crate::estate::approved_velnor_runner_labels().join(", ");
+        let toml_labels = crate::estate::approved_velnor_runner_labels()
+            .iter()
+            .map(|label| format!("\"{label}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let config_text = format!(
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\n"
+        );
+        let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
+        let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
+        let root = policy_fixture(
+            "velnor-pr-fallback",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            "schema = 1\n\n[workflow]\npull_request_on_velnor = true\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            format!(
+                r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{{{ {gate} }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+  ci-required:
+    if: ${{{{ always() && ({gate}) }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            format!(
+                r"
+name: rust
+on:
+  workflow_call:
+jobs:
+  verify:
+    if: ${{{{ contains(format(',{{0}},', inputs.selected_units), ',rust-policy,') && ({gate}) }}}}
+    runs-on: {runner}
+    steps:
+      - run: true
+",
+            ),
+        )?;
+        let result = enforce_policy_with_revision(&root, POLICY_REVISION);
+        assert!(
+            result.is_ok(),
+            "accepted opt-in fixture rejected: {result:?}"
+        );
+        std::fs::remove_dir_all(root)?;
+
+        let mismatched = policy_fixture(
+            "velnor-pr-fallback-mismatched",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(mismatched.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::write(
+            mismatched.join(".github/workflows/ci-pr.yml"),
+            r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, other-runner]
+    steps:
+      - run: true
+",
+        )?;
+        assert!(!run_policy(mismatched)?);
+        Ok(())
+    }
+
 }

@@ -266,6 +266,8 @@ fn automatic_pr_schedules_github_hosted_unit_jobs() {
 fn dispatch_defaults_to_github_and_omitted_runner_selects_github() {
     let root = unique_dir("dispatch");
     write_rust_fixture(&root, 2);
+    // The stock fixture declares runners = "both" with no automatic lane, so
+    // generation exercises the inferred-GitHub dispatch default below.
     let generated = generate(&root);
     for name in ["ci-pr.yml", "ci-main.yml"] {
         let workflow = generated.workflow(name);
@@ -336,6 +338,10 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
             "uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@${{ github.sha }}"
         ),
         "GitHub forbids expressions in uses: {main}"
+    );
+    assert!(
+        !main.contains("runs-on: { group:"),
+        "both-mode Planning must not require Velnor: {main}"
     );
 }
 
@@ -552,7 +558,10 @@ fn kind_reusable_preserves_declared_contract_per_unit() {
     let root = unique_dir("per-unit-contracts");
     write_rust_fixture(&root, 2);
     let config_path = root.join(".github-gen/velnor-workflow.toml");
-    let mut config = fs::read_to_string(&config_path).unwrap();
+    let mut config = fs::read_to_string(&config_path).unwrap().replace(
+        "runners = \"velnor\"",
+        "runners = \"both\"\nautomatic = \"both\"",
+    );
     config.push_str(
         r#"
 
@@ -616,6 +625,7 @@ fn unit_run_consumes_the_selection_artifact_not_a_hardcoded_id() {
     let generated = generate(&root);
     let unit = generated.workflow("ci-unit-rust.yml");
     assert!(unit.contains("VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection"));
+    assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
     assert!(unit.contains("--unit \"$CI_UNIT_ID\""));
     assert!(unit.contains("CI_UNIT_ID: rust-crate00"));
     assert!(!unit.contains("--unit crate00"));

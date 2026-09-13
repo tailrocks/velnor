@@ -60,6 +60,83 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
     patterns
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
+        AutomaticEvent, DispatchChoice::*, RunnerMode, VelnorPullRequest,
+    };
+
+    #[test]
+    fn manual_dispatch_reachability_matches_the_backend_table() {
+        let cases = [
+            (Github, true, false),
+            (Velnor, false, true),
+            (Both, true, true),
+            (Omitted, true, true),
+        ];
+        for (choice, github, velnor) in cases {
+            assert_eq!(
+                dispatch_choice_selects_lane(choice, RunnerMode::Github),
+                github,
+                "GitHub reachability for {choice:?}"
+            );
+            assert_eq!(
+                dispatch_choice_selects_lane(choice, RunnerMode::Velnor),
+                velnor,
+                "Velnor reachability for {choice:?}"
+            );
+        }
+
+        let github = dispatch_lane_expression(RunnerMode::Github, true);
+        let velnor = dispatch_lane_expression(RunnerMode::Velnor, true);
+        assert!(github.contains("runner == 'github'"));
+        assert!(!github.contains("runner == 'velnor'"));
+        assert!(velnor.contains("runner == 'velnor'"));
+        assert!(!velnor.contains("runner == 'github'"));
+    }
+
+    #[test]
+    fn automatic_reachability_keeps_untrusted_events_off_velnor() {
+        use AutomaticEvent::{
+            MergeGroup, PullRequestFork, PullRequestSameRepository, Push, Schedule,
+        };
+
+        let cases = [
+            (PullRequestSameRepository, true, true),
+            (PullRequestFork, true, false),
+            (Push, true, true),
+            (Schedule, true, true),
+            (MergeGroup, true, false),
+        ];
+        for (event, github, velnor) in cases {
+            assert_eq!(
+                automatic_event_selects_lane(
+                    event,
+                    RunnerMode::Github,
+                    VelnorPullRequest::Automatic,
+                ),
+                github,
+                "GitHub reachability for {event:?}"
+            );
+            assert_eq!(
+                automatic_event_selects_lane(
+                    event,
+                    RunnerMode::Velnor,
+                    VelnorPullRequest::Automatic,
+                ),
+                velnor,
+                "Velnor reachability for {event:?}"
+            );
+        }
+        assert!(!automatic_event_selects_lane(
+            PullRequestSameRepository,
+            RunnerMode::Velnor,
+            VelnorPullRequest::TrustedOnly,
+        ));
+    }
+}
+
 /// The units a snapshot-carrying unit compiles: the unit itself plus the
 /// transitive workspace dependency closure its `depends_on` names.
 fn closure_members<'a>(unit: &'a Unit, units: &'a [Unit]) -> Vec<&'a Unit> {
@@ -728,6 +805,69 @@ pub(crate) enum WorkflowKind {
     Nightly,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DispatchChoice {
+    Github,
+    Velnor,
+    Both,
+    Omitted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutomaticEvent {
+    PullRequestSameRepository,
+    PullRequestFork,
+    Push,
+    Schedule,
+    MergeGroup,
+}
+
+fn automatic_event_selects_lane(
+    event: AutomaticEvent,
+    lane: RunnerMode,
+    velnor_pull_request: VelnorPullRequest,
+) -> bool {
+    match lane {
+        RunnerMode::Github => true,
+        RunnerMode::Velnor => match event {
+            AutomaticEvent::PullRequestSameRepository => {
+                velnor_pull_request == VelnorPullRequest::Automatic
+            }
+            AutomaticEvent::Push | AutomaticEvent::Schedule => true,
+            AutomaticEvent::PullRequestFork | AutomaticEvent::MergeGroup => false,
+        },
+        RunnerMode::Both => false,
+    }
+}
+
+fn dispatch_choice_selects_lane(choice: DispatchChoice, lane: RunnerMode) -> bool {
+    match choice {
+        DispatchChoice::Github => lane == RunnerMode::Github,
+        DispatchChoice::Velnor => lane == RunnerMode::Velnor,
+        DispatchChoice::Both | DispatchChoice::Omitted => {
+            matches!(lane, RunnerMode::Github | RunnerMode::Velnor)
+        }
+    }
+}
+
+fn dispatch_lane_expression(lane: RunnerMode, include_omitted: bool) -> String {
+    let mut choices = vec![
+        (DispatchChoice::Github, "github"),
+        (DispatchChoice::Velnor, "velnor"),
+        (DispatchChoice::Both, "both"),
+    ];
+    if include_omitted {
+        choices.push((DispatchChoice::Omitted, ""));
+    }
+    let selected = choices
+        .into_iter()
+        .filter(|(choice, _)| dispatch_choice_selects_lane(*choice, lane))
+        .map(|(_, value)| format!("github.event.inputs.runner == '{value}'"))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    format!("github.event_name == 'workflow_dispatch' && ({selected})")
+}
+
 fn workflow_dispatch_inputs(
     default_scope: &str,
     default_branch: &str,
@@ -1058,6 +1198,7 @@ impl WorkflowIr {
     }
 
     pub(crate) fn render_nested_unit_callers(&self, output: &mut String, include_policy: bool) {
+        let base_sha = self.base_sha_expression();
         for unit in &self.units {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
@@ -1078,11 +1219,12 @@ impl WorkflowIr {
             ));
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
+                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      unit: {}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection\n      base_sha: ${{{{ {base_sha} }}}}\n      head_sha: ${{{{ github.sha }}}}",
                 yaml_scalar(&name),
                 conditions.join(" && "),
                 needs.join(", "),
                 nested_unit_workflow_file(unit),
+                yaml_scalar(&unit.id),
             );
         }
     }
@@ -1666,6 +1808,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn velnor_automatic_event_expression(&self) -> String {
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::Push,
+            RunnerMode::Velnor,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::Schedule,
+            RunnerMode::Velnor,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(!automatic_event_selects_lane(
+            AutomaticEvent::PullRequestFork,
+            RunnerMode::Velnor,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(!automatic_event_selects_lane(
+            AutomaticEvent::MergeGroup,
+            RunnerMode::Velnor,
+            self.pull_request_on_velnor,
+        ));
         format!(
             "{} || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
             "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository",
@@ -1674,6 +1836,31 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn automatic_event_expression(&self) -> String {
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::PullRequestSameRepository,
+            RunnerMode::Github,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::PullRequestFork,
+            RunnerMode::Github,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::Push,
+            RunnerMode::Github,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::Schedule,
+            RunnerMode::Github,
+            self.pull_request_on_velnor,
+        ));
+        debug_assert!(automatic_event_selects_lane(
+            AutomaticEvent::MergeGroup,
+            RunnerMode::Github,
+            self.pull_request_on_velnor,
+        ));
         format!(
             "github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
             self.default_branch
@@ -1690,16 +1877,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
         let omitted_github = matches!(self.automatic, RunnerMode::Github | RunnerMode::Both);
         let omitted_velnor = matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both);
-        let dispatch_github = if omitted_github {
-            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
-        } else {
-            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')"
-        };
-        let dispatch_velnor = if omitted_velnor {
-            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')"
-        } else {
-            "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')"
-        };
+        let dispatch_github = dispatch_lane_expression(RunnerMode::Github, omitted_github);
+        let dispatch_velnor = dispatch_lane_expression(RunnerMode::Velnor, omitted_velnor);
         match lane {
             RunnerMode::Github => {
                 if matches!(self.automatic, RunnerMode::Github | RunnerMode::Both) {
@@ -1708,7 +1887,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                         self.automatic_event_expression()
                     )
                 } else {
-                    dispatch_github.to_owned()
+                    dispatch_github
                 }
             }
             RunnerMode::Velnor => {
@@ -1723,7 +1902,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                         self.default_branch
                     )
                 } else {
-                    dispatch_velnor.to_owned()
+                    dispatch_velnor
                 };
                 if matches!(self.automatic, RunnerMode::Velnor | RunnerMode::Both) {
                     self.velnor_lane_event_expression(&dispatch)

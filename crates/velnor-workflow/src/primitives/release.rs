@@ -1,12 +1,11 @@
 //! The release-side families: publishing, rolling preview, maintenance, and
-//! the static surfaces a repository declares verbatim.
+//! provenance signing.
 //!
 //! Every family here renders one workflow file from the scanned shape, the
 //! resolved config, and — for the families a repository may drive itself — its
 //! declared arguments. A release contract is explicit input: the generic
 //! publishers render only what a config or catalog declares, never a guess
-//! from a manifest. A repository whose publishing surface is reviewed as a
-//! whole declares it as a `static-workflow` row and owns the bytes.
+//! from a manifest.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -60,9 +59,7 @@ pub(crate) fn release_content(config: &ProjectConfig) -> Option<String> {
         .map(|release| render_release(config, release))
 }
 
-/// The `preview.yml` content for a config. Every contract renders the generic
-/// rolling preview; a repository with a reviewed native preview declares its
-/// bytes as a static workflow instead.
+/// The `preview.yml` content for a config.
 pub(crate) fn preview_content(config: &ProjectConfig) -> String {
     render_preview(config, config.release.as_ref())
 }
@@ -77,10 +74,9 @@ pub(crate) fn release_signer_content() -> String {
     crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
 }
 
-/// A reviewed workflow body, declared verbatim, rendered through the static
-/// template machinery: source pins, action pins, and the Mr. Boxington command
-/// contract are refreshed from the generator's reviewed tables at generation
-/// time, so the declared body stays revision-independent.
+/// A `static-workflow` row names an imported workflow body, which is not a
+/// generation input: the primitive stays registered so the declaration fails
+/// with explicit guidance instead of an unknown-primitive error.
 pub(crate) struct StaticWorkflow;
 
 impl Primitive for StaticWorkflow {
@@ -1748,15 +1744,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "d486cc1d09476de165cdf5dc6e5a230d64e641e3d172761c5c6cccc463cd8cf1",
+                "8cbbf232fb8ac812fe96d6cefd7e899d36242863f3b66308a7f48d4688936ccd",
             ),
             (
                 "preview.yml",
-                "a718b11f13306b36b08b81ca667c039588f55b090b3e66dc7cd3fa2762f75335",
+                "2bab1838bde564c65cae3ff586e1080d8b6613d6f189bbed16548eeb35046b22",
             ),
             (
                 "maintenance.yml",
-                "d6950f87dd2c2769fa72dbe42f0fb084d9354d900d9b0eaedffe528fd282ed71",
+                "f9041ceee42ed9d07984da77e7d64b6cb4b4014d76c44f0216eb5477797f92a6",
             ),
             (
                 "ci-release-package-signer.yml",
