@@ -3,12 +3,23 @@ name: "Documentation · Documentation"
 on:
   workflow_call:
     inputs:
+      unit:
+        required: true
+        type: string
       scope:
         required: true
         type: string
       selection-artifact:
         required: true
         type: string
+      base-sha:
+        required: false
+        type: string
+        default: ""
+      head-sha:
+        required: false
+        type: string
+        default: ""
 
 env:
   RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -16,6 +27,7 @@ env:
 jobs:
   github:
     name: GitHub
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -26,12 +38,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-984396e67ef674189cf15f4e5bff3c8785aa3180-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-2a61afb8653fac83f443a35f6e13d5d1875327cd-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: 984396e67ef674189cf15f4e5bff3c8785aa3180
+          EXPECTED_REVISION: 2a61afb8653fac83f443a35f6e13d5d1875327cd
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -56,16 +68,16 @@ jobs:
         with:
           path: |
             ~/.npm
-          key: ci-${{ runner.os }}-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
+          key: ci-${{ runner.os }}-docs-${{ hashFiles('bun.lock', 'package-lock.json') }}
           restore-keys: |
             ci-${{ runner.os }}-docs-
       - name: Run Documentation checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: docs
+          CI_UNIT_ID: ${{ inputs.unit }}
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base-sha || github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.head-sha || github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -74,7 +86,7 @@ jobs:
           set -o pipefail
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
-          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
           echo "VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           exit $rc
       - name: Report phase timings and cache outcomes
@@ -193,11 +205,11 @@ jobs:
         with:
           path: |
             ~/.npm
-          key: ci-${{ runner.os }}-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
+          key: ci-${{ runner.os }}-docs-${{ hashFiles('bun.lock', 'package-lock.json') }}
 
   velnor:
     name: Velnor
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:
@@ -216,16 +228,16 @@ jobs:
         with:
           path: |
             ~/.npm
-          key: ci-${{ runner.os }}-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
+          key: ci-${{ runner.os }}-docs-${{ hashFiles('bun.lock', 'package-lock.json') }}
           restore-keys: |
             ci-${{ runner.os }}-docs-
       - name: Run Documentation checks
         env:
           CI_SCOPE: ${{ inputs.scope }}
-          CI_UNIT_ID: docs
+          CI_UNIT_ID: ${{ inputs.unit }}
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ inputs.base-sha || github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ inputs.head-sha || github.sha }}
           VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
@@ -234,7 +246,7 @@ jobs:
           set -o pipefail
           echo "VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           rc=0
-          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit docs 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
           echo "VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           exit $rc
       - name: Report phase timings and cache outcomes
