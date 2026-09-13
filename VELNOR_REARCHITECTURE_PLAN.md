@@ -6380,3 +6380,39 @@ Gates observed in this worktree: `cargo fmt --all -- --check` clean;
 runner lib with `test-support` 1897 passed, 0 failed, 1 ignored. (One
 parallel-only flake in untouched `checkout_emits_the_four_bench_phase_spans`,
 passing alone, matching the §111 note.)
+
+## 115. R0-705-corr: ignored-umbrella status conversion, cancelled gate, umbrella row flag — 2026-09-13
+
+Fast-follow to #705 (branch `r0-705-corr` from `origin/main` at
+`91defe66`). Closes the §113 out-of-scope note: the `steps` context
+stays job-global, so after an ignored umbrella the inner `Failure`
+entries poisoned the job-scope scans and a later `failure()` step
+wrongly ran.
+
+- **Converted inner ids.** `pop_composite` now returns the inner step
+  ids recorded in the popped scope frame; at an ignored `End` they are
+  marked converted (`converted_conclusions`), and `job_status` /
+  `status_scope_has_failure` skip converted ids. Inner `steps.<id>`
+  reads stay raw (upstream converts the composite conclusion only),
+  matching upstream `job.status` deriving from top-level step results
+  only. The defensive flush converts still-open scopes the same way.
+- **Cancelled gate.** `umbrella_result` takes the cancelled state and
+  never converts under cancellation (upstream completes a killed step
+  `Canceled`; `ApplyContinueOnError` converts `Failed` only). The
+  `results`-range conversion keys off the gated flag, so it follows.
+- **Umbrella row flag.** `absorb`/`merge_nested` no longer OR inner
+  ignored flags into the frame; the timeline row flag is assigned from
+  the umbrella conversion at `End`. Previously an umbrella that still
+  fails (no own `continue-on-error`) reported conclusion success
+  whenever any inner step was ignored.
+
+Tests: 3 new (ignored umbrella + `failure()`/`success()`/`job.status`
+readers with raw `steps.boom` read, cancelled-gate unit, row-flag
+fix). Efficacy proven by mutation: without the conversion call the
+status test fails with `failure()` running; with the flag OR restored
+the row test fails.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --locked` clean; strict clippy clean on runner
+(`--all-targets --locked --features test-support -D warnings`); serial
+runner lib with `test-support` 1925 passed, 0 failed, 1 ignored.
