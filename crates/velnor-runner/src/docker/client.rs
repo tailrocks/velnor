@@ -419,9 +419,21 @@ pub(crate) fn parse_id_list(stdout: &str) -> Vec<String> {
     ids
 }
 
+/// The port order both transports agree on: lexicographic by container
+/// port, then host address.
+pub(crate) fn sort_port_mappings(mappings: &mut [PortMapping]) {
+    mappings.sort_by(|a, b| {
+        (&a.container_port, &a.host_address).cmp(&(&b.container_port, &b.host_address))
+    });
+}
+
 /// Parse `docker port` output (`container-port/proto -> host:port`) into
 /// mappings. Malformed lines are skipped: a service with one unparsable
-/// mapping still reports the rest.
+/// mapping still reports the rest. Sorted in the shared order: the daemon
+/// prints its own numeric order (Engine 29.4.0 prints 9090 before 10000,
+/// proven live) while the API projection iterates JSON maps sorted, so an
+/// unsorted parse would disagree with the API leg and `service_context`'s
+/// first-wins pick per container port could differ by transport.
 pub(crate) fn parse_port_mappings(text: &str) -> Vec<PortMapping> {
     let mut mappings = Vec::new();
     for line in text.lines() {
@@ -436,6 +448,7 @@ pub(crate) fn parse_port_mappings(text: &str) -> Vec<PortMapping> {
             host_address: address.to_string(),
         });
     }
+    sort_port_mappings(&mut mappings);
     mappings
 }
 
@@ -1268,7 +1281,8 @@ impl<'r> Docker<'r> {
     /// metrics carry the same class the policy always assigned this query.
     ///
     /// Returns the API value on success. On ANY API failure — transport,
-    /// timeout, status, framing, JSON, schema — records the fallback with
+    /// timeout, status, framing, JSON, schema, dead runtime, or a job
+    /// cancellation winning the socket-wait race — records the fallback with
     /// telemetry, logs the reason at `warn`, and returns `None` so the
     /// caller runs its historical CLI query unchanged. Engine errors never
     /// surface: the CLI stays the arbiter whenever the API does not
@@ -1282,7 +1296,8 @@ impl<'r> Docker<'r> {
         run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
     ) -> Option<T>
     where
-        F: std::future::Future<Output = Result<T, super::engine::EngineError>>,
+        F: std::future::Future<Output = Result<T, super::engine::EngineError>> + Send,
+        T: Send,
     {
         if !super::engine::engine_api_enabled() {
             return None;
@@ -1307,7 +1322,26 @@ impl<'r> Docker<'r> {
         let budget = super::engine::api_budget(class_deadline);
         let engine = super::engine::EngineClient::new(super::engine::socket_path());
         let started = std::time::Instant::now();
-        match super::engine::block_on_engine(run(engine, budget)) {
+        let attempt =
+            super::engine::block_on_engine(super::engine::cancel_race(run(engine, budget)));
+        let result = match attempt {
+            None => Err(super::engine::EngineError::fault(
+                op,
+                (
+                    super::engine::EngineFaultKind::Runtime,
+                    "engine runtime unavailable".to_string(),
+                ),
+            )),
+            Some(None) => Err(super::engine::EngineError::fault(
+                op,
+                (
+                    super::engine::EngineFaultKind::Cancelled,
+                    "job cancelled during engine api wait".to_string(),
+                ),
+            )),
+            Some(Some(result)) => result,
+        };
+        match result {
             Ok(value) => {
                 crate::docker::observe_api(op, started.elapsed());
                 Some(value)
@@ -1453,9 +1487,11 @@ impl<'r> Docker<'r> {
 mod tests {
     use super::*;
     use crate::docker::engine::mock::json_response;
-    use crate::docker::engine::{EngineTestGuard, MockEngine};
+    use crate::docker::engine::{EngineTestGuard, FailRuntimeBuildGuard, MockEngine};
     use crate::docker::{begin_job, snapshot};
+    use crate::execution::cancel::{set_active, CancelReason, JobCancellation};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.
@@ -2091,6 +2127,181 @@ Total:\t\t6.054MB
         assert!(!running);
         assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
         assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn runtime_build_failure_falls_back_to_one_cli_call() {
+        // The mock is healthy and would serve: the dead runtime alone must
+        // route to the CLI, never panic the calling thread.
+        let mock = routed_mock(1);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _fail = FailRuntimeBuildGuard::inject();
+        let _scope = begin_job("seq-fallback-runtime");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_readiness("svc").expect("fallback serves")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_context_serves_api_without_panicking() {
+        // `block_in_place` panics on this flavor; the facade drives the
+        // helper thread instead and serves from the API with no CLI call.
+        let mock = routed_mock(1);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-current-thread");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let id = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_id("svc")
+                .expect("api serves on current-thread")
+        };
+        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot().api_calls, 1);
+    }
+
+    /// A mock that answers one inspect after `delay`: the API leg would
+    /// ride the wait, so any fast CLI answer proves the race abandoned it.
+    fn slow_mock(delay: Duration) -> MockEngine {
+        MockEngine::serve(
+            move |_| {
+                std::thread::sleep(delay);
+                json_response(ROUTED_INSPECT)
+            },
+            1,
+        )
+    }
+
+    #[test]
+    fn cancelled_before_start_skips_the_socket_wait() {
+        let mock = slow_mock(Duration::from_millis(500));
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        token.request(CancelReason::ServerRequested);
+        let _active = set_active(token);
+        let _scope = begin_job("seq-cancel-before");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let started = Instant::now();
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_readiness("svc")
+                .expect("cancelled api falls back")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a cancelled wait must not ride the 500ms socket delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancelled_mid_flight_abandons_the_socket_wait() {
+        let mock = slow_mock(Duration::from_millis(500));
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        let _active = set_active(token.clone());
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            token.request(CancelReason::ServerRequested);
+        });
+        let _scope = begin_job("seq-cancel-midflight");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let started = Instant::now();
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_readiness("svc")
+                .expect("cancelled api falls back")
+        };
+        canceller.join().expect("canceller joins");
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a mid-flight cancel must abandon the 500ms socket delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Live Engine latency bench: API vs CLI on the daemon-cgroup query,
+    /// which needs no container and runs on any daemon host. Ignored: it
+    /// needs a live `/var/run/docker.sock` and spawns real `docker`
+    /// children. Run it with:
+    /// `cargo test -p velnor-runner --lib live_engine_latency_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_engine_latency_bench() {
+        use std::os::unix::net::UnixStream;
+        const ITERATIONS: usize = 25;
+        let socket = super::super::engine::socket_path();
+        if UnixStream::connect(&socket).is_err() {
+            println!(
+                "live_engine_latency_bench: SKIP, no live daemon at {}",
+                socket.display()
+            );
+            return;
+        }
+        fn summarize(name: &str, mut samples: Vec<Duration>) {
+            samples.sort();
+            let percentile = |p: usize| samples[(samples.len() * p / 100).min(samples.len() - 1)];
+            println!(
+                "live_engine_latency_bench: {name} n={} p50={:?} p95={:?} min={:?} max={:?}",
+                samples.len(),
+                percentile(50),
+                percentile(95),
+                samples[0],
+                samples[samples.len() - 1],
+            );
+        }
+        let api: Vec<(Duration, CgroupDriver)> = {
+            let _guard = EngineTestGuard::serve(socket, None);
+            (0..ITERATIONS)
+                .map(|_| {
+                    let started = Instant::now();
+                    let value = Docker::host()
+                        .daemon_cgroup()
+                        .expect("live api serves daemon cgroup");
+                    (started.elapsed(), value)
+                })
+                .collect()
+        };
+        let cli: Vec<(Duration, CgroupDriver)> = (0..ITERATIONS)
+            .map(|_| {
+                let started = Instant::now();
+                let value = Docker::host()
+                    .daemon_cgroup()
+                    .expect("live cli serves daemon cgroup");
+                (started.elapsed(), value)
+            })
+            .collect();
+        for (iteration, ((_, api_value), (_, cli_value))) in api.iter().zip(cli.iter()).enumerate()
+        {
+            assert_eq!(
+                api_value, cli_value,
+                "live transports disagree on iteration {iteration}"
+            );
+        }
+        summarize(
+            "api ",
+            api.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+        summarize(
+            "cli ",
+            cli.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
     }
 
     #[test]
