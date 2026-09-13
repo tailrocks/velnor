@@ -36,7 +36,7 @@ fn scratch(label: &str) -> std::path::PathBuf {
 }
 
 /// (a) A drain marker latched through one handle is visible to a second
-/// handle and to the lock-free reader, and the second handle's reducer
+/// handle and to the zero-timeout (non-blocking) reader, and the second handle's reducer
 /// rejects fresh permits and acquisitions against it.
 #[test]
 fn drain_marker_is_visible_across_handles_and_gates_the_second_writer() {
