@@ -438,6 +438,20 @@ fn job_container_options(job: &AgentJobRequestMessage, trust_scope: &str) -> Vec
     )
 }
 
+/// Names of the `services:` containers a job owns, for cancellation fan-out.
+///
+/// Same authority as the container spec below: a name registered here is the
+/// name the spec starts, so the ladder signals a real container.
+pub(crate) fn service_container_names(
+    job: &AgentJobRequestMessage,
+    trust_scope: &str,
+) -> Vec<String> {
+    service_containers(job, trust_scope)
+        .into_iter()
+        .map(|service| service.name)
+        .collect()
+}
+
 fn service_containers(
     job: &AgentJobRequestMessage,
     trust_scope: &str,

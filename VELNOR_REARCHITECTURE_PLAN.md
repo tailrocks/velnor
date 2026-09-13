@@ -6218,3 +6218,60 @@ success); `steps` context is job-global rather than composite-scoped;
 `::stop-commands::`/resume lines stay consumed instead of echoing
 unconditionally; live-streamed log lines are raw (ungated `::debug::`
 in the live mirror only — the persisted log is gated).
+
+## 112. R0-secc: checkout symlink containment + concurrency F1–F3 (service ladder, job wall clock, bounded terminal uploads) — 2026-09-13
+
+Base `origin/main` at `f841ced2` (post-#699). Four small verifier FAILs, one
+fix each:
+
+- **Security — checkout destination symlink traversal.** `checkout_path`
+  rejects absolute paths and `..` lexically, but the destination is created
+  and written host-side (`create_dir_all`, git, the `.git/config`
+  credential write), which all follow symlinks: a second checkout whose
+  `path:` traverses a link an earlier checkout's repo content planted
+  (`first/link/escape`) is lexically clean yet lands outside the workspace.
+  `execute_checkout_with_mirror` now takes the workspace root and refuses,
+  before any side effect, any destination whose nearest existing ancestor
+  canonicalizes outside it — the pages/artifact canonicalize-plus-containment
+  pattern from `executor.rs`. The check runs at execution time because plan
+  time cannot see links that do not exist yet. Two executor fixtures whose
+  plan destination sat beside (not under) the container workspace were
+  aligned with the production invariant (`runner.rs` joins plans under the
+  same root the spec carries).
+- **F1 — service containers never ladder-terminated.**
+  `ContainerRole::Service` terminates at `Forced` but nothing registered
+  Service targets. The broker-cancellation poller now registers the job's
+  services (names from `github_adapter::service_container_names`, the same
+  authority as the spec) alongside the sidecar and job container via the new
+  `register_owned_containers` helper; guards live in the poller task, so the
+  set is bounded by the job's own service list and deregisters on drop.
+- **F2 — job `timeout-minutes` never enforced.**
+  `CancelReason::JobTimeout` had no producer. New `arm_job_timeout`
+  enforcer in `execution/cancel.rs`: one watchdog thread per armed job
+  requests `JobTimeout` when the collective wall clock elapses, disarms on
+  drop (no join, so async teardown never blocks). Armed in
+  `handle_job_request` on the live job token with GitHub's default 360 min
+  (`DEFAULT_JOB_TIMEOUT`), marking the job canceled exactly as a server
+  message would.
+- **F3 — unbounded Azure blob PUT on the terminal completion path.**
+  `TwirpResultsClient` built its HTTP client with no timeout, and
+  `complete_run_service_job` awaited both log uploads before `CompleteJob`
+  with no bound while lease renewal continued. The client now carries a
+  30s per-request bound (`new_with_timeout` keeps tests fast), and the two
+  uploads race under a 180s outer bound (`upload_terminal_logs_for`, in the
+  `publish_with_timeout` shape) that exceeds the artifact leg's own 120s
+  grace floor.
+
+Tests: 6 new (planted-symlink refusal, owned-container registration +
+no-leak, enforcer fires `JobTimeout`, enforcer disarms on drop, stalled PUT
+fails fast, terminal race outward-bounded). Efficacy proven by mutation:
+with the containment call stubbed the symlink test fails; with the client
+`.timeout` removed the stalled PUT rides the full 30s delay and its test
+fails.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --locked` clean; strict clippy clean on runner
+(`--all-targets --locked --features test-support -D warnings`); serial
+runner lib with `test-support` 1897 passed, 0 failed, 1 ignored. (One
+parallel-only flake in untouched `checkout_emits_the_four_bench_phase_spans`,
+passing alone, matching the §111 note.)

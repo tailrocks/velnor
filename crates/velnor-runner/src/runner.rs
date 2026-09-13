@@ -88,6 +88,12 @@ const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// one publish: the feed drops its connection and reconnects on the next
 /// send, and stateless HTTP publishes simply retry on the next event.
 const STEP_PUBLISH_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+/// Outer bound for the two terminal log uploads raced before `CompleteJob`
+/// (Results blob + per-job artifact fallback). Exceeds the artifact leg's
+/// own 120s-grace floor so a healthy-but-slow upload still lands, while a
+/// stalled backend can never pin the job `in_progress` — the lease-renewal
+/// loop keeps running while completion waits.
+const COMPLETION_LOG_UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 /// Memory ceiling for the streamed-step-log mirror (cancel-path partial
 /// logs): evict oldest first once either bound is exceeded. A single record
 /// larger than the byte cap is still retained alone — the same record is
@@ -6549,10 +6555,27 @@ async fn handle_job_request(
             JobCancellationWatch {
                 job_id: job.job_id.clone(),
                 job_container_name: job_container_name(&job),
+                service_container_names: crate::github_adapter::service_container_names(
+                    &job,
+                    &effective_trust_scope,
+                ),
                 canceled: canceled.clone(),
                 cancellation: job_cancellation.clone(),
             },
             broker_cancellation.stored,
+        );
+        // Job wall clock: upstream enforces `timeout-minutes` on the server,
+        // but a job whose cancellation message never arrives must still die.
+        // The enforcer requests `JobTimeout` on the same token the poller
+        // drives and marks the job canceled, exactly as a server message
+        // would. Disarms when the job scope ends.
+        let _job_timeout = crate::execution::cancel::arm_job_timeout(
+            &job_cancellation,
+            crate::execution::cancel::DEFAULT_JOB_TIMEOUT,
+            {
+                let canceled = canceled.clone();
+                move || canceled.store(true, Ordering::SeqCst)
+            },
         );
 
         // Disk peak reservation is taken only for an acquired job (not while
@@ -7556,8 +7579,47 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
 struct JobCancellationWatch {
     job_id: String,
     job_container_name: String,
+    service_container_names: Vec<String>,
     canceled: Arc<AtomicBool>,
     cancellation: crate::execution::cancel::JobCancellation,
+}
+
+/// Register every container the job owns — the Docker-action sidecar, the job
+/// container, and each `services:` container — as a ladder target, so
+/// cancellation terminates them rather than a separate `docker kill` racing
+/// the ladder. The guards live as long as the poller task holds them: bounded
+/// by the job's own service list, deregistered on drop, never leaked.
+fn register_owned_containers(
+    cancellation: &crate::execution::cancel::JobCancellation,
+    job_container_name: &str,
+    service_container_names: &[String],
+) -> Vec<crate::execution::cancel::TargetRegistration> {
+    // The sidecar is the current step's own work and dies on request, while
+    // the job container — and the services the post steps may still probe —
+    // wait for escalation (`terminate_at`, sparing them until `Forced` so
+    // `always()`/`cancelled()` post steps still run against live containers).
+    let mut targets = Vec::with_capacity(service_container_names.len() + 2);
+    targets.push(
+        cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+            name: format!("velnor-docker-action-{job_container_name}"),
+            role: crate::execution::cancel::ContainerRole::DockerAction,
+        }),
+    );
+    targets.push(
+        cancellation.register(crate::execution::cancel::TerminationTarget::Container {
+            name: job_container_name.to_string(),
+            role: crate::execution::cancel::ContainerRole::Job,
+        }),
+    );
+    for name in service_container_names {
+        targets.push(cancellation.register(
+            crate::execution::cancel::TerminationTarget::Container {
+                name: name.clone(),
+                role: crate::execution::cancel::ContainerRole::Service,
+            },
+        ));
+    }
+    targets
 }
 
 fn start_broker_cancellation_poll(
@@ -7570,6 +7632,7 @@ fn start_broker_cancellation_poll(
     let JobCancellationWatch {
         job_id,
         job_container_name,
+        service_container_names,
         canceled,
         cancellation,
     } = watch;
@@ -7580,20 +7643,9 @@ fn start_broker_cancellation_poll(
         // The eager kill this replaces ran on the line after `request()`, which
         // SIGKILLed the job container at *request* level — defeating the whole
         // point of `terminate_at()` sparing it until `Forced` so `always()` and
-        // `cancelled()` post steps can still exec into a live container. Docker
-        // actions run in a sibling sidecar, so both names are registered: the
-        // sidecar first, because it is the current step's own work and dies on
-        // request, while the job container waits for escalation.
-        let _sidecar_target =
-            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
-                name: format!("velnor-docker-action-{job_container_name}"),
-                role: crate::execution::cancel::ContainerRole::DockerAction,
-            });
-        let _job_container_target =
-            cancellation.register(crate::execution::cancel::TerminationTarget::Container {
-                name: job_container_name.clone(),
-                role: crate::execution::cancel::ContainerRole::Job,
-            });
+        // `cancelled()` post steps can still exec into a live container.
+        let _owned_containers =
+            register_owned_containers(&cancellation, &job_container_name, &service_container_names);
         let mut broker = broker;
         let mut error_streak: u32 = 0;
         loop {
@@ -9335,6 +9387,7 @@ fn execute_script_job_inner(
                 plan,
                 &mut checkout_trace,
                 Some(&git_mirror_store),
+                &workspace,
             )
         };
         checkout_duration = checkout_duration.saturating_add(checkout_started.elapsed());
@@ -11675,6 +11728,34 @@ fn results_client_for_job(
         .and_then(|r| r.ok())
 }
 
+/// Race the two terminal log uploads (Results blob + per-job artifact
+/// fallback) under one outer bound, in the `publish_with_timeout` shape:
+/// a stalled backend fails the race, never wedges terminal completion.
+async fn upload_terminal_logs(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
+    upload_terminal_logs_for(COMPLETION_LOG_UPLOAD_TIMEOUT, job, step_logs).await;
+}
+
+async fn upload_terminal_logs_for(
+    timeout: Duration,
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+) {
+    if tokio::time::timeout(timeout, async {
+        tokio::join!(
+            upload_results_job_log(job, step_logs),
+            upload_job_log_artifact(job, step_logs),
+        );
+    })
+    .await
+    .is_err()
+    {
+        eprintln!(
+            "Best-effort terminal log uploads timed out after {}s; continuing to CompleteJob",
+            timeout.as_secs()
+        );
+    }
+}
+
 /// Upload the combined job log to Results Service so GitHub's native job-log
 /// download endpoint has the same backing blob the official runner publishes.
 async fn upload_results_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
@@ -11913,11 +11994,9 @@ async fn complete_run_service_job(
     // blob used by official runners, then keep a per-job artifact fallback.
     // The two independent uploads used to run serially, needlessly adding both
     // network tails to terminal completion. Keep both before CompleteJob, but
-    // overlap them so completion waits only for the slower upload.
-    tokio::join!(
-        upload_results_job_log(job, &step_logs),
-        upload_job_log_artifact(job, &step_logs),
-    );
+    // overlap them so completion waits only for the slower upload — and bound
+    // the race, so a stalled backend cannot hold CompleteJob open.
+    upload_terminal_logs(job, &step_logs).await;
     // Annotations ride the durable CompleteJob call in two places (per-step
     // results and the job-level list); both are built through the one Masker
     // so neither can publish a secret in cleartext.
@@ -19829,6 +19908,30 @@ jobs:
         assert!(!is_job_cancellation_for(&message, "job-123"));
     }
 
+    /// `ContainerRole::Service` terminates at `Forced`, but nothing
+    /// registered service targets, so a cancelled job's services never met
+    /// the ladder. Owned-container registration must cover them — and drop
+    /// every registration with the guard, so the registry cannot leak.
+    #[test]
+    fn owned_container_registration_covers_services_without_leaking() {
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let guards = register_owned_containers(
+            &token,
+            "velnor-job-1",
+            &["velnor-service-1-postgres".to_string()],
+        );
+        assert_eq!(guards.len(), 3);
+        let keys = token.target_keys();
+        assert!(keys.contains(&"container:velnor-docker-action-velnor-job-1".to_string()));
+        assert!(keys.contains(&"container:velnor-job-1".to_string()));
+        assert!(keys.contains(&"container:velnor-service-1-postgres".to_string()));
+        drop(guards);
+        assert!(
+            token.target_keys().is_empty(),
+            "registrations must deregister on drop"
+        );
+    }
+
     #[test]
     fn parses_broker_migration_message_url() {
         let message = TaskAgentMessage {
@@ -22848,6 +22951,93 @@ runs:
             })))
             .mount(server)
             .await;
+    }
+
+    #[cfg(feature = "test-support")]
+    async fn mount_delayed_results_job_log_endpoint(
+        server: &wiremock::MockServer,
+        put_delay: Duration,
+    ) {
+        use wiremock::{matchers::method, Mock, ResponseTemplate};
+
+        let signed_url = format!("{}/blob/job-log", server.uri());
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(
+                "/twirp/results.services.receiver.Receiver/GetJobLogsSignedBlobURL",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "logs_url": signed_url,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path("/blob/job-log"))
+            .respond_with(ResponseTemplate::new(201).set_delay(put_delay))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(
+                "/twirp/results.services.receiver.Receiver/CreateJobLogsMetadata",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// The Azure blob PUT had no timeout: a stalled endpoint wedged terminal
+    /// completion, which awaits the uploads. Each attempt must fail fast
+    /// under the client's per-request bound instead of riding out the stall.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn stalled_blob_put_fails_fast_under_the_per_request_timeout() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = wiremock::MockServer::start().await;
+        mount_delayed_results_job_log_endpoint(&server, Duration::from_secs(30)).await;
+
+        let job = results_job(&server.uri());
+        let client = crate::protocol::TwirpResultsClient::new_with_timeout(
+            server.uri(),
+            "token",
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let step_logs = vec![partial_step_log("build", &["output"], "")];
+        let started = std::time::Instant::now();
+        let error = upload_results_job_log_with_client(&client, &job, &step_logs)
+            .await
+            .expect_err("a stalled blob PUT must fail, not hang");
+        assert!(
+            format!("{error:#}").contains("failed after 3 attempts"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "per-request bound did not cut the stalled PUT short"
+        );
+    }
+
+    /// `complete_run_service_job` awaits both terminal log uploads before
+    /// `CompleteJob` while lease renewal continues. The race must resolve
+    /// under its outer bound even when one leg stalls indefinitely.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn terminal_log_upload_race_is_outward_bounded() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = wiremock::MockServer::start().await;
+        mount_delayed_results_job_log_endpoint(&server, Duration::from_secs(30)).await;
+
+        let job = results_job(&server.uri());
+        let step_logs = vec![partial_step_log("build", &["output"], "")];
+        let started = std::time::Instant::now();
+        upload_terminal_logs_for(Duration::from_millis(200), &job, &step_logs).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the terminal upload race outlived its outer bound"
+        );
     }
 
     #[cfg(feature = "test-support")]

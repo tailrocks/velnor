@@ -120,6 +120,11 @@ pub const MIN_CANCEL_GRACE: Duration = Duration::from_secs(60);
 /// …and hard kills 15s before it expires
 /// (`src/Runner.Listener/JobDispatcher.cs:1285`).
 pub const HARD_KILL_LEAD: Duration = Duration::from_secs(15);
+/// GitHub's default `timeout-minutes` (360): the collective job wall clock.
+/// Upstream enforces job timeouts on the server and delivers them as ordinary
+/// cancellations; the [`arm_job_timeout`] enforcer below is the local backstop
+/// for when that message never arrives.
+pub const DEFAULT_JOB_TIMEOUT: Duration = Duration::from_secs(360 * 60);
 
 /// Effective forced-kill deadline for a server-supplied cancel timeout:
 /// `max(timeout, 60s) - 15s` (`src/Runner.Listener/JobDispatcher.cs:1280-1285`).
@@ -1156,6 +1161,63 @@ impl JobCancellation {
     }
 }
 
+/// Wall-clock enforcer: requests [`CancelReason::JobTimeout`] on the job's
+/// token when `timeout` elapses. Disarms on drop, so a finished job never
+/// fires late. One watchdog thread per armed job; it exits on disarm or on
+/// firing, so an armed-then-dropped enforcer leaves nothing behind.
+pub struct JobTimeoutEnforcer {
+    disarm: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Drop for JobTimeoutEnforcer {
+    fn drop(&mut self) {
+        // The watchdog exits on its own once disarmed; no join, so dropping
+        // from an async worker never blocks job teardown.
+        if let Some(disarm) = self.disarm.take() {
+            let _ = disarm.send(());
+        }
+    }
+}
+
+/// Arm the job wall clock: `on_timeout` runs and [`CancelReason::JobTimeout`]
+/// is requested when `timeout` elapses without the returned guard being
+/// dropped. `request` is idempotent, so firing into an already-cancelled job
+/// keeps the first reason.
+pub fn arm_job_timeout<F>(
+    token: &JobCancellation,
+    timeout: Duration,
+    on_timeout: F,
+) -> JobTimeoutEnforcer
+where
+    F: FnOnce() + Send + 'static,
+{
+    let (disarm_tx, disarm_rx) = std::sync::mpsc::channel::<()>();
+    let token = token.clone();
+    let spawned = std::thread::Builder::new()
+        .name("velnor-job-timeout".into())
+        .spawn(move || {
+            if disarm_rx.recv_timeout(timeout).is_err() {
+                // Elapsed, not disarmed.
+                eprintln!("Job exceeded its timeout-minutes wall clock; requesting cancellation.");
+                on_timeout();
+                token.request(CancelReason::JobTimeout);
+            }
+        });
+    match spawned {
+        Ok(_) => JobTimeoutEnforcer {
+            disarm: Some(disarm_tx),
+        },
+        Err(error) => {
+            // A host that cannot spawn a thread cannot enforce the wall
+            // clock; say so loudly rather than pretending it is armed.
+            eprintln!(
+                "job-timeout watchdog thread could not be spawned ({error}); the job wall clock is not enforced"
+            );
+            JobTimeoutEnforcer { disarm: None }
+        }
+    }
+}
+
 fn recorded_outcome(target: &TerminationTarget, level: CancelLevel) -> TerminationOutcome {
     let mut outcome = TerminationOutcome {
         target: target.key(),
@@ -1755,5 +1817,36 @@ mod tests {
             assert!(token.is_cancelled());
         }
         assert!(active().is_none());
+    }
+
+    /// `CancelReason::JobTimeout` had no producer: a job whose server
+    /// cancellation never arrived ran forever. The wall-clock enforcer must
+    /// request it when the collective job time exceeds the limit.
+    #[test]
+    fn job_timeout_enforcer_requests_job_timeout_when_the_wall_clock_elapses() {
+        let token = JobCancellation::recording(None);
+        let fired = Arc::new(AtomicBool::new(false));
+        let _enforcer = arm_job_timeout(&token, Duration::from_millis(20), {
+            let fired = Arc::clone(&fired);
+            move || fired.store(true, Ordering::SeqCst)
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !token.is_cancelled() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(token.reason(), Some(CancelReason::JobTimeout));
+        assert!(fired.load(Ordering::SeqCst));
+    }
+
+    /// A finished job disarms the enforcer by dropping it; the wall clock
+    /// must never fire late into whatever runs next on the host.
+    #[test]
+    fn job_timeout_enforcer_disarms_on_drop() {
+        let token = JobCancellation::recording(None);
+        {
+            let _enforcer = arm_job_timeout(&token, Duration::from_millis(50), || {});
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!token.is_cancelled());
     }
 }
