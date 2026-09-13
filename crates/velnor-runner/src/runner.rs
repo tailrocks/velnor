@@ -4291,6 +4291,13 @@ async fn delete_runner_keeping_busy_identity(
             }
             Ok(())
         }
+        // Busy-conflict policy (GOAL 31): matched on the typed conflict,
+        // never on response text. DELETE is idempotent, so after completing
+        // the recorded in-flight job the supervisor retries the DELETE
+        // exactly once; a repeated conflict quarantines the runner (local
+        // identity preserved) instead of hammering GitHub or churning
+        // runner IDs. Bound: one retry. Deadline: each attempt carries the
+        // 30s GitHub HTTP timeout; quarantine never blocks the slot.
         Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
             if let Some(dir) = slot_dir {
                 let stored = config::load(dir)
