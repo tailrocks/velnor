@@ -2281,7 +2281,12 @@ fn validate_guest_seed_job(job: &str, steps: &[(String, String)]) -> Result<(), 
     let image = &steps[indexes[4]].1;
     let collect = &steps[indexes[5]].1;
     let save = &steps[indexes[6]].1;
+    let restore_key = validate_guest_seed_restore_key(job, restore)?;
+    validate_guest_seed_reuse_gates(job, reuse, kernel, image)?;
+    validate_guest_seed_trusted_save(job, collect, save, &restore_key)
+}
 
+fn validate_guest_seed_restore_key(job: &str, restore: &str) -> Result<String, GeneratorError> {
     let restore_key = step_scalar(restore, "key").ok_or_else(|| {
         GeneratorError::usage(format!(
             "static workflow job `{job}` restores a guest seed without a recipe-identity key"
@@ -2307,6 +2312,15 @@ fn validate_guest_seed_job(job: &str, steps: &[(String, String)]) -> Result<(), 
             )));
         }
     }
+    Ok(restore_key)
+}
+
+fn validate_guest_seed_reuse_gates(
+    job: &str,
+    reuse: &str,
+    kernel: &str,
+    image: &str,
+) -> Result<(), GeneratorError> {
     if !reuse.contains("id: guest-seed-reuse") {
         return Err(GeneratorError::usage(format!(
             "static workflow job `{job}` reuses a guest seed without `id: guest-seed-reuse`"
@@ -2325,12 +2339,21 @@ fn validate_guest_seed_job(job: &str, steps: &[(String, String)]) -> Result<(), 
              failure"
         )));
     }
+    Ok(())
+}
+
+fn validate_guest_seed_trusted_save(
+    job: &str,
+    collect: &str,
+    save: &str,
+    restore_key: &str,
+) -> Result<(), GeneratorError> {
     let trusted_miss = "github.event_name == 'push' && github.ref == 'refs/heads/'";
     // Collect and save share the trusted exact-miss gate so a prefix restore
     // can mint the current recipe identity while an exact hit writes nothing.
     for (name, body) in [
-        ("Collect verified guest seed", collect.as_str()),
-        ("Save guest seed", save.as_str()),
+        ("Collect verified guest seed", collect),
+        ("Save guest seed", save),
     ] {
         if !body.contains("github.event_name == 'push'")
             || !body.contains("github.ref == 'refs/heads/")
