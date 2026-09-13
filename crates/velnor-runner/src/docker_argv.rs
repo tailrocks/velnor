@@ -486,6 +486,20 @@ impl DockerCommand {
         self
     }
 
+    /// The recorded variables in declaration order, for the Engine-API exec
+    /// path: `exec_create` takes the same ordered list the CLI leg splits
+    /// across `--env-file` and bare `-e` forwards, so last-wins override
+    /// order is identical on both transports without writing an env file.
+    pub fn recorded_env(&self) -> Vec<(String, String)> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Env(name, value) => Some((name.clone(), value.clone())),
+                Slot::Arg(_) => None,
+            })
+            .collect()
+    }
+
     pub fn envs<'a, I>(&mut self, entries: I) -> &mut Self
     where
         I: IntoIterator<Item = (&'a str, &'a str)>,
