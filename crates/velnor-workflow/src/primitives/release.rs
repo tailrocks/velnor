@@ -1065,9 +1065,11 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 "#;
 
 /// Maintenance is GitHub cache-API hygiene, not a Velnor job. Both jobs stay
-/// on the hosted image and always install `setup-velnor-workflow` at HEAD so
-/// default-branch dispatch can source-bootstrap, even when CI lanes select
-/// `runners = "velnor"`.
+/// on the hosted image even when CI lanes select `runners = "velnor"`. `uses:`
+/// stays on the SOURCE_REV pin (GitHub Actions rejects expressions in `uses:`
+/// versions). `rev:` is `${{ github.sha }}` so default-branch dispatch installs
+/// HEAD through an action yaml that includes CONTROLLED_BOOTSTRAP for
+/// `workflow_dispatch`.
 fn render_maintenance(config: &ProjectConfig) -> String {
     MAINTENANCE_WORKFLOW
         .replace(
@@ -1156,25 +1158,28 @@ mod tests {
             workflow.contains("setup-velnor-workflow"),
             "maintenance must install the hosted workflow runtime: {workflow}"
         );
-        let head_rev = github_expression("github.sha");
-        assert!(
-            workflow.contains(&format!(
-                "uses: {}@{head_rev}",
-                crate::VELNOR_WORKFLOW_SETUP_ACTION
-            )),
-            "maintenance must resolve setup at HEAD: {workflow}"
+        assert_eq!(
+            crate::VELNOR_WORKFLOW_SOURCE_REV,
+            "172845cf0307d99b2af1e29f58d4880519c6fb31"
         );
+        let uses_line = must_some(
+            workflow.lines().find(|line| {
+                line.contains(&format!("uses: {}", crate::VELNOR_WORKFLOW_SETUP_ACTION))
+            }),
+            "setup-velnor-workflow uses line",
+        );
+        assert!(
+            uses_line.contains("@172845cf0307d99b2af1e29f58d4880519c6fb31"),
+            "uses: must pin SOURCE_REV: {uses_line}"
+        );
+        assert!(
+            !uses_line.contains("github.sha"),
+            "GitHub Actions forbids expressions in uses: versions: {uses_line}"
+        );
+        let head_rev = github_expression("github.sha");
         assert!(
             workflow.contains(&format!("rev: {head_rev}")),
             "maintenance cache-plan must install HEAD: {workflow}"
-        );
-        assert!(
-            !workflow.contains(&format!(
-                "uses: {}@{}",
-                crate::VELNOR_WORKFLOW_SETUP_ACTION,
-                crate::VELNOR_WORKFLOW_SOURCE_REV
-            )),
-            "maintenance must not pin setup to SOURCE_REV: {workflow}"
         );
         assert!(
             !workflow.contains(&format!("rev: {}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
@@ -1380,15 +1385,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "a8c695c436d592d46e16e29f984c06bf58eb2e51f0990f0e14627ab420737cda",
+                "2912ae5a02086b8d0f892ab87adc2fed4f19e7d0904743b10e37bec48d5d02f1",
             ),
             (
                 "preview.yml",
-                "8c7249e3784fe491432249e172578817a11c19bad489747feec62d4d01057ec5",
+                "a0ab79fff849c4b9ef76f3d362d33a53625fb52d94b92974d52618dc790f99c8",
             ),
             (
                 "maintenance.yml",
-                "3e4437d765a3e1a24cb3d4c8146c8347b5f140e1d0fa7b5c2143587b31402bd6",
+                "ee336d15bffe519c307b4b6c38bed1c35a1912b684eafffcbc97ca990c0dd626",
             ),
             (
                 "ci-release-package-signer.yml",
