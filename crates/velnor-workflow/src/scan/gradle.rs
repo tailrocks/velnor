@@ -57,6 +57,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
                 ],
                 purpose: CachePurpose::Generic,
                 mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
             }),
         ));
     }

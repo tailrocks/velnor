@@ -469,7 +469,6 @@ jobs:
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
-      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -506,13 +505,29 @@ jobs:
       # trusted default-branch pushes only (the preview lane saves them).
 __VELNOR_PINNED_TOOLCHAIN_STEPS__
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -520,8 +535,19 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Export metadata from one release-build binary
         id: export
@@ -557,7 +583,6 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             target: aarch64-unknown-linux-gnu
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -602,13 +627,29 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           install_args: "zig aqua:rust-cross/cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-workflow-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -616,8 +657,19 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Build workflow binary
         run: mbx zigbuild -p velnor-workflow --release --locked --target "${{ matrix.target }}"
@@ -711,7 +763,6 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
       contents: read
       packages: write
     env:
-      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
       COMMIT: ${{ needs.release_gate.outputs.default_branch_commit }}
     steps:
@@ -778,7 +829,7 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }}
           cache-to: |
             type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ matrix.arch }},mode=max
-            type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }},mode=max,ignore-error=true
+            type=gha,scope=velnor-job-ubuntu-${{ matrix.arch }},mode=max
           secrets: |
             mise_github_token=${{ github.token }}
           build-args: |
@@ -938,7 +989,6 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
     # Velnor provides the required isolated user-namespace capability.
     runs-on: ${{ matrix.runner }}
     env:
-      CACHE_LANE: GitHub
       CARGO_INCREMENTAL: "0"
       GUEST_ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
@@ -967,11 +1017,49 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
       # trusted default-branch pushes only (the preview lane saves them).
 __VELNOR_PINNED_TOOLCHAIN_STEPS__
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
+
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install kernel and rootfs build packages
         run: |
@@ -1076,7 +1164,6 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             target: aarch64-unknown-linux-gnu
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: ${{ needs.identity.outputs.lane == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -1123,13 +1210,29 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           install_args: "zig cargo-binstall aqua:rust-cross/cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1137,8 +1240,19 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install cargo-deb (verified prebuilt only)
         env:
@@ -1932,7 +2046,6 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      CACHE_LANE: Preview
       CARGO_INCREMENTAL: "0"
       GUEST_ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
@@ -1964,11 +2077,49 @@ jobs:
       # is what may save the toolchain cache.
 __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-guest-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
+
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install kernel and rootfs build packages
         run: |
@@ -2067,7 +2218,6 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
     timeout-minutes: 30
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: Preview
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -2107,13 +2257,29 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
       # is what may save the toolchain cache.
 __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-metadata-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2121,8 +2287,19 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Export metadata from one preview-build binary
         env:
@@ -2172,7 +2349,6 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
             target: aarch64-unknown-linux-gnu
     runs-on: ubuntu-24.04
     env:
-      CACHE_LANE: Preview
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
@@ -2222,13 +2398,29 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
           install_args: "zig cargo-binstall aqua:rust-cross/cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compiler persistence: this lane runs on disposable hosted runners, so
+      # the mbx closure travels through the GitHub object cache. The key is
+      # the release-family compatibility identity - mbx generation and
+      # version, OS and arch, the job variant, the dependency inputs - and
+      # the preview lane saves under the same namespace, so a release run on
+      # unchanged inputs restores that snapshot instead of rebuilding cold
+      # (immutable keys make a duplicate write a no-op).
       - name: Set up Mr. Boxington
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
-          backend: local
+          backend: github
+          github-cache-mode: objects
           version: 1.8.3
+          cache-key: velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-mbx-objects-v2-1.8.3-${{ runner.os }}-${{ runner.arch }}-deb-${{ matrix.target }}-
+          save-on-workflow-dispatch: true
 
-      - name: Cache Cargo registry
+      # Cargo sources ride the release-family namespace: the content is a
+      # function of the dependency inputs alone, so the preview lane's fetch
+      # warms the release lane's, and no per-lane split can strand a warm
+      # snapshot behind the wrong lane name.
+      - name: Cache Cargo sources
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -2236,8 +2428,19 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ runner.arch }}-
+          key: velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.cargo/**', '**/Cargo.lock', 'mise.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-release-cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Prepare Cargo sources
+        env:
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
 
       - name: Install cargo-deb (verified prebuilt only)
         env:
@@ -2777,15 +2980,34 @@ pinned_lockfile = true
 key_files = ["Cargo.toml", "Cargo.lock"]
 paths = ["~/.cargo/registry", "~/.cargo/git"]
 
-# The Docker image build: the repository declares its buildx contract (gha
-# cache scopes per lane) on top of the detected unit.
+# The Docker image build: the repository declares its buildx contract on top
+# of the detected unit. The hosted full build injects the restored mutable
+# mount seed through the image's `velnor-cache-seed` stage, exports the layer
+# cache without `ignore-error` (a failed export must be visible, not a silent
+# cold builder next run), and a trusted build extracts the updated cache
+# mounts back out of the `velnor-cache-export` target. The self-hosted lane
+# keeps its own retained builder and needs no seed transport.
 
 [[units]]
 id = "docker"
 github_pr_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
-github_full_commands = ["docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker,ignore-error=true --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+github_full_commands = [
+  "docker buildx build --load --cache-from type=gha,scope=velnor-docker --cache-to type=gha,mode=max,scope=velnor-docker --file 'Dockerfile' --tag local-ci:dockerfile --build-context velnor-cache-seed='.velnor-docker-cache/seed' '.'",
+  "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --build-context velnor-cache-seed='.velnor-docker-cache/seed' --file 'Dockerfile' '.'",
+]
 velnor_pr_commands = ["docker buildx build --load --target ci --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
 velnor_full_commands = ["docker buildx build --load --file 'Dockerfile' --tag local-ci:dockerfile '.'"]
+
+# The mutable mount seed: the compatibility identity of the state the image's
+# cache mounts hold (Cargo sources, the locked mise toolset, the build recipe)
+# and the workspace directory the generator restores it into before the build
+# and collects the export into afterwards. One namespace, owned by the image
+# build alone.
+
+[units.cache]
+key_files = ["Cargo.lock", "Dockerfile", "docker/build-mise.lock", "docker/build-mise.toml", "rust-toolchain.toml"]
+paths = [".velnor-docker-cache"]
+mutable_mount_seed = true
 
 # The composite action the generated workflows bootstrap through: the
 # repository owns the bytes under .github-gen/sources, the generator owns the

@@ -29,6 +29,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
                 paths: vec!["~/.terraform.d/plugin-cache".to_owned()],
                 purpose: CachePurpose::Generic,
                 mbx_output_cache_justification: None,
+                mutable_mount_seed: false,
             }),
         ));
     }
