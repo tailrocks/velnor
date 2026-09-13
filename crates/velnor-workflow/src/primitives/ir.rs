@@ -5,7 +5,7 @@
 //! unit needs provisioned. It carries no repository knowledge of its own; every
 //! value comes from the scanned shape and the repo-owned generation config.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::snapshot::{
@@ -712,6 +712,93 @@ pub(crate) enum WorkflowKind {
     Nightly,
 }
 
+fn workflow_dispatch_inputs(default_scope: &str, extra_inputs: &str) -> String {
+    format!(
+        "  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: true\n        default: velnor\n        type: choice\n        options:\n          - velnor\n          - github\n          - both\n      scope:\n        description: Verification scope\n        required: true\n        default: {default_scope}\n        type: choice\n        options:\n          - affected\n          - full\n{extra_inputs}"
+    )
+}
+
+fn aggregate_triggers(
+    kind: WorkflowKind,
+    default_branch: &str,
+) -> (&'static str, &'static str, String, &'static str) {
+    match kind {
+        WorkflowKind::PullRequest => (
+            "CI",
+            "CI / PR",
+            format!(
+                "on:\n  pull_request:\n{}",
+                workflow_dispatch_inputs("affected", "")
+            ),
+            "true",
+        ),
+        WorkflowKind::Main => (
+            "CI",
+            "CI / main",
+            format!(
+                "on:\n  push:\n    branches: [{}]\n{}",
+                yaml_scalar(default_branch),
+                workflow_dispatch_inputs("full", "")
+            ),
+            "true",
+        ),
+        WorkflowKind::Nightly => (
+            "Nightly",
+            "Nightly",
+            format!(
+                "on:\n  schedule:\n    - cron: '17 3 * * *'\n{}",
+                workflow_dispatch_inputs(
+                    "full",
+                    "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
+                )
+            ),
+            "true",
+        ),
+    }
+}
+
+fn kind_matrix_output(kind: UnitKind) -> String {
+    format!("{}_matrix", kind.id_prefix())
+}
+
+fn kind_matrix_output_from_file(file: &str) -> String {
+    let stem = file
+        .strip_prefix("ci-unit-")
+        .and_then(|value| value.strip_suffix(".yml"))
+        .unwrap_or("unit");
+    format!("{stem}_matrix")
+}
+
+fn merged_kind_cache(units: &[&Unit]) -> Option<CacheSpec> {
+    let mut key_files = BTreeSet::new();
+    let mut paths = BTreeSet::new();
+    let mut purpose = None;
+    let mut justification = None;
+    let mut mutable_mount_seed = false;
+    for unit in units {
+        let Some(cache) = &unit.cache else {
+            continue;
+        };
+        key_files.extend(cache.key_files.iter().cloned());
+        paths.extend(cache.paths.iter().cloned());
+        purpose.get_or_insert(cache.purpose);
+        if justification.is_none() {
+            justification.clone_from(&cache.mbx_output_cache_justification);
+        }
+        mutable_mount_seed |= cache.mutable_mount_seed;
+    }
+    if key_files.is_empty() && paths.is_empty() {
+        return None;
+    }
+    Some(CacheSpec {
+        key_files: key_files.into_iter().collect(),
+        paths: paths.into_iter().collect(),
+        purpose: purpose.unwrap_or(CachePurpose::Generic),
+        mbx_output_cache_justification: justification,
+        mutable_mount_seed,
+    })
+}
+
 #[allow(dead_code)]
 impl WorkflowIr {
     pub(crate) fn from_config(config: &ProjectConfig) -> Self {
@@ -785,36 +872,10 @@ impl WorkflowIr {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the legacy renderer remains a single auditable workflow pass"
-    )]
     pub(crate) fn render(&self, kind: WorkflowKind) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) = match kind {
-            WorkflowKind::PullRequest => (
-                "CI",
-                "CI / PR",
-                "on:\n  pull_request:".to_owned(),
-                "true",
-            ),
-            WorkflowKind::Main => (
-                "CI",
-                "CI / main",
-                format!(
-                    "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
-                    yaml_scalar(&self.default_branch)
-                ),
-                "true",
-            ),
-            WorkflowKind::Nightly => (
-                "Nightly",
-                "Nightly",
-                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
-                    .to_owned(),
-                "true",
-            ),
-        };
+        let (workflow_name, run_name, triggers, cancel_in_progress) =
+            aggregate_triggers(kind, &self.default_branch);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\n"
@@ -922,30 +983,8 @@ impl WorkflowIr {
     /// simply has no caller and no required-check branch.
     pub(crate) fn render_nested(&self, kind: WorkflowKind, nodes: &[GraphNode]) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, cancel_in_progress) = match kind {
-            WorkflowKind::PullRequest => (
-                "CI",
-                "CI / PR",
-                "on:\n  pull_request:".to_owned(),
-                "true",
-            ),
-            WorkflowKind::Main => (
-                "CI",
-                "CI / main",
-                format!(
-                    "on:\n  push:\n    branches: [{}]\n  workflow_dispatch:",
-                    yaml_scalar(&self.default_branch)
-                ),
-                "true",
-            ),
-            WorkflowKind::Nightly => (
-                "Nightly",
-                "Nightly",
-                "on:\n  schedule:\n    - cron: '17 3 * * *'\n  workflow_dispatch:\n    inputs:\n      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean"
-                    .to_owned(),
-                "true",
-            ),
-        };
+        let (workflow_name, run_name, triggers, cancel_in_progress) =
+            aggregate_triggers(kind, &self.default_branch);
         let _ = writeln!(
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
@@ -1013,19 +1052,27 @@ impl WorkflowIr {
         }
     }
 
-    /// One reusable-workflow caller per contributed unit node, in the order the
-    /// nodes were contributed (canonical unit order).
+    /// One reusable-workflow caller per unit kind. Selected units of that kind
+    /// fan out through `strategy.matrix.include` from the plan artifact so
+    /// unselected units are never scheduled.
     pub(crate) fn render_node_callers(
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
     ) {
+        let mut groups: BTreeMap<(&str, &str), Vec<(&str, &str)>> = BTreeMap::new();
         for (unit_id, job_id, name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
+            groups
+                .entry((job_id, file))
+                .or_default()
+                .push((unit_id, name));
+        }
+        for ((job_id, file), _units) in groups {
             let mut needs = vec!["plan".to_owned()];
             if include_policy {
                 needs.push("policy".to_owned());
             }
-            let id = job_id;
+            let matrix_output = kind_matrix_output_from_file(file);
             let mut conditions = vec![
                 "always()".to_owned(),
                 "needs.plan.result == 'success'".to_owned(),
@@ -1033,16 +1080,12 @@ impl WorkflowIr {
             if include_policy {
                 conditions.push("needs.policy.result == 'success'".to_owned());
             }
-            conditions.push(format!(
-                "contains(format(',{{0}},', needs.plan.outputs.units), ',{unit_id},')"
-            ));
+            conditions.push(format!("needs.plan.outputs.{matrix_output} != '[]'"));
             let _ = writeln!(
                 output,
-                "  {id}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{}\n    with:\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
-                yaml_scalar(name),
+                "  {job_id}:\n    name: ${{{{ matrix.label }}}}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    strategy:\n      fail-fast: false\n      matrix:\n        include: ${{{{ fromJSON(needs.plan.outputs.{matrix_output}) }}}}\n    uses: ./.github/workflows/{file}\n    with:\n      unit: ${{{{ matrix.unit }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      selection-artifact: velnor-ci-selection",
                 conditions.join(" && "),
                 needs.join(", "),
-                file,
             );
         }
     }
@@ -1056,20 +1099,21 @@ impl WorkflowIr {
         check_name: &str,
         simulate_failure: bool,
     ) {
-        let units = nodes
+        let mut units = Vec::new();
+        for job_id in nodes
             .iter()
             .filter_map(|node| node.as_unit().map(|(_, job_id, _, _)| job_id.to_owned()))
-            .collect::<Vec<_>>();
+        {
+            if !units.contains(&job_id) {
+                units.push(job_id);
+            }
+        }
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
         }
         needs.extend(units);
-        let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_event_expression())
-        } else {
-            "always()".to_owned()
-        };
+        let if_condition = format!("always() && ({})", self.aggregate_event_expression());
         let _ = writeln!(
             output,
             "  {check_name}:\n    name: {check_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        shell: bash\n        run: |",
@@ -1093,14 +1137,21 @@ impl WorkflowIr {
                 "          result=\"{result}\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
-        let selected = github_expression("needs.plan.outputs.units");
-        let _ = writeln!(output, "          selected=\",{selected},\"");
-        for (unit_id, job_id, _, _) in nodes.iter().filter_map(GraphNode::as_unit) {
-            let job = job_id;
-            let result = github_expression(&format!("needs['{job}'].result"));
+        let mut seen = BTreeSet::new();
+        for (job_id, file) in nodes
+            .iter()
+            .filter_map(GraphNode::as_unit)
+            .map(|(_, job_id, _, file)| (job_id, file))
+        {
+            if !seen.insert(job_id) {
+                continue;
+            }
+            let matrix = kind_matrix_output_from_file(file);
+            let matrix_value = github_expression(&format!("needs.plan.outputs.{matrix}"));
+            let result = github_expression(&format!("needs['{job_id}'].result"));
             let _ = writeln!(
                 output,
-            "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"{result}\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
+                "          matrix=\"{matrix_value}\"\n          result=\"{result}\"\n          if [[ \"$matrix\" != '[]' ]]; then\n            if [[ \"$result\" != success ]]; then\n              echo \"selected CI group {job_id} did not pass: $result\" >&2\n              exit 1\n            fi\n          else\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI group {job_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
             );
         }
     }
@@ -1133,9 +1184,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// seed lifecycle rendered for it exactly as a declared pipeline would —
     /// the default contract defaults the lane surface, never the cache
     /// transport a unit declared.
+    #[expect(
+        clippy::unused_self,
+        reason = "unit contracts stay on WorkflowIr so callers keep one render environment"
+    )]
     pub(crate) fn default_unit_contract(&self, unit: &Unit, cache_save: bool) -> UnitContract {
         UnitContract {
-            lanes: self.default_lane_jobs(cache_save),
+            lanes: Self::default_lane_jobs(cache_save),
             timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
             cache: CacheBackend::Detected,
             cache_save,
@@ -1149,23 +1204,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// The lane jobs a nested unit workflow emits: the hosted lane saves the
     /// cache and is untrusted. Velnor-only pull requests use the untrusted
     /// Velnor path; trusted event gates still guard persistent cache writes.
-    pub(crate) fn default_lane_jobs(&self, cache_save: bool) -> Vec<LaneJob> {
-        let mut lanes = Vec::new();
-        if matches!(self.runners, RunnerMode::Github | RunnerMode::Both) {
-            lanes.push(LaneJob {
+    pub(crate) fn default_lane_jobs(cache_save: bool) -> Vec<LaneJob> {
+        vec![
+            LaneJob {
                 lane: RunnerMode::Github,
                 cache_save,
                 trusted: false,
-            });
-        }
-        if matches!(self.runners, RunnerMode::Velnor | RunnerMode::Both) {
-            lanes.push(LaneJob {
+            },
+            LaneJob {
                 lane: RunnerMode::Velnor,
                 cache_save: false,
                 trusted: true,
-            });
-        }
-        lanes
+            },
+        ]
     }
 
     /// Render one unit's reusable workflow surface.
@@ -1178,7 +1229,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
-            "name: {}\non:\n  workflow_call:\n    inputs:\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string",
+            "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      selection-artifact:\n        required: true\n        type: string",
             yaml_scalar(&sidebar_group_name(unit))
         );
         self.render_workflow_env(&mut output, unit);
@@ -1197,6 +1248,26 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         self.render_unit_surface(
             unit,
             &self.default_unit_contract(unit, kind != WorkflowKind::PullRequest),
+        )
+    }
+
+    /// One reusable workflow for every unit of `kind`. The caller supplies the
+    /// unit id through `workflow_call` inputs so a monorepo does not emit one
+    /// unique reusable file per unit.
+    pub(crate) fn render_kind_units(&self, kind: UnitKind) -> String {
+        let members = self
+            .units
+            .iter()
+            .filter(|unit| unit.kind == kind)
+            .collect::<Vec<_>>();
+        let Some(representative) = members.first().copied() else {
+            return String::new();
+        };
+        let mut unit = representative.clone();
+        unit.cache = merged_kind_cache(&members);
+        self.render_unit_surface(
+            &unit,
+            &self.default_unit_contract(&unit, true),
         )
     }
 
@@ -1231,17 +1302,10 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     ) {
         let lane = job.lane;
         let cache_save = job.cache_save && contract.cache_save;
-        let trusted = job.trusted;
         let id = lane.as_str();
         let _ = writeln!(output, "  {id}:\n    name: {}", lane.display_name());
-        if trusted {
-            let gate = if lane == RunnerMode::Velnor && self.runners == RunnerMode::Velnor {
-                self.velnor_event_expression()
-            } else {
-                self.trusted_event_expression()
-            };
-            let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
-        }
+        let gate = self.lane_event_expression(lane);
+        let _ = writeln!(output, "    if: ${{{{ {gate} }}}}");
         let _ = writeln!(
             output,
             "    runs-on: {}\n    timeout-minutes: {}\n    steps:",
@@ -1268,24 +1332,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             let (paths, key) = rendered_cache_values(cache);
             let cache_key = format!(
                 "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                unit.id
+                unit.kind.id_prefix()
             );
             let _ = writeln!(
                 output,
                 "      - name: Restore {} cache\n        id: cache\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {cache_key}\n          restore-keys: |\n            ci-${{{{ runner.os }}}}-{}-",
                 yaml_scalar(&unit.label),
                 self.pins.cache_restore,
-                unit.id
+                unit.kind.id_prefix()
             );
         }
         render_cargo_source_preparation(output, unit);
         let _ = writeln!(
             output,
-            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {} 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
+            "      - name: Run {} checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{}\n        run: |\n          set -o pipefail\n          echo \"VELNOR_CHECKS_STARTED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n          echo \"VELNOR_CHECKS_ENDED_EPOCH=$(date +%s)\" >> \"$GITHUB_ENV\"\n          exit $rc",
             yaml_scalar(&unit.label),
-            yaml_scalar(&unit.id),
             checks_env(unit),
-            yaml_scalar(&unit.id)
         );
         render_phase_report_step(
             output,
@@ -1306,7 +1368,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             let (paths, key) = rendered_cache_values(cache);
             let cache_key = format!(
                 "ci-${{{{ runner.os }}}}-{}-${{{{ hashFiles({key}) }}}}",
-                unit.id
+                unit.kind.id_prefix()
             );
             let _ = writeln!(
                 output,
@@ -1350,10 +1412,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             workflow_runtime_setup(RunnerMode::Github)
         };
+        let mut outputs = vec![
+            "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
+            "      units: ${{ steps.plan.outputs.units }}".to_owned(),
+            "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
+        ];
+        let mut kinds = BTreeSet::new();
+        for unit in &self.units {
+            kinds.insert(unit.kind);
+        }
+        for kind in kinds {
+            let name = kind_matrix_output(kind);
+            outputs.push(format!("      {name}: ${{{{ steps.plan.outputs.{name} }}}}"));
+        }
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n      scope: ${{{{ steps.plan.outputs.scope }}}}\n      units: ${{{{ steps.plan.outputs.units }}}}\n      full_units: ${{{{ steps.plan.outputs.full_units }}}}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.event.before }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
+            outputs.join("\n"),
             self.pins.checkout,
         );
         output.push_str(&workflow_runtime_artifact_upload());
@@ -1380,14 +1456,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "    if: ${{{{ {} }}}}\n",
-                if self.runners == RunnerMode::Velnor {
-                    self.velnor_event_expression()
-                } else {
-                    self.trusted_event_expression()
-                }
-            )
+            format!("    if: ${{{{ {} }}}}\n", self.aggregate_event_expression())
         } else {
             String::new()
         }
@@ -1400,11 +1469,47 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         )
     }
 
-    fn velnor_event_expression(&self) -> String {
+    fn automatic_event_expression(&self) -> String {
         format!(
-            "github.event_name == 'pull_request' || ({})",
-            self.trusted_event_expression()
+            "github.event_name == 'pull_request' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            self.default_branch
         )
+    }
+
+    fn aggregate_event_expression(&self) -> String {
+        format!(
+            "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
+            self.default_branch
+        )
+    }
+
+    fn velnor_event_expression(&self) -> String {
+        self.aggregate_event_expression()
+    }
+
+    fn lane_event_expression(&self, lane: RunnerMode) -> String {
+        let dispatch = match lane {
+            RunnerMode::Velnor => {
+                "github.event_name == 'workflow_dispatch' && (inputs.runner == 'velnor' || inputs.runner == 'both')"
+            }
+            RunnerMode::Github => {
+                "github.event_name == 'workflow_dispatch' && (inputs.runner == 'github' || inputs.runner == 'both')"
+            }
+            RunnerMode::Both => {
+                "github.event_name == 'workflow_dispatch'"
+            }
+        };
+        let automatic = matches!(
+            (self.runners, lane),
+            (RunnerMode::Velnor, RunnerMode::Velnor)
+                | (RunnerMode::Github, RunnerMode::Github)
+                | (RunnerMode::Both, RunnerMode::Velnor | RunnerMode::Github)
+        );
+        if automatic {
+            format!("{} || ({dispatch})", self.automatic_event_expression())
+        } else {
+            dispatch.to_owned()
+        }
     }
 
     pub(crate) fn render_verify_github(
