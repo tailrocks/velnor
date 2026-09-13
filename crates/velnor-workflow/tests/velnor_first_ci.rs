@@ -1,5 +1,6 @@
-//! Velnor-first CI contract: PR jobs run, unique reusables stay under GitHub's
-//! limit, and manual dispatch can select runner and scope without regen.
+//! Velnor-first CI contract: PR workflows keep untrusted execution off the
+//! self-hosted lane, unique reusables stay under GitHub's limit, and manual
+//! dispatch can select runner and scope without regen.
 
 #![expect(
     clippy::unwrap_used,
@@ -114,11 +115,11 @@ fn pull_request_plan_and_required_are_not_main_only() {
     let generated = generate(&root);
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
-    assert!(pr.contains("github.event_name == 'pull_request'"));
     assert!(
-        !pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"),
-        "PR jobs must not be gated to the trusted main-only expression: {pr}"
+        pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"),
+        "self-hosted PR jobs must carry the trusted main-only expression: {pr}"
     );
+    assert!(!pr.contains("github.event_name == 'pull_request'"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
     assert!(pr.contains("runs-on: [self-hosted, example-runner]"));
@@ -179,6 +180,75 @@ fn dispatch_exposes_runner_and_scope_without_committed_flips() {
     assert!(pr.contains("github.event.before || 'refs/heads/main'"));
     let main = generated.workflow("ci-main.yml");
     assert!(main.contains("default: full"));
+}
+
+#[test]
+fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
+    let root = unique_dir("pr-on-velnor");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\npull_request_on_velnor = true\n",
+    )
+    .unwrap();
+    let generated = generate(&root);
+    let pr = generated.workflow("ci-pr.yml");
+    assert!(
+        pr.contains("github.event_name == 'pull_request'"),
+        "opt-in automatic PR must admit pull_request: {pr}"
+    );
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("github.event_name == 'pull_request'"),
+        "opt-in Velnor lane must admit pull_request: {unit}"
+    );
+    assert!(
+        pr.contains("unset CI_SCOPE_OVERRIDE"),
+        "empty dispatch scope must not be passed as a CI scope: {pr}"
+    );
+    let plan = pr
+        .split("\n  plan:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n  group-").next())
+        .unwrap_or(&pr);
+    assert!(
+        plan.contains("runs-on: [self-hosted, example-runner]"),
+        "opt-in Planning must run on the Velnor lane: {plan}"
+    );
+    assert!(
+        !plan.contains("runs-on: ubuntu-24.04"),
+        "opt-in Planning must not use GitHub-hosted runners: {plan}"
+    );
+    assert!(
+        !plan.contains("name: Publish Velnor workflow runtime"),
+        "Velnor Planning must not publish a runtime artifact: {plan}"
+    );
+    let github = unit.split("runs-on: ubuntu-24.04").nth(1).unwrap_or(&unit);
+    assert!(
+        github.contains("setup-velnor-workflow"),
+        "manual GitHub units must bootstrap the pinned runtime: {github}"
+    );
+    assert!(
+        !github.contains("name: Download Velnor workflow runtime"),
+        "manual GitHub units must not expect a Planning runtime artifact: {github}"
+    );
+}
+
+#[test]
+fn velnor_lane_installs_declared_mise_tools() {
+    let root = unique_dir("mise-velnor");
+    write_rust_fixture(&root, 1);
+    fs::write(root.join("mise.toml"), "[tools]\nnode = \"24.20.0\"\n").unwrap();
+    let generated = generate(&root);
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        unit.contains("Install declared Mise tools"),
+        "Velnor lane must install lockfile tools: {unit}"
+    );
+    assert!(
+        unit.contains("mise --yes install"),
+        "Velnor lane must run mise install: {unit}"
+    );
 }
 
 #[test]

@@ -25,8 +25,8 @@ concurrency:
 jobs:
   prune-pr-cache:
     name: Prune closed-PR cache
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
@@ -59,10 +59,17 @@ jobs:
           fi
   cache-budget:
     name: Cache retention
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
+      - name: Set up Velnor workflow runtime
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@172845cf0307d99b2af1e29f58d4880519c6fb31
+        with:
+          rev: ${{ github.sha }}
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=172845cf0307d99b2af1e29f58d4880519c6fb31" >> "$GITHUB_ENV"
       - name: Collect Actions cache account
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,10 +101,10 @@ jobs:
           # variant class, and the protected classes (toolchain seeds, Cargo
           # source bundles, the Docker seed baseline) reserved before rolling
           # compiler snapshots are touched. An access timestamp is not a
-          # lease: entries younger than the producer window are out of reach,
-          # because a producer may have published them seconds ago or be about
-          # to publish their successor, and creation is the only producer
-          # signal the cache API carries.
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
           velnor-workflow cache-plan \
             --now "$(date -u +%s)" \
             --entries "$RUNNER_TEMP/cache-retention/entries.json" \

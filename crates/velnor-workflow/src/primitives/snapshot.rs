@@ -321,10 +321,12 @@ pub(crate) struct ClassPolicy {
 pub(crate) struct RetentionPolicy {
     /// The Actions cache account budget, in bytes.
     pub(crate) total_bytes: u64,
-    /// How long a freshly created entry is out of reach of eviction: a
-    /// producer may have published it seconds ago or be about to publish its
-    /// successor, and creation — not access — is the only producer signal the
-    /// cache API offers.
+    /// How long the newest generation of a variant is treated as
+    /// producer-active: a producer may have published it seconds ago or be
+    /// about to publish its successor, and creation — not access — is the
+    /// only producer signal the cache API offers. A superseded generation of
+    /// the same variant is not producer-active: the newer save is the signal
+    /// that the older entry is no longer being written.
     pub(crate) producer_window_seconds: u64,
     /// The classes, in classification order.
     pub(crate) classes: Vec<ClassPolicy>,
@@ -471,7 +473,7 @@ fn epoch_of(created_at: &str) -> Option<i64> {
 }
 
 fn classify(entries: &[CacheEntry], policy: &RetentionPolicy, now_epoch: i64) -> Vec<Classified> {
-    entries
+    let mut classified = entries
         .iter()
         .cloned()
         .map(|entry| {
@@ -495,8 +497,7 @@ fn classify(entries: &[CacheEntry], policy: &RetentionPolicy, now_epoch: i64) ->
             let generation = strip_hash_segments(&entry.key);
             let age_seconds = epoch_of(&entry.created_at).map_or(-1, |created| now_epoch - created);
             Classified {
-                eligible: age_seconds >= 0
-                    && age_seconds >= i64::try_from(policy.producer_window_seconds).unwrap_or(0),
+                eligible: false,
                 entry,
                 class: class_id.to_owned(),
                 tier: Tier::from(purpose),
@@ -507,7 +508,54 @@ fn classify(entries: &[CacheEntry], policy: &RetentionPolicy, now_epoch: i64) ->
                 age_seconds,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    apply_producer_eligibility(&mut classified, policy);
+    classified
+}
+
+fn generation_group(candidate: &Classified) -> String {
+    format!("{}/{}", candidate.class, candidate.generation)
+}
+
+/// Newest readable generation of each bounded variant, by `created_at` then
+/// key — the same total order [`oldest_first`] uses.
+fn newest_readable_of_bounded_variants(classified: &[Classified]) -> Vec<(String, usize)> {
+    let mut newest: Vec<(String, usize)> = Vec::new();
+    for (index, candidate) in classified.iter().enumerate() {
+        if candidate.age_seconds < 0 || candidate.generation_bound == 0 {
+            continue;
+        }
+        let group = generation_group(candidate);
+        match newest.iter_mut().find(|(key, _)| *key == group) {
+            Some((_, current)) => {
+                if classified
+                    .get(*current)
+                    .is_some_and(|existing| oldest_first(candidate, existing).is_gt())
+                {
+                    *current = index;
+                }
+            }
+            None => newest.push((group, index)),
+        }
+    }
+    newest
+}
+
+fn apply_producer_eligibility(classified: &mut [Classified], policy: &RetentionPolicy) {
+    let window = i64::try_from(policy.producer_window_seconds).unwrap_or(0);
+    let newest = newest_readable_of_bounded_variants(classified);
+    for (index, candidate) in classified.iter_mut().enumerate() {
+        if candidate.age_seconds < 0 {
+            candidate.eligible = false;
+            continue;
+        }
+        let aged_out = candidate.age_seconds >= window;
+        let superseded = candidate.generation_bound > 0
+            && newest.iter().any(|(group, newest_index)| {
+                *newest_index != index && *group == generation_group(candidate)
+            });
+        candidate.eligible = aged_out || superseded;
+    }
 }
 
 fn strip_hash_segments(key: &str) -> String {
@@ -566,8 +614,10 @@ fn selected(
 /// The order is the policy: generations beyond the per-class bound first, then
 /// class budgets, then the global budget — and protected classes are never
 /// selected by the global sweep, because their space is reserved before
-/// rolling state is allocated. Entries inside the producer window, and entries
-/// whose age cannot be read, are never selected.
+/// rolling state is allocated. The newest generation of a variant stays out
+/// of reach inside the producer window; a superseded generation of the same
+/// variant is eligible even while it is still young. Entries whose age cannot
+/// be read are never selected.
 pub(crate) fn plan_evictions(
     entries: &[CacheEntry],
     policy: &RetentionPolicy,
@@ -576,15 +626,35 @@ pub(crate) fn plan_evictions(
     let classified = classify(entries, policy, now_epoch);
     let mut plan: Vec<Eviction> = Vec::new();
     let mut selected_ids: Vec<String> = Vec::new();
+    evict_beyond_generation_bound(&classified, &mut plan, &mut selected_ids);
+    evict_over_class_budget(&classified, &mut plan, &mut selected_ids);
+    evict_over_global_budget(
+        &classified,
+        policy.total_bytes,
+        &mut plan,
+        &mut selected_ids,
+    );
+    plan
+}
 
-    // 1. Generations beyond the bound of their variant class: the oldest go
-    //    first, so the newest trusted snapshot of every variant survives.
+fn remember(plan: &[Eviction], before: usize, selected_ids: &mut Vec<String>) {
+    selected_ids.extend(plan[before..].iter().map(|eviction| eviction.id.clone()));
+}
+
+/// Generations beyond the bound of their variant class: the oldest go first,
+/// so the newest trusted snapshot of every variant survives. Ineligible
+/// newest gens still occupy a slot, but only eligible overflow is selected.
+fn evict_beyond_generation_bound(
+    classified: &[Classified],
+    plan: &mut Vec<Eviction>,
+    selected_ids: &mut Vec<String>,
+) {
     let mut by_generation: Vec<(String, Vec<&Classified>)> = Vec::new();
-    for candidate in &classified {
-        if !candidate.eligible || candidate.generation_bound == 0 {
+    for candidate in classified {
+        if candidate.generation_bound == 0 {
             continue;
         }
-        let generation = format!("{}/{}", candidate.class, candidate.generation);
+        let generation = generation_group(candidate);
         match by_generation.iter_mut().find(|(key, _)| *key == generation) {
             Some((_, group)) => group.push(candidate),
             None => by_generation.push((generation, vec![candidate])),
@@ -596,27 +666,40 @@ pub(crate) fn plan_evictions(
         if group.len() <= bound {
             continue;
         }
-        let evicting = &group[..group.len() - bound];
+        let evicting: Vec<&Classified> = group[..group.len() - bound]
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.eligible)
+            .collect();
+        if evicting.is_empty() {
+            continue;
+        }
         let bytes: u64 = evicting.iter().map(|c| c.entry.size_in_bytes).sum();
         let class = group[0].class.clone();
+        let before = plan.len();
         selected(
-            evicting,
+            &evicting,
             bytes,
             &class,
             EvictionReason::GenerationBeyondBound,
-            &mut plan,
+            plan,
         );
-        selected_ids.extend(evicting.iter().map(|c| c.entry.id.clone()));
+        remember(plan, before, selected_ids);
     }
+}
 
-    // 2. Class budgets: a rolling or baseline class holding more than its
-    //    budget gives up its oldest entries first. A protected class's budget
-    //    is a reservation, not a cap: the space is set aside for the seeds
-    //    before rolling state is allocated, so retention never trims the
-    //    seeds to fit it.
+/// A rolling or baseline class holding more than its budget gives up its
+/// oldest eligible entries first. Ineligible newest gens still count toward
+/// held, so a class over budget because of young live snapshots still drops
+/// superseded ones. A protected class's budget is a reservation, not a cap.
+fn evict_over_class_budget(
+    classified: &[Classified],
+    plan: &mut Vec<Eviction>,
+    selected_ids: &mut Vec<String>,
+) {
     let mut by_class: Vec<(String, Vec<&Classified>)> = Vec::new();
-    for candidate in &classified {
-        if !candidate.eligible || candidate.budget_bytes == 0 || candidate.tier == Tier::Protected {
+    for candidate in classified {
+        if candidate.budget_bytes == 0 || candidate.tier == Tier::Protected {
             continue;
         }
         match by_class
@@ -643,7 +726,7 @@ pub(crate) fn plan_evictions(
         let kept: Vec<&Classified> = group
             .iter()
             .copied()
-            .filter(|candidate| !selected_ids.contains(&candidate.entry.id))
+            .filter(|candidate| candidate.eligible && !selected_ids.contains(&candidate.entry.id))
             .collect();
         let before = plan.len();
         selected(
@@ -651,43 +734,50 @@ pub(crate) fn plan_evictions(
             held - budget,
             &class,
             EvictionReason::ClassBudget,
-            &mut plan,
+            plan,
         );
-        selected_ids.extend(plan[before..].iter().map(|eviction| eviction.id.clone()));
+        remember(plan, before, selected_ids);
     }
+}
 
-    // 3. The global budget, paid by unprotected classes only. Protected space
-    //    is reserved: the sweep cannot spend it to make room for rolling
-    //    snapshots. The overage is computed against the entries retention may
-    //    actually touch — entries inside the producer window stay out of reach
-    //    even when they push the account over, and the enforcement step
-    //    reports what remains.
+/// Global budget, paid by unprotected classes only. Ineligible rolling and
+/// baseline entries still count toward the overage; only eligible
+/// unprotected entries may be deleted.
+fn evict_over_global_budget(
+    classified: &[Classified],
+    total_bytes: u64,
+    plan: &mut Vec<Eviction>,
+    selected_ids: &mut Vec<String>,
+) {
     let kept_total: u64 = classified
         .iter()
-        .filter(|candidate| candidate.eligible && !selected_ids.contains(&candidate.entry.id))
+        .filter(|candidate| {
+            !selected_ids.contains(&candidate.entry.id)
+                && (candidate.eligible || candidate.tier != Tier::Protected)
+        })
         .map(|candidate| candidate.entry.size_in_bytes)
         .sum();
-    if kept_total > policy.total_bytes {
-        let mut candidates: Vec<&Classified> = classified
-            .iter()
-            .filter(|candidate| {
-                candidate.eligible
-                    && candidate.tier != Tier::Protected
-                    && !selected_ids.contains(&candidate.entry.id)
-            })
-            .collect();
-        candidates.sort_by(|a, b| oldest_first(a, b));
-        let before = plan.len();
-        selected(
-            &candidates,
-            kept_total - policy.total_bytes,
-            "unprotected",
-            EvictionReason::GlobalBudget,
-            &mut plan,
-        );
-        selected_ids.extend(plan[before..].iter().map(|eviction| eviction.id.clone()));
+    if kept_total <= total_bytes {
+        return;
     }
-    plan
+    let mut candidates: Vec<&Classified> = classified
+        .iter()
+        .filter(|candidate| {
+            candidate.eligible
+                && candidate.tier != Tier::Protected
+                && !selected_ids.contains(&candidate.entry.id)
+        })
+        .collect();
+    candidates.sort_by(|a, b| oldest_first(a, b));
+    let before = plan.len();
+    selected(
+        &candidates,
+        kept_total - total_bytes,
+        "unprotected",
+        EvictionReason::GlobalBudget,
+        plan,
+    );
+    remember(plan, before, selected_ids);
 }
 
 #[cfg(test)]
@@ -710,10 +800,9 @@ mod tests {
         }
     }
 
-    /// An RFC 3339 timestamp `age_seconds` before the fixture base, in the
-    /// exact shape the cache API reports.
-    fn stamp(age_seconds: i64) -> String {
-        let epoch = BASE_EPOCH - age_seconds;
+    /// An RFC 3339 timestamp at `epoch`, in the exact shape the cache API
+    /// reports.
+    fn stamp_from_epoch(epoch: i64) -> String {
         let days = epoch.div_euclid(86_400);
         let seconds = epoch.rem_euclid(86_400);
         // Civil-from-days, the inverse of the conversion the planner parses.
@@ -740,8 +829,37 @@ mod tests {
         )
     }
 
+    /// An RFC 3339 timestamp `age_seconds` before the fixture base.
+    fn stamp(age_seconds: i64) -> String {
+        stamp_from_epoch(BASE_EPOCH - age_seconds)
+    }
+
     fn aged(id: &str, key: &str, size: u64, age_seconds: i64) -> CacheEntry {
         entry(id, key, size, stamp(age_seconds).as_str())
+    }
+
+    /// An entry `age_seconds` before `NOW`, so it can sit inside the producer
+    /// window. `aged` ages from `BASE_EPOCH`, which is 90 days behind `NOW`.
+    fn recent(id: &str, key: &str, size: u64, age_seconds: i64) -> CacheEntry {
+        entry(id, key, size, stamp_from_epoch(NOW - age_seconds).as_str())
+    }
+
+    fn hex64(seed: u8) -> String {
+        format!("{seed:064x}")
+    }
+
+    /// Live compiler-snapshot shape: namespace, schema, compatibility digest,
+    /// runtime, variant, then the two 64-hex `hashFiles` segments.
+    fn release_mbx_key(variant: &str, dependency: u8, freshness: u8) -> String {
+        format!(
+            "velnor-release-mbx-v3-58835fa41d40-Linux-X64-{variant}-{}-{}",
+            hex64(dependency),
+            hex64(freshness)
+        )
+    }
+
+    fn plan_ids(plan: &[Eviction]) -> Vec<&str> {
+        plan.iter().map(|eviction| eviction.id.as_str()).collect()
     }
 
     fn snapshot_key_of(variant: &str, state: u8) -> String {
@@ -1374,5 +1492,134 @@ mod tests {
             "velnor-rustup-Linux-X64-abc",
             "a key without hash segments stays whole"
         );
+        assert_eq!(
+            strip_hash_segments(&release_mbx_key("deb-x86_64-unknown-linux-gnu", 0x3d, 0xa8)),
+            "velnor-release-mbx-v3-58835fa41d40-Linux-X64-deb-x86_64-unknown-linux-gnu",
+            "live-shaped compiler-snapshot keys group by variant, not freshness"
+        );
+    }
+
+    /// Two rolling generations of one variant, both inside the two-hour
+    /// producer window: the older one is not producer-active once the newer
+    /// save exists. Bound 2 would keep both; class-budget overage (held
+    /// includes the ineligible newest) selects the superseded gen. A unique
+    /// young generation and an unreadable timestamp stay out of the plan.
+    #[test]
+    fn superseded_in_window_generations_are_evicted_while_the_newest_is_not() {
+        const MINUTE: i64 = 60;
+        let policy = RetentionPolicy::default_policy();
+        let compiler = policy_class(&policy, "compiler-snapshots");
+        assert_eq!(compiler.generation_bound, 2);
+        let older_key = release_mbx_key("deb-x86_64-unknown-linux-gnu", 0x3d, 0xa8);
+        let newer_key = release_mbx_key("deb-x86_64-unknown-linux-gnu", 0x3d, 0x01);
+        let unique_key = release_mbx_key("guest-x86_64-unknown-linux-gnu", 0x3d, 0x11);
+        assert_eq!(
+            strip_hash_segments(&older_key),
+            strip_hash_segments(&newer_key)
+        );
+        assert_ne!(
+            strip_hash_segments(&older_key),
+            strip_hash_segments(&unique_key)
+        );
+        let older_size = 2_144_000_000;
+        let newer_size = 2_292_000_000;
+        assert!(older_size + newer_size > compiler.budget_bytes);
+        assert!(newer_size <= compiler.budget_bytes);
+        let entries = vec![
+            recent("older", older_key.as_str(), older_size, 22 * MINUTE),
+            recent("newer", newer_key.as_str(), newer_size, 3 * MINUTE),
+            recent(
+                "unique-young",
+                unique_key.as_str(),
+                100_000_000,
+                30 * MINUTE,
+            ),
+            entry(
+                "unreadable",
+                snapshot_key_of("rust-example", 9).as_str(),
+                100_000_000,
+                "not-a-timestamp",
+            ),
+        ];
+        let plan = plan_evictions(&entries, &policy, NOW);
+        assert_eq!(plan_ids(&plan), vec!["older"]);
+        let older = must_some(
+            plan.iter().find(|eviction| eviction.id == "older"),
+            "superseded in-window generation is planned",
+        );
+        assert_eq!(older.reason, EvictionReason::ClassBudget);
+        assert_eq!(older.class, "compiler-snapshots");
+        assert!(
+            plan.iter().all(|eviction| eviction.id != "newer"),
+            "the newest in-window generation must survive: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|eviction| eviction.id != "unique-young"),
+            "a unique young generation with no older sibling must survive: {plan:?}"
+        );
+        assert!(
+            plan.iter().all(|eviction| eviction.id != "unreadable"),
+            "an unreadable age must survive: {plan:?}"
+        );
+    }
+
+    /// Protected toolchain seeds are never selected, inside or outside the
+    /// producer window, even when they exceed the class reservation.
+    #[test]
+    fn protected_seeds_are_never_planned_inside_or_outside_the_producer_window() {
+        const MINUTE: i64 = 60;
+        const HOUR: i64 = 3_600;
+        let policy = RetentionPolicy::default_policy();
+        let rustup_budget = policy_class(&policy, "toolchain-seeds").budget_bytes;
+        let cargo_budget = policy_class(&policy, "source-bundles").budget_bytes;
+        let entries = vec![
+            recent(
+                "rustup-young",
+                "velnor-rustup-Linux-X64-seed",
+                rustup_budget + 1,
+                10 * MINUTE,
+            ),
+            aged(
+                "rustup-old",
+                "velnor-rustup-Linux-X64-old",
+                rustup_budget + 1,
+                48 * HOUR,
+            ),
+            recent(
+                "cargo-young",
+                "velnor-cargo-Linux-X64-sources",
+                cargo_budget + 1,
+                15 * MINUTE,
+            ),
+            aged(
+                "cargo-old",
+                "ci-Linux-rust-unit-sources",
+                cargo_budget + 1,
+                48 * HOUR,
+            ),
+            recent(
+                "older",
+                release_mbx_key("deb-x86_64-unknown-linux-gnu", 0x3d, 0xa8).as_str(),
+                2_144_000_000,
+                22 * MINUTE,
+            ),
+            recent(
+                "newer",
+                release_mbx_key("deb-x86_64-unknown-linux-gnu", 0x3d, 0x01).as_str(),
+                2_292_000_000,
+                3 * MINUTE,
+            ),
+        ];
+        let plan = plan_evictions(&entries, &policy, NOW);
+        assert!(
+            plan.iter().all(|eviction| {
+                eviction.id != "rustup-young"
+                    && eviction.id != "rustup-old"
+                    && eviction.id != "cargo-young"
+                    && eviction.id != "cargo-old"
+            }),
+            "protected rustup/cargo must never be planned: {plan:?}"
+        );
+        assert_eq!(plan_ids(&plan), vec!["older"]);
     }
 }

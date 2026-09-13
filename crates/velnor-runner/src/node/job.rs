@@ -288,10 +288,13 @@ mod tests {
         let job_id = JobId("job-1".to_owned());
         assert!(
             !journal
-                .apply(Event::Assigned {
+                .apply(Event::JobAcquisitionIntended {
                     slot_id: SlotId("reject-1".to_owned()),
                     job_id: job_id.clone(),
                     generation: Generation::INITIAL,
+                    message_id: "msg-1".into(),
+                    run_service_url: "https://run.example/run".into(),
+                    intended_unix: 1_000,
                 })
                 .unwrap()
                 .rejected

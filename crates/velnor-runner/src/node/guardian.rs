@@ -60,7 +60,7 @@ fn supervise_once(
         .unwrap_or(0);
     let state = journal.materialized_state()?;
     for slot in &state.slots {
-        if matches!(slot.phase, ActorPhase::Fenced | ActorPhase::Quarantined) {
+        if slot.phase == ActorPhase::Fenced {
             continue;
         }
         let pid_dead = slot.pid.is_some_and(|pid| {

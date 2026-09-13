@@ -17,18 +17,27 @@
 //!
 //! [`client::Docker`] is the typed owner of the calls themselves: every query
 //! returns a typed value, and control-plane methods take no timeout because
-//! both transports apply [`deadline_for`]. Nothing here talks to the Engine
-//! itself. The classification input is the `docker` argument vector, which
-//! keeps the policy usable unchanged when the CLI is replaced by an API
-//! client: the classes and their deadlines survive, only the classifier's
-//! input changes.
+//! both transports apply [`deadline_for`]. The classification input is the
+//! `docker` argument vector, which keeps the policy usable unchanged now
+//! that an API client exists: the classes and their deadlines survive, only
+//! the transport changes.
+//!
+//! `engine` is the read-only Engine API fast path over the daemon Unix
+//! socket. Migrated facade queries try it first under a capped budget and
+//! fall back to their historical CLI query on any API failure, so the CLI
+//! stays the arbiter — and the error taxonomy stays the CLI's — whenever
+//! the API does not affirmatively succeed.
 
 pub(crate) mod client;
 pub mod deadline;
+pub(crate) mod engine;
 pub mod facts;
 pub mod metrics;
 
 pub(crate) use client::Docker;
 pub use deadline::{classify, deadline_for, DockerOp, DockerTimeout};
 pub use facts::{Fact, FactKey, FactLifetime};
-pub use metrics::{begin_job, observe, snapshot, ClassTotal, JobDockerScope, Snapshot};
+pub use metrics::{
+    begin_job, observe, observe_api, observe_api_fallback, snapshot, ClassTotal, JobDockerScope,
+    Snapshot,
+};

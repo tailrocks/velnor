@@ -1392,10 +1392,13 @@ fn job_once_without_exec_persists_only_after_ownership() {
     prime_named_ready(&mut journal, "jobown");
     use velnor_model::JobId;
     journal
-        .apply(Event::Assigned {
+        .apply(Event::JobAcquisitionIntended {
             slot_id: SlotId("jobown-1".into()),
             job_id: JobId("slot-1-worker".into()),
             generation: Generation::INITIAL,
+            message_id: "msg-1".into(),
+            run_service_url: "https://run.example/run".into(),
+            intended_unix: 1_000,
         })
         .unwrap();
     journal
@@ -1440,6 +1443,43 @@ fn job_once_without_exec_persists_only_after_ownership() {
 }
 
 #[test]
+fn daemon_acquisition_path_marks_job_running_at_start() {
+    use velnor_model::JobId;
+    use velnor_runner::node::complete::{
+        confirm_acquisition, intend_acquisition, record_job_started, resolve_acquisition,
+    };
+    let dir = scratch("daemon-running");
+    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+    prime_named_ready(&mut journal, "daemonrun");
+    let slot_id = SlotId("daemonrun-1".into());
+    let job_id = JobId("daemon-job-1".into());
+    let generation = intend_acquisition(
+        &mut journal,
+        &job_id,
+        &slot_id,
+        "msg-1",
+        "https://run.example/run",
+        1_000,
+    )
+    .unwrap();
+    resolve_acquisition(&mut journal, &job_id, &job_id, "plan-1", generation).unwrap();
+    confirm_acquisition(&mut journal, &job_id, &slot_id, generation).unwrap();
+    assert_eq!(
+        journal.load_state().unwrap().jobs[0].phase,
+        velnor_model::ActorPhase::Assigned
+    );
+    // This is the emission handle_job_request performs right after its store
+    // JobStarted edge: the journal phase must track the running execution.
+    record_job_started(&mut journal, &job_id, generation).unwrap();
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
+    assert_eq!(state.jobs[0].phase, velnor_model::ActorPhase::Running);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn controller_sends_pending_completion_outbox() {
     let dir = scratch("outbox");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -1448,10 +1488,13 @@ fn controller_sends_pending_completion_outbox() {
     use velnor_model::JobId;
     let job_id = JobId("slot-1-worker".into());
     journal
-        .apply(Event::Assigned {
+        .apply(Event::JobAcquisitionIntended {
             slot_id: SlotId("out-1".into()),
             job_id: job_id.clone(),
             generation: Generation::INITIAL,
+            message_id: "msg-1".into(),
+            run_service_url: "https://run.example/run".into(),
+            intended_unix: 1_000,
         })
         .unwrap();
     journal

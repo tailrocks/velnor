@@ -1,10 +1,13 @@
 #![allow(dead_code)]
 
 use std::{
+    fmt::Write as _,
     fs, io,
     num::NonZeroU32,
     path::{Path, PathBuf},
 };
+
+use sha2::{Digest, Sha256};
 
 use crate::container::host_budget::{BuildkitSize, HostBudget, SlotBudget};
 use crate::docker_argv::{DockerArgv, DockerCommand, FlagSink, ImageReference};
@@ -18,6 +21,8 @@ pub use crate::docker_argv::PreparedDockerArgs;
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const JOB_NOFILE_LIMIT: &str = "65536:65536";
 const JOB_DOCKER_HOST: &str = "unix:///var/run/docker.sock";
+const JOB_WORKFLOW_CLI: &str = "/usr/local/bin/velnor-workflow";
+const JOB_WORKFLOW_CLI_SHA256: &str = "/usr/local/share/velnor/velnor-workflow.sha256";
 
 /// Daemon-owned runner identity. Dropped from step env by exact match in
 /// `append_step_env` and re-asserted after it on every exec/run path, so a
@@ -172,6 +177,10 @@ pub struct JobContainerSpec {
     pub node_action_image: String,
     pub docker_cli_host_path: Option<PathBuf>,
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
+    /// Host path of the apt-packaged `velnor-workflow` CLI. Jobs bind-mount it
+    /// over the image copy so `apt install velnor-runner` is enough to update
+    /// plan/run. `None` skips the mount (tests).
+    pub packaged_workflow_cli_host: Option<PathBuf>,
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
@@ -250,23 +259,70 @@ impl JobContainerSpec {
             .capped_by_container_cpus(self.declared_container_cpus())
     }
 
-    /// CPU/memory ceiling for a shared buildkitd this job holds alongside
-    /// `holders - 1` other jobs: the slot share times the holder count,
-    /// capped at the host budget. The daemon used to be created from the
-    /// static `resource_options` spelling of operator policy alone, so the
-    /// derived budget sized every compiler except the one inside buildkitd.
-    /// An explicit `--memory` limit narrows the aggregate exactly as it
-    /// narrows one job container; without any declared limit the call still
-    /// succeeds with `None`.
+    /// This job's own BuildKit entitlement: its slot share narrowed by its
+    /// own declared limits. Recorded in the claim file at claim time; the
+    /// daemon ceiling is the sum of every holder's recording, never this
+    /// job's limits multiplied across strangers. The daemon used to be
+    /// created from the static `resource_options` spelling of operator
+    /// policy alone, so the derived budget sized every compiler except the
+    /// one inside buildkitd.
     ///
     /// # Errors
     /// A declared `--memory` limit is present but malformed, the same
     /// rejection `start_args` applies instead of silently dropping policy.
-    pub(crate) fn buildkit_size(&self, holders: u32) -> io::Result<BuildkitSize> {
+    pub(crate) fn own_buildkit_entitlement(&self) -> io::Result<BuildkitSize> {
         let budget = self.slot_budget();
         let declared = self.declared_container_memory()?;
-        let holders = NonZeroU32::new(holders).unwrap_or(NonZeroU32::MIN);
-        Ok(budget.buildkit_size(holders, declared))
+        Ok(budget.own_buildkit_entitlement(declared))
+    }
+
+    /// CPU/memory ceiling for a shared buildkitd doing the compiling for
+    /// `entitlements`: the summed holder recordings, capped at the host
+    /// budget. Pure w.r.t. declared policy — every holder's limits already
+    /// narrowed its own recording — so the sizing (and releasing) job's
+    /// workflow limits cannot leak onto other holders.
+    pub(crate) fn buildkit_size_summed(&self, entitlements: &[BuildkitSize]) -> BuildkitSize {
+        self.slot_budget().buildkit_size_summed(entitlements)
+    }
+
+    /// Static daemon-wide ceilings from `resource_options` alone, for the
+    /// per-dimension fallback when the derived budget cannot observe a
+    /// dimension. Lenient where the create path is strict: unknown flags
+    /// and malformed values read as undeclared rather than failing the
+    /// resize — the create path already rejects a misspelled operator
+    /// policy loudly, and a best-effort resize must not fail twice.
+    /// Workflow createOptions are deliberately excluded: they differ per
+    /// job, so they cannot fill a dimension of a shared daemon's ceiling.
+    pub(crate) fn static_buildkit_fallback(&self) -> (Option<u64>, Option<u64>) {
+        let cpu_milli = self
+            .resource_options
+            .windows(2)
+            .filter(|pair| pair[0] == "--cpus")
+            .map(|pair| pair[1].as_str())
+            .chain(
+                self.resource_options
+                    .iter()
+                    .filter_map(|option| option.strip_prefix("--cpus=")),
+            )
+            .filter_map(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .filter_map(crate::container::host_budget::cpu_milli_from_cpus)
+            .filter(|milli| *milli > 0)
+            .min();
+        let memory_bytes = self
+            .resource_options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, option)| {
+                if option == "--memory" {
+                    self.resource_options.get(index + 1).map(String::as_str)
+                } else {
+                    option.strip_prefix("--memory=")
+                }
+            })
+            .filter_map(parse_docker_memory_bytes)
+            .min();
+        (cpu_milli, memory_bytes)
     }
 
     /// One line naming the budget, how it was derived, and any workflow value
@@ -372,14 +428,13 @@ impl JobContainerSpec {
                 ("MBX_GC_MAX_TOTAL_SIZE", "50GiB"),
             ]);
         } else if let Some(host) = &self.sccache_store_host {
-            command.pair("-v", self.mount_arg(host, "/var/cache/sccache"));
-            command.envs([
-                ("MBX_DISABLE", "1"),
-                ("RUSTC_WRAPPER", "sccache"),
-                ("SCCACHE_DIR", "/var/cache/sccache"),
-                ("SCCACHE_CACHE_SIZE", "20G"),
-                ("SCCACHE_GHA_ENABLED", "false"),
-            ]);
+            // Explicit sccache compatibility mode: mount and env owned by the
+            // compat module; the default mbx branch above is untouched.
+            command.pair(
+                "-v",
+                self.mount_arg(host, crate::sccache_compat::CONTAINER_DIR),
+            );
+            command.envs(crate::sccache_compat::container_env());
         }
     }
 
@@ -560,6 +615,7 @@ impl JobContainerSpec {
 
         self.append_docker_socket_mount(args);
         self.append_docker_cli_mounts(args);
+        self.append_packaged_workflow_cli_mounts(args)?;
 
         // The per-job network is runner policy. Keep it after expanded job
         // and daemon resource options so the job cannot be displaced from the
@@ -1126,6 +1182,38 @@ impl JobContainerSpec {
         }
     }
 
+    fn append_packaged_workflow_cli_mounts(&self, args: &mut impl FlagSink) -> io::Result<()> {
+        let Some(host) = self.packaged_workflow_cli_host.as_deref() else {
+            return Ok(());
+        };
+        if !host.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "packaged velnor-workflow missing at {}; install velnor-runner from apt",
+                    host.display()
+                ),
+            ));
+        }
+        fs::create_dir_all(&self.temp_host)?;
+        let digest = Sha256::digest(fs::read(host)?);
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        let sidecar = self.temp_host.join("velnor-workflow.sha256");
+        fs::write(&sidecar, format!("{hex}  {JOB_WORKFLOW_CLI}\n"))?;
+        args.pair(
+            "-v",
+            format!("{}:ro", self.mount_arg(host, JOB_WORKFLOW_CLI)),
+        );
+        args.pair(
+            "-v",
+            format!("{}:ro", self.mount_arg(&sidecar, JOB_WORKFLOW_CLI_SHA256)),
+        );
+        Ok(())
+    }
+
     fn mount_arg(&self, host_path: &Path, container_path: &str) -> String {
         mount(&self.docker_host_path(host_path), container_path)
     }
@@ -1417,18 +1505,8 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
     }
 }
 
-/// Host-persistent sccache compiler store, namespaced by the job's admitted
-/// scope like every other trust-partitioned store.
-pub(crate) fn sccache_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
-    crate::storage::cache_class_path_for_trust(
-        &daemon_store_root(temp_host),
-        trust_scope,
-        "compiler/sccache",
-        "_velnor_sccache",
-    )
-}
-
-/// Host-persistent Cargo download/index store, daemon-shared like sccache.
+/// Host-persistent Cargo download/index store, daemon-shared like the
+/// compiler stores.
 /// Extracted registry sources and git checkouts remain job-local because they
 /// are mutable during materialization and are unsafe to share across slots.
 ///
@@ -1732,6 +1810,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
@@ -1743,12 +1822,73 @@ mod tests {
     }
 
     #[test]
+    fn packaged_workflow_cli_is_bind_mounted_over_the_image_copy() {
+        let mut job = spec();
+        fs::create_dir_all(&job.temp_host).unwrap();
+        let cli = job.temp_host.join("packaged-velnor-workflow");
+        fs::write(&cli, b"workflow-cli").unwrap();
+        job.packaged_workflow_cli_host = Some(cli.clone());
+        let prepared = job.start_args().unwrap();
+        assert!(has_read_only_mount(
+            &rendered(&prepared),
+            &cli,
+            "/usr/local/bin/velnor-workflow"
+        ));
+        let sidecar = job.temp_host.join("velnor-workflow.sha256");
+        assert!(has_read_only_mount(
+            &rendered(&prepared),
+            &sidecar,
+            "/usr/local/share/velnor/velnor-workflow.sha256"
+        ));
+        let sidecar_text = fs::read_to_string(&sidecar).unwrap();
+        assert!(
+            sidecar_text.ends_with("  /usr/local/bin/velnor-workflow\n"),
+            "{sidecar_text}"
+        );
+        assert_eq!(
+            sidecar_text.len(),
+            64 + "  /usr/local/bin/velnor-workflow\n".len()
+        );
+    }
+
+    #[test]
+    fn packaged_workflow_cli_missing_from_apt_fails_closed() {
+        let mut job = spec();
+        job.packaged_workflow_cli_host = Some(job.temp_host.join("missing-velnor-workflow"));
+        let error = job.start_args().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("install velnor-runner from apt"));
+    }
+
+    #[test]
     fn slot_budget_uses_authoritative_count_for_nonstandard_job_paths() {
         let mut job = spec();
         job.temp_host = PathBuf::from("/not-a-slot-layout/jobs/job/temp");
         job.slot_count = NonZeroU32::new(2).unwrap();
 
         assert_eq!(job.slot_budget().slots, job.slot_count);
+    }
+
+    #[test]
+    fn static_daemon_fallback_reads_only_daemon_wide_policy() {
+        let mut job = spec();
+        // Workflow createOptions differ per job, so they cannot fill a
+        // shared daemon's ceiling — not even when resource_options say
+        // nothing in that dimension.
+        job.resource_options = vec!["--cpus".into(), "4".into()];
+        job.options = vec!["--memory".into(), "1g".into(), "--cpus".into(), "1".into()];
+        assert_eq!(job.static_buildkit_fallback(), (Some(4000), None));
+
+        job.resource_options = vec!["--memory".into(), "12g".into()];
+        assert_eq!(
+            job.static_buildkit_fallback(),
+            (None, Some(12 * 1024 * 1024 * 1024))
+        );
+
+        // Lenient where the create path is strict: garbage reads as
+        // undeclared rather than failing a best-effort resize.
+        job.resource_options = vec!["--cpus".into(), "bogus".into(), "--pids-limit".into()];
+        assert_eq!(job.static_buildkit_fallback(), (None, None));
     }
 
     #[test]
@@ -1779,6 +1919,12 @@ mod tests {
         assert!(args.contains(&"MBX_GC_MAX_TOTAL_SIZE=50GiB".into()));
         assert!(!args.iter().any(|arg| arg.contains("/var/cache/sccache")));
         assert!(!args.contains(&"MBX_DISABLE=1".into()));
+        // Default path carries no sccache presence at all: no wrapper, no
+        // sccache env, no provisioned binary on PATH.
+        assert!(!args.iter().any(|arg| arg.contains("RUSTC_WRAPPER")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.to_ascii_lowercase().contains("sccache")));
     }
 
     #[test]
@@ -2153,25 +2299,6 @@ mod tests {
         assert_eq!(
             mise_store_host(temp, "trusted").join("cache"),
             PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
-        );
-    }
-
-    #[test]
-    fn sccache_host_is_shared_across_daemon_slots() {
-        // slot-N work roots collapse to one daemon-level sccache dir.
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-3/job-9/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
-        );
-        assert_eq!(
-            sccache_host(
-                Path::new("/var/lib/velnor/work/slot-7/job-1/temp"),
-                "trusted",
-            ),
-            PathBuf::from("/var/lib/velnor/work/_velnor_sccache/trusted")
         );
     }
 

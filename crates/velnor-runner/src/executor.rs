@@ -8,6 +8,10 @@ use crate::{
     cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{JobContainerSpec, Shell},
+    docker::client::{
+        classify_docker_stderr, docker_error_category, DockerCommandError, DockerErrorCategory,
+    },
+    execution::{CompositeConclusionScopes, StepOutcome},
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::{
@@ -4240,7 +4244,7 @@ where
                 let result = self.native_shell(
                     container,
                     state,
-                    "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
+                    crate::sccache_compat::post_script(),
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -4343,39 +4347,38 @@ where
                         stdout.push_str("No other holders: daemon already stopped, cache kept\n");
                     }
                 }
-                // Holders remain: shrink the daemon ceiling for those that do,
-                // so a once-shared builder does not keep a machine-sized
-                // ceiling for one job. Best-effort like the stop — sizing is
-                // an optimization, never a release failure — and skipped when
-                // the remaining holders cannot be counted. A final release
-                // resizes nothing: the daemon is stopped or already gone.
+                // Holders remain: shrink the daemon ceiling for those that
+                // do, so a once-shared builder does not keep a machine-sized
+                // ceiling for one job. The ceiling sums the remaining
+                // holders' own recordings — the releaser's limits are not
+                // theirs — with the same per-dimension static fallback
+                // setup uses. Best-effort like the stop: sizing is an
+                // optimization, never a release failure. Unreadable
+                // holders resize nothing, and a final release resizes
+                // nothing either: the daemon is stopped or already gone.
                 if matches!(outcome, Some(outcome) if !outcome.removed_last)
                     && let Some(run_root) = run_root.as_ref()
-                    && let Some(remaining) = crate::buildkit::builder_holder_count(run_root, &name)
-                    && remaining > 0
+                    && let Some(remaining) =
+                        crate::buildkit::builder_holders_for_sizing(run_root, &name)
+                    && !remaining.is_empty()
                 {
-                    match container.buildkit_size(u32::try_from(remaining).unwrap_or(u32::MAX)) {
-                        Ok(size) if !size.is_empty() => {
-                            if let Err(error) = crate::buildkit::resize_builder_daemon(
-                                &name,
-                                size.cpu_milli,
-                                size.memory_bytes,
-                            ) {
-                                use std::fmt::Write as _;
-                                let _ = writeln!(
-                                    stderr,
-                                    "buildx post: resize of {name} failed ({error:#})"
-                                );
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            use std::fmt::Write as _;
-                            let _ = writeln!(
-                                stderr,
-                                "buildx post: resize of {name} skipped ({error:#})"
-                            );
-                        }
+                    let entitlements: Vec<_> = remaining
+                        .iter()
+                        .map(|holder| holder.entitlement())
+                        .collect();
+                    let derived = container.buildkit_size_summed(&entitlements);
+                    let (static_cpu, static_memory) = container.static_buildkit_fallback();
+                    let size = derived.with_fallback(static_cpu, static_memory);
+                    if !size.is_empty()
+                        && let Err(error) = crate::buildkit::resize_builder_daemon(
+                            &name,
+                            size.cpu_milli,
+                            size.memory_bytes,
+                        )
+                    {
+                        use std::fmt::Write as _;
+                        let _ =
+                            writeln!(stderr, "buildx post: resize of {name} failed ({error:#})");
                     }
                 }
                 Ok(StepExecutionResult {
@@ -4541,8 +4544,32 @@ where
         state: &JobExecutionState,
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
-        Ok(native_command_result(result, StepCommandState::default()))
+        let mut result = self.native_shell(
+            container,
+            state,
+            &crate::sccache_compat::setup_script(),
+            timeout,
+        )?;
+        // The setup script installs outside the default PATH only on the
+        // non-root fallback; mirror a fallback install dir onto later steps'
+        // PATH the same way the cosign adapter does.
+        let mut path = Vec::new();
+        let mut kept = Vec::new();
+        for line in result.stdout.lines() {
+            if let Some(dir) = line.strip_prefix(crate::sccache_compat::PATH_MARKER) {
+                path.push(dir.to_string());
+            } else {
+                kept.push(line.to_string());
+            }
+        }
+        result.stdout = kept.join("\n");
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path,
+                ..StepCommandState::default()
+            },
+        ))
     }
 
     fn native_setup_mold(
@@ -4930,12 +4957,18 @@ where
         // another job's release could stop a daemon mid-build. Without a
         // temp dir or run root there are no claims at all, so nobody stops
         // and the builder only ever leaks (converged by the horizon path).
-        // The holder count below sizes the daemon for the jobs sharing it
-        // now; without a run root there is nothing to count, so a created
+        // This job's own entitlement, recorded in its claim below so the
+        // daemon ceiling sums what each holder measured for itself. Computed
+        // before the claim: a malformed declared limit fails setup here —
+        // the same rejection `start_args` applies — instead of claiming a
+        // builder this setup then refuses to size.
+        let own_entitlement = container.own_buildkit_entitlement()?;
+        // The holder set below sizes the daemon for the jobs sharing it
+        // now; without a run root there is nothing to read, so a created
         // daemon is sized for this job alone and an existing daemon is left
         // untouched — resizing it to a single share could throttle sharers
         // this setup cannot see.
-        let mut holders: u32 = 1;
+        let mut entitlements = vec![own_entitlement];
         let mut holders_known = false;
         if let (Some(temp), Some(run_root)) = (
             state.temp_host.as_deref(),
@@ -4952,6 +4985,7 @@ where
                 },
                 &job_scope_from_temp(Some(temp)),
                 &container.name,
+                own_entitlement,
             )?;
             // Cap the workflow-minted builders in this scope/tier/repository:
             // per-victim failures are best-effort, but an over-cap group with
@@ -4983,26 +5017,35 @@ where
                     );
                 }
             }
-            // Count after the claim above, so this job is included. The read
+            // Read after the claim above, so this job is included. The read
             // only fails when the file this setup just wrote cannot be read
             // back; a created daemon is then sized for this job alone rather
             // than failing the step, while an existing daemon is left
             // untouched — an uncounted resize could throttle unseen sharers.
-            match crate::buildkit::builder_holder_count(&run_root, &name) {
-                Some(count) => {
-                    holders = u32::try_from(count.max(1)).unwrap_or(1);
+            // The job's own recording is appended when the read somehow
+            // misses it, so sizing never drops the holder standing here.
+            match crate::buildkit::builder_holders_for_sizing(&run_root, &name) {
+                Some(holders) => {
+                    entitlements = holders.iter().map(|holder| holder.entitlement()).collect();
+                    if !holders
+                        .iter()
+                        .any(|holder| holder.container == container.name)
+                    {
+                        entitlements.push(own_entitlement);
+                    }
                     holders_known = true;
                 }
                 None => {
-                    holders = 1;
+                    entitlements = vec![own_entitlement];
                 }
             }
         }
-        // The derived slot budget sizes the daemon for its current holders.
-        // Each known dimension wins independently; an unobservable CPU must
-        // not discard an explicit memory ceiling, and an unobservable memory
-        // budget must not discard an explicit CPU ceiling.
-        let buildkit_size = container.buildkit_size(holders)?;
+        // The summed holder entitlements size the daemon for the jobs
+        // sharing it now. Each known dimension wins independently: an
+        // unobservable CPU must not discard an explicit memory ceiling,
+        // and an unobservable memory budget must not discard an explicit
+        // CPU ceiling. Total absence keeps the verbatim static spelling.
+        let buildkit_size = container.buildkit_size_summed(&entitlements);
         let driver_opts = buildx_driver_options(&buildkit_size, &container.resource_options)?;
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
@@ -5028,15 +5071,22 @@ where
             let result =
                 self.container_docker(container, &action_state, &use_args, None, timeout)?;
             // An existing daemon keeps whatever ceiling it was born with, so
-            // resize it for the counted holders present now. Best-effort: a
-            // wrong ceiling slows builds, it never breaks them, and the next
-            // setup converges it. Uncounted holders resize nothing.
+            // resize it for the holders present now, with the same
+            // per-dimension static fallback creation uses: an unobservable
+            // budget resizes an existing daemon exactly as it would create
+            // one. Best-effort: a wrong ceiling slows builds, it never
+            // breaks them, and the next setup converges it. Uncounted
+            // holders resize nothing, and a dimension with neither a
+            // derived nor a static value keeps the daemon's existing
+            // ceiling there.
+            let (static_cpu, static_memory) = container.static_buildkit_fallback();
+            let effective = buildkit_size.with_fallback(static_cpu, static_memory);
             if holders_known
-                && !buildkit_size.is_empty()
+                && !effective.is_empty()
                 && let Err(error) = crate::buildkit::resize_builder_daemon(
                     &name,
-                    buildkit_size.cpu_milli,
-                    buildkit_size.memory_bytes,
+                    effective.cpu_milli,
+                    effective.memory_bytes,
                 )
             {
                 eprintln!("buildx setup: resize of {name}: {error:#}");
@@ -5630,6 +5680,25 @@ where
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _span = tracing::info_span!("job-container-boot").entered();
+        // The retry decision derives from the typed category attached at the
+        // docker boundary, never from error text (GOAL 31). Every failure
+        // still tidies partial state first; only the retry decision below is
+        // category-driven. Idempotence per category:
+        //
+        // * Transient (daemon restart / transport break): re-running start
+        //   after stale cleanup re-creates the same names. The previous
+        //   attempt's network guard is retired before recreate, so a retry
+        //   cannot orphan or double-own it. Safe to repeat with backoff.
+        // * Conflict (leftover object owned by another writer): the stale
+        //   cleanup removes the conflicting object, then exactly one retry.
+        //   A second conflict proves the conflict is not stale leftovers.
+        // * Terminal (same inputs fail identically, or an error the docker
+        //   boundary never classified): fail fast, no retry.
+        //
+        // Bounds: attempts per category plus an overall deadline backstop for
+        // slow attempts. Each attempt additionally runs under its own
+        // per-class docker deadline.
+        let deadline = Instant::now() + DOCKER_START_RETRY_DEADLINE;
         let mut attempt = 1_u32;
         loop {
             let Err(error) = self.start_job_environment_once(container) else {
@@ -5637,25 +5706,24 @@ where
             };
             self.cleanup_stale(container);
 
-            // A daemon/containerd restart briefly returns transport and shim
-            // errors for every `docker run`. The historical single immediate
-            // retry always landed inside the same restart window, turning a
-            // healthy workflow into a permanent pre-execution rejection.
-            // Retry only this closed transient class with bounded backoff.
-            // Every other failure retains the one stale-resource retry.
-            let transient = docker_start_error_is_transient(&error);
-            let max_attempts = if transient { 5 } else { 2 };
-            if attempt >= max_attempts {
+            let category = docker_error_category(&error);
+            let (max_attempts, delay) = match category {
+                DockerErrorCategory::Terminal => return Err(error),
+                DockerErrorCategory::Conflict => {
+                    (DOCKER_START_CONFLICT_MAX_ATTEMPTS, Duration::ZERO)
+                }
+                DockerErrorCategory::Transient => (
+                    DOCKER_START_TRANSIENT_MAX_ATTEMPTS,
+                    docker_start_retry_delay(attempt),
+                ),
+            };
+            if attempt >= max_attempts || Instant::now() >= deadline {
                 return Err(error);
             }
-            let delay = if transient {
-                docker_start_retry_delay(attempt)
-            } else {
-                Duration::ZERO
-            };
             eprintln!(
-                "Docker job environment start failed (attempt {attempt}/{max_attempts}); \
-                 removed stale resources; retrying in {}ms: {error:#}",
+                "Docker job environment start failed ({category:?}; attempt \
+                 {attempt}/{max_attempts}); removed stale resources; retrying \
+                 in {}ms: {error:#}",
                 delay.as_millis()
             );
             if !delay.is_zero() {
@@ -5781,15 +5849,19 @@ where
             let resolver = self
                 .runner
                 .run("docker", &container.resolver_state_args())?;
-            bail!(
-                "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
-                service.network_alias,
-                container.name,
-                lookup.code,
-                lookup.stderr.trim(),
-                network.stdout.trim(),
-                resolver.stdout.trim()
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
+                    service.network_alias,
+                    container.name,
+                    lookup.code,
+                    lookup.stderr.trim(),
+                    network.stdout.trim(),
+                    resolver.stdout.trim()
+                ),
+                &lookup.stderr,
+            )
+            .into());
         }
         Ok(())
     }
@@ -5851,14 +5923,18 @@ where
         let result = self.runner.run("docker", args.args())?;
         fs::remove_file(&marker).ok();
         if result.code != 0 {
-            bail!(
-                "Docker daemon cannot see Velnor bind-mounted work directories. \
-                 Expected host temp '{}' to appear at '/__t' in container '{}'. \
-                 Use a local Docker daemon or set --work-dir/--config-dir to a path visible to the daemon. stderr: {}",
-                container.temp_host.display(),
-                container.name,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "Docker daemon cannot see Velnor bind-mounted work directories. \
+                     Expected host temp '{}' to appear at '/__t' in container '{}'. \
+                     Use a local Docker daemon or set --work-dir/--config-dir to a path visible to the daemon. stderr: {}",
+                    container.temp_host.display(),
+                    container.name,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(())
     }
@@ -5909,12 +5985,16 @@ where
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
         let result = self.runner.run("docker", args)?;
         if result.code != 0 {
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -5943,12 +6023,16 @@ where
     ) -> Result<CommandResult> {
         let result = self.runner.run_with_env("docker", args, env)?;
         if result.code != 0 {
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -5965,18 +6049,25 @@ where
             // container removal does not cause the slot to cycle unnecessarily.
             // A bounded timeout (Created/removing BuildKit) is the same class:
             // job teardown proceeds; doctor/boot retry until the object is gone.
-            if result.code == 124
-                || (result.stderr.contains("removal of container")
-                    && result.stderr.contains("is already in progress"))
-            {
+            // The tolerance is the Conflict category narrowed to the in-progress
+            // needles: a stderr that also matches Transient (daemon down
+            // mid-removal) surfaces instead of masking as success.
+            let removal_in_flight = result.stderr.contains("removal of container")
+                && result.stderr.contains("is already in progress")
+                && classify_docker_stderr(&result.stderr) == DockerErrorCategory::Conflict;
+            if result.code == 124 || removal_in_flight {
                 return Ok(result);
             }
-            bail!(
-                "docker {} failed with code {}: {}",
-                args.join(" "),
-                result.code,
-                result.stderr
-            );
+            return Err(DockerCommandError::classified(
+                format!(
+                    "docker {} failed with code {}: {}",
+                    args.join(" "),
+                    result.code,
+                    result.stderr
+                ),
+                &result.stderr,
+            )
+            .into());
         }
         Ok(result)
     }
@@ -6028,20 +6119,16 @@ fn resolve_checkout_plan_expressions(
     Ok(plan)
 }
 
-fn docker_start_error_is_transient(error: &anyhow::Error) -> bool {
-    let message = format!("{error:#}").to_ascii_lowercase();
-    [
-        "failed to create ttrpc connection",
-        "error reading from server: eof",
-        "unexpected eof",
-        "connection reset by peer",
-        "cannot connect to the docker daemon",
-        "is the docker daemon running",
-        "transport is closing",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
+/// Transient start failures retry with backoff: a daemon/containerd restart
+/// briefly fails every `docker` invocation, and the backoff sleeps outlast
+/// the restart window instead of landing inside it.
+const DOCKER_START_TRANSIENT_MAX_ATTEMPTS: u32 = 5;
+/// Conflicting leftover state gets one stale cleanup plus a single retry.
+const DOCKER_START_CONFLICT_MAX_ATTEMPTS: u32 = 2;
+/// Overall start-retry budget. Backoff sleeps total at most 15s and each
+/// attempt runs under its own per-class docker deadline; 60s is headroom,
+/// not a target — the attempts bound normally binds first.
+const DOCKER_START_RETRY_DEADLINE: Duration = Duration::from_secs(60);
 
 fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
     Duration::from_secs(1_u64 << failed_attempt.saturating_sub(1).min(3))
@@ -6431,43 +6518,6 @@ fn parse_mise_environment(
         .filter(|value| !value.is_empty())
         .collect();
     Ok((env, masks))
-}
-
-fn sccache_setup_script() -> String {
-    // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
-    // (download the release if the job image doesn't ship it), then start the
-    // server. Velnor selects RUSTC_WRAPPER=sccache only when this explicit
-    // action is present, so the binary MUST exist on PATH or every invocation fails with
-    // "could not execute process `sccache ...`: No such file or directory".
-    // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
-    // Velnor injects let sccache use the GitHub Actions cache backend.
-    r#"set -e
-command -v sccache >/dev/null 2>&1 || { echo 'sccache v0.16.0 must be preinstalled in the job image' >&2; exit 1; }
-sccache --version | grep -F 'sccache 0.16.0'
-# Velnor provides a fast, host-shared sccache cache bind-mounted at
-# /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
-# service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
-# would make the server fail ("cache url for ghac not found") and every
-# RUSTC_WRAPPER=sccache compile would error. Export the override via GITHUB_ENV so
-# subsequent compile steps (clippy/test) pick it up, and disable the GHA backend.
-SCCACHE_LOCAL_DIR=/var/cache/sccache
-mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-  echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
-  echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-fi
-export RUSTC_WRAPPER=sccache
-export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
-export SCCACHE_GHA_ENABLED=false
-export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
-if [ -n "${GITHUB_ENV:-}" ]; then
-  echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE" >> "$GITHUB_ENV"
-fi
-# Best-effort: cargo will auto-start the server on first use anyway.
-sccache --start-server 2>/dev/null || true
-"#
-    .to_string()
 }
 
 /// Inputs of `hadolint/hadolint-action`, defaults matching its action.yml.
@@ -7635,7 +7685,7 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path_or_child(path, "/opt/mise")
         || path_or_child(path, "/root/.rustup")
-        || path_or_child(path, "/var/cache/sccache")
+        || path_or_child(path, crate::sccache_compat::CONTAINER_DIR)
 }
 
 fn rust_cache_covered_by_persistent_storage(cache_directories: &str) -> bool {
@@ -11923,6 +11973,12 @@ fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<Str
     Ok(options)
 }
 
+/// Merge a derived daemon size with the static `resource_options`
+/// spelling: each known dimension wins independently, and only unknown
+/// dimensions inherit the static value. Total absence returns the static
+/// spelling verbatim, flag order included. Entries outside the
+/// `cpu-*`/`memory=` vocabulary pass through untouched rather than
+/// vanishing.
 fn buildx_driver_options(
     buildkit_size: &crate::container::host_budget::BuildkitSize,
     resource_options: &[String],
@@ -11967,6 +12023,13 @@ fn buildx_driver_options(
                 .cloned(),
         );
     }
+    options.extend(
+        derived
+            .iter()
+            .chain(fallback.iter())
+            .filter(|option| !option.starts_with("cpu-") && !option.starts_with("memory="))
+            .cloned(),
+    );
     Ok(options)
 }
 
@@ -12320,50 +12383,17 @@ pub(crate) struct JobExecutionState {
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     conclusions: BTreeMap<String, StepOutcome>,
-    /// Inner step ids converted by an ignored umbrella conclusion. Inner
-    /// `Failure` entries stay in `conclusions` (raw `steps.<id>` reads),
-    /// but the job-scope status scans skip these ids: upstream
-    /// `job.status` derives from top-level step results only, so after an
-    /// ignored umbrella a later `failure()` step must not run.
-    converted_conclusions: BTreeSet<String>,
+    /// Nested composite conclusion scopes (open-umbrella stack plus the
+    /// ignored-umbrella conversion set). The scope machinery lives in
+    /// `execution::composite_scopes`; this state only delegates to it.
+    composite_scopes: CompositeConclusionScopes,
     path: Vec<String>,
     masks: Vec<String>,
-    composite_stack: Vec<String>,
-    composite_conclusion_stack: Vec<CompositeConclusionFrame>,
     /// The running job's cancellation, so `success()`, `failure()` and
     /// `cancelled()` answer from the job's real status instead of from a
     /// constant. The engine installs its own required token here before the
     /// first step runs.
     cancellation: crate::execution::cancel::JobCancellation,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CompositeConclusionFrame {
-    step_id: String,
-    conclusions: BTreeMap<String, StepOutcome>,
-    /// Transitive inner ids popped from nested scopes. Kept separate from
-    /// `conclusions` so the scope status scan never sees them; an ignored
-    /// outer umbrella converts them with its own direct ids.
-    descendants: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepOutcome {
-    Success,
-    Failure,
-    Cancelled,
-    Skipped,
-}
-
-impl StepOutcome {
-    fn as_str(self) -> &'static str {
-        match self {
-            StepOutcome::Success => "success",
-            StepOutcome::Failure => "failure",
-            StepOutcome::Cancelled => "cancelled",
-            StepOutcome::Skipped => "skipped",
-        }
-    }
 }
 
 impl JobExecutionState {
@@ -12443,11 +12473,9 @@ impl JobExecutionState {
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             conclusions: BTreeMap::new(),
-            converted_conclusions: BTreeSet::new(),
+            composite_scopes: CompositeConclusionScopes::default(),
             path: Vec::new(),
             masks: Vec::new(),
-            composite_stack: Vec::new(),
-            composite_conclusion_stack: Vec::new(),
             cancellation: crate::execution::cancel::JobCancellation::inert(),
         };
         state.env = state
@@ -12499,11 +12527,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
-            converted_conclusions: self.converted_conclusions.clone(),
+            composite_scopes: self.composite_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
-            composite_stack: self.composite_stack.clone(),
-            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             // A derived state is the same job, so it carries the same
             // cancellation. Dropping it here would make every step's condition
             // — which is evaluated on a derived state — read as not cancelled.
@@ -12531,11 +12557,9 @@ impl JobExecutionState {
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
             conclusions: self.conclusions.clone(),
-            converted_conclusions: self.converted_conclusions.clone(),
+            composite_scopes: self.composite_scopes.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
-            composite_stack: self.composite_stack.clone(),
-            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             // A derived state is the same job, so it carries the same
             // cancellation. Dropping it here would make every step's condition
             // — which is evaluated on a derived state — read as not cancelled.
@@ -12548,75 +12572,28 @@ impl JobExecutionState {
     }
 
     fn push_composite(&mut self, step_id: &str) {
-        self.composite_stack.push(step_id.to_string());
-        self.composite_conclusion_stack
-            .push(CompositeConclusionFrame {
-                step_id: step_id.to_string(),
-                conclusions: BTreeMap::new(),
-                descendants: BTreeSet::new(),
-            });
+        self.composite_scopes.push(step_id);
     }
 
-    /// Pop a composite scope, returning the transitive inner step ids
-    /// (direct plus nested descendants). The transitive set always
-    /// propagates to the parent frame's descendants — even when this
-    /// level stands — so an ignored outer umbrella converts nested
-    /// failures with its own. Descendants never enter `conclusions`,
-    /// so the scope status scan is unchanged.
+    /// Pop a composite scope, returning the transitive inner step ids.
+    /// The propagation invariant lives with the scope stack; see
+    /// `CompositeConclusionScopes::pop`.
     fn pop_composite(&mut self, step_id: &str) -> Vec<String> {
-        if self
-            .composite_stack
-            .last()
-            .is_some_and(|scope| scope == step_id)
-        {
-            self.composite_stack.pop();
-        }
-        if self
-            .composite_conclusion_stack
-            .last()
-            .is_some_and(|frame| frame.step_id == step_id)
-        {
-            match self.composite_conclusion_stack.pop() {
-                Some(frame) => {
-                    let mut transitive: BTreeSet<String> = frame.conclusions.into_keys().collect();
-                    transitive.extend(frame.descendants);
-                    if let Some(parent) = self.composite_conclusion_stack.last_mut() {
-                        parent.descendants.extend(transitive.iter().cloned());
-                    }
-                    transitive.into_iter().collect()
-                }
-                None => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        }
+        self.composite_scopes.pop(step_id)
     }
 
     /// Mark inner step ids as converted by their umbrella's ignored
-    /// conclusion. Their `Failure` entries stay in `conclusions` (raw
-    /// `steps.<id>` reads), but the job-scope status scans skip them —
-    /// upstream `job.status` derives from top-level step results only.
+    /// conclusion. The conversion rule lives with the scope stack; see
+    /// `CompositeConclusionScopes::convert`.
     fn convert_conclusions(&mut self, step_ids: Vec<String>) {
-        self.converted_conclusions.extend(step_ids);
+        self.composite_scopes.convert(step_ids);
     }
 
-    /// Defensive-flush twin of the End path's `pop_composite` harvest: a
-    /// plan whose `CompositeEnd` never arrived leaves its scopes open, so
+    /// Defensive-flush twin of the End path's `pop_composite` harvest:
     /// an ignored flush umbrella converts every still-open scope's ids.
     /// The stacks stay untouched — only the status scans change.
     fn convert_open_composite_scopes(&mut self) {
-        let ids: Vec<String> = self
-            .composite_conclusion_stack
-            .iter()
-            .flat_map(|frame| {
-                frame
-                    .conclusions
-                    .keys()
-                    .cloned()
-                    .chain(frame.descendants.iter().cloned())
-            })
-            .collect();
-        self.convert_conclusions(ids);
+        self.composite_scopes.convert_open_scopes();
     }
 
     pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
@@ -12634,9 +12611,7 @@ impl JobExecutionState {
         };
         self.outcomes.insert(step_id.to_string(), outcome);
         self.conclusions.insert(step_id.to_string(), conclusion);
-        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
-            frame.conclusions.insert(step_id.to_string(), conclusion);
-        }
+        self.composite_scopes.record(step_id, conclusion);
 
         if !result.state.outputs.is_empty() {
             self.outputs
@@ -12677,11 +12652,8 @@ impl JobExecutionState {
             .insert(step_id.to_string(), StepOutcome::Cancelled);
         self.conclusions
             .insert(step_id.to_string(), StepOutcome::Cancelled);
-        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
-            frame
-                .conclusions
-                .insert(step_id.to_string(), StepOutcome::Cancelled);
-        }
+        self.composite_scopes
+            .record(step_id, StepOutcome::Cancelled);
     }
 
     fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
@@ -12901,9 +12873,10 @@ impl JobExecutionState {
     fn job_status(&self) -> &'static str {
         if self.is_cancelled() {
             "cancelled"
-        } else if self.conclusions.iter().any(|(id, outcome)| {
-            *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-        }) {
+        } else if self
+            .composite_scopes
+            .top_level_has_failure(&self.conclusions)
+        {
             "failure"
         } else {
             "success"
@@ -12924,15 +12897,7 @@ impl JobExecutionState {
     }
 
     fn status_scope_has_failure(&self) -> bool {
-        if let Some(frame) = self.composite_conclusion_stack.last() {
-            frame.conclusions.iter().any(|(id, outcome)| {
-                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-            })
-        } else {
-            self.conclusions.iter().any(|(id, outcome)| {
-                *outcome == StepOutcome::Failure && !self.converted_conclusions.contains(id)
-            })
-        }
+        self.composite_scopes.scope_has_failure(&self.conclusions)
     }
 
     /// Read a dotted context path (e.g. `github.event.pull_request.number`)
@@ -15534,6 +15499,61 @@ mod tests {
         }
     }
 
+    /// [`RecordingRunner`] that also scripts stderr per recorded call, for
+    /// retry-category tests: the docker boundary classifies on stderr, so a
+    /// retry test must pin the failure shape, not just the exit code. Entry
+    /// `i` overrides the stderr of the i-th recorded call (the unrecorded
+    /// mise-seed probe consumes neither a code nor a stderr); calls past the
+    /// script keep the inner empty stderr.
+    struct StderrScriptRunner {
+        inner: RecordingRunner,
+        stderrs: Vec<String>,
+    }
+
+    impl StderrScriptRunner {
+        fn scripted(codes: Vec<i32>, stderrs: Vec<&str>) -> Self {
+            Self {
+                inner: RecordingRunner {
+                    calls: Vec::new(),
+                    stdin: Vec::new(),
+                    env: Vec::new(),
+                    codes,
+                },
+                stderrs: stderrs.into_iter().map(str::to_string).collect(),
+            }
+        }
+
+        fn script_stderr(&mut self, result: &mut CommandResult) {
+            if !self.stderrs.is_empty() {
+                result.stderr = self.stderrs.remove(0);
+            }
+        }
+    }
+
+    impl CommandRunner for StderrScriptRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            let expanded = crate::execution::expand_env_file_args(args);
+            let mut result = self.inner.run(program, args)?;
+            // Mirror the inner seed-probe short-circuit: the probe consumes
+            // no code, so it must consume no stderr either.
+            if !is_seed_probe(&expanded) {
+                self.script_stderr(&mut result);
+            }
+            Ok(result)
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            let mut result = self.inner.run_with_env(program, args, env)?;
+            self.script_stderr(&mut result);
+            Ok(result)
+        }
+    }
+
     #[derive(Default)]
     struct BuildkitCleanupRunner {
         calls: Vec<Vec<String>>,
@@ -16459,6 +16479,7 @@ esac
             node_action_image: String::new(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
@@ -16927,6 +16948,22 @@ esac
         assert!(buildx_driver_resource_options(&["--cpus".into(), "0".into()]).is_err());
         assert!(buildx_driver_resource_options(&["--pids-limit".into(), "512".into()]).is_err());
         assert!(buildx_driver_resource_options(&["--memory".into()]).is_err());
+    }
+
+    #[test]
+    fn partial_derived_size_inherits_only_unknown_static_dimensions() {
+        use crate::container::host_budget::BuildkitSize;
+        let derived = BuildkitSize {
+            cpu_milli: Some(4000),
+            memory_bytes: None,
+        };
+        let static_options = ["--cpus".into(), "8".into(), "--memory".into(), "12g".into()];
+        // Derived CPU wins over static `--cpus 8`; unobserved memory keeps
+        // the static `memory=12g` instead of silently uncapping.
+        assert_eq!(
+            buildx_driver_options(&derived, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=400000", "memory=12g",]
+        );
     }
 
     #[test]
@@ -19640,6 +19677,25 @@ type=sha,format=long,prefix=,enable=true"
         let mut spec = container(&temp);
         spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
+        // Pin the host budget to a synthetic 16-CPU/16-GiB tree: the
+        // expected daemon ceiling below is hand-derived from it, so this
+        // test asserts an exact argv instead of recomputing one from the
+        // machine it happens to run on.
+        let budget_root = temp.join("synthetic-budget");
+        fs::create_dir_all(budget_root.join("proc")).unwrap();
+        fs::create_dir_all(budget_root.join("sys/fs/cgroup/velnor-jobs.slice")).unwrap();
+        fs::write(
+            budget_root.join("proc/meminfo"),
+            "MemTotal:       16777216 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            budget_root.join("sys/fs/cgroup/velnor-jobs.slice/cpu.max"),
+            "1600000 100000\n",
+        )
+        .unwrap();
+        let _budget = crate::container::host_budget::TestBudgetGuard::pin(&budget_root, Some(16));
+
         let results = executor
             .execute_ordered_steps_with_context(
                 &spec,
@@ -19693,19 +19749,22 @@ type=sha,format=long,prefix=,enable=true"
             builder,
             "velnor-builder-shared-trusted-unknown-unknown-repository"
         );
-        // The derived slot budget sizes the daemon: recompute the size from
-        // the same host observation and require it on the create argv. Any
-        // unobservable dimension still falls back to its static policy.
-        let size = spec.buildkit_size(1).unwrap();
-        let expected_opts = buildx_driver_options(&size, &spec.resource_options).unwrap();
-        assert!(!expected_opts.is_empty());
-        let expected_driver_opt = expected_opts.join(",");
+        // The synthetic budget pins this job to 16 CPUs and the 85% memory
+        // pool of 16 GiB on one slot; the declared `--cpus 4` narrows CPU
+        // to 4000 milli and the declared `--memory 12g` narrows memory to
+        // exactly 12 GiB. No run root exists in tests, so the daemon is
+        // sized for this job alone: the exact ceiling is asserted literally
+        // below, while the recomputed size only selects the fallback
+        // assertion branch after it.
+        let own = spec.own_buildkit_entitlement().unwrap();
+        let size = spec.buildkit_size_summed(&[own]);
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
             .expect("buildx create call");
         assert!(
-            create.contains(&format!("'--driver-opt' '{expected_driver_opt}'")),
+            create
+                .contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12884901888'"),
             "derived budget must reach buildkitd, got: {create}"
         );
         assert!(create.contains(&format!(
@@ -20629,19 +20688,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             continue_on_error: false,
             timeout_minutes: None,
         }];
-        let mut executor = DockerJobEngine::inert(RecordingRunner {
-            calls: Vec::new(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        });
+        // The stale network left by a previous attempt is a boundary
+        // conflict: cleanup removes it, then the single retry succeeds.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec!["Error response from daemon: network with name \"net\" already exists"],
+        ));
 
         let results = executor
             .execute_steps(&container(&temp), &steps, &temp)
             .unwrap();
 
         assert_eq!(results.len(), 1);
-        let calls = &executor.runner().calls;
+        let calls = &executor.runner().inner.calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
@@ -20672,19 +20731,28 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn start_job_double_failure_cleans_up_retry_resources() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let mut executor = DockerJobEngine::inert(RecordingRunner {
-            calls: Vec::new(),
-            stdin: Vec::new(),
-            env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
-        });
+        // Both failures are boundary conflicts: stale cleanup plus exactly
+        // one retry, then the error surfaces. Each attempt still tidies.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
+            vec![
+                "Error response from daemon: network with name \"net\" already exists",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "Conflict. The container name \"/job\" is already in use by container deadbeef",
+            ],
+        ));
 
         let error = executor
             .start_job_environment(&container(&temp))
             .unwrap_err();
 
         assert!(error.to_string().contains("docker run"));
-        let calls = &executor.runner().calls;
+        let calls = &executor.runner().inner.calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(
             calls[1].1,
@@ -20729,6 +20797,173 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             crate::docker_lease::force_remove_network_args(&["net".to_string()])
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_transient_failure_retries_then_succeeds() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // Daemon unreachable on the first attempt only: the category-driven
+        // policy backs off and the retry recreates the environment.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0, 0, 0],
+            vec!["Cannot connect to the Docker daemon. Is the docker daemon running?"],
+        ));
+
+        executor.start_job_environment(&container(&temp)).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[6].1, expected_network_create_args());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_terminal_failure_fails_fast_without_retry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // Same inputs fail identically: no retry, but the single attempt
+        // still tidies partial state before the error surfaces.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1, 0, 0, 0, 0, 0],
+            vec!["Error response from daemon: pull access denied for private/image"],
+        ));
+
+        let error = executor
+            .start_job_environment(&container(&temp))
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("pull access denied"),
+            "terminal error must surface unchanged: {error:#}"
+        );
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert!(
+            !calls[1..]
+                .iter()
+                .any(|(_, args)| args == &expected_network_create_args()),
+            "terminal failure must not retry: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_registry_transient_pull_retries_then_succeeds() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        // The job `docker run` pulls: a registry rate limit is a transfer
+        // transient, retried with backoff — not a fail-fast terminal.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 1],
+            vec![
+                "",
+                "Error response from daemon: toomanyrequests: You have reached your pull rate limit",
+            ],
+        ));
+
+        executor.start_job_environment(&container(&temp)).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "registry transient must retry the environment: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_start_readiness_not_found_race_recovers_with_retry() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        // The service container vanishes between `run` and the readiness
+        // poll: another writer removed it mid-flight (Conflict-shaped), so
+        // one stale cleanup plus a single retry recovers the race.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![0, 0, 1],
+            vec!["", "", "Error: No such object: svc"],
+        ));
+
+        executor.start_job_environment(&spec).unwrap();
+
+        let calls = &executor.runner().inner.calls;
+        assert_eq!(calls[0].1, expected_network_create_args());
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(calls[2].1[0], "inspect");
+        // Retry cleanup removes the raced service before the retry recreates it.
+        let expected_service_rm = crate::docker_lease::remove_one_container_args("svc");
+        assert!(
+            calls.iter().any(|(_, args)| args == &expected_service_rm),
+            "race retry must clean the service first: {calls:?}"
+        );
+        // The retry re-creates the environment and re-polls readiness.
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args == &expected_network_create_args())
+                .count(),
+            2,
+            "NotFound race must retry the environment: {calls:?}"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "inspect"))
+                .count(),
+            2,
+            "NotFound race must re-poll readiness: {calls:?}"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn remove_container_failure_carries_typed_category() {
+        // The rm bail attaches DockerCommandError like every other
+        // docker-failure production point: the retry policy reads the chain,
+        // never the text. The message itself is unchanged.
+        let mut executor = DockerJobEngine::inert(StderrScriptRunner::scripted(
+            vec![1],
+            vec!["Error response from daemon: cannot remove a running container"],
+        ));
+
+        let error = executor
+            .run_docker_remove_container(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                "--".to_string(),
+                "job".to_string(),
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "docker rm --force -- job failed with code 1: \
+             Error response from daemon: cannot remove a running container"
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.downcast_ref::<DockerCommandError>().is_some()),
+            "rm failure must carry DockerCommandError: {error:#}"
+        );
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Terminal);
     }
 
     #[test]
@@ -20808,6 +21043,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -20846,6 +21082,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 fetch_tags: false,
                 persist_credentials: true,
                 clean: true,
+                preserve_target: false,
                 lfs: false,
                 condition: None,
                 continue_on_error: false,
@@ -24760,6 +24997,7 @@ fi"#
                 fetch_tags: false,
                 persist_credentials: false,
                 clean: true,
+                preserve_target: false,
                 lfs: false,
                 condition: None,
                 continue_on_error: false,
@@ -31530,26 +31768,6 @@ bitcoin-processor-app.push=true")
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
         );
-    }
-
-    #[test]
-    fn docker_start_retry_classifies_only_transient_runtime_failures() {
-        for message in [
-            "failed to create TTRPC connection: unsupported protocol",
-            "error reading from server: EOF",
-            "Cannot connect to the Docker daemon. Is the docker daemon running?",
-            "rpc error: transport is closing",
-        ] {
-            assert!(docker_start_error_is_transient(&anyhow::anyhow!(message)));
-        }
-        for message in [
-            "pull access denied for private/image",
-            "invalid reference format",
-            "network with name job already exists",
-            "failed to create task for container: OCI runtime create failed: executable not found",
-        ] {
-            assert!(!docker_start_error_is_transient(&anyhow::anyhow!(message)));
-        }
     }
 
     #[test]

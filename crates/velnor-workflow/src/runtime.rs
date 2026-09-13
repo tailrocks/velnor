@@ -1457,6 +1457,7 @@ pub(crate) fn enforce_policy_with_revision(
     let entries = fs::read_dir(&workflows)
         .map_err(|error| GeneratorError::io("read workflow directory", &workflows, &error))?;
     let policy_entrypoint = workflows.join("ci-policy.yml");
+    let velnor_labels = configured_velnor_labels(root);
     let mut found_policy_entrypoint = false;
     let mut failures = PolicyFindings::default();
     // GitHub rejects a workflow whose YAML carries duplicate keys, so the
@@ -1489,7 +1490,13 @@ pub(crate) fn enforce_policy_with_revision(
             failures.record(&path, "workflow document must be a YAML mapping");
             continue;
         };
-        inspect_workflow(workflow, &path, trusted_revision, &mut failures);
+        inspect_workflow(
+            workflow,
+            &path,
+            trusted_revision,
+            &velnor_labels,
+            &mut failures,
+        );
     }
     if !found_policy_entrypoint {
         failures.record(
@@ -1511,6 +1518,7 @@ fn inspect_workflow(
     workflow: &Mapping,
     path: &Path,
     trusted_revision: &str,
+    velnor_labels: &[String],
     failures: &mut PolicyFindings,
 ) {
     let approved_policy_entrypoint =
@@ -1525,7 +1533,7 @@ fn inspect_workflow(
                     failures.record(path, "pull_request_target is forbidden");
                 }
             }
-            "jobs" => inspect_jobs(value, path, trusted_revision, failures),
+            "jobs" => inspect_jobs(value, path, trusted_revision, velnor_labels, failures),
             _ => inspect_yaml_value(value, path, None, false, trusted_revision, failures),
         }
     }
@@ -1602,7 +1610,7 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         // remaining job structure stays an exact generator comparison.
         if !mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job))
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, &[]))
         {
             return false;
         }
@@ -1646,32 +1654,100 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
 }
 
-fn is_static_velnor_runner(job: &Mapping) -> bool {
+fn has_safe_runner_gate(condition: &str, job: &Mapping, velnor_labels: &[String]) -> bool {
+    if has_trusted_runner_gate(condition) {
+        return true;
+    }
+    is_generated_velnor_pr_gate(condition)
+        && is_static_self_hosted_runner(job)
+        && job_runs_on_matches_labels(job, velnor_labels)
+}
+
+fn configured_velnor_labels(root: &Path) -> Vec<String> {
+    let path = root.join(DEFAULT_CONFIG);
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
+        return Vec::new();
+    };
+    value
+        .get("workflow")
+        .and_then(toml::Value::as_table)
+        .and_then(|workflow| workflow.get("velnor_labels"))
+        .and_then(toml::Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn job_runs_on_matches_labels(job: &Mapping, expected: &[String]) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
     let Some(runs_on) = mapping_value(job, "runs-on") else {
         return false;
     };
-    let mut resolving = BTreeSet::new();
-    let analysis = analyze_runner(runs_on, None, &mut resolving);
-    analysis.self_hosted
-        && !analysis.dynamic
-        && !analysis.invalid
-        && contains_velnor_runner_label(runs_on)
+    let Some(labels) = runs_on.as_sequence() else {
+        return false;
+    };
+    if labels.len() != expected.len() {
+        return false;
+    }
+    labels
+        .iter()
+        .zip(expected)
+        .all(|(label, expected)| label.as_str() == Some(expected.as_str()))
 }
 
-fn contains_velnor_runner_label(value: &Value) -> bool {
-    match value {
-        Value::String(value) => value.to_ascii_lowercase().contains("velnor"),
-        Value::Mapping(mapping) => mapping.values().any(contains_velnor_runner_label),
-        Value::Sequence(sequence) => sequence.iter().any(contains_velnor_runner_label),
-        Value::Tagged(tagged) => contains_velnor_runner_label(tagged.value()),
-        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+fn normalize_gate_expression(value: &str) -> String {
+    // Both-mode aggregates name the manual lane selector `lanes` while
+    // single-lane modes name it `runner`; the gate shape the policy matchers
+    // below recognize is identical, so canonicalize the spelling first.
+    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    if let Some(inner) = value
+        .strip_prefix("always()&&(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        inner.to_owned()
+    } else {
+        value
     }
 }
 
-fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
-    has_trusted_runner_gate(condition)
-        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
-        || (has_manual_velnor_dispatch_gate(condition) && is_static_velnor_runner(job))
+fn is_generated_velnor_pr_gate(value: &str) -> bool {
+    let normalized = normalize_gate_expression(value);
+    let value = strip_reusable_unit_selector(&normalized).unwrap_or(&normalized);
+    let marker = "github.ref=='refs/heads/";
+    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
+        return false;
+    };
+    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
+        return false;
+    };
+    let branch = &value[start..end];
+    if !valid_branch(branch) {
+        return false;
+    }
+    let control_plane = format!(
+        "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))"
+    );
+    let velnor_lane = format!(
+        "github.event_name=='pull_request'||(github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'))||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))"
+    );
+    value == control_plane || value == velnor_lane
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1699,7 +1775,13 @@ fn claims_inline_policy_transport(job: &Mapping) -> bool {
         == Some("Checkout caller workflow data")
 }
 
-fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &mut PolicyFindings) {
+fn inspect_jobs(
+    value: &Value,
+    path: &Path,
+    trusted_revision: &str,
+    velnor_labels: &[String],
+    failures: &mut PolicyFindings,
+) {
     let Some(jobs) = value.as_mapping() else {
         failures.record(path, "jobs must be a YAML mapping");
         return;
@@ -1719,7 +1801,7 @@ fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &m
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job));
+            .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_labels));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
@@ -1864,12 +1946,6 @@ fn is_approved_local_action(value: &str) -> bool {
         && !path.split('/').any(|segment| segment == "..")
 }
 
-/// The owners that mirror the `velnor-actions` fleet. A reusable workflow
-/// from a fleet mirror, pinned by full commit SHA, is content-addressed
-/// exactly like a SHA-pinned external action; anything else reusable stays
-/// rejected above.
-const FLEET_VELNOR_ACTION_OWNERS: &[&str] = &["jackin-project", "tailrocks", "ChainArgos"];
-
 fn is_approved_fleet_reusable(value: &str) -> bool {
     let Some((path, reference)) = value.split_once('@') else {
         return false;
@@ -1888,7 +1964,7 @@ fn is_approved_fleet_reusable(value: &str) -> bool {
         return false;
     };
     segments.next().is_none()
-        && FLEET_VELNOR_ACTION_OWNERS.contains(&owner)
+        && crate::estate::FLEET_VELNOR_ACTION_OWNERS.contains(&owner)
         && repository == "velnor-actions"
         && dot_github == ".github"
         && workflows == "workflows"
@@ -1951,23 +2027,6 @@ fn inspect_runner(
     }
 }
 
-/// Adopted lane-selection `runs-on` shapes, whitespace-normalized for
-/// comparison (see [`normalize_runner_expression`]). Every shape resolves to
-/// either the hosted `ubuntu-26.04` label or the repository's declared
-/// self-hosted labels; the lane shapes additionally map every `pull_request`
-/// evaluation to the hosted label, so untrusted pull requests never resolve
-/// to the persistent pool. Selectors reference only the event name and the
-/// manual `lanes` input, and matrix shapes reference only the job matrix the
-/// repository's own producer jobs compute from the same trusted inputs.
-/// Anything else dynamic stays rejected.
-const APPROVED_DYNAMIC_RUNNERS: &[&str] = &[
-    "((github.event_name=='workflow_dispatch'&&inputs.lanes=='github')||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "((github.event_name=='workflow_dispatch'&&inputs.lanes!='velnor')||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "((github.event_name=='workflow_dispatch'&&inputs.lanes=='github')||github.event_name=='pull_request'||github.event_name=='merge_group'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "matrix.config.runner",
-    "fromJSON(matrix.config.runner)",
-];
-
 fn normalize_runner_expression(value: &str) -> String {
     value
         .trim()
@@ -1981,7 +2040,7 @@ fn normalize_runner_expression(value: &str) -> String {
 
 fn is_approved_dynamic_runner(label: &str) -> bool {
     let normalized = normalize_runner_expression(label);
-    APPROVED_DYNAMIC_RUNNERS
+    crate::estate::APPROVED_DYNAMIC_RUNNERS
         .iter()
         .any(|shape| normalized == **shape)
 }
@@ -2144,6 +2203,9 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     {
         return has_trusted_runner_gate(trusted);
     }
+    if let Some(trusted) = strip_reusable_unit_selector(&value) {
+        return has_trusted_runner_gate(trusted);
+    }
     let marker = "github.ref=='refs/heads/";
     let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
         return false;
@@ -2161,8 +2223,13 @@ fn has_trusted_runner_gate(value: &str) -> bool {
     let release_gate = format!(
         "(github.event_name=='push'&&(github.ref_type=='tag'||github.ref=='refs/heads/{branch}'))||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&github.ref=='refs/heads/{branch}')"
     );
+    let velnor_lane_gate = format!(
+        "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule'||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')))"
+    );
     value == ci_gate
         || value == format!("always()&&{ci_gate}")
+        || value == velnor_lane_gate
+        || value == format!("always()&&{velnor_lane_gate}")
         || value == release_gate
         || value
             .strip_suffix(&format!("&&{ci_gate}"))
@@ -2178,65 +2245,6 @@ fn has_trusted_runner_gate(value: &str) -> bool {
             .is_some_and(is_safe_trusted_gate_conjunction)
 }
 
-fn has_untrusted_pull_request_gate(value: &str) -> bool {
-    let value = normalize_gate_expression(value);
-    if value == "github.event_name=='pull_request'" {
-        return true;
-    }
-    if value
-        .strip_prefix("github.event_name=='pull_request'||(")
-        .and_then(|value| value.strip_suffix(')'))
-        .is_some_and(|trusted| {
-            has_trusted_runner_gate(trusted) || is_automatic_push_schedule_gate(trusted)
-        })
-    {
-        return true;
-    }
-    if value
-        .strip_prefix(
-            "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(",
-        )
-        .and_then(|rest| rest.strip_suffix(')'))
-        .is_some_and(is_automatic_push_schedule_gate)
-    {
-        return true;
-    }
-    let dispatch = "||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
-    value
-        .strip_prefix("github.event_name=='pull_request'||(")
-        .and_then(|rest| rest.strip_suffix(dispatch))
-        .map(|inner| inner.strip_suffix(')').unwrap_or(inner))
-        .is_some_and(is_automatic_push_schedule_gate)
-}
-
-fn has_manual_velnor_dispatch_gate(value: &str) -> bool {
-    let value = normalize_gate_expression(value);
-    value == "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
-        || has_untrusted_pull_request_gate(&value)
-}
-
-fn normalize_gate_expression(value: &str) -> String {
-    let value = value.trim();
-    // Both-mode aggregates name the manual lane selector `lanes` while
-    // single-lane modes name it `runner`; the gate shape the policy matchers
-    // below recognize is identical, so canonicalize the spelling first.
-    let value = value.replace("github.event.inputs.lanes", "github.event.inputs.runner");
-    let value = value
-        .strip_prefix("${{")
-        .and_then(|value| value.strip_suffix("}}"))
-        .map_or(value.as_str(), str::trim)
-        .split_whitespace()
-        .collect::<String>();
-    let value = value.strip_prefix("always()&&").unwrap_or(&value);
-    let value = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-        .unwrap_or(value);
-    strip_reusable_unit_selector(value)
-        .unwrap_or(value)
-        .to_owned()
-}
-
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
     let value = value.strip_prefix("inputs.unit=='")?;
     let separator = value.find("'&&(")?;
@@ -2245,22 +2253,6 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
-}
-
-fn is_automatic_push_schedule_gate(value: &str) -> bool {
-    let marker = "github.ref=='refs/heads/";
-    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
-        return false;
-    };
-    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
-        return false;
-    };
-    let branch = &value[start..end];
-    valid_branch(branch)
-        && value
-            == format!(
-                "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule')"
-            )
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -3242,8 +3234,7 @@ jobs:
     }
 
     #[test]
-    fn policy_accepts_the_generated_untrusted_velnor_pull_request_gate(
-    ) -> Result<(), Box<dyn Error>> {
+    fn policy_rejects_untrusted_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Velnor PR
 on:
@@ -3256,7 +3247,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Velnor PR aggregate
@@ -3269,7 +3260,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        assert!(!run_policy(root)?);
 
         let workflow = r"
 name: Velnor kind reusable
@@ -3282,7 +3273,81 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+        Ok(())
+    }
+
+    #[test]
+    fn policy_accepts_generated_pr_gates_on_configured_velnor_labels() -> Result<(), Box<dyn Error>>
+    {
+        let root = policy_fixture(
+            "velnor-pr-configured",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-pr.yml"),
+            r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+  ci-required:
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+",
+        )?;
+        std::fs::write(
+            root.join(".github/workflows/ci-unit-rust.yml"),
+            r"
+name: rust
+on:
+  workflow_call:
+jobs:
+  verify:
+    if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+",
+        )?;
         assert!(run_policy(root)?);
+
+        let mismatched = policy_fixture(
+            "velnor-pr-mismatched",
+            "name: Other\non: push\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: true\n",
+            "velnor",
+        )?;
+        std::fs::write(
+            mismatched.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        std::fs::write(
+            mismatched.join(".github/workflows/ci-pr.yml"),
+            r"
+name: CI
+on:
+  pull_request:
+jobs:
+  plan:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
+    runs-on: [self-hosted, other-runner]
+    steps:
+      - run: true
+",
+        )?;
+        assert!(!run_policy(mismatched)?);
         Ok(())
     }
 
@@ -3301,6 +3366,10 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-lanes-reusable", workflow, "velnor")?;
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
         assert!(run_policy(root)?);
 
         let workflow = r"
@@ -3314,7 +3383,13 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-lanes-dispatch", workflow, "velnor")?;
-        assert!(run_policy(root)?);
+        std::fs::write(
+            root.join(".github/ci/project.toml"),
+            "schema = 2\nrunners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"example-velnor\"]\n",
+        )?;
+        // A dispatch-only gate stays rejected: manual dispatch must ride with
+        // the automatic arms, never alone on the self-hosted lane.
+        assert!(!run_policy(root)?);
         Ok(())
     }
 
@@ -3348,8 +3423,8 @@ jobs:
         let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
         assert!(!run_policy(root)?);
 
-        // Velnor policy uses the local cache backend and a pull-request-safe
-        // event gate, while preserving the same pinned revision.
+        // Velnor policy uses the local cache backend and a trusted event gate,
+        // while preserving the same pinned revision.
         let trusted_gate = "    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
@@ -3376,6 +3451,34 @@ jobs:
             )
         );
         let root = policy_fixture("inline-velnor-pull-request", &workflow, "velnor")?;
+        assert!(!run_policy(root)?);
+
+        let lane_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}\n";
+        let workflow = format!(
+            "name: Velnor dispatch policy\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(lane_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-dispatch", &workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let unit_gate = "    if: ${{ inputs.unit == 'rust-policy' && (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')))) }}\n";
+        let workflow = format!(
+            "name: Velnor unit policy\non: workflow_call\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(unit_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-unit", &workflow, "velnor")?;
         assert!(run_policy(root)?);
 
         // The Velnor lane remains fail-closed for both revision drift and
@@ -3540,7 +3643,10 @@ jobs:
 
     #[test]
     fn policy_accepts_adopted_lane_selection_runners() -> Result<(), Box<dyn Error>> {
-        let lane = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+        let lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'pull_request' || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
         let valid = format!(
             "name: Valid\non: pull_request\njobs:\n  verify:\n    runs-on: {lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
         );
@@ -3550,7 +3656,10 @@ jobs:
         // A lane selector that routes pull requests anywhere but the hosted
         // label stays rejected: untrusted pull requests must never resolve
         // to the persistent pool.
-        let unsafe_lane = "${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}";
+        let unsafe_lane = format!(
+            "${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || {} }}}}",
+            crate::estate::LEGACY_VELNOR_RUNNER_SELECTOR
+        );
         let invalid = format!(
             "name: Invalid\non: pull_request\njobs:\n  verify:\n    runs-on: {unsafe_lane}\n    steps:\n      - uses: actions/checkout@{CHECKOUT_SHA}\n"
         );
@@ -3586,14 +3695,17 @@ jobs:
     #[test]
     fn policy_accepts_sha_pinned_fleet_reusables() -> Result<(), Box<dyn Error>> {
         let sha = "851ef541d67f9cabebf2ddb2a2a02f51f6c54130";
+        let owner = crate::estate::FLEET_VELNOR_ACTION_OWNERS[0];
         let valid = format!(
-            "name: Valid\non: pull_request\njobs:\n  sign:\n    uses: jackin-project/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
+            "name: Valid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@{sha}\n"
         );
         let root = policy_fixture("fleet-valid", &valid, "github")?;
         assert!(run_policy(root)?);
 
-        let invalid = "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: jackin-project/velnor-actions/.github/workflows/package-signer.yml@2026.8.33\n";
-        let root = policy_fixture("fleet-unpinned", invalid, "github")?;
+        let invalid = format!(
+            "name: Invalid\non: pull_request\njobs:\n  sign:\n    uses: {owner}/velnor-actions/.github/workflows/package-signer.yml@2026.8.33\n"
+        );
+        let root = policy_fixture("fleet-unpinned", &invalid, "github")?;
         assert!(!run_policy(root)?);
 
         let invalid = format!(

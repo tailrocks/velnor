@@ -89,8 +89,8 @@ fn the_setup_action_is_owned_verbatim() {
 fn velnor_lane_uses_the_local_mb_boxington_backend() {
     let (_, workflow) = generated_files()
         .into_iter()
-        .find(|(name, _)| name == "ci-rust-velnor-workflow.yml")
-        .expect("the workflow crate unit renders a workflow");
+        .find(|(name, _)| name == "ci-unit-rust.yml")
+        .expect("the rust kind reusable renders a workflow");
     assert!(
         workflow.contains("backend: local"),
         "velnor lane lost its local backend"

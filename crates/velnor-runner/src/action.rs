@@ -556,6 +556,7 @@ fn step_id(step: &ActionStep, index: usize) -> String {
 pub fn download_repository_actions<R>(
     runner: &mut R,
     plans: &[RepositoryActionPlan],
+    actions_host: &Path,
 ) -> Result<Vec<ResolvedAction>>
 where
     R: CommandRunner,
@@ -569,13 +570,15 @@ where
                 &repository_clone_url(&plan.repository),
                 &plan.git_ref,
                 &plan.repository_dir,
+                actions_host,
                 None,
                 Some(1),
                 false,
                 true,
                 true,
-                false,           // lfs: action repos don't use LFS
-                None,            // action bundles are not primary-repository mirrors
+                false, // preserve_target: action bundles are metadata-only, never built
+                false, // lfs: action repos don't use LFS
+                None,  // action bundles are not primary-repository mirrors
                 &mut Vec::new(), // action-repo fetch trace is internal, not surfaced
             )?;
         }
@@ -3200,7 +3203,7 @@ runs:
         ];
         let mut runner = RecordingRunner::default();
 
-        let resolved = download_repository_actions(&mut runner, &plans).unwrap();
+        let resolved = download_repository_actions(&mut runner, &plans, &actions_host).unwrap();
 
         let fetches = runner
             .calls

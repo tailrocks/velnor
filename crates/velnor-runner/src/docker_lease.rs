@@ -191,7 +191,8 @@ impl DockerLeasePolicy {
             return authorize_docker_route(AuthorizedDockerRoute::DaemonRead, upgrade);
         }
         if segments.as_slice() == ["containers", "create"] && method == "POST" {
-            validate_container_create_request(request).map_err(create_capability_deny)?;
+            self.validate_container_create_request(request)
+                .map_err(create_capability_deny)?;
             return authorize_docker_route(
                 AuthorizedDockerRoute::Create(DockerResourceKind::Container),
                 upgrade,
@@ -344,6 +345,29 @@ impl DockerLeasePolicy {
             .and_then(Value::as_str)
             .context("Docker network request must name a container")?;
         self.require_owned(DockerResourceKind::Container, id)
+    }
+
+    fn owned_volume_names(&self) -> Result<BTreeSet<String>> {
+        let resources = self
+            .resources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Docker lease ownership registry is poisoned"))?;
+        Ok(resources.volumes.clone())
+    }
+
+    fn validate_container_create_request(&self, request: &[u8]) -> Result<()> {
+        let owned_volume_names = self.owned_volume_names()?;
+        validate_container_create_request_with_volumes(request, &owned_volume_names)
+    }
+
+    fn rewrite_docker_api_request(
+        &self,
+        request: &[u8],
+        job_id: &str,
+        daemon_id: &str,
+    ) -> Result<Vec<u8>> {
+        let owned_volume_names = self.owned_volume_names()?;
+        rewrite_docker_api_request_with_volumes(request, job_id, daemon_id, &owned_volume_names)
     }
 
     /// Learn a created container's name once its create succeeded.
@@ -1150,10 +1174,20 @@ fn inject_ownership_labels_value(value: &mut Value, job_id: &str, daemon_id: &st
 }
 
 /// Rewrite a Docker Engine HTTP/1.1 request so object creates carry job labels.
+#[cfg(test)]
 pub fn rewrite_docker_api_request(
     request: &[u8],
     job_id: &str,
     daemon_id: &str,
+) -> Result<Vec<u8>> {
+    rewrite_docker_api_request_with_volumes(request, job_id, daemon_id, &BTreeSet::new())
+}
+
+fn rewrite_docker_api_request_with_volumes(
+    request: &[u8],
+    job_id: &str,
+    daemon_id: &str,
+    owned_volume_names: &BTreeSet<String>,
 ) -> Result<Vec<u8>> {
     let header_end = request
         .windows(4)
@@ -1208,7 +1242,7 @@ pub fn rewrite_docker_api_request(
     }
     let mut value = parse_create_value(body)?;
     if path.ends_with("/containers/create") {
-        inject_job_cgroup_parent_value(&mut value)?;
+        inject_job_cgroup_parent_value(&mut value, owned_volume_names)?;
     } else if path.ends_with("/networks/create") {
         validate_network_create_value(&value)?;
     } else if path.ends_with("/volumes/create") {
@@ -1242,10 +1276,13 @@ fn validate_network_create_request(request: &[u8]) -> Result<()> {
 /// Running it here — instead of letting the transform discover the same
 /// failure — means a rejected create is answered with a structured 403 deny
 /// response; the guest never sees the connection drop mid-request.
-fn validate_container_create_request(request: &[u8]) -> Result<()> {
+fn validate_container_create_request_with_volumes(
+    request: &[u8],
+    owned_volume_names: &BTreeSet<String>,
+) -> Result<()> {
     let body = docker_request_body(request)?;
     let mut value = parse_create_value(body).context("parse Docker container create request")?;
-    inject_job_cgroup_parent_value(&mut value)
+    inject_job_cgroup_parent_value(&mut value, owned_volume_names)
 }
 
 /// Denials detected during create-request validation are capability
@@ -1408,7 +1445,10 @@ fn validate_empty_network_ipam(value: &Value) -> Result<()> {
 /// cgroup. The lease proxy is the only Docker socket exposed to a job, so this
 /// also covers BuildKit and nested Testcontainers creates. Runner policy wins
 /// over a workflow-supplied `HostConfig.CgroupParent`.
-fn inject_job_cgroup_parent_value(value: &mut Value) -> Result<()> {
+fn inject_job_cgroup_parent_value(
+    value: &mut Value,
+    owned_volume_names: &BTreeSet<String>,
+) -> Result<()> {
     let Some(object) = value.as_object_mut() else {
         bail!("Docker container create body must be a JSON object");
     };
@@ -1428,7 +1468,7 @@ fn inject_job_cgroup_parent_value(value: &mut Value) -> Result<()> {
             bail!("Docker container create HostConfig must be an object, got {other}");
         }
     };
-    reject_unsafe_nested_host_controls(&host_config)?;
+    reject_unsafe_nested_host_controls(&host_config, owned_volume_names)?;
     if let Some(alias) = host_config
         .keys()
         .find(|key| key.as_str() != "CgroupParent" && key.eq_ignore_ascii_case("CgroupParent"))
@@ -1467,14 +1507,17 @@ fn reject_unsafe_volume_create_value(value: &Value) -> Result<()> {
     if let Some((key, options)) = object
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("driveropts"))
-        && value_is_present(options)
+        && is_strict_value_present(options)
     {
         bail!("Docker volume create field {key:?} requests host control access");
     }
     Ok(())
 }
 
-fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Result<()> {
+fn reject_unsafe_nested_host_controls(
+    host_config: &Map<String, Value>,
+    owned_volume_names: &BTreeSet<String>,
+) -> Result<()> {
     reject_case_insensitive_duplicate_keys(host_config, "Docker container HostConfig")?;
     for (key, value) in host_config {
         let unsafe_control = match key.to_ascii_lowercase().as_str() {
@@ -1487,12 +1530,19 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
                 Value::Bool(true) => true,
                 _ => true,
             },
-            "capadd" | "devices" | "devicecgrouprules" | "devicerequests" | "securityopt"
-            | "runtime" | "sysctls" | "volumedriver" | "volumesfrom" | "volumeoptions"
-            | "portbindings" | "publishallports" | "containeridfile" | "restartpolicy" => {
-                value_is_present(value)
-            }
-            "binds" | "mounts" => contains_host_bind(value)? || value_is_present(value),
+            "capadd" | "devices" | "devicecgrouprules" | "securityopt" | "runtime" | "sysctls"
+            | "volumedriver" | "volumesfrom" | "volumeoptions" | "portbindings"
+            | "publishallports" | "containeridfile" => is_strict_value_present(value),
+            // Live API 1.55: `{"Name":"no","MaximumRetryCount":0}` is the
+            // default (no restart). `always` / `on-failure` stay denied.
+            "restartpolicy" => !is_default_restart_policy(value)?,
+            // BuildKit's GPU request is an exact, driverless shape. Other
+            // device requests stay denied.
+            "devicerequests" => !is_guest_device_requests(value)?,
+            // Binds are always host paths. Named Mounts are admitted only
+            // when their exact source was created and recorded by this lease.
+            "binds" => !is_empty_mount_list(value),
+            "mounts" => !is_guest_or_empty_mounts(value, owned_volume_names)?,
             // Docker's zero value means "unset" for this known field. Do
             // not generalize that exception to future numeric fields.
             "blkioweight" => !is_zero_number(value),
@@ -1507,15 +1557,19 @@ fn reject_unsafe_nested_host_controls(host_config: &Map<String, Value>) -> Resul
             | "readonlyrootfs" | "shmsize" | "init" | "stopsignal" | "stoptimeout" | "dns"
             | "dnsoptions" | "dnssearch" | "extrahosts" | "groupadd" | "ulimits"
             | "maskedpaths" | "readonlypaths" => false,
-            // Docker CLI releases routinely add benign HostConfig fields and
-            // serialize their null, false, string, array, or object defaults
-            // (observed live: API 1.55 sends `BlkioDeviceReadBps: []`). A
-            // populated unknown field is a capability request. Unknown
-            // numeric values remain denied, including zero.
-            _ => value_is_present(value),
+            // Docker CLI serializes unused HostConfig fields as empty
+            // defaults (live API 1.55: `BlkioDeviceReadBps: []`,
+            // `BlkioWeight: 0`, `ConsoleSize: [0,0]`,
+            // `IOMaximumBandwidth: 0`, `DeviceRequests: []`). Only this
+            // unknown-field fallback accepts recursively empty values;
+            // strict controls above must treat any nonempty container shape
+            // as a capability request.
+            _ => !is_empty_default(value),
         };
         if unsafe_control {
-            bail!("Docker container create HostConfig field {key:?} requests host control access");
+            bail!(
+                "Docker container create HostConfig field {key:?} requests host control access: {value}"
+            );
         }
     }
     Ok(())
@@ -1541,11 +1595,218 @@ fn is_guest_network_mode(value: &Value) -> bool {
 }
 
 fn is_zero_number(value: &Value) -> bool {
-    matches!(
-        value,
-        Value::Number(number)
-            if number.as_i64() == Some(0) || number.as_u64() == Some(0)
-    )
+    match value {
+        Value::Number(number) => {
+            number.as_i64() == Some(0) || number.as_u64() == Some(0) || number.as_f64() == Some(0.0)
+        }
+        _ => false,
+    }
+}
+
+fn is_empty_mount_list(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn is_guest_or_empty_mounts(value: &Value, owned_volume_names: &BTreeSet<String>) -> Result<bool> {
+    let Value::Array(items) = value else {
+        return Ok(value.is_null());
+    };
+    if items.is_empty() {
+        return Ok(true);
+    }
+    for item in items {
+        if !is_owned_named_volume_mount(item, owned_volume_names)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn is_owned_named_volume_mount(
+    value: &Value,
+    owned_volume_names: &BTreeSet<String>,
+) -> Result<bool> {
+    let Value::Object(object) = value else {
+        return Ok(false);
+    };
+    reject_case_insensitive_duplicate_keys(object, "Docker mount object")?;
+    const ALLOWED_FIELDS: [&str; 5] = ["type", "source", "target", "readonly", "consistency"];
+    for key in object.keys() {
+        if !ALLOWED_FIELDS.contains(&key.to_ascii_lowercase().as_str()) {
+            bail!("Docker volume mount field {key:?} is not permitted");
+        }
+    }
+    let mount_type = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("type"))
+        .and_then(|(_, value)| value.as_str());
+    if mount_type != Some("volume") {
+        return Ok(false);
+    }
+    let Some(source) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("source"))
+        .and_then(|(_, value)| value.as_str())
+    else {
+        return Ok(false);
+    };
+    if source.is_empty() || !owned_volume_names.contains(source) {
+        return Ok(false);
+    }
+    let Some(target) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("target"))
+        .and_then(|(_, value)| value.as_str())
+    else {
+        return Ok(false);
+    };
+    if !target.starts_with('/') || target.contains('\0') {
+        return Ok(false);
+    }
+    if let Some(read_only) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("readonly"))
+        .map(|(_, value)| value)
+        && !read_only.is_boolean()
+    {
+        return Ok(false);
+    }
+    if let Some(consistency) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("consistency"))
+        .map(|(_, value)| value)
+        && !consistency.is_string()
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn is_default_restart_policy(value: &Value) -> Result<bool> {
+    match value {
+        Value::Null => Ok(true),
+        Value::Object(object) => {
+            reject_case_insensitive_duplicate_keys(object, "Docker RestartPolicy")?;
+            const ALLOWED_FIELDS: [&str; 2] = ["name", "maximumretrycount"];
+            for key in object.keys() {
+                if !ALLOWED_FIELDS.contains(&key.to_ascii_lowercase().as_str()) {
+                    bail!("Docker RestartPolicy field {key:?} is not permitted");
+                }
+            }
+            let name = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("name"))
+                .map(|(_, value)| value);
+            let name = match name {
+                None => "",
+                Some(value) => match value.as_str() {
+                    Some(name) => name,
+                    None => return Ok(false),
+                },
+            };
+            let retries = object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("maximumretrycount"))
+                .map(|(_, value)| value)
+                .is_none_or(|value| value.as_i64() == Some(0) || value.as_u64() == Some(0));
+            Ok((name.is_empty()
+                || name.eq_ignore_ascii_case("no")
+                || name.eq_ignore_ascii_case("none"))
+                && retries)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_guest_device_requests(value: &Value) -> Result<bool> {
+    if value.is_null() {
+        return Ok(true);
+    }
+    let Value::Array(items) = value else {
+        return Ok(false);
+    };
+    for item in items {
+        if !is_buildkit_device_request(item)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn is_buildkit_device_request(value: &Value) -> Result<bool> {
+    let Value::Object(object) = value else {
+        return Ok(false);
+    };
+    reject_case_insensitive_duplicate_keys(object, "Docker DeviceRequest")?;
+    const ALLOWED_FIELDS: [&str; 5] = ["driver", "count", "deviceids", "capabilities", "options"];
+    for key in object.keys() {
+        if !ALLOWED_FIELDS.contains(&key.to_ascii_lowercase().as_str()) {
+            bail!("Docker DeviceRequest field {key:?} is not permitted");
+        }
+    }
+    let Some(driver) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("driver"))
+        .and_then(|(_, value)| value.as_str())
+    else {
+        return Ok(false);
+    };
+    if !driver.is_empty() {
+        return Ok(false);
+    }
+    let Some(count) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("count"))
+        .and_then(|(_, value)| value.as_i64())
+    else {
+        return Ok(false);
+    };
+    let Some(ids) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("deviceids"))
+        .map(|(_, value)| value)
+    else {
+        return Ok(false);
+    };
+    let ids_empty =
+        matches!(ids, Value::Null) || matches!(ids, Value::Array(values) if values.is_empty());
+    if !ids_empty {
+        return Ok(false);
+    }
+    let Some(capabilities) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("capabilities"))
+        .map(|(_, value)| value)
+    else {
+        return Ok(false);
+    };
+    let Some(options) = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("options"))
+        .map(|(_, value)| value)
+    else {
+        return Ok(false);
+    };
+    if !options.as_object().is_some_and(Map::is_empty) {
+        return Ok(false);
+    }
+    let empty_request =
+        count == 0 && matches!(capabilities, Value::Array(values) if values.is_empty());
+    let buildkit_gpu_request = count == -1 && is_buildkit_gpu_capabilities(capabilities);
+    Ok(empty_request || buildkit_gpu_request)
+}
+
+fn is_buildkit_gpu_capabilities(value: &Value) -> bool {
+    let Value::Array(groups) = value else {
+        return false;
+    };
+    groups.len() == 1
+        && matches!(&groups[0], Value::Array(names) if names.len() == 1
+            && names[0].as_str() == Some("gpu"))
 }
 
 fn is_default_console_size(value: &Value) -> bool {
@@ -1557,7 +1818,18 @@ fn is_default_console_size(value: &Value) -> bool {
     }
 }
 
-fn value_is_present(value: &Value) -> bool {
+fn is_empty_default(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(value) => !*value,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(values) => values.iter().all(is_empty_default),
+        Value::Object(object) => object.values().all(is_empty_default),
+        Value::Number(_) => is_zero_number(value),
+    }
+}
+
+fn is_strict_value_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(value) => *value,
@@ -1579,50 +1851,6 @@ fn reject_case_insensitive_duplicate_keys(
         }
     }
     Ok(())
-}
-
-fn contains_host_bind(value: &Value) -> Result<bool> {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                if contains_host_bind(value)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        Value::Object(object) => {
-            reject_case_insensitive_duplicate_keys(object, "Docker mount object")?;
-            let mount_type = object
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("type"))
-                .and_then(|(_, value)| value.as_str());
-            let source = object
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case("source"))
-                .and_then(|(_, value)| value.as_str());
-            Ok(
-                mount_type.is_none_or(|kind| !kind.eq_ignore_ascii_case("volume"))
-                    && source.is_some_and(is_host_bind_source),
-            )
-        }
-        Value::String(bind) => Ok(bind.split_once(':').map_or_else(
-            || is_host_bind_source(bind),
-            |(source, _)| is_host_bind_source(source),
-        )),
-        _ => Ok(false),
-    }
-}
-
-fn is_host_bind_source(path: &str) -> bool {
-    let path = path.trim();
-    path.starts_with('/')
-        || path == "."
-        || path == ".."
-        || path.starts_with("./")
-        || path.starts_with("../")
-        || path == "~"
-        || path.starts_with("~/")
 }
 
 #[cfg(unix)]
@@ -2276,7 +2504,7 @@ fn handle_client_with(
             _ => None,
         };
         let forwarded = transform_request_buffer(bytes, &mut budget, |request| {
-            rewrite_docker_api_request(request, job_id, daemon_id)
+            policy.rewrite_docker_api_request(request, job_id, daemon_id)
         })?;
         let forwarded = transform_request_buffer(forwarded, &mut budget, without_expect_continue)?;
         if conns.is_shutdown() {
@@ -3616,23 +3844,262 @@ mod tests {
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"NetworkMode":"none","AutoRemove":true}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"BlkioDeviceReadBps":[],"BlkioDeviceWriteBps":[],"BlkioWeightDevice":[],"BlkioWeight":0,"ConsoleSize":[0,0],"IOMaximumBandwidth":0,"DeviceRequests":[],"NetworkMode":"none","AutoRemove":true}}"#,
         );
         let result = policy.authorize(&request);
         assert!(result.is_ok(), "unexpected denial: {result:#?}");
     }
 
     #[test]
-    fn container_create_rejects_unknown_numeric_zero_hostconfig_field() {
+    fn container_create_empty_device_requests_are_absent() {
         let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
         let request = api_request(
             "POST",
             "/v1.43/containers/create?name=job-container",
-            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":0}}"#,
+            br#"{"Image":"busybox:1.36","HostConfig":{"DeviceRequests":[{"Driver":"","Count":0,"DeviceIDs":[],"Capabilities":[],"Options":{}}]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"DeviceRequests":[{"Driver":"nvidia","Count":1}]}}"#,
         );
         let error = policy
             .authorize(&request)
-            .expect_err("unknown numeric HostConfig fields must fail closed");
+            .expect_err("populated DeviceRequests is host control");
+        let deny = error
+            .downcast_ref::<LeaseDeny>()
+            .expect("DeviceRequests denial must answer as LeaseDeny");
+        assert_eq!(deny.status, 403);
+        assert!(deny.message.contains("DeviceRequests"));
+        assert!(deny.message.contains("nvidia"));
+    }
+
+    #[test]
+    fn container_create_gpu_requests_require_exact_buildkit_shape() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        for (request, expected_fragment) in [
+            (
+                br#"{"Driver":"","Count":1,"DeviceIDs":[],"Capabilities":[["gpu"]],"Options":{}}"#
+                    .as_slice(),
+                "DeviceRequests",
+            ),
+            (
+                br#"{"Driver":"nvidia","Count":-1,"DeviceIDs":[],"Capabilities":[["gpu"]],"Options":{}}"#
+                    .as_slice(),
+                "DeviceRequests",
+            ),
+            (
+                br#"{"Driver":"","Count":-1,"DeviceIDs":["GPU-1"],"Capabilities":[["gpu"]],"Options":{}}"#
+                    .as_slice(),
+                "DeviceRequests",
+            ),
+            (
+                br#"{"Driver":"","Count":-1,"DeviceIDs":[],"Capabilities":[["gpu"]],"Options":{"foo":"bar"}}"#
+                    .as_slice(),
+                "DeviceRequests",
+            ),
+            (
+                br#"{"Driver":"","Count":-1,"DeviceIDs":[],"Capabilities":[["gpu","nvidia"]],"Options":{}}"#
+                    .as_slice(),
+                "DeviceRequests",
+            ),
+            (
+                br#"{"Driver":"","Count":-1,"DeviceIDs":[],"Capabilities":[["gpu"]],"Options":{},"FutureField":{}}"#
+                    .as_slice(),
+                "FutureField",
+            ),
+        ] {
+            let body = format!(
+                r#"{{"Image":"busybox:1.36","HostConfig":{{"DeviceRequests":[{}]}}}}"#,
+                std::str::from_utf8(request).unwrap()
+            );
+            let error = policy
+                .authorize(&api_request(
+                    "POST",
+                    "/v1.43/containers/create?name=job-container",
+                    body.as_bytes(),
+                ))
+                .expect_err("non-BuildKit GPU request must fail closed");
+            assert!(error.to_string().contains(expected_fragment), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn container_create_live_cli_restart_policy_no_is_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"MaximumRetryCount":0,"Name":"no"}}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"Name":"always"}}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("RestartPolicy always is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":3}}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("RestartPolicy on-failure is host control");
+        assert!(error.to_string().contains("RestartPolicy"), "{error:#}");
+
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"RestartPolicy":{"Name":"no","MaximumRetryCount":0,"FutureField":0}}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("unknown RestartPolicy fields must fail closed");
+        assert!(error.to_string().contains("FutureField"), "{error:#}");
+    }
+
+    #[test]
+    fn container_create_live_buildx_gpu_and_volume_mounts_are_guest() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        policy
+            .record_create_response(
+                DockerResourceKind::Volume,
+                201,
+                br#"{"Name":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state"}"#,
+            )
+            .unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"moby/buildkit:buildx-stable-1","HostConfig":{"DeviceRequests":[{"Capabilities":[["gpu"]],"Count":-1,"DeviceIDs":null,"Driver":"","Options":{}}],"Mounts":[{"Source":"buildx_buildkit_velnor-builder-shared-trusted-branch-tailrocks_velnor-actions-fixture0_state","Target":"/var/lib/buildkit","Type":"volume"}]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_named_volumes_require_owned_exact_mount_shape() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        policy
+            .record_create_response(
+                DockerResourceKind::Volume,
+                201,
+                br#"{"Name":"runner-owned-volume"}"#,
+            )
+            .unwrap();
+
+        let valid = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"Mounts":[{"Source":"runner-owned-volume","Target":"/data","Type":"volume","ReadOnly":true,"Consistency":"consistent"}]}}"#,
+        );
+        assert!(
+            policy.authorize(&valid).is_ok(),
+            "runner-owned named volume should be admitted"
+        );
+        policy
+            .rewrite_docker_api_request(&valid, "job-a", "daemon-a")
+            .expect("production rewrite must use the same tracked volume ownership");
+
+        for (field, value) in [
+            ("VolumeOptions", r#"{"NoCopy":false}"#),
+            ("DriverConfig", r#"{"Name":"local"}"#),
+            ("FutureField", "0"),
+        ] {
+            let body = format!(
+                r#"{{"Image":"busybox:1.36","HostConfig":{{"Mounts":[{{"Source":"runner-owned-volume","Target":"/data","Type":"volume","{field}":{value}}}]}}}}"#,
+            );
+            let error = policy
+                .authorize(&api_request(
+                    "POST",
+                    "/v1.43/containers/create?name=job-container",
+                    body.as_bytes(),
+                ))
+                .expect_err("unsafe or unknown volume mount fields must fail closed");
+            assert!(error.to_string().contains(field), "{error:#}");
+        }
+
+        for source in ["foreign-volume", "missing-volume", "/etc"] {
+            let body = format!(
+                r#"{{"Image":"busybox:1.36","HostConfig":{{"Mounts":[{{"Source":"{source}","Target":"/data","Type":"volume"}}]}}}}"#,
+            );
+            let error = policy
+                .authorize(&api_request(
+                    "POST",
+                    "/v1.43/containers/create?name=job-container",
+                    body.as_bytes(),
+                ))
+                .expect_err("foreign or missing volumes must not be auto-created");
+            assert!(error.to_string().contains("Mounts"), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn container_create_unknown_numeric_zero_is_empty_default() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"IOMaximumBandwidth":0,"FutureHostControl":0}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_unknown_recursively_empty_default_is_allowed() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":[{}]}}"#,
+        );
+        let result = policy.authorize(&request);
+        assert!(result.is_ok(), "unexpected denial: {result:#?}");
+    }
+
+    #[test]
+    fn container_create_strict_controls_reject_recursively_empty_values() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        for (field, value) in [
+            ("Binds", "[{}]"),
+            ("Mounts", "[{}]"),
+            ("Sysctls", "{\"net.ipv4.ip_forward\":0}"),
+        ] {
+            let body = format!(r#"{{"Image":"busybox:1.36","HostConfig":{{"{field}":{value}}}}}"#);
+            let error = policy
+                .authorize(&api_request(
+                    "POST",
+                    "/v1.43/containers/create?name=job-container",
+                    body.as_bytes(),
+                ))
+                .expect_err("strict control must not inherit recursive empty semantics");
+            assert!(error.to_string().contains(field), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn container_create_rejects_unknown_numeric_nonzero_hostconfig_field() {
+        let policy = DockerLeasePolicy::new("velnor-job-owned").unwrap();
+        let request = api_request(
+            "POST",
+            "/v1.43/containers/create?name=job-container",
+            br#"{"Image":"busybox:1.36","HostConfig":{"FutureHostControl":1}}"#,
+        );
+        let error = policy
+            .authorize(&request)
+            .expect_err("unknown nonzero HostConfig fields must fail closed");
         let deny = error
             .downcast_ref::<LeaseDeny>()
             .expect("unknown numeric field denial must answer as LeaseDeny");
@@ -4138,6 +4605,19 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn volume_create_rejects_driveropts_with_empty_nested_values() {
+        let body = br#"{"Name":"cache","Driver":"local","DriverOpts":{"device":""}}"#;
+        let request = format!(
+            "POST /v1.43/volumes/create HTTP/1.1\r\nHost: docker\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            std::str::from_utf8(body).unwrap()
+        );
+        let error = rewrite_docker_api_request(request.as_bytes(), "job-a", "daemon-a")
+            .expect_err("nonempty DriverOpts must stay a host-control request");
+        assert!(error.to_string().contains("DriverOpts"), "{error:#}");
     }
 
     #[test]

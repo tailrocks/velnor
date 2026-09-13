@@ -196,6 +196,124 @@ pub(crate) fn daemon_reports_missing(stderr: &str) -> bool {
     stderr.contains("No such") || stderr.contains("no such")
 }
 
+/// Retry category of a failed `docker` invocation, decided once at the
+/// boundary where the exit code and stderr are observed. Retry policy matches
+/// on this category; it never re-parses error text (GOAL 31).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DockerErrorCategory {
+    /// Daemon restart or transport break: the same request may succeed later.
+    Transient,
+    /// Conflicting leftover state a cleanup pass can remove: one stale
+    /// cleanup plus a single immediate retry.
+    Conflict,
+    /// Same inputs fail the same way: fail fast, no retry.
+    Terminal,
+}
+
+/// Transport, daemon-unavailable, and registry-transfer vocabulary. A
+/// daemon/containerd restart briefly returns the transport needles for every
+/// `docker` invocation; a registry rate limit, 5xx, or stalled transfer
+/// returns the transfer needles for pulls and pushes. The historical single
+/// immediate retry always landed inside the same restart window, which is why
+/// transient failures retry with backoff instead.
+const DOCKER_TRANSIENT_NEEDLES: &[&str] = &[
+    "failed to create ttrpc connection",
+    "error reading from server: eof",
+    "unexpected eof",
+    "connection reset by peer",
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "transport is closing",
+    // Registry transfer: a `docker run` that pulls fails with the registry's
+    // rate limit or 5xx, or the transfer stalls and the HTTP client times out
+    // mid-flight. Same shape as a daemon restart — the next attempt
+    // re-resolves and resumes — so backoff, never fail fast.
+    "toomanyrequests",
+    "too many requests",
+    "http status: 429",
+    "http status: 5",
+    "service unavailable",
+    "bad gateway",
+    "gateway timeout",
+    "internal server error",
+    "i/o timeout",
+    "context deadline exceeded",
+];
+
+/// Resource-contention vocabulary: another writer (a previous attempt, a
+/// concurrent daemon) holds the object this invocation wanted to own.
+const DOCKER_CONFLICT_NEEDLES: &[&str] =
+    &["already exists", "already in use", "already in progress"];
+
+/// Boundary classifier: raw daemon/CLI stderr becomes a retry category.
+/// Transient is checked first; anything unrecognized is terminal (fail
+/// closed, including class-deadline timeouts: a call that never answered in
+/// its class deadline is a wedged daemon, and waiting longer never turns it
+/// into a success).
+pub(crate) fn classify_docker_stderr(stderr: &str) -> DockerErrorCategory {
+    let lower = stderr.to_ascii_lowercase();
+    if DOCKER_TRANSIENT_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        DockerErrorCategory::Transient
+    } else if DOCKER_CONFLICT_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        DockerErrorCategory::Conflict
+    } else {
+        DockerErrorCategory::Terminal
+    }
+}
+
+/// A failed `docker` invocation with its retry category attached at the
+/// boundary. `Display` reproduces the exact historical boundary message, so
+/// logs and downstream text are unchanged; only the category is new.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct DockerCommandError {
+    message: String,
+    category: DockerErrorCategory,
+}
+
+impl DockerCommandError {
+    /// Attach the boundary category to the historical failure message.
+    /// `stderr` is the failing command's own stderr — the classification
+    /// input — not the composite message.
+    pub(crate) fn classified(message: String, stderr: &str) -> Self {
+        Self {
+            message,
+            category: classify_docker_stderr(stderr),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn category(&self) -> DockerErrorCategory {
+        self.category
+    }
+}
+
+/// Retry-policy accessor: the category of the docker failure in this error
+/// chain, or [`DockerErrorCategory::Terminal`] when no typed docker failure
+/// is present. Fail closed: an error the boundary never classified
+/// (filesystem, config, unknown) must not retry as if the daemon hiccupped.
+/// A daemon positive-missing answer ([`NotFound`]) is Conflict-shaped: the
+/// start path — the only consumer — only queries objects its own attempt
+/// created, so a missing answer means another writer removed the object
+/// mid-flight, and one stale cleanup plus a single retry recovers the race.
+pub(crate) fn docker_error_category(error: &anyhow::Error) -> DockerErrorCategory {
+    for cause in error.chain() {
+        if let Some(command) = cause.downcast_ref::<DockerCommandError>() {
+            return command.category();
+        }
+        if cause.downcast_ref::<NotFound>().is_some() {
+            return DockerErrorCategory::Conflict;
+        }
+    }
+    DockerErrorCategory::Terminal
+}
+
 // ---------------------------------------------------------------------------
 // Fixed query shapes
 // ---------------------------------------------------------------------------
@@ -301,9 +419,21 @@ pub(crate) fn parse_id_list(stdout: &str) -> Vec<String> {
     ids
 }
 
+/// The port order both transports agree on: lexicographic by container
+/// port, then host address.
+pub(crate) fn sort_port_mappings(mappings: &mut [PortMapping]) {
+    mappings.sort_by(|a, b| {
+        (&a.container_port, &a.host_address).cmp(&(&b.container_port, &b.host_address))
+    });
+}
+
 /// Parse `docker port` output (`container-port/proto -> host:port`) into
 /// mappings. Malformed lines are skipped: a service with one unparsable
-/// mapping still reports the rest.
+/// mapping still reports the rest. Sorted in the shared order: the daemon
+/// prints its own numeric order (Engine 29.4.0 prints 9090 before 10000,
+/// proven live) while the API projection iterates JSON maps sorted, so an
+/// unsorted parse would disagree with the API leg and `service_context`'s
+/// first-wins pick per container port could differ by transport.
 pub(crate) fn parse_port_mappings(text: &str) -> Vec<PortMapping> {
     let mut mappings = Vec::new();
     for line in text.lines() {
@@ -318,6 +448,7 @@ pub(crate) fn parse_port_mappings(text: &str) -> Vec<PortMapping> {
             host_address: address.to_string(),
         });
     }
+    sort_port_mappings(&mut mappings);
     mappings
 }
 
@@ -1041,10 +1172,23 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already in progress") {
+        // Another writer already owns this object (Conflict): when that
+        // writer is a concurrent `rm` of the same object, the desired end
+        // state is in flight — report success. Narrow to the in-progress
+        // needle on purpose: other conflicts ("already exists") are real
+        // errors on the host path, not tolerance signals. A stderr that also
+        // matches Transient (daemon down mid-removal) surfaces instead of
+        // masking as success — transient checks first in the classifier.
+        let removal_in_flight = stderr.contains("already in progress")
+            && classify_docker_stderr(&stderr) == DockerErrorCategory::Conflict;
+        if removal_in_flight {
             return Ok(String::new());
         }
-        anyhow::bail!("docker {} failed: {}", args.join(" "), stderr);
+        return Err(DockerCommandError::classified(
+            format!("docker {} failed: {}", args.join(" "), stderr),
+            &stderr,
+        )
+        .into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -1062,9 +1206,12 @@ enum Transport<'r> {
 ///
 /// Construct with [`Docker::job`] on the job path (cancellation-aware,
 /// metrics-attributed) or [`Docker::host`] on the maintenance/cancel path.
-/// Every method runs exactly one `docker` process under its class deadline
-/// and returns a typed value; a daemon that positively reports an object
-/// missing surfaces as [`NotFound`], never as an empty success.
+/// Every method returns a typed value; a daemon that positively reports an
+/// object missing surfaces as [`NotFound`], never as an empty success.
+/// Migrated queries try the Engine API first ([`Docker::engine_or_cli`]) and run
+/// their historical one-`docker`-process CLI query only when the API does
+/// not affirmatively succeed — unmigrated queries (the buildx pair, which
+/// have no Engine equivalent) always run the CLI.
 pub(crate) struct Docker<'r> {
     transport: Transport<'r>,
 }
@@ -1085,7 +1232,7 @@ impl<'r> Docker<'r> {
     /// Run one query and return its stdout. Non-zero exits become errors:
     /// a daemon missing-object answer becomes [`NotFound`], a runner timeout
     /// (exit 124) becomes the operation's [`crate::docker::DockerTimeout`],
-    /// anything else carries the stderr.
+    /// anything else carries the stderr plus its [`DockerErrorCategory`].
     fn call(&mut self, args: &[String], object: &str) -> Result<String> {
         match &mut self.transport {
             Transport::Host => host_call(args).map_err(|error| {
@@ -1116,11 +1263,100 @@ impl<'r> Docker<'r> {
                         object: object.to_string(),
                     }));
                 }
-                anyhow::bail!(
-                    "docker query {object} exited {}: {}",
-                    result.code,
-                    result.stderr.trim()
+                Err(anyhow::Error::new(DockerCommandError::classified(
+                    format!(
+                        "docker query {object} exited {}: {}",
+                        result.code,
+                        result.stderr.trim()
+                    ),
+                    &result.stderr,
+                )))
+            }
+        }
+    }
+
+    /// Engine-API fast path for one read-only query. `cli_args` is the query's
+    /// historical CLI vector: it classifies the operation and its class
+    /// deadline exactly as the CLI call would, so the API attempt and its
+    /// metrics carry the same class the policy always assigned this query.
+    ///
+    /// Returns the API value on success. On ANY API failure — transport,
+    /// timeout, status, framing, JSON, schema, dead runtime, or a job
+    /// cancellation winning the socket-wait race — records the fallback with
+    /// telemetry, logs the reason at `warn`, and returns `None` so the
+    /// caller runs its historical CLI query unchanged. Engine errors never
+    /// surface: the CLI stays the arbiter whenever the API does not
+    /// affirmatively succeed, which is what keeps results, error taxonomy
+    /// (`NotFound`, `DockerTimeout`, `DockerCommandError`), and deadlines
+    /// identical. A fallback costs exactly one subprocess: the same as
+    /// before the migration.
+    fn engine_or_cli<T, F>(
+        &self,
+        cli_args: &[String],
+        run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
+    ) -> Option<T>
+    where
+        F: std::future::Future<Output = Result<T, super::engine::EngineError>> + Send,
+        T: Send,
+    {
+        if !super::engine::engine_api_enabled() {
+            return None;
+        }
+        // An Engine answer is a host fact, so only a runner that spawns host
+        // processes may consult it — the same rule fact caching applies
+        // (`execution/docker.rs` consults `is_host_process_runner` too).
+        // Test doubles stay on their scripts, which keeps scripted tests
+        // hermetic on daemon hosts and immune to the process-global test
+        // override while a routing test holds it.
+        if let Transport::Job(runner) = &self.transport
+            && !runner.is_host_process_runner()
+        {
+            return None;
+        }
+        let (op, class_deadline) =
+            crate::docker::deadline_for(cli_args, crate::executor::DEFAULT_STEP_TIMEOUT);
+        debug_assert!(
+            op.is_control_plane(),
+            "engine fast path serves control-plane queries only"
+        );
+        let budget = super::engine::api_budget(class_deadline);
+        let engine = super::engine::EngineClient::new(super::engine::socket_path());
+        let started = std::time::Instant::now();
+        let attempt =
+            super::engine::block_on_engine(super::engine::cancel_race(run(engine, budget)));
+        let result = match attempt {
+            None => Err(super::engine::EngineError::fault(
+                op,
+                (
+                    super::engine::EngineFaultKind::Runtime,
+                    "engine runtime unavailable".to_string(),
+                ),
+            )),
+            Some(None) => Err(super::engine::EngineError::fault(
+                op,
+                (
+                    super::engine::EngineFaultKind::Cancelled,
+                    "job cancelled during engine api wait".to_string(),
+                ),
+            )),
+            Some(Some(result)) => result,
+        };
+        match result {
+            Ok(value) => {
+                crate::docker::observe_api(op, started.elapsed());
+                Some(value)
+            }
+            Err(error) => {
+                crate::docker::observe_api_fallback(op);
+                tracing::warn!(
+                    target: "velnor.docker",
+                    docker_op = op.label(),
+                    docker_transport = "cli-fallback",
+                    docker_api_fault = error.label(),
+                    reason = %error,
+                    "engine api failed; falling back to docker cli"
                 );
+                None
             }
         }
     }
@@ -1128,6 +1364,18 @@ impl<'r> Docker<'r> {
     /// Readiness of one container: health status when a healthcheck exists,
     /// else the lifecycle status.
     pub(crate) fn container_readiness(&mut self, name: &str) -> Result<Readiness> {
+        if let Some(readiness) =
+            self.engine_or_cli(&readiness_args(name), |engine, budget| async move {
+                Ok(Readiness::parse(
+                    engine
+                        .inspect_container(name, budget)
+                        .await?
+                        .readiness_word(),
+                ))
+            })
+        {
+            return Ok(readiness);
+        }
         let args = readiness_args(name);
         Ok(Readiness::parse(&self.call(&args, name)?))
     }
@@ -1136,6 +1384,13 @@ impl<'r> Docker<'r> {
     /// answer reads as not running; any other failure propagates so the
     /// caller takes its own fail-closed direction.
     pub(crate) fn container_running(&mut self, name: &str) -> Result<bool> {
+        if let Some(running) = self
+            .engine_or_cli(&running_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.running)
+            })
+        {
+            return Ok(running);
+        }
         let args = running_args(name);
         match self.call(&args, name) {
             Ok(output) => Ok(output.trim() == "true"),
@@ -1146,24 +1401,56 @@ impl<'r> Docker<'r> {
 
     /// Full id of one container.
     pub(crate) fn container_id(&mut self, name: &str) -> Result<String> {
+        if let Some(id) = self
+            .engine_or_cli(&container_id_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.id)
+            })
+        {
+            return Ok(id);
+        }
         let args = container_id_args(name);
         Ok(self.call(&args, name)?.trim().to_string())
     }
 
     /// Resolved id of one image reference.
     pub(crate) fn image_id(&mut self, reference: &str) -> Result<String> {
+        if let Some(id) = self
+            .engine_or_cli(&image_id_args(reference), |engine, budget| async move {
+                Ok(engine.inspect_image(reference, budget).await?.id)
+            })
+        {
+            return Ok(id);
+        }
         let args = image_id_args(reference);
         Ok(self.call(&args, reference)?.trim().to_string())
     }
 
     /// Published ports of one container.
     pub(crate) fn mapped_ports(&mut self, name: &str) -> Result<Vec<PortMapping>> {
+        if let Some(ports) = self
+            .engine_or_cli(&mapped_ports_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.ports)
+            })
+        {
+            return Ok(ports);
+        }
         let args = mapped_ports_args(name);
         Ok(parse_port_mappings(&self.call(&args, name)?))
     }
 
     /// The Engine's cgroup driver and version.
     pub(crate) fn daemon_cgroup(&mut self) -> Result<CgroupDriver> {
+        if let Some(cgroup) =
+            self.engine_or_cli(&daemon_cgroup_args(), |engine, budget| async move {
+                let info = engine.daemon_info(budget).await?;
+                Ok(CgroupDriver {
+                    driver: info.cgroup_driver,
+                    version: info.cgroup_version,
+                })
+            })
+        {
+            return Ok(cgroup);
+        }
         let args = daemon_cgroup_args();
         parse_cgroup_projection(&self.call(&args, "daemon cgroup")?)
     }
@@ -1176,6 +1463,15 @@ impl<'r> Docker<'r> {
 
     /// Lifecycle word and last stop time of one container.
     pub(crate) fn inspect_exit(&mut self, name: &str) -> Result<ExitInfo> {
+        if let Some(exit) = self.engine_or_cli(&exit_info_args(name), |engine, budget| async move {
+            let container = engine.inspect_container(name, budget).await?;
+            Ok(ExitInfo {
+                status: ContainerState::parse(&container.status),
+                finished: parse_finished_at(&container.finished_at),
+            })
+        }) {
+            return Ok(exit);
+        }
         let args = exit_info_args(name);
         parse_exit_info(&self.call(&args, name)?)
     }
@@ -1190,7 +1486,12 @@ impl<'r> Docker<'r> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docker::engine::mock::json_response;
+    use crate::docker::engine::{EngineTestGuard, FailRuntimeBuildGuard, MockEngine};
+    use crate::docker::{begin_job, snapshot};
+    use crate::execution::cancel::{set_active, CancelReason, JobCancellation};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.
@@ -1296,6 +1597,93 @@ mod tests {
     }
 
     #[test]
+    fn docker_stderr_classifier_separates_transient_conflict_and_terminal() {
+        use DockerErrorCategory::{Conflict, Terminal, Transient};
+        // Daemon restart / transport break: retry with backoff.
+        for stderr in [
+            "failed to create TTRPC connection: unsupported protocol",
+            "error reading from server: EOF",
+            "Cannot connect to the Docker daemon. Is the docker daemon running?",
+            "rpc error: transport is closing",
+            "connection reset by peer",
+            "unexpected EOF reading trailer",
+        ] {
+            assert_eq!(classify_docker_stderr(stderr), Transient, "{stderr:?}");
+        }
+        // Registry transfer during pull/push: rate limit, 429/5xx, stalled
+        // transfer. The next attempt re-resolves and resumes: backoff, never
+        // fail fast.
+        for stderr in [
+            "Error response from daemon: toomanyrequests: You have reached your pull rate limit",
+            "received unexpected HTTP status: 429 Too Many Requests",
+            "received unexpected HTTP status: 503 Service Unavailable",
+            "received unexpected HTTP status: 500 Internal Server Error",
+            "received unexpected HTTP status: 502 Bad Gateway",
+            "received unexpected HTTP status: 504 Gateway Timeout",
+            "unexpected status from HEAD request to https://registry-1.docker.io/v2/library/ubuntu/manifests/24.04: 503 Service Unavailable",
+            "dial tcp: lookup registry-1.docker.io: i/o timeout",
+            "Get \"https://registry-1.docker.io/v2/\": context deadline exceeded",
+        ] {
+            assert_eq!(classify_docker_stderr(stderr), Transient, "{stderr:?}");
+        }
+        // Another writer holds the object: one stale cleanup plus one retry.
+        for stderr in [
+            r#"Error response from daemon: network with name "net" already exists"#,
+            "Conflict. The container name \"/job\" is already in use by container abc123",
+            "Error response from daemon: removal of container abc is already in progress",
+        ] {
+            assert_eq!(classify_docker_stderr(stderr), Conflict, "{stderr:?}");
+        }
+        // Same inputs fail the same way: fail fast. Unknown output fails
+        // closed to terminal, never to a hopeful retry.
+        for stderr in [
+            "pull access denied for private/image",
+            "invalid reference format",
+            "failed to create task for container: OCI runtime create failed: executable not found",
+            "",
+            "timed out",
+        ] {
+            assert_eq!(classify_docker_stderr(stderr), Terminal, "{stderr:?}");
+        }
+    }
+
+    #[test]
+    fn docker_command_error_preserves_message_and_exposes_category() {
+        let message = "docker network create failed with code 1: Error response from \
+            daemon: network with name \"net\" already exists"
+            .to_string();
+        let error = anyhow::Error::new(DockerCommandError::classified(
+            message.clone(),
+            "Error response from daemon: network with name \"net\" already exists",
+        ));
+        assert_eq!(error.to_string(), message);
+        assert_eq!(docker_error_category(&error), DockerErrorCategory::Conflict);
+        // The category survives context wrapping: the policy reads the chain.
+        let wrapped = error.context("start job network");
+        assert_eq!(
+            docker_error_category(&wrapped),
+            DockerErrorCategory::Conflict
+        );
+        // No typed docker failure in the chain: terminal, fail fast.
+        assert_eq!(
+            docker_error_category(&anyhow::anyhow!("boom")),
+            DockerErrorCategory::Terminal
+        );
+        // A daemon positive-missing answer is Conflict-shaped: on the start
+        // path it means another writer removed an object this attempt
+        // created, so one stale cleanup plus a single retry recovers the race.
+        assert_eq!(
+            docker_error_category(
+                &anyhow::Error::new(NotFound {
+                    object: "svc".to_string()
+                })
+                .context("query")
+            ),
+            DockerErrorCategory::Conflict
+        );
+    }
+
+    #[test]
     fn every_facade_query_is_a_bounded_control_plane_call() {
         const SIX_HOURS: Duration = Duration::from_secs(6 * 3600);
         let mut queries: Vec<Vec<String>> = vec![
@@ -1341,6 +1729,7 @@ mod tests {
         results: std::collections::VecDeque<CommandResult>,
         calls: AtomicUsize,
         seen_args: std::sync::Mutex<Vec<Vec<String>>>,
+        host: bool,
     }
 
     impl ScriptRunner {
@@ -1349,11 +1738,28 @@ mod tests {
                 results: results.into(),
                 calls: AtomicUsize::new(0),
                 seen_args: std::sync::Mutex::new(Vec::new()),
+                host: false,
+            }
+        }
+
+        /// Scripted runner that passes as a host process runner, so the
+        /// facade routes it through the Engine fast path like production.
+        /// Only routing tests use this, all under the shared serial lock.
+        fn scripted_host(results: Vec<CommandResult>) -> Self {
+            Self {
+                results: results.into(),
+                calls: AtomicUsize::new(0),
+                seen_args: std::sync::Mutex::new(Vec::new()),
+                host: true,
             }
         }
     }
 
     impl CommandRunner for ScriptRunner {
+        fn is_host_process_runner(&self) -> bool {
+            self.host
+        }
+
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             assert_eq!(program, "docker");
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1554,5 +1960,376 @@ Total:\t\t6.054MB
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    // ------------------------------------------------------------------
+    // Engine-API routing: identical values, subprocesses only on fallback
+    // ------------------------------------------------------------------
+
+    const ROUTED_INSPECT: &str = r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
+    const ROUTED_IMAGE: &str = r#"{"Id":"sha256:feedface"}"#;
+    const ROUTED_INFO: &str = r#"{"CgroupDriver":"systemd","CgroupVersion":2}"#;
+
+    fn routed_mock(connections: usize) -> MockEngine {
+        MockEngine::serve(
+            |head| {
+                if head.contains("GET /info ") {
+                    json_response(ROUTED_INFO)
+                } else if head.contains("GET /images/") {
+                    json_response(ROUTED_IMAGE)
+                } else {
+                    json_response(ROUTED_INSPECT)
+                }
+            },
+            connections,
+        )
+    }
+
+    /// The seven migrated queries in one fixed order, returning their typed
+    /// values for cross-transport comparison.
+    type RoutedValues = (
+        Readiness,
+        bool,
+        String,
+        String,
+        Vec<PortMapping>,
+        CgroupDriver,
+        ExitInfo,
+    );
+
+    fn routed_sequence(docker: &mut Docker<'_>) -> Result<RoutedValues> {
+        Ok((
+            docker.container_readiness("svc")?,
+            docker.container_running("svc")?,
+            docker.container_id("svc")?,
+            docker.image_id("img:tag")?,
+            docker.mapped_ports("svc")?,
+            docker.daemon_cgroup()?,
+            docker.inspect_exit("svc")?,
+        ))
+    }
+
+    fn cli_script_for_routed_sequence() -> Vec<CommandResult> {
+        vec![
+            ok("healthy\n"),
+            ok("true\n"),
+            ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n"),
+            ok("sha256:feedface\n"),
+            ok("8080/tcp -> 0.0.0.0:41062\n8080/tcp -> [::]:41062\n"),
+            ok("systemd 2\n"),
+            ok("running 0001-01-01T00:00:00Z\n"),
+        ]
+    }
+
+    #[test]
+    fn representative_sequence_is_identical_with_zero_subprocess_on_api() {
+        let mock = routed_mock(7);
+
+        // Before: engine off (the test default), every query is one CLI call.
+        let cli_values = {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("seq-cli");
+            let mut runner = ScriptRunner::scripted_host(cli_script_for_routed_sequence());
+            let values = {
+                let mut docker = Docker::job(&mut runner);
+                routed_sequence(&mut docker).expect("cli sequence serves")
+            };
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 7);
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 0);
+            assert_eq!(counts.api_fallbacks, 0);
+            // The scripted runner bypasses the real spawn seam where
+            // `invocations` is observed, so it stays zero here; the seven
+            // runner calls above are the seven subprocesses, one per query,
+            // as `each_query_costs_exactly_one_process` pins down.
+            assert_eq!(counts.invocations, 0);
+            values
+        };
+
+        // After: engine on, the same values with no runner call at all.
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-api");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let api_values = {
+            let mut docker = Docker::job(&mut runner);
+            routed_sequence(&mut docker).expect("api sequence serves")
+        };
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no CLI call may run while the API serves"
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 7);
+        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(counts.invocations, 0);
+        assert_eq!(api_values, cli_values, "transports must agree exactly");
+    }
+
+    #[test]
+    fn api_status_failure_falls_back_to_one_cli_call() {
+        let mock = MockEngine::serve(
+            |_| b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-fallback-status");
+        let mut runner =
+            ScriptRunner::scripted_host(vec![ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n")]);
+        let id = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_id("svc").expect("fallback serves")
+        };
+        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[test]
+    fn api_timeout_falls_back_to_cli() {
+        let mock = MockEngine::serve(
+            |_| {
+                std::thread::sleep(Duration::from_millis(300));
+                json_response(ROUTED_INSPECT)
+            },
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), Some(30));
+        let _scope = begin_job("seq-fallback-timeout");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_readiness("svc").expect("fallback serves")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn missing_container_falls_back_and_still_reads_as_not_running() {
+        let mock = MockEngine::serve(
+            |_| b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-fallback-missing");
+        let mut runner =
+            ScriptRunner::scripted_host(vec![failed(1, "Error: No such object: svc\n")]);
+        let running = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_running("svc")
+                .expect("missing reads as not running")
+        };
+        assert!(!running);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn runtime_build_failure_falls_back_to_one_cli_call() {
+        // The mock is healthy and would serve: the dead runtime alone must
+        // route to the CLI, never panic the calling thread.
+        let mock = routed_mock(1);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _fail = FailRuntimeBuildGuard::inject();
+        let _scope = begin_job("seq-fallback-runtime");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_readiness("svc").expect("fallback serves")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_context_serves_api_without_panicking() {
+        // `block_in_place` panics on this flavor; the facade drives the
+        // helper thread instead and serves from the API with no CLI call.
+        let mock = routed_mock(1);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-current-thread");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let id = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_id("svc")
+                .expect("api serves on current-thread")
+        };
+        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot().api_calls, 1);
+    }
+
+    /// A mock that answers one inspect after `delay`: the API leg would
+    /// ride the wait, so any fast CLI answer proves the race abandoned it.
+    fn slow_mock(delay: Duration) -> MockEngine {
+        MockEngine::serve(
+            move |_| {
+                std::thread::sleep(delay);
+                json_response(ROUTED_INSPECT)
+            },
+            1,
+        )
+    }
+
+    #[test]
+    fn cancelled_before_start_skips_the_socket_wait() {
+        let mock = slow_mock(Duration::from_millis(500));
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        token.request(CancelReason::ServerRequested);
+        let _active = set_active(token);
+        let _scope = begin_job("seq-cancel-before");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let started = Instant::now();
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_readiness("svc")
+                .expect("cancelled api falls back")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a cancelled wait must not ride the 500ms socket delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancelled_mid_flight_abandons_the_socket_wait() {
+        let mock = slow_mock(Duration::from_millis(500));
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        let _active = set_active(token.clone());
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            token.request(CancelReason::ServerRequested);
+        });
+        let _scope = begin_job("seq-cancel-midflight");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let started = Instant::now();
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_readiness("svc")
+                .expect("cancelled api falls back")
+        };
+        canceller.join().expect("canceller joins");
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a mid-flight cancel must abandon the 500ms socket delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Live Engine latency bench: API vs CLI on the daemon-cgroup query,
+    /// which needs no container and runs on any daemon host. Ignored: it
+    /// needs a live `/var/run/docker.sock` and spawns real `docker`
+    /// children. Run it with:
+    /// `cargo test -p velnor-runner --lib live_engine_latency_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_engine_latency_bench() {
+        use std::os::unix::net::UnixStream;
+        const ITERATIONS: usize = 25;
+        let socket = super::super::engine::socket_path();
+        if UnixStream::connect(&socket).is_err() {
+            println!(
+                "live_engine_latency_bench: SKIP, no live daemon at {}",
+                socket.display()
+            );
+            return;
+        }
+        fn summarize(name: &str, mut samples: Vec<Duration>) {
+            samples.sort();
+            let percentile = |p: usize| samples[(samples.len() * p / 100).min(samples.len() - 1)];
+            println!(
+                "live_engine_latency_bench: {name} n={} p50={:?} p95={:?} min={:?} max={:?}",
+                samples.len(),
+                percentile(50),
+                percentile(95),
+                samples[0],
+                samples[samples.len() - 1],
+            );
+        }
+        let api: Vec<(Duration, CgroupDriver)> = {
+            let _guard = EngineTestGuard::serve(socket, None);
+            (0..ITERATIONS)
+                .map(|_| {
+                    let started = Instant::now();
+                    let value = Docker::host()
+                        .daemon_cgroup()
+                        .expect("live api serves daemon cgroup");
+                    (started.elapsed(), value)
+                })
+                .collect()
+        };
+        let cli: Vec<(Duration, CgroupDriver)> = (0..ITERATIONS)
+            .map(|_| {
+                let started = Instant::now();
+                let value = Docker::host()
+                    .daemon_cgroup()
+                    .expect("live cli serves daemon cgroup");
+                (started.elapsed(), value)
+            })
+            .collect();
+        for (iteration, ((_, api_value), (_, cli_value))) in api.iter().zip(cli.iter()).enumerate()
+        {
+            assert_eq!(
+                api_value, cli_value,
+                "live transports disagree on iteration {iteration}"
+            );
+        }
+        summarize(
+            "api ",
+            api.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+        summarize(
+            "cli ",
+            cli.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+    }
+
+    #[test]
+    fn buildx_queries_stay_on_cli_without_api_attempts() {
+        let mock = routed_mock(0);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-buildx-cli");
+        let mut runner = ScriptRunner::scripted_host(vec![
+            ok("velnor-builder-shared-trusted-o_r0\n"),
+            ok("Total:\t\t6.054MB\n"),
+        ]);
+        let (builders, usage) = {
+            let mut docker = Docker::job(&mut runner);
+            (
+                docker.buildx_builders().expect("builders list"),
+                docker
+                    .buildx_disk_usage("velnor-builder-shared-trusted-o_r0")
+                    .expect("disk usage"),
+            )
+        };
+        assert_eq!(
+            builders,
+            vec!["velnor-builder-shared-trusted-o_r0".to_string()]
+        );
+        assert_eq!(usage, 6_054_000);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 0);
     }
 }
