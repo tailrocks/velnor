@@ -753,7 +753,7 @@ fn aggregate_triggers(
 ) -> (&'static str, &'static str, String, &'static str) {
     match kind {
         WorkflowKind::PullRequest => (
-            "CI",
+            "CI / PR",
             "CI / PR",
             format!(
                 "on:\n  pull_request:\n{}",
@@ -762,7 +762,7 @@ fn aggregate_triggers(
             "true",
         ),
         WorkflowKind::Main => (
-            "CI",
+            "CI / Main",
             "CI / main",
             format!(
                 "on:\n  push:\n    branches: [{}]\n{}",
@@ -1562,9 +1562,19 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             ""
         };
+        // Both-mode planning consumes the admitted lanes: a velnor-only
+        // dispatch plans a velnor-only selection, so units the Velnor lane
+        // cannot run stay unselected (and green under the required gate)
+        // instead of failing a selection they can never satisfy.
+        // Single-lane modes plan unfiltered, as before.
+        let lanes_env = if self.runners == RunnerMode::Both {
+            "          VELNOR_LANES: ${{ needs.lane-admission.outputs.lanes }}\n"
+        } else {
+            ""
+        };
         let _ = writeln!(
             output,
-            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
+            "  plan:\n    name: Planning\n{gate}{needs}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
             self.runner_for(runners),
             outputs.join("\n"),
             self.pins.checkout,

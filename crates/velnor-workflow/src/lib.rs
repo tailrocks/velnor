@@ -2713,7 +2713,30 @@ pub(crate) fn unit_group_job_id(unit: &Unit) -> String {
 }
 
 pub(crate) fn lane_supports_unit(lane: RunnerMode, unit: &Unit) -> bool {
-    !(lane == RunnerMode::Velnor && unit.kind == UnitKind::Swift)
+    lane_supports_unit_kind(lane, unit.kind)
+}
+
+/// Whether `lane` can execute a unit of `kind`. This is the canonical
+/// lane-support rule: unit-surface rendering and lanes-aware planning both
+/// delegate here, so a kind the Velnor lane cannot run is skipped in
+/// rendering and excluded from a velnor-only selection by the same
+/// predicate.
+pub(crate) fn lane_supports_unit_kind(lane: RunnerMode, kind: UnitKind) -> bool {
+    !(lane == RunnerMode::Velnor && kind == UnitKind::Swift)
+}
+
+/// Whether the admitted `lanes` can execute a unit of `kind`: at least one
+/// admitted lane must support it. A velnor-only selection drops whatever the
+/// Velnor lane cannot run; `github` and `both` keep every known kind because
+/// the GitHub lane runs them all.
+pub(crate) fn lanes_support_unit_kind(lanes: RunnerMode, kind: UnitKind) -> bool {
+    match lanes {
+        RunnerMode::Both => {
+            lane_supports_unit_kind(RunnerMode::Github, kind)
+                || lane_supports_unit_kind(RunnerMode::Velnor, kind)
+        }
+        lane => lane_supports_unit_kind(lane, kind),
+    }
 }
 
 #[allow(dead_code)]
@@ -7672,7 +7695,7 @@ channel = "stable"
     fn workflow_snapshot_enforces_security_shape() {
         let config = scanned_fixture(RunnerMode::Both);
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
-        assert!(workflow.contains("name: CI\nrun-name: CI / main"));
+        assert!(workflow.contains("name: CI / Main\nrun-name: CI / main"));
         assert!(workflow.contains("  ci-required:\n    name: ci-required"));
         assert!(workflow.contains("needs: [plan, policy]"));
         assert!(workflow.contains("github.ref == 'refs/heads/main'"));
@@ -8219,6 +8242,59 @@ channel = "stable"
     }
 
     #[test]
+    fn both_mode_plan_consumes_the_admitted_lanes() {
+        let config = scanned_fixture(RunnerMode::Both);
+        let generator = WorkflowIr::from_config(&config);
+        for aggregate in [
+            generator.render_nested(WorkflowKind::PullRequest, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Main, &legacy_plan(&generator)),
+            generator.render_nested(WorkflowKind::Nightly, &legacy_plan(&generator)),
+            generator.render(WorkflowKind::Main),
+        ] {
+            let consumer = "VELNOR_LANES: ${{ needs.lane-admission.outputs.lanes }}";
+            assert!(aggregate.contains(consumer), "{aggregate}");
+            // The consumer sits in the plan step, after the admission job the
+            // plan job needs.
+            let admission = must_some(aggregate.find("  lane-admission:"), "lane-admission job");
+            let plan = must_some(aggregate.find("  plan:"), "plan job");
+            let lanes_env = must_some(aggregate.find(consumer), "plan lanes env");
+            assert!(admission < plan && plan < lanes_env, "{aggregate}");
+        }
+    }
+
+    #[test]
+    fn admitted_lanes_support_every_kind_but_velnor_only_swift() {
+        let kinds = [
+            UnitKind::Rust,
+            UnitKind::Gradle,
+            UnitKind::Node,
+            UnitKind::Bun,
+            UnitKind::Swift,
+            UnitKind::OpenTofu,
+            UnitKind::Docker,
+            UnitKind::Homebrew,
+            UnitKind::Docs,
+        ];
+        for kind in kinds {
+            assert!(
+                lanes_support_unit_kind(RunnerMode::Github, kind),
+                "{kind:?}"
+            );
+            assert!(lanes_support_unit_kind(RunnerMode::Both, kind), "{kind:?}");
+            assert_eq!(
+                lanes_support_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+            assert_eq!(
+                lane_supports_unit_kind(RunnerMode::Velnor, kind),
+                kind != UnitKind::Swift,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn single_lane_modes_keep_the_runner_selector_without_admission() {
         for runners in [RunnerMode::Github, RunnerMode::Velnor] {
             let config = scanned_fixture(runners);
@@ -8233,6 +8309,7 @@ channel = "stable"
                 );
                 assert!(!aggregate.contains("lane-admission"), "{aggregate}");
                 assert!(!aggregate.contains("inputs.lanes"), "{aggregate}");
+                assert!(!aggregate.contains("VELNOR_LANES"), "{aggregate}");
             }
             let rust_unit = must_some(
                 config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
@@ -8558,14 +8635,14 @@ channel = "stable"
         let generator = WorkflowIr::from_config(&config);
         let pr = generator.render(WorkflowKind::PullRequest);
         let main = generator.render(WorkflowKind::Main);
-        assert!(pr.contains("name: CI\nrun-name: CI / PR"));
+        assert!(pr.contains("name: CI / PR\nrun-name: CI / PR"));
         assert!(pr.contains("pull_request:"));
         assert!(!pr.contains("merge_group:"));
         assert!(pr.contains("permissions:\n  actions: read\n  contents: read"));
         assert!(pr.contains("cancel-in-progress: true"));
         assert!(pr.contains("  ci-required:\n    name: ci-required"));
         assert!(!pr.contains("branches: [main]"));
-        assert!(main.contains("name: CI\nrun-name: CI / main"));
+        assert!(main.contains("name: CI / Main\nrun-name: CI / main"));
         assert!(main.contains("branches: [main]"));
         assert!(main.contains("workflow_dispatch:"));
         assert!(!main.contains("pull_request:"));
