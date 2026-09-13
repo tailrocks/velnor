@@ -356,6 +356,10 @@ where
     // never persisted anything. Anything else is a real failure and must fail
     // the job: a warning on stderr let a credentialed workspace survive.
     if result.code != 0 && result.code != GIT_CONFIG_KEY_NOT_FOUND {
+        // Scrub before failing: stable workspaces persist across jobs, so a
+        // token left behind by a failed `git config` would be readable by
+        // the next job. The failure itself still fails loud below.
+        let _ = scrub_config_credentials(&config_path);
         bail!(
             "cleanup of checkout credentials in {} failed with code {}: {}",
             plan.destination.display(),
@@ -597,7 +601,7 @@ fn reap_stale_credentials_in(dir: &Path) -> Result<usize> {
 /// Remove every `extraheader` entry from a git config file, returning whether
 /// anything was removed. Velnor is the only writer of `http.*.extraheader` in a
 /// checkout, and every value it writes is a bearer credential.
-fn scrub_config_credentials(config_path: &Path) -> Result<bool> {
+pub(crate) fn scrub_config_credentials(config_path: &Path) -> Result<bool> {
     let content = match fs::read_to_string(config_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -781,6 +785,25 @@ where
                 fetch_tags,
                 log,
             )?;
+            if fetch_depth.is_none() && destination.join(".git/shallow").is_file() {
+                // A reused workspace can be shallow from a prior job; a full
+                // hydration without an unshallow keeps it shallow. Fetch the
+                // missing history from the local mirror (no network), then
+                // restore FETCH_HEAD to the requested ref.
+                let unshallow = vec![
+                    "-C".to_string(),
+                    path_arg(destination),
+                    "fetch".to_string(),
+                    "--unshallow".to_string(),
+                    mirror.path.display().to_string(),
+                    git_ref.to_string(),
+                    "+refs/heads/*:refs/remotes/origin/*".to_string(),
+                    "+refs/tags/*:refs/tags/*".to_string(),
+                ];
+                run_git(runner, &unshallow, log)?;
+                write_fetch_head(&destination.join(".git"), &mirror.sha, git_ref, clone_url)?;
+                log.push("Unshallowed the workspace from the local mirror".to_string());
+            }
             // Hydration has linked or copied every object and wrote the refs and
             // FETCH_HEAD the workspace needs. Later checkout/cleanup work touches
             // only the workspace, so do not hold the mirror reader lease for it.
@@ -870,6 +893,11 @@ where
         "protocol.version=2".to_string(),
     ];
     fetch.extend(["fetch".to_string(), "--prune".to_string()]);
+    if fetch_depth.is_none() && destination.join(".git/shallow").is_file() {
+        // A reused workspace can be shallow from a prior job; a full fetch
+        // without `--unshallow` keeps the new history shallow.
+        fetch.push("--unshallow".to_string());
+    }
     match fetch_depth {
         Some(depth) => {
             if fetch_tags {
@@ -2058,8 +2086,8 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("velnor-credential-{}", uuid::Uuid::new_v4()));
         let workspace = root.join("workspace");
-        write_credentialed_config(&workspace);
-        let mut plan = test_checkout_plan(workspace);
+        let config = write_credentialed_config(&workspace);
+        let mut plan = test_checkout_plan(workspace.clone());
         plan.token = Some("token".into());
         plan.persist_credentials = true;
 
@@ -2069,6 +2097,10 @@ mod tests {
         assert!(
             format!("{error:#}").contains("cleanup of checkout credentials"),
             "{error:#}"
+        );
+        assert!(
+            !config_has_credential(&config),
+            "a failed git cleanup must still scrub the token (stable workspaces persist)"
         );
         std::fs::remove_dir_all(root).ok();
     }
@@ -3993,5 +4025,251 @@ mod tests {
         std::fs::write(&lib, text).unwrap();
         let third = cargo_check_units(&workspace, &cargo_home);
         assert!(!third.is_empty(), "changed sources must rebuild");
+    }
+
+    fn commit_count(runner: &mut ProcessCommandRunner, workspace: &Path) -> usize {
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(workspace),
+                    "log".to_string(),
+                    "--oneline".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(result.code, 0);
+        result
+            .stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+    }
+
+    fn extend_fixture_to_three_commits(fixture: &mut RepoFixture) {
+        let work = fixture.root.join("seed");
+        let mut runner = ProcessCommandRunner;
+        for content in ["two", "three"] {
+            std::fs::write(work.join("value"), content).unwrap();
+            for args in [
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "add".to_string(),
+                    ".".to_string(),
+                ],
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "commit".to_string(),
+                    "-m".to_string(),
+                    content.to_string(),
+                ],
+                vec![
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "push".to_string(),
+                    path_arg(&fixture.origin),
+                    "HEAD:master".to_string(),
+                ],
+            ] {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+            }
+        }
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "rev-parse".to_string(),
+                    "HEAD".to_string(),
+                ],
+            )
+            .unwrap();
+        fixture.sha = result.stdout.trim().to_string();
+    }
+
+    #[test]
+    fn full_fetch_unshallows_a_reused_workspace_on_both_paths() {
+        // Stable workspaces reuse the directory: a shallow checkout leaves
+        // a shallow marker, and a later full fetch must unshallow or the new
+        // history stays shallow (stickiness across jobs).
+        let mut fixture = RepoFixture::new();
+        extend_fixture_to_three_commits(&mut fixture);
+        let mut runner = ProcessCommandRunner;
+
+        // Direct path: shallow then full without a mirror.
+        let direct = fixture.root.join("workspace-direct");
+        let mut shallow = fixture.plan(direct.clone());
+        shallow.fetch_depth = Some(1);
+        shallow.clean = true;
+        execute_checkout_with_mirror(&mut runner, &shallow, &mut Vec::new(), None, &fixture.root)
+            .unwrap();
+        assert!(
+            direct.join(".git/shallow").is_file(),
+            "shallow checkout must leave a shallow marker"
+        );
+        assert_eq!(commit_count(&mut runner, &direct), 1);
+        let mut full = fixture.plan(direct.clone());
+        full.fetch_depth = None;
+        full.clean = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &full, &mut log, None, &fixture.root).unwrap();
+        assert!(
+            !direct.join(".git/shallow").exists(),
+            "full fetch must unshallow a reused workspace"
+        );
+        assert_eq!(commit_count(&mut runner, &direct), 3);
+        assert!(
+            log.iter().any(|line| line.contains("--unshallow")),
+            "direct full fetch on shallow must run --unshallow: {log:?}"
+        );
+
+        // Mirror path: shallow via direct (mirrors never write shallow
+        // markers), then full via the mirror, which must unshallow from
+        // the local mirror without network.
+        let mirrored = fixture.root.join("workspace-mirror");
+        let mut shallow = fixture.plan(mirrored.clone());
+        shallow.fetch_depth = Some(1);
+        shallow.clean = true;
+        execute_checkout_with_mirror(&mut runner, &shallow, &mut Vec::new(), None, &fixture.root)
+            .unwrap();
+        assert!(mirrored.join(".git/shallow").is_file());
+        let mut full = fixture.plan(mirrored.clone());
+        full.fetch_depth = None;
+        full.clean = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &full,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
+        assert!(
+            !mirrored.join(".git/shallow").exists(),
+            "mirror hydration must unshallow a reused workspace"
+        );
+        assert_eq!(commit_count(&mut runner, &mirrored), 3);
+        assert!(
+            log.iter().any(|line| line.contains("--unshallow")),
+            "mirror full fetch on shallow must run --unshallow: {log:?}"
+        );
+    }
+
+    #[test]
+    fn clone_url_change_replaces_origin_and_tree() {
+        // Same destination, different repository: the checkout must remove
+        // the old origin, add the new one, fetch, checkout --force, reset
+        // --hard, and clean — leaving the new tree and no stale files.
+        let first = RepoFixture::new();
+        let mut second = RepoFixture::new();
+        let work = second.root.join("seed");
+        let mut runner = ProcessCommandRunner;
+        std::fs::write(work.join("url-marker"), "two").unwrap();
+        for args in [
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "add".to_string(),
+                ".".to_string(),
+            ],
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "commit".to_string(),
+                "-m".to_string(),
+                "marker".to_string(),
+            ],
+            vec![
+                "-C".to_string(),
+                path_arg(&work),
+                "push".to_string(),
+                path_arg(&second.origin),
+                "HEAD:master".to_string(),
+            ],
+        ] {
+            let result = runner.run("git", &args).unwrap();
+            assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+        }
+        let result = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&work),
+                    "rev-parse".to_string(),
+                    "HEAD".to_string(),
+                ],
+            )
+            .unwrap();
+        second.sha = result.stdout.trim().to_string();
+
+        let workspace = first.root.join("workspace-url-change");
+        let mut first_plan = first.plan(workspace.clone());
+        first_plan.clean = true;
+        first_plan.preserve_target = true;
+        execute_checkout_with_mirror(
+            &mut runner,
+            &first_plan,
+            &mut Vec::new(),
+            Some(&first.store()),
+            &first.root,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("value")).unwrap(),
+            "one"
+        );
+        assert!(!workspace.join("url-marker").exists());
+
+        let mut second_plan = second.plan(workspace.clone());
+        second_plan.clean = true;
+        second_plan.preserve_target = true;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &second_plan,
+            &mut log,
+            Some(&second.store()),
+            &first.root,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("url-marker")).unwrap(),
+            "two",
+            "the new repository tree must replace the old one"
+        );
+        let origin = runner
+            .run(
+                "git",
+                &[
+                    "-C".to_string(),
+                    path_arg(&workspace),
+                    "remote".to_string(),
+                    "get-url".to_string(),
+                    "origin".to_string(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(origin.stdout.trim(), second_plan.clone_url);
+        let joined = log.join(
+            "
+",
+        );
+        for needle in [
+            "remote remove",
+            "remote add",
+            "fetch",
+            "checkout --force",
+            "reset --hard",
+            "clean -ffdx",
+        ] {
+            assert!(joined.contains(needle), "log must show {needle}: {log:?}");
+        }
     }
 }

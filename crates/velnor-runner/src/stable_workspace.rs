@@ -70,6 +70,11 @@ pub(crate) const STABLE_WORKSPACES_DIR: &str = "stable-workspaces";
 /// last-use clock, refreshed by every allocation that lands on the scope.
 const STABLE_SCOPE_LAST_USE: &str = ".velnor-last-use";
 
+/// Recorded checkout destinations for one scope, as workspace-relative
+/// keys (`""` for the workspace root, `"subdir"` otherwise). Read before
+/// checkout to delete destinations the previous job left behind.
+const STABLE_SCOPE_DESTINATIONS: &str = ".velnor-destinations";
+
 /// Cap for one slot's whole stable-workspace tree, in bytes.
 ///
 /// Parity with `MBX_TARGET_MAX_SIZE` (30 GiB per managed-target store):
@@ -109,6 +114,159 @@ pub(crate) fn resolve(
         scope_dir,
         fresh_scope: false,
     }
+}
+
+/// Whether a workspace host path lives inside the stable tree. Composite
+/// checkout plans are built after the top-level stable flag is gone, so
+/// they detect stability from the path instead of threading the flag.
+pub(crate) fn is_stable_workspace(workspace: &Path) -> bool {
+    workspace
+        .components()
+        .any(|component| component.as_os_str().to_string_lossy() == STABLE_WORKSPACES_DIR)
+}
+
+fn destination_key(workspace: &Path, destination: &Path) -> Option<String> {
+    let relative = destination.strip_prefix(workspace).ok()?;
+    if relative.as_os_str().is_empty() {
+        return Some(String::new());
+    }
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let name = component.as_os_str().to_string_lossy().into_owned();
+        if name.is_empty() || name == "." || name == ".." {
+            return None;
+        }
+        parts.push(name);
+    }
+    Some(parts.join("/"))
+}
+
+fn destination_path(workspace: &Path, key: &str) -> Option<PathBuf> {
+    if key.is_empty() {
+        return Some(workspace.to_path_buf());
+    }
+    if key.starts_with('/') || key.contains("//") {
+        return None;
+    }
+    let mut path = workspace.to_path_buf();
+    for part in key.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        path.push(part);
+    }
+    if !path.starts_with(workspace) {
+        return None;
+    }
+    Some(path)
+}
+
+fn write_destination_record(record_path: &Path, current: &std::collections::BTreeSet<String>) {
+    let list: Vec<&String> = current.iter().collect();
+    let text = serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string());
+    let tmp = record_path.with_extension(format!("tmp-{}", std::process::id()));
+    let result = fs::write(&tmp, &text).and_then(|()| fs::rename(&tmp, record_path));
+    if let Err(error) = result {
+        eprintln!(
+            "forensics.lifecycle: stable destinations unwritable at {}: {error:#}",
+            record_path.display()
+        );
+        fs::remove_file(&tmp).ok();
+    }
+}
+
+fn clear_workspace(workspace: &Path) -> anyhow::Result<()> {
+    if workspace.exists() {
+        fs::remove_dir_all(workspace)
+            .with_context(|| format!("clear stable workspace {}", workspace.display()))?;
+    }
+    fs::create_dir_all(workspace)
+        .with_context(|| format!("recreate stable workspace {}", workspace.display()))?;
+    Ok(())
+}
+
+/// Delete checkout destinations the previous job left behind.
+///
+/// The scope records its destination set on every job; destinations
+/// absent from the current job are removed before any checkout runs, so
+/// a job that checks out `a` never sees the previous job's `b`. A
+/// previous root checkout (`""`) absent now clears the whole workspace,
+/// since the root's files (including its `target/`) belong to a layout
+/// the current job does not use. Deletion failures fail the job: leaking
+/// prior-job files is a correctness violation, not hygiene. Record-write
+/// failures only warn: the current job already pruned correctly, and the
+/// next job fails closed on a missing record by clearing.
+pub(crate) fn prune_stale_destinations(
+    scope_dir: &Path,
+    workspace: &Path,
+    current_destinations: &[PathBuf],
+) -> anyhow::Result<()> {
+    let mut current = std::collections::BTreeSet::new();
+    for destination in current_destinations {
+        if let Some(key) = destination_key(workspace, destination) {
+            current.insert(key);
+        }
+    }
+    let record_path = scope_dir.join(STABLE_SCOPE_DESTINATIONS);
+    let previous: std::collections::BTreeSet<String> = match fs::read_to_string(&record_path) {
+        Ok(text) => match serde_json::from_str::<Vec<String>>(&text) {
+            Ok(list) => list.into_iter().collect(),
+            Err(error) => {
+                eprintln!(
+                    "forensics.lifecycle: stable destinations unreadable at {} ({error:#}), clearing workspace",
+                    record_path.display()
+                );
+                clear_workspace(workspace)?;
+                write_destination_record(&record_path, &current);
+                return Ok(());
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_destination_record(&record_path, &current);
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!(
+                "forensics.lifecycle: stable destinations unreadable at {} ({error:#}), clearing workspace",
+                record_path.display()
+            );
+            clear_workspace(workspace)?;
+            write_destination_record(&record_path, &current);
+            return Ok(());
+        }
+    };
+    let stale: Vec<String> = previous.difference(&current).cloned().collect();
+    if stale.is_empty() {
+        write_destination_record(&record_path, &current);
+        return Ok(());
+    }
+    if stale.iter().any(|key| key.is_empty()) {
+        eprintln!(
+            "forensics.lifecycle: stable workspace clearing {} (previous root checkout absent)",
+            workspace.display()
+        );
+        clear_workspace(workspace)?;
+        write_destination_record(&record_path, &current);
+        return Ok(());
+    }
+    for key in stale {
+        let Some(path) = destination_path(workspace, &key) else {
+            eprintln!(
+                "forensics.lifecycle: stable workspace skipping unsafe recorded destination {key:?}"
+            );
+            continue;
+        };
+        if path.exists() {
+            eprintln!(
+                "forensics.lifecycle: stable workspace removing stale destination {}",
+                path.display()
+            );
+            fs::remove_dir_all(&path)
+                .with_context(|| format!("remove stale stable destination {}", path.display()))?;
+        }
+    }
+    write_destination_record(&record_path, &current);
+    Ok(())
 }
 
 /// Allocate the stable workspace for one job: create the directories,
@@ -407,6 +565,76 @@ mod tests {
         let current = seed_scope(&root, "trusted", "1", 100, true);
         enforce_budget(&root, &current, 10);
         assert!(current.exists());
+        fs::remove_dir_all(&slot).ok();
+    }
+
+    #[test]
+    fn stable_detection_matches_only_the_stable_tree() {
+        let slot = slot_root("detect");
+        let stable = resolve(&slot, "trusted", 41);
+        assert!(is_stable_workspace(&stable.workspace));
+        assert!(!is_stable_workspace(
+            &slot.join("550e8400-e29b-41d4-a716-446655440000/workspace")
+        ));
+        fs::remove_dir_all(&slot).ok();
+    }
+
+    #[test]
+    fn prune_removes_destinations_absent_from_the_current_job() {
+        let slot = slot_root("prune");
+        let stable = prepare(&slot, "trusted", 41).unwrap();
+        let keep = stable.workspace.join("keep");
+        let stale = stable.workspace.join("stale");
+        fs::create_dir_all(&keep).unwrap();
+        fs::write(keep.join("file"), b"keep").unwrap();
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("file"), b"stale").unwrap();
+        prune_stale_destinations(
+            &stable.scope_dir,
+            &stable.workspace,
+            &[keep.clone(), stale.clone()],
+        )
+        .unwrap();
+        assert!(keep.join("file").is_file());
+        assert!(stale.join("file").is_file());
+        prune_stale_destinations(
+            &stable.scope_dir,
+            &stable.workspace,
+            std::slice::from_ref(&keep),
+        )
+        .unwrap();
+        assert!(keep.join("file").is_file(), "current destinations survive");
+        assert!(!stale.exists(), "absent destinations are deleted");
+        let record = fs::read_to_string(stable.scope_dir.join(STABLE_SCOPE_DESTINATIONS)).unwrap();
+        assert!(record.contains("keep"));
+        assert!(!record.contains("stale"));
+        fs::remove_dir_all(&slot).ok();
+    }
+
+    #[test]
+    fn prune_clears_the_workspace_when_the_root_checkout_goes_away() {
+        let slot = slot_root("prune-root");
+        let stable = prepare(&slot, "trusted", 41).unwrap();
+        fs::write(stable.workspace.join("root-file"), b"root").unwrap();
+        fs::create_dir_all(stable.workspace.join("target")).unwrap();
+        fs::write(stable.workspace.join("target/artifact"), b"warm").unwrap();
+        prune_stale_destinations(
+            &stable.scope_dir,
+            &stable.workspace,
+            std::slice::from_ref(&stable.workspace),
+        )
+        .unwrap();
+        let next = stable.workspace.join("next");
+        prune_stale_destinations(&stable.scope_dir, &stable.workspace, &[next]).unwrap();
+        assert!(
+            !stable.workspace.join("root-file").exists(),
+            "previous root files must not leak into a subdir-only job"
+        );
+        assert!(
+            !stable.workspace.join("target/artifact").exists(),
+            "the root target belongs to the previous layout"
+        );
+        assert!(stable.workspace.is_dir());
         fs::remove_dir_all(&slot).ok();
     }
 }

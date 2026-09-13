@@ -245,6 +245,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R2-perf BC-14 deleted the mtime pin and the persistent target layer: checkout leaves wall-clock mtimes (GitHub-hosted parity, backdated-2001 pin), the 5th bench phase is gone (`CheckoutPhase::ALL` is 4, span table exact), target materialize/publish + generation store + traversal budgets removed from the executor, `target/` resolves as an ordinary workspace path for cache/artifacts, and `VELNOR_CARGO_TARGET_PERSIST` fails loud instead of silently no-opping; measured via the R1-bench span contract (real-checkout 4-span pin, wall-clock pin, subscriber round-trip). |
 | 2026-09-13 | R2-perf BC-14 correction closed both review issues: the shipped `velnor.env` no longer advertises the removed `VELNOR_CARGO_TARGET_PERSIST` knob (block deleted per the no-legacy rule; the daemon's fail-loud admission error remains the operator guidance), and the native rust-cache covered summary reports `Store: host-persistent cache class` with the `persistent_target` local renamed to `covered_by_persistent_storage`, matching the sibling actions/cache copy since coverage is static stores only — pinned by a no-knob env assertion and a summary assertion on the warm-static-directories test. |
 | 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §115: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
+| 2026-09-13 | R0-f4-warm correction closed the five staleness gaps: no-checkout jobs refuse stable (ephemeral + forensics), stable forces `clean:true` (checkout-time clean only removes prior-job state), per-scope destination record with pre-checkout prune of absent paths (root-absent clears), `--unshallow` on full fetch when `.git/shallow` exists (direct flag + mirror local-fetch), and stable double-failure scrubs plus fails loud with both errors (checkout scrubs before bail); clone-URL-change pin added (remove/add-origin + fetch + force + reset + clean). Bench prose scoped to the pinned zero-unit test claim (§115); rust/warm + rust/noop runs pending. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -6385,24 +6386,20 @@ passing alone, matching the §111 note.)
 ## 115. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
 
 BC-14 deleted the mtime pin and the persistent target layer for timestamp
-soundness. The measured effect on warm same-SHA cross-checkout: the mbx
-default path shows no regression (2.8 s, 87 hits — mbx is
-content-addressed and keeps its own managed targets), while the
-explicit-sccache path went 0.4–1.2 s to 6–33 s and the `MBX_DISABLE=1`
-opt-out path went 0.2–0.4 s to 7.6–42 s (30–100x).
+soundness. The warm-build claim for this remediation is pinned by the
+zero-unit test only (real git over file:// plus real Cargo on a
+zero-dependency fixture with a build-script crate and a proc-macro
+crate): a warm same-SHA rebuild into a stable workspace compiles zero
+units, while a changed source still rebuilds. Bench numbers (rust/warm
+and rust/noop on the explicit-sccache and opt-out fixtures) were not run
+for this change and are pending; no timing or speedup factor is claimed
+here.
 
-Mechanism, validated host-side with plain Cargo in the production job
-shape (`CARGO_INCREMENTAL=0`, no wrappers, shared warm target): every job
-checks out into a fresh per-job-UUID directory, so Cargo fingerprints
-never survive and the fresh wall-clock mtimes mark every path-local crate
-dirty. A fresh checkout at the same SHA rebuilds exactly the workspace
-members (1 unit on `velnor-model`, 2.94 s; 3 units on `velnor-runner`,
-9.40 s) while all 300 registry dependencies — including `-sys` crates —
-stay fresh; rebuilding in the same path compiles zero units (0.45 s on
-`velnor-runner`, 21x). A same-SHA `checkout --force` + `reset --hard`
-rewrites no tracked file (mtime byte-identical), and a changed source
-rebuilds. The fix therefore restores fingerprint hits by keeping the
-workspace, not by restoring the pin or the target store.
+Mechanism: every job checks out into a fresh per-job-UUID directory, so
+Cargo fingerprints never survive and the fresh wall-clock mtimes mark
+every path-local crate dirty. A same-SHA `checkout --force` +
+`reset --hard` rewrites no tracked file, so keeping the workspace
+restores fingerprint hits without restoring the pin or the target store.
 
 What changed (`crates/velnor-runner`):
 
@@ -6474,3 +6471,18 @@ Gates observed in this worktree (base `11302b22`, branch `r0-f4-warm`):
 filter 12 incl. the pin). Full parallel `--lib` shows the pre-existing
 timing-flake cluster (checkout mirror spans/lease fail identically on
 base; see report) — no failure in touched code.
+
+Correction 2026-09-13 (same branch): closed the five staleness gaps plus
+the missing URL-change pin, 8 new tests. (a) `stable_workspace_for_job`
+refuses jobs with no enabled checkout step or empty/invalid plans
+(ephemeral + forensics). (b) Stable forces `clean:true` via
+`apply_stable_checkout_policy` (top-level and composite paths). (c)
+Per-scope `.velnor-destinations` record with pre-checkout prune
+(`prune_stale_destinations`; root-absent clears the workspace). (d)
+Full fetch unshallows when `.git/shallow` exists: `--unshallow` flag on
+the direct path, local-mirror `--unshallow` + FETCH_HEAD restore on the
+mirror path. (e) Checkout scrubs before bailing on git failure, and
+`combine_job_and_cleanup` scrubs plus fails loud with both errors on
+stable double failure (ephemeral keeps masking). Clone-URL-change pin
+covers remove/add-origin + fetch + force + reset + clean. Bench prose
+above scoped to the zero-unit pin; rust/warm + rust/noop runs pending.
