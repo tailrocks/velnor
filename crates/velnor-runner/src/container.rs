@@ -736,6 +736,21 @@ impl JobContainerSpec {
         self.exec_command(working_directory, env, secret_masks, command, true)
     }
 
+    /// The ordered environment for one Engine-API script exec: base exec
+    /// env, step env, authoritative runner env — the same three appends in
+    /// the same order `exec_command` feeds the CLI
+    /// builder, so daemon last-wins resolves identically on both legs. The
+    /// scratch builder is never finished, so no env file is written; control
+    /// and authoritative filtering is shared, not duplicated, with the CLI
+    /// leg by construction.
+    pub fn script_exec_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+        let mut builder = DockerCommand::new(self.env_dir(), ["exec"]);
+        self.append_base_exec_env(&mut builder);
+        self.append_step_env(&mut builder, env);
+        self.append_authoritative_runner_env(&mut builder);
+        builder.recorded_env()
+    }
+
     fn exec_command(
         &self,
         working_directory: &str,
@@ -1434,7 +1449,9 @@ pub enum Shell {
 }
 
 impl Shell {
-    fn command_args(self, script_path: &str) -> Vec<String> {
+    /// The argv a script step runs under this shell. Shared by the CLI exec
+    /// leg and the Engine-API exec leg so the executed command is identical.
+    pub(crate) fn command_args(self, script_path: &str) -> Vec<String> {
         match self {
             Self::Bash => vec![
                 "bash".into(),
@@ -3813,5 +3830,87 @@ mod tests {
             split_container_options(r#"--cpus 2 --health-cmd "pg_isready -U postgres""#),
             vec!["--cpus", "2", "--health-cmd", "pg_isready -U postgres"]
         );
+    }
+
+    #[test]
+    fn script_exec_env_matches_prepared_argv_env_exactly() {
+        let mut job = spec();
+        job.env
+            .push(("VELNOR_EXECUTION_BACKEND".into(), "velnor".into()));
+        let step_env = vec![
+            ("STEP_VAR".into(), "step".into()),
+            ("PATH".into(), "/step/path".into()),
+            ("DOCKER_HOST".into(), "tcp://evil:2376".into()),
+            ("MULTILINE".into(), "a\nb".into()),
+            ("VELNOR_EXECUTION_BACKEND".into(), "spoof".into()),
+        ];
+        let engine = job.script_exec_env(&step_env);
+        let prepared = job
+            .prepare_exec_script_args("/__t/step.sh", Shell::Sh, "/__w", &step_env, &[])
+            .unwrap();
+        // The CLI leg's effective env in argv order: env files expanded in
+        // place, bare `-e NAME` resolved from the client process env. Stops
+        // at `--`: command operands are opaque (`sh -e` is not a flag).
+        let mut cli = Vec::new();
+        let mut args = prepared.args().iter();
+        while let Some(arg) = args.next() {
+            if arg == "--" {
+                break;
+            }
+            if arg == "--env-file" {
+                let path = args.next().expect("env file path follows --env-file");
+                cli.extend(
+                    fs::read_to_string(path)
+                        .unwrap()
+                        .lines()
+                        .map(str::to_string),
+                );
+            } else if arg == "-e" {
+                let name = args.next().expect("variable name follows -e");
+                let (_, value) = prepared
+                    .process_env()
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .expect("forwarded value exists");
+                cli.push(format!("{name}={value}"));
+            }
+        }
+        let engine: Vec<String> = engine
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        assert_eq!(engine, cli, "engine list must equal CLI effective env");
+        // The semantics the shared appends own: base first, the control
+        // spoof dropped, step PATH after base PATH (last-wins), the
+        // authoritative value re-asserted last, multiline intact.
+        assert_eq!(engine[0], "HOME=/github/home");
+        assert!(
+            !engine.iter().any(|entry| entry.contains("tcp://evil")),
+            "{engine:?}"
+        );
+        assert_eq!(
+            engine
+                .iter()
+                .filter(|entry| entry.starts_with("DOCKER_HOST="))
+                .count(),
+            1
+        );
+        let base_path = engine
+            .iter()
+            .position(|entry| entry.starts_with("PATH="))
+            .unwrap();
+        let step_path = engine
+            .iter()
+            .position(|entry| entry == "PATH=/step/path")
+            .unwrap();
+        assert!(base_path < step_path);
+        assert!(!engine.iter().any(|entry| entry.ends_with("=spoof")));
+        assert_eq!(engine.last().unwrap(), "VELNOR_EXECUTION_BACKEND=velnor");
+        assert!(engine.contains(&"MULTILINE=a\nb".to_string()));
+        // The CLI leg can only carry that value via the client process env;
+        // the engine leg carries it directly — same daemon value.
+        assert!(prepared
+            .process_env()
+            .contains(&("MULTILINE".to_string(), "a\nb".to_string())));
     }
 }

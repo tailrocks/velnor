@@ -51,7 +51,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::executor::{CommandResult, CommandRunner};
+use crate::executor::{CommandResult, CommandRunner, CommandStream};
 
 // ---------------------------------------------------------------------------
 // Typed results
@@ -1361,6 +1361,21 @@ enum Transport<'r> {
     Host,
 }
 
+/// Outcome of the Engine-API attempt for one script-step exec. See
+/// [`Docker::try_exec_script`] for the contract each arm carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ScriptExecRoute {
+    /// The API ran the step end to end: exit code plus demuxed streams,
+    /// zero subprocesses.
+    Served(CommandResult),
+    /// The step deadline expired on the API leg: the CLI watchdog's own
+    /// 124 result, the container killed the same way. Never a fallback.
+    Expired(CommandResult),
+    /// Any API failure, the API disabled, or a non-host runner: run the
+    /// historical CLI call unchanged.
+    UseCli,
+}
+
 /// The typed owner of host Docker control-plane calls.
 ///
 /// Construct with [`Docker::job`] on the job path (cancellation-aware,
@@ -1372,7 +1387,9 @@ enum Transport<'r> {
 /// Migrated calls try the Engine API first ([`Docker::engine_or_cli`]) and run
 /// their historical one-`docker`-process CLI call only when the API does
 /// not affirmatively succeed — unmigrated calls (the buildx pair, which
-/// has no Engine equivalent) always run the CLI.
+/// has no Engine equivalent) always run the CLI. One payload call is
+/// migrated too: [`Docker::try_exec_script`] serves script steps via
+/// `exec_create`/`exec_start` under the step deadline.
 pub(crate) struct Docker<'r> {
     transport: Transport<'r>,
 }
@@ -1533,6 +1550,149 @@ impl<'r> Docker<'r> {
                 None
             }
         }
+    }
+
+    /// Engine-API fast path for one script step's `docker exec` — the ONLY
+    /// payload call on the API, and only for the script-step shape: no
+    /// stdin, no TTY, attached. Every other exec shape (stdin forwards,
+    /// host/maintenance calls) stays on the CLI at its own call site;
+    /// there is no TTY or detach exec in the runner at all, so those
+    /// semantics are preserved by never being offered this route.
+    ///
+    /// `cli_args` is the step's historical CLI vector: it classifies the
+    /// operation exactly as the CLI call would (always
+    /// [`DockerOp::Payload`](crate::docker::DockerOp::Payload)) and
+    /// `timeout` is the step's own deadline, which bounds the whole API
+    /// attempt — no 5 s cap: the payload class takes the caller's
+    /// deadline on both transports. Live lines reach `on_line` per stream
+    /// as they demux, with the CLI runner's own line semantics.
+    ///
+    /// * [`ScriptExecRoute::Served`] — the API ran the step end to end:
+    ///   exit code plus demuxed streams, zero subprocesses. A nonzero
+    ///   step exit is a served outcome, not a docker failure: no host
+    ///   `docker` invocation existed, so the docker failure counter (a
+    ///   per-invocation count) does not move — the step outcome is
+    ///   recorded in the step telemetry, as on the CLI leg.
+    /// * [`ScriptExecRoute::Expired`] — the step deadline expired on the
+    ///   API leg: the CLI watchdog's own 124 result (same message, same
+    ///   partial streams), after killing the container the same way.
+    ///   Served, never a fallback — expiry must not rerun the step.
+    /// * [`ScriptExecRoute::UseCli`] — ANY API failure (transport,
+    ///   status, framing, JSON, schema, dead runtime, or a job
+    ///   cancellation winning the race), the API disabled, or a
+    ///   non-host runner: run the historical CLI call unchanged. Under
+    ///   cancel this is the same spawn-and-ladder-kill the CLI path has
+    ///   always run, so cancellation keeps its historical shape by
+    ///   construction. A fallback costs exactly one subprocess — the
+    ///   same as before the migration — but note the exec caveat: when
+    ///   the exec'd process already started, the fallback reruns the
+    ///   step. Every rerun is telemetry-visible with its fault label.
+    pub(crate) fn try_exec_script(
+        &self,
+        container: &str,
+        cli_args: &[String],
+        config: &super::engine::ExecConfig,
+        timeout: Duration,
+        on_line: &mut (dyn FnMut(CommandStream, &str) + Send),
+    ) -> ScriptExecRoute {
+        if !super::engine::engine_api_enabled() {
+            return ScriptExecRoute::UseCli;
+        }
+        // An Engine answer is a host fact, so only a runner that spawns host
+        // processes may consult it — the same rule `engine_or_cli` applies.
+        // Test doubles stay on their scripts.
+        if let Transport::Job(runner) = &self.transport
+            && !runner.is_host_process_runner()
+        {
+            return ScriptExecRoute::UseCli;
+        }
+        let (op, step_deadline) = crate::docker::deadline_for(cli_args, timeout);
+        debug_assert_eq!(op, crate::docker::DockerOp::Payload);
+        let engine = super::engine::EngineClient::new(super::engine::socket_path());
+        let started = std::time::Instant::now();
+        let mut output = super::engine::ExecOutput::default();
+        // The timeout builds inside the async block: `tokio::time::timeout`
+        // needs a runtime context at construction, and the block first
+        // polls on the engine runtime that `block_on_engine` provides.
+        let attempt = super::engine::block_on_engine(async {
+            tokio::time::timeout(
+                step_deadline,
+                super::engine::cancel_race(engine.exec_run(
+                    container,
+                    config,
+                    step_deadline,
+                    &mut output,
+                    on_line,
+                )),
+            )
+            .await
+        });
+        match attempt {
+            Some(Ok(Some(Ok(code)))) => {
+                crate::docker::observe_api(op, started.elapsed());
+                ScriptExecRoute::Served(CommandResult {
+                    code,
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                })
+            }
+            Some(Err(_)) => {
+                crate::executor::kill_container_best_effort(container);
+                let result = crate::executor::timeout_command_result(
+                    Some(crate::docker::DockerOp::Payload),
+                    step_deadline,
+                    output.stdout,
+                    output.stderr,
+                );
+                crate::docker::observe_api(op, started.elapsed());
+                ScriptExecRoute::Expired(result)
+            }
+            Some(Ok(Some(Err(error)))) => {
+                Self::exec_fallback(op, &error);
+                ScriptExecRoute::UseCli
+            }
+            Some(Ok(None)) => {
+                Self::exec_fallback(
+                    op,
+                    &super::engine::EngineError::fault(
+                        op,
+                        (
+                            super::engine::EngineFaultKind::Cancelled,
+                            "job cancelled during engine api wait".to_string(),
+                        ),
+                    ),
+                );
+                ScriptExecRoute::UseCli
+            }
+            None => {
+                Self::exec_fallback(
+                    op,
+                    &super::engine::EngineError::fault(
+                        op,
+                        (
+                            super::engine::EngineFaultKind::Runtime,
+                            "engine runtime unavailable".to_string(),
+                        ),
+                    ),
+                );
+                ScriptExecRoute::UseCli
+            }
+        }
+    }
+
+    /// Record one exec attempt that falls back to the CLI: the fallback
+    /// counter plus the fault at `warn`, the same shape `engine_or_cli`
+    /// emits. The CLI call that follows records its own `observe`.
+    fn exec_fallback(op: crate::docker::DockerOp, error: &super::engine::EngineError) {
+        crate::docker::observe_api_fallback(op);
+        tracing::warn!(
+            target: "velnor.docker",
+            docker_op = op.label(),
+            docker_transport = "cli-fallback",
+            docker_api_fault = error.label(),
+            reason = %error,
+            "engine api failed; falling back to docker cli"
+        );
     }
 
     /// Readiness of one container: health status when a healthcheck exists,
@@ -1824,8 +1984,10 @@ fn removal_in_flight_error(error: &anyhow::Error) -> bool {
 )]
 mod tests {
     use super::*;
-    use crate::docker::engine::mock::{error_response, json_response, status_response};
-    use crate::docker::engine::{EngineTestGuard, FailRuntimeBuildGuard, MockEngine};
+    use crate::docker::engine::mock::{
+        error_response, exec_frame, json_response, start_response, status_response,
+    };
+    use crate::docker::engine::{EngineTestGuard, ExecConfig, FailRuntimeBuildGuard, MockEngine};
     use crate::docker::{begin_job, snapshot};
     use crate::execution::cancel::{set_active, CancelReason, JobCancellation};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3323,6 +3485,474 @@ Total:\t\t6.054MB
         assert_eq!(
             crate::docker::deadline_for(&container_remove_args("svc", true, true), SIX_HOURS),
             (crate::docker::DockerOp::Remove, Duration::from_secs(20))
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Script-step exec routing: served, expired, or one CLI call
+    // ------------------------------------------------------------------
+
+    /// The historical CLI vector for one script step, argv-shaped as the
+    /// executor builds it: flags, `--env-file`, `--` separator, container
+    /// operand, command.
+    fn script_exec_cli_args() -> Vec<String> {
+        vec![
+            "exec",
+            "--workdir",
+            "/__w",
+            "--env-file",
+            "/tmp/velnor-env-x",
+            "--",
+            "velnor-job-1",
+            "sh",
+            "-e",
+            "/__t/step.sh",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn script_exec_config() -> ExecConfig {
+        ExecConfig {
+            cmd: vec!["sh".into(), "-e".into(), "/__t/step.sh".into()],
+            env: vec![("A".into(), "1".into())],
+            workdir: "/__w".into(),
+        }
+    }
+
+    /// The three-connection exec conversation with live Engine 29.4.0
+    /// fixtures: 201 create, multiplexed start stream (stderr first, as
+    /// the daemon scheduled it), exit-3 inspect.
+    fn served_exec_mock() -> MockEngine {
+        MockEngine::serve(
+            |request| {
+                if request.contains("POST /containers/") {
+                    error_response(
+                        "201 Created",
+                        r#"{"Id":"bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e"}"#,
+                    )
+                } else if request.contains("POST /exec/") {
+                    let mut stream = exec_frame(2, b"err\n");
+                    stream.extend_from_slice(&exec_frame(1, b"out\n"));
+                    start_response(&stream)
+                } else {
+                    json_response(
+                        r#"{"ID":"bfd9079ad9ae2473ffbc0d6eb008f4bd8c9d96ee046b040713ac823a7838e82e","Running":false,"ExitCode":3}"#,
+                    )
+                }
+            },
+            3,
+        )
+    }
+
+    #[test]
+    fn script_exec_served_with_zero_subprocess_before_after_identity() {
+        // Before: engine off, the CLI leg serves the scripted step result.
+        let cli_args = script_exec_cli_args();
+        let cli_result = CommandResult {
+            code: 3,
+            stdout: "out\n".into(),
+            stderr: "err\n".into(),
+        };
+        let mut runner = ScriptRunner::scripted(vec![cli_result.clone()]);
+        let before = {
+            let docker = Docker::job(&mut runner);
+            let route = docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(60),
+                &mut |_, _| {},
+            );
+            assert_eq!(route, ScriptExecRoute::UseCli);
+            // The caller runs its historical CLI call on UseCli.
+            runner
+                .run_streaming_timeout_with_env(
+                    "docker",
+                    &cli_args,
+                    &[],
+                    Duration::from_secs(60),
+                    &mut |_, _| {},
+                )
+                .expect("cli leg serves")
+        };
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(before, cli_result);
+
+        // After: engine on, the same step with no runner call at all.
+        let mock = served_exec_mock();
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("exec-served");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let mut lines = Vec::new();
+        let after = {
+            let docker = Docker::job(&mut runner);
+            match docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(60),
+                &mut |stream, line: &str| lines.push((stream, line.to_string())),
+            ) {
+                ScriptExecRoute::Served(result) => result,
+                route => panic!("api must serve, got {route:?}"),
+            }
+        };
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no CLI call may run while the API serves"
+        );
+        assert_eq!(after, before, "transports must agree exactly");
+        assert_eq!(
+            lines,
+            vec![
+                (CommandStream::Stderr, "err".to_string()),
+                (CommandStream::Stdout, "out".to_string()),
+            ]
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 1);
+        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(counts.invocations, 0);
+    }
+
+    #[test]
+    fn script_exec_status_error_falls_back_to_one_cli_call() {
+        let mock = MockEngine::serve(
+            |_| error_response("500 Internal Server Error", r#"{"message":"boom"}"#),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("exec-fallback-status");
+        let cli_args = script_exec_cli_args();
+        let cli_result = CommandResult {
+            code: 3,
+            stdout: "out\n".into(),
+            stderr: "err\n".into(),
+        };
+        let mut runner = ScriptRunner::scripted_host(vec![cli_result.clone()]);
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(60),
+                &mut |_, _| {},
+            )
+        };
+        assert_eq!(route, ScriptExecRoute::UseCli);
+        let served = runner
+            .run_streaming_timeout_with_env(
+                "docker",
+                &cli_args,
+                &[],
+                Duration::from_secs(60),
+                &mut |_, _| {},
+            )
+            .expect("cli fallback serves");
+        assert_eq!(served, cli_result);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[test]
+    fn script_exec_slow_create_falls_back_instead_of_expiring() {
+        // The create leg stalls past the capped API budget while the step
+        // deadline is far away: the step must fall back to the CLI with
+        // its full deadline, not 124.
+        let mock = MockEngine::serve(
+            |_| {
+                std::thread::sleep(Duration::from_millis(300));
+                error_response("201 Created", r#"{"Id":"abc"}"#)
+            },
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), Some(30));
+        let _scope = begin_job("exec-fallback-create-timeout");
+        let cli_args = script_exec_cli_args();
+        let mut runner = ScriptRunner::scripted_host(vec![ok("out\n")]);
+        let started = Instant::now();
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(10),
+                &mut |_, _| {},
+            )
+        };
+        assert_eq!(route, ScriptExecRoute::UseCli);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a stalled create must fail at the API budget, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn script_exec_cancel_mid_stream_falls_back_promptly() {
+        let mock = MockEngine::serve(
+            |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else {
+                    std::thread::sleep(Duration::from_millis(500));
+                    start_response(&exec_frame(1, b"late\n"))
+                }
+            },
+            2,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let token = JobCancellation::recording(None);
+        let _active = set_active(token.clone());
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            token.request(CancelReason::ServerRequested);
+        });
+        let _scope = begin_job("exec-cancel-midstream");
+        let cli_args = script_exec_cli_args();
+        let mut runner = ScriptRunner::scripted_host(vec![ok("out\n")]);
+        let started = Instant::now();
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(10),
+                &mut |_, _| {},
+            )
+        };
+        canceller.join().expect("canceller joins");
+        assert_eq!(route, ScriptExecRoute::UseCli);
+        assert_eq!(snapshot().api_fallbacks, 1);
+        assert!(
+            started.elapsed() < Duration::from_millis(400),
+            "a mid-stream cancel must abandon the 500ms socket delay, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn script_exec_deadline_expires_to_124_without_fallback() {
+        let mock = MockEngine::serve(
+            |request| {
+                if request.contains("POST /containers/") {
+                    error_response("201 Created", r#"{"Id":"abc"}"#)
+                } else {
+                    // The exec never produces output: the step deadline
+                    // expires on the API leg.
+                    std::thread::sleep(Duration::from_millis(500));
+                    start_response(&exec_frame(1, b"late\n"))
+                }
+            },
+            2,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("exec-expired");
+        let cli_args = script_exec_cli_args();
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-eng4-test-gone",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_millis(30),
+                &mut |_, _| {},
+            )
+        };
+        // Byte-identical to the CLI watchdog's expiry: code, empty partial
+        // stdout, and the payload timeout sentence.
+        assert_eq!(
+            route,
+            ScriptExecRoute::Expired(CommandResult {
+                code: 124,
+                stdout: String::new(),
+                stderr:
+                    "##[error]The operation was canceled because it exceeded timeout-minutes.\n"
+                        .into(),
+            })
+        );
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "expiry serves, it never falls back"
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 1);
+        assert_eq!(counts.api_fallbacks, 0);
+    }
+
+    #[test]
+    fn script_exec_skips_api_for_test_doubles_and_when_disabled() {
+        // A nonexistent socket proves the negative: any API attempt would
+        // surface as a connect fallback, so zero fallbacks means zero
+        // attempts.
+        let missing = std::path::Path::new("/no/such/velnor-engine.sock").to_path_buf();
+        let cli_args = script_exec_cli_args();
+        let _guard = EngineTestGuard::serve(missing, None);
+        let _scope = begin_job("exec-skip");
+        let mut runner = ScriptRunner::scripted(Vec::new());
+        let route = {
+            let docker = Docker::job(&mut runner);
+            docker.try_exec_script(
+                "velnor-job-1",
+                &cli_args,
+                &script_exec_config(),
+                Duration::from_secs(60),
+                &mut |_, _| {},
+            )
+        };
+        assert_eq!(route, ScriptExecRoute::UseCli);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 0);
+    }
+
+    /// Live Engine exec bench: API vs CLI on a trivial step, asserting
+    /// byte-identical stdout/stderr/exit code and printing both legs'
+    /// latency. Ignored: it needs a live `/var/run/docker.sock` and pulls
+    /// nothing (reuses `alpine:3.20` if present, else skips). Run it with:
+    /// `cargo test -p velnor-runner --lib live_exec_latency_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_exec_latency_bench() {
+        use std::os::unix::net::UnixStream;
+        use std::process::Command;
+        const ITERATIONS: usize = 10;
+        const NAME: &str = "velnor-eng4-bench";
+        let socket = super::super::engine::socket_path();
+        if UnixStream::connect(&socket).is_err() {
+            println!(
+                "live_exec_latency_bench: SKIP, no live daemon at {}",
+                socket.display()
+            );
+            return;
+        }
+        // Best-effort container lifecycle for the bench: stale names go
+        // away before and after, even on assertion failure.
+        struct BenchContainer;
+        impl BenchContainer {
+            fn remove() {
+                let _ = Command::new("docker").args(["rm", "-f", NAME]).status();
+            }
+        }
+        impl Drop for BenchContainer {
+            fn drop(&mut self) {
+                Self::remove();
+            }
+        }
+        let _container = BenchContainer;
+        BenchContainer::remove();
+        let started = Command::new("docker")
+            .args(["run", "-d", "--name", NAME, "alpine:3.20", "sleep", "300"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !started {
+            println!("live_exec_latency_bench: SKIP, cannot start {NAME}");
+            return;
+        }
+        let script = "echo out; echo err >&2; exit 3";
+        let cli_args: Vec<String> = [
+            "exec",
+            "--workdir",
+            "/tmp",
+            "-e",
+            "A=1",
+            NAME,
+            "sh",
+            "-c",
+            script,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let config = ExecConfig {
+            cmd: vec!["sh".into(), "-c".into(), script.into()],
+            env: vec![("A".into(), "1".into())],
+            workdir: "/tmp".into(),
+        };
+        fn summarize(name: &str, mut samples: Vec<Duration>) {
+            samples.sort();
+            let percentile = |p: usize| samples[(samples.len() * p / 100).min(samples.len() - 1)];
+            println!(
+                "live_exec_latency_bench: {name} n={} p50={:?} p95={:?} min={:?} max={:?}",
+                samples.len(),
+                percentile(50),
+                percentile(95),
+                samples[0],
+                samples[samples.len() - 1],
+            );
+        }
+        let api: Vec<(Duration, CommandResult)> = {
+            let _guard = EngineTestGuard::serve(socket, None);
+            (0..ITERATIONS)
+                .map(|_| {
+                    let started = Instant::now();
+                    let mut live_lines = Vec::new();
+                    let route = Docker::host().try_exec_script(
+                        NAME,
+                        &cli_args,
+                        &config,
+                        Duration::from_secs(60),
+                        &mut |stream, line: &str| live_lines.push((stream, line.to_string())),
+                    );
+                    let ScriptExecRoute::Served(result) = route else {
+                        panic!("live api must serve, got {route:?}");
+                    };
+                    // Live lines carry both streams; interleave is racy, so
+                    // compare sorted by line text.
+                    live_lines.sort_by(|a, b| a.1.cmp(&b.1));
+                    assert_eq!(
+                        live_lines,
+                        vec![
+                            (CommandStream::Stderr, "err".to_string()),
+                            (CommandStream::Stdout, "out".to_string()),
+                        ]
+                    );
+                    (started.elapsed(), result)
+                })
+                .collect()
+        };
+        let cli: Vec<(Duration, CommandResult)> = (0..ITERATIONS)
+            .map(|_| {
+                let started = Instant::now();
+                let output = Command::new("docker")
+                    .args(&cli_args)
+                    .output()
+                    .expect("live cli serves exec");
+                let result = CommandResult {
+                    code: output.status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                };
+                (started.elapsed(), result)
+            })
+            .collect();
+        for (iteration, ((_, api_result), (_, cli_result))) in
+            api.iter().zip(cli.iter()).enumerate()
+        {
+            assert_eq!(
+                api_result, cli_result,
+                "live transports disagree on iteration {iteration}"
+            );
+        }
+        summarize(
+            "api ",
+            api.into_iter().map(|(elapsed, _)| elapsed).collect(),
+        );
+        summarize(
+            "cli ",
+            cli.into_iter().map(|(elapsed, _)| elapsed).collect(),
         );
     }
 }
