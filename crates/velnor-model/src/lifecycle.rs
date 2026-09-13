@@ -238,6 +238,11 @@ impl TryFrom<&str> for JobState {
 /// would be stuck nonterminal forever. Every other `(from, reason)` pair —
 /// including any edge out of a terminal state and any non-job reason — is
 /// illegal.
+///
+/// Projection assert: the store's `project_job_transition` consults this
+/// table for every candidate edge, so the table stays the single source of
+/// edge legality while the `jobs.phase` column is only its materialized
+/// view.
 #[must_use]
 pub fn transition_target(from: JobState, reason: EventReason) -> Option<JobState> {
     match (from, reason) {

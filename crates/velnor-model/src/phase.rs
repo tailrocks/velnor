@@ -113,6 +113,11 @@ impl TryFrom<&str> for SlotPhase {
 /// never skip teardown between active work and recycling. A newer actor
 /// generation establishes a fresh ownership root and therefore has no `from`
 /// edge to validate with this function.
+///
+/// Projection assert: the store's `project_slot_transition` consults this
+/// graph for every candidate edge, so the graph stays the single source of
+/// edge legality while the `slots.phase` column is only its materialized
+/// view.
 #[must_use]
 pub const fn slot_transition_allowed(from: SlotPhase, to: SlotPhase) -> bool {
     match from {
