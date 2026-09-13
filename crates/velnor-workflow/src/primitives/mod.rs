@@ -63,8 +63,6 @@ pub(crate) const PREVIEW: &str = "preview";
 pub(crate) const MAINTENANCE: &str = "maintenance";
 /// The release artifact provenance signer.
 pub(crate) const RELEASE_SIGNER: &str = "release-signer";
-/// A reviewed workflow body declared verbatim by the repository.
-pub(crate) const STATIC_WORKFLOW: &str = "static-workflow";
 
 /// The Dockerfile stage a mutable mount seed is injected through. The image
 /// declares it as an empty `FROM scratch` stage so a build without the
@@ -591,7 +589,6 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::Preview),
         Box::new(release::Maintenance),
         Box::new(release::ReleaseSigner),
-        Box::new(release::StaticWorkflow),
     ]
 }
 
@@ -1282,7 +1279,6 @@ mod tests {
             PREVIEW,
             MAINTENANCE,
             RELEASE_SIGNER,
-            STATIC_WORKFLOW,
         ] {
             assert!(lookup(contract).is_ok(), "`{contract}` is not registered");
             ids.push(contract);

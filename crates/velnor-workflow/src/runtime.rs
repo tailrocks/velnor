@@ -1746,6 +1746,33 @@ fn has_safe_runner_gate(
         && is_static_self_hosted_runner(job, velnor_policy)
 }
 
+fn generation_pull_request_on_velnor(root: &Path) -> Result<bool, GeneratorError> {
+    let path = root.join(".github-gen/velnor-workflow.toml");
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(GeneratorError::io(
+                "read generation workflow config",
+                &path,
+                &error,
+            ));
+        }
+    };
+    let value = toml::from_str::<toml::Value>(&content).map_err(|error| {
+        GeneratorError::usage(format!("parse workflow config {}: {error}", path.display()))
+    })?;
+    value
+        .get("workflow")
+        .and_then(toml::Value::as_table)
+        .and_then(|workflow| workflow.get("pull_request_on_velnor"))
+        .map_or(Ok(false), |value| {
+            value.as_bool().ok_or_else(|| {
+                GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
+            })
+        })
+}
+
 fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, GeneratorError> {
     let path = root.join(DEFAULT_CONFIG);
     let content = match fs::read_to_string(&path) {
@@ -1783,15 +1810,19 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
             })
         })
         .transpose()?;
-    let pull_request_on_velnor = workflow
+    let runtime_pull_request_on_velnor = workflow
         .and_then(|workflow| workflow.get("pull_request_on_velnor"))
         .map(|enabled| {
             enabled.as_bool().ok_or_else(|| {
                 GeneratorError::usage("[workflow] pull_request_on_velnor must be a boolean")
             })
         })
-        .transpose()?
-        .unwrap_or(false);
+        .transpose()?;
+    let pull_request_on_velnor = if let Some(enabled) = runtime_pull_request_on_velnor {
+        enabled
+    } else {
+        generation_pull_request_on_velnor(root)?
+    };
     let policy = VelnorPolicyContract {
         runners: value
             .get("runners")
@@ -2379,12 +2410,15 @@ impl PolicyFindings {
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary ...",
+            "usage: release verify-tag | release package-binary | release package-deb | release verify-feed | release update-feed",
         ));
     };
     match command {
         "verify-tag" => verify_tag(&arguments[1..]),
         "package-binary" => package_binary(&arguments[1..]),
+        "package-deb" => package_deb(&arguments[1..]),
+        "verify-feed" => verify_feed(&arguments[1..]),
+        "update-feed" => update_feed(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2502,6 +2536,75 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
     Ok(())
+}
+
+fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["package", "version"])?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    if !valid_package(package) || !is_artifact_version(version) {
+        return Err(GeneratorError::usage("invalid package or version"));
+    }
+    let status = Command::new("cargo")
+        .args(["deb", "--no-strip", "--package", package])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    Ok(())
+}
+
+fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    let kind = required_option(&options, "kind")?;
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
+    match kind {
+        "homebrew" => {
+            let formula = Path::new("Formula").join(format!("{package}.rb"));
+            if !formula.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "homebrew feed requires {}",
+                    formula.display()
+                )));
+            }
+        }
+        "apt" => {
+            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+                return Err(GeneratorError::usage(
+                    "apt feed requires conf/distributions or debian/",
+                ));
+            }
+        }
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "unsupported feed kind: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
+    verify_feed(arguments)?;
+    let kind = required_option(&options, "kind")?;
+    let channel = options.get("channel").map_or("stable", String::as_str);
+    if !matches!(channel, "stable" | "preview") {
+        return Err(GeneratorError::usage("channel must be stable or preview"));
+    }
+    match kind {
+        "homebrew" | "apt" => {
+            println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported feed kind: {other}"
+        ))),
+    }
 }
 
 fn required_option<'a>(
@@ -3390,7 +3493,7 @@ jobs:
             .collect::<Vec<_>>()
             .join(", ");
         let config_text = format!(
-            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\npull_request_on_velnor = true\n"
+            "schema = 2\nrunners = \"velnor\"\ndefault_branch = \"main\"\n\n[workflow]\nvelnor_labels = [{toml_labels}]\nvelnor_runner_group = \"{group}\"\n"
         );
         let runner = format!("{{ group: {group}, labels: [{yaml_labels}] }}");
         let gate = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')))";
@@ -3400,6 +3503,11 @@ jobs:
             "velnor",
         )?;
         std::fs::write(root.join(".github/ci/project.toml"), &config_text)?;
+        std::fs::create_dir_all(root.join(".github-gen"))?;
+        std::fs::write(
+            root.join(".github-gen/velnor-workflow.toml"),
+            "schema = 1\n\n[workflow]\npull_request_on_velnor = true\n",
+        )?;
         std::fs::write(
             root.join(".github/workflows/ci-pr.yml"),
             format!(

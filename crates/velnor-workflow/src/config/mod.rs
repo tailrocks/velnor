@@ -1038,11 +1038,16 @@ fn is_contained_repository_path(path: &str) -> bool {
 
 /// The publishers the renderer implements, and the contract fields each one
 /// renders from.
-const RELEASE_KINDS: &[&str] = &["crates", "rust-binary", "pages"];
+const RELEASE_KINDS: &[&str] = &[
+    "crates",
+    "rust-binary",
+    "native",
+    "pages",
+    "homebrew",
+    "apt",
+];
 
-/// A `kind` the renderer does not implement has no rendered `release.yml`: it
-/// is accepted only from a repository that renders its own publisher verbatim
-/// as a `static-workflow` row, and is a configuration error anywhere else.
+/// An enabled release must use one complete typed publisher contract.
 impl RepoGenerationConfig {
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
@@ -1067,22 +1072,45 @@ impl RepoGenerationConfig {
                 .artifact_path
                 .as_deref()
                 .is_some_and(|value| !value.is_empty()),
+            "native" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .binary
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && !release.targets.is_empty()
+            }
+            "homebrew" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .source_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
+            "apt" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .consumer_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
             _ => false,
         };
         if complete {
             return Ok(());
         }
-        let declared = self.declare.iter().any(|row| {
-            row.primitive() == crate::primitives::STATIC_WORKFLOW
-                && row.file.as_deref() == Some(crate::RELEASE_WORKFLOW)
-        });
-        if declared && !kind.is_empty() {
-            return Ok(());
-        }
         Err(GeneratorError::usage(format!(
-            "[release] enabled repositories must declare `kind`, one of {}, each with the contract fields that publisher renders from; a `kind` the renderer does not implement requires a `static-workflow` row that renders `{}` verbatim",
-            RELEASE_KINDS.join(", "),
-            crate::RELEASE_WORKFLOW
+            "[release] enabled repositories must declare a complete typed `kind`, one of {}",
+            RELEASE_KINDS.join(", ")
         )))
     }
 }

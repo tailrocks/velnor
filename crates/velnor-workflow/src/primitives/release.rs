@@ -1,12 +1,11 @@
 //! The release-side families: publishing, rolling preview, maintenance, and
-//! the static surfaces a repository declares verbatim.
+//! provenance signing.
 //!
 //! Every family here renders one workflow file from the scanned shape, the
 //! resolved config, and — for the families a repository may drive itself — its
 //! declared arguments. A release contract is explicit input: the generic
 //! publishers render only what a config or catalog declares, never a guess
-//! from a manifest. A repository whose publishing surface is reviewed as a
-//! whole declares it as a `static-workflow` row and owns the bytes.
+//! from a manifest.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -14,7 +13,7 @@ use std::fmt::Write as _;
 use super::{
     checks_env, render_cargo_source_preparation, render_pinned_toolchain_steps,
     render_retained_output_cache_note, Args, CacheBackend, Primitive, RenderCtx, Rendered,
-    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
+    WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
 };
 use crate::{
     github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
@@ -44,7 +43,7 @@ pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static st
 
 /// Whether the primitive renders one of the release-side workflow files.
 pub(crate) fn is_release_side(primitive: &str) -> bool {
-    canonical_release_side_file(primitive).is_some() || primitive == STATIC_WORKFLOW
+    canonical_release_side_file(primitive).is_some()
 }
 
 // The default-surface content helpers. Both the estate catalog's name-keyed
@@ -60,9 +59,7 @@ pub(crate) fn release_content(config: &ProjectConfig) -> Option<String> {
         .map(|release| render_release(config, release))
 }
 
-/// The `preview.yml` content for a config. Every contract renders the generic
-/// rolling preview; a repository with a reviewed native preview declares its
-/// bytes as a static workflow instead.
+/// The `preview.yml` content for a config.
 pub(crate) fn preview_content(config: &ProjectConfig) -> String {
     render_preview(config, config.release.as_ref())
 }
@@ -77,48 +74,6 @@ pub(crate) fn release_signer_content() -> String {
     crate::render_static_template(VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE)
 }
 
-/// A reviewed workflow body, declared verbatim, rendered through the static
-/// template machinery: source pins, action pins, and the Mr. Boxington command
-/// contract are refreshed from the generator's reviewed tables at generation
-/// time, so the declared body stays revision-independent.
-pub(crate) struct StaticWorkflow;
-
-impl Primitive for StaticWorkflow {
-    fn id(&self) -> &'static str {
-        STATIC_WORKFLOW
-    }
-
-    fn schema(&self) -> &'static [&'static str] {
-        &["template"]
-    }
-
-    fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let file = ctx
-            .file
-            .filter(|file| !file.is_empty())
-            .ok_or_else(|| {
-                GeneratorError::usage(format!(
-                    "`{STATIC_WORKFLOW}` renders one workflow file and needs `file`"
-                ))
-            })?
-            .to_owned();
-        let template = args.string("template")?.ok_or_else(|| {
-            GeneratorError::usage(format!(
-                "`{STATIC_WORKFLOW}` declares `{file}`, which needs a `template`; the workflow body is explicit input, never a guess"
-            ))
-        })?;
-        let content = crate::render_static_template_for_config(ctx.config, &file, &template)?;
-        Ok(Rendered {
-            files: std::iter::once((
-                std::path::PathBuf::from(".github/workflows").join(file),
-                content,
-            ))
-            .collect(),
-            ..Rendered::default()
-        })
-    }
-}
-
 /// The declared `release.yml` publisher.
 pub(crate) struct Release;
 
@@ -131,9 +86,12 @@ impl Primitive for Release {
         &[
             "artifact_path",
             "binary",
+            "consumer_repository",
+            "image",
             "kind",
             "package",
             "packages",
+            "source_repository",
             "targets",
         ]
     }
@@ -238,15 +196,17 @@ fn declared_or_configured_spec(
 /// partially rendered publisher.
 fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError> {
     let kind = match args.string("kind")?.as_deref() {
-        Some("crates" | "rust-binary" | "pages") => args.string("kind")?.unwrap_or_default(),
+        Some("crates" | "rust-binary" | "native" | "pages" | "homebrew" | "apt") => {
+            args.string("kind")?.unwrap_or_default()
+        }
         Some(other) => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` `kind` must be `crates`, `rust-binary`, or `pages`, found `{other}`"
+                "`{family}` `kind` must be `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`, found `{other}`"
             )))
         }
         None => {
             return Err(GeneratorError::usage(format!(
-                "`{family}` needs `kind`; one of `crates`, `rust-binary`, or `pages`"
+                "`{family}` needs `kind`; one of `crates`, `rust-binary`, `native`, `pages`, `homebrew`, or `apt`"
             )))
         }
     };
@@ -256,9 +216,9 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         packages: args.strings("packages")?.unwrap_or_default(),
         binary: args.string("binary")?.unwrap_or_default(),
         targets: args.strings("targets")?.unwrap_or_default(),
-        image: String::new(),
-        source_repository: String::new(),
-        consumer_repository: String::new(),
+        image: args.string("image")?.unwrap_or_default(),
+        source_repository: args.string("source_repository")?.unwrap_or_default(),
+        consumer_repository: args.string("consumer_repository")?.unwrap_or_default(),
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
         description: String::new(),
     })
@@ -328,14 +288,14 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
     };
     match release.kind.as_str() {
         "crates" => !release.packages.is_empty(),
-        "rust-binary" => {
+        "rust-binary" | "native" => {
             !release.package.is_empty()
                 && !release.binary.is_empty()
                 && targets_are_real(&release.targets)
         }
         "pages" => !release.artifact_path.is_empty(),
-        // A publisher the renderer does not implement renders nothing: the
-        // repository that owns one declares its bytes and records its own kind.
+        "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
+        "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
         _ => false,
     }
 }
@@ -352,6 +312,164 @@ fn release_watch_paths(config: &ProjectConfig) -> String {
         let _ = writeln!(output, "      - {}", yaml_scalar(&path));
     }
     output
+}
+
+fn guest_seed_recipe_globs(config: &ProjectConfig) -> Vec<String> {
+    if !config
+        .units
+        .iter()
+        .any(|unit| unit.watch.iter().any(|path| path.contains("microvm")))
+    {
+        return Vec::new();
+    }
+    let mut globs = vec![
+        "microvm/**".to_owned(),
+        "Cargo.lock".to_owned(),
+        "rust-toolchain.toml".to_owned(),
+    ];
+    for unit in &config.units {
+        let root = unit.root.trim_end_matches('/');
+        if root.starts_with("crates/") {
+            globs.push(format!("{root}/**"));
+        }
+        if root.contains("runner") {
+            globs.push(format!("{root}/Cargo.toml"));
+            globs.push(format!("{root}/build.rs"));
+            globs.push(format!("{root}/src/**"));
+        }
+    }
+    globs.sort();
+    globs.dedup();
+    globs
+}
+
+fn guest_agent_bin(release: &ReleaseSpec) -> String {
+    if release.package.contains("runner") || release.binary.contains("runner") {
+        "velnor-guest-agent".to_owned()
+    } else {
+        format!("{}-guest-agent", release.package)
+    }
+}
+
+fn hashfiles_expr(globs: &[String]) -> String {
+    globs
+        .iter()
+        .map(|glob| format!("'{glob}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Restore/reuse/collect/save a recipe-identity guest seed. Exact-only restore;
+/// save only on a trusted default-branch miss.
+fn render_guest_seed_steps(
+    default_branch: &str,
+    recipe_globs: &[String],
+    package: &str,
+    agent_bin: &str,
+) -> String {
+    let hashfiles = hashfiles_expr(recipe_globs);
+    let restore = ActionPin::CacheRestore.reference();
+    let save = ActionPin::CacheSave.reference();
+    let package = yaml_scalar(package);
+    let agent_bin = yaml_scalar(agent_bin);
+    format!(
+        r#"      - name: Restore guest seed
+        id: guest-seed
+        uses: {restore}
+        with:
+          path: .guest-seed/${{{{ matrix.arch }}}}
+          key: guest-seed-${{{{ matrix.arch }}}}-${{{{ hashFiles({hashfiles}) }}}}
+      - name: Build guest agent for rootfs
+        run: |
+          set -euo pipefail
+          rustup target add "$TARGET"
+          agent="target/$TARGET/release/{agent_bin}"
+          cargo build --locked --release --package {package} --bin {agent_bin} --target "$TARGET"
+          test -x "$agent"
+      - name: Reuse verified guest seed
+        id: guest-seed-reuse
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${{{{ matrix.arch }}}}"
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/vmlinux.sha256" ] || [ ! -s "$seed/rootfs.ext4" ] || [ ! -s "$seed/rootfs.sha256" ]; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p release/microvm
+          cp "$seed/vmlinux" "$seed/rootfs.ext4" "$seed/rootfs.sha256" release/microvm/
+          cp "target/$TARGET/release/{agent_bin}" release/microvm/{agent_bin}
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+      - name: Download pinned kernel tarball
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --retry 5 --retry-all-errors \
+            --connect-timeout 30 --max-time 900 -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum --check --strict
+      - name: Build guest vmlinux and rootfs.ext4
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p release/microvm
+          agent="target/$TARGET/release/{agent_bin}"
+          cargo run --locked --release --package {package} --bin velnor-guest-image -- \
+            build --arch "${{{{ matrix.arch }}}}" --out release/microvm \
+            --tarball linux.tar.xz --guest-agent "$agent"
+          test -s release/microvm/vmlinux
+          test -s release/microvm/rootfs.ext4
+          cp "$agent" release/microvm/{agent_bin}
+          (cd release/microvm && sha256sum rootfs.ext4 > rootfs.sha256)
+      - name: Collect verified guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${{{{ matrix.arch }}}}"
+          mkdir -p "$seed"
+          cp release/microvm/vmlinux release/microvm/rootfs.ext4 release/microvm/rootfs.sha256 "$seed/"
+          (cd "$seed" && sha256sum vmlinux > vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
+      - name: Save guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
+        uses: {save}
+        with:
+          path: .guest-seed/${{{{ matrix.arch }}}}
+          key: guest-seed-${{{{ matrix.arch }}}}-${{{{ hashFiles({hashfiles}) }}}}
+      - name: Upload guest payload
+        uses: {}
+        with:
+          name: guest-payload-${{{{ matrix.arch }}}}
+          path: release/microvm
+          if-no-files-found: error
+          retention-days: 2
+"#,
+        ActionPin::UploadArtifact.reference()
+    )
+}
+
+fn render_guest_payload_job(config: &ProjectConfig, release: &ReleaseSpec) -> Option<String> {
+    let globs = guest_seed_recipe_globs(config);
+    if globs.is_empty() {
+        return None;
+    }
+    let runner = yaml_scalar(&config.github_runner);
+    let checkout = ActionPin::Checkout.reference();
+    let steps = render_guest_seed_steps(
+        &config.default_branch,
+        &globs,
+        &release.package,
+        &guest_agent_bin(release),
+    );
+    Some(format!(
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: {runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - arch: x86_64\n            target: x86_64-unknown-linux-gnu\n          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n      - name: Install guest image build packages\n        run: |\n          set -euo pipefail\n          sudo apt-get update\n          sudo apt-get install -y --no-install-recommends build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs mmdebstrap debootstrap arch-test gcc-aarch64-linux-gnu\n{steps}"
+    ))
 }
 
 fn release_runner(target: &str) -> &'static str {
@@ -402,7 +520,9 @@ fn canonical_lane(config: &ProjectConfig) -> &'static str {
 }
 
 fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> String {
-    let Some(release) = release.filter(|release| release.kind == "rust-binary") else {
+    let Some(release) =
+        release.filter(|release| matches!(release.kind.as_str(), "rust-binary" | "native"))
+    else {
         return format!(
             "{GENERATED_HEADER}# Preview is omitted: no complete Rust binary release contract.\n"
         );
@@ -438,7 +558,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             );
         }
     }
-    format!(
+    let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
         ActionPin::Checkout.reference(),
@@ -507,7 +627,11 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             canonical_lane(config)
         ),
     )
-    .replace("run: cargo build ", "run: mbx build ")
+    .replace("run: cargo build ", "run: mbx build ");
+    if let Some(guest) = render_guest_payload_job(config, release) {
+        output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
+    }
+    output
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
@@ -519,7 +643,10 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
     match release.kind.as_str() {
         "crates" => render_crates_release(config, release),
         "rust-binary" => render_binary_release(config, release),
+        "native" => render_native_release(config, release),
         "pages" => render_pages_release(config, release),
+        "homebrew" => render_homebrew_release(config, release),
+        "apt" => render_apt_release(config, release),
         _ => format!(
             "{GENERATED_HEADER}# Release omitted: this publisher requires a separately verified contract.\n"
         ),
@@ -806,6 +933,101 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         )
 }
 
+#[allow(clippy::format_push_string)]
+fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    let mut output = render_binary_release(config, release);
+    let github_runner = yaml_scalar(&config.github_runner);
+    let admit = format!(
+        "  admit-runner:\n    name: Admit release runner\n    runs-on: {github_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n"
+    );
+    output = output.replace("jobs:\n  verify:", &format!("jobs:\n{admit}\n  verify:"));
+    output = output.replace(
+        "    needs: [verify, build]\n",
+        "    needs: [admit-runner, verify, build]\n",
+    );
+    let mut extra = String::new();
+    let mut publish_needs = vec![
+        "admit-runner".to_owned(),
+        "verify".to_owned(),
+        "build".to_owned(),
+    ];
+    if !release.image.is_empty() {
+        let image_tag = yaml_scalar(&format!("{}:${{{{ github.ref_name }}}}", release.image));
+        extra.push_str(&format!(
+            "  image:\n    name: Publish container image\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 120\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Log in to GHCR\n        uses: {}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ github.token }}}}\n      - name: Build and push image\n        uses: {}\n        with:\n          context: .\n          push: true\n          tags: {image_tag}\n          provenance: true\n          sbom: true\n",
+            ActionPin::Checkout.reference(),
+            ActionPin::DockerLogin.reference(),
+            ActionPin::DockerBuild.reference(),
+        ));
+        publish_needs.push("image".to_owned());
+    }
+    if !release.consumer_repository.is_empty() {
+        let package = yaml_scalar(&release.package);
+        extra.push_str(&format!(
+            "  debian:\n    name: Package Debian artifacts\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-deb --package {package} --version \"${{VERSION#v}}\"\n      - name: Attest Debian packages\n        uses: {}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n",
+            ActionPin::Checkout.reference(),
+            ActionPin::DownloadArtifact.reference(),
+            ActionPin::Attest.reference(),
+            ActionPin::UploadArtifact.reference(),
+        ));
+        publish_needs.push("debian".to_owned());
+    }
+    if let Some(guest_job) = render_guest_payload_job(config, release) {
+        extra.push_str(&guest_job);
+        extra.push('\n');
+        publish_needs.push("guest-payload".to_owned());
+    }
+    if !extra.is_empty() {
+        output = output.replace("\n  publish:", &format!("\n{extra}\n  publish:"));
+    }
+    output = output.replace(
+        "  publish:\n    name: Publish GitHub release\n    needs: [admit-runner, verify, build]\n",
+        &format!(
+            "  publish:\n    name: Publish GitHub release\n    needs: [{}]\n",
+            publish_needs.join(", ")
+        ),
+    );
+    output.replace(
+        "on:\n  push:\n    tags: [\"v*\"]\n",
+        "on:\n  push:\n    tags: [\"v*\"]\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n",
+    )
+}
+
+fn render_homebrew_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    render_package_feed(
+        config,
+        "homebrew",
+        &release.package,
+        &release.source_repository,
+    )
+}
+
+fn render_apt_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
+    render_package_feed(
+        config,
+        "apt",
+        &release.package,
+        &release.consumer_repository,
+    )
+}
+
+fn render_package_feed(
+    config: &ProjectConfig,
+    kind: &str,
+    package: &str,
+    coordinate: &str,
+) -> String {
+    let runner = yaml_scalar(&config.github_runner);
+    let package = yaml_scalar(package);
+    let coordinate = yaml_scalar(coordinate);
+    format!(
+        "{GENERATED_HEADER}name: Package feed\nrun-name: Package feed · {kind} · ${{{{ github.event_name }}}}\n\non:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      runner:\n        description: Execution backend\n        required: false\n        default: github\n        type: choice\n        options:\n          - github\n          - velnor\n          - both\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n\nconcurrency:\n  group: package-feed-{kind}-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  admit-runner:\n    name: Admit feed runner\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only feed mutation\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.runner == 'velnor' }}}}\n        run: |\n          echo '{kind} feed mutation publishes from GitHub only' >&2\n          exit 1\n  verify:\n    name: Verify {kind} feed\n    needs: [admit-runner]\n    runs-on: {runner}\n    timeout-minutes: 30\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Verify feed inputs\n        run: velnor-workflow release verify-feed --kind {kind} --package {package} --coordinate {coordinate}\n  mutate:\n    name: Update {kind} feed\n    needs: [admit-runner, verify]\n    if: ${{{{ github.ref == 'refs/heads/{branch}' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event.inputs.runner != 'velnor' }}}}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Update feed\n        env:\n          CHANNEL: ${{{{ github.event.inputs.channel || 'stable' }}}}\n        run: velnor-workflow release update-feed --kind {kind} --package {package} --coordinate {coordinate} --channel \"$CHANNEL\"\n",
+        ActionPin::Checkout.reference(),
+        ActionPin::Checkout.reference(),
+        branch = config.default_branch,
+    )
+}
+
 fn render_pages_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
     let _ = writeln!(
@@ -1064,12 +1286,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
           fi
 "#;
 
-/// Maintenance keeps closed-PR pruning on the hosted image. The cache-budget
-/// lane follows the configured CI mode: Velnor for `runners = "velnor"`, and
-/// hosted otherwise. Hosted cache-budget dispatch uses the literal `SOURCE_REV`
-/// action pin (GitHub Actions rejects expressions in `uses:` versions) while
-/// `rev:` is `${{ github.sha }}` so dispatch installs HEAD through the pinned
-/// action yaml's `CONTROLLED_BOOTSTRAP` path.
+/// Maintenance keeps closed-PR pruning hosted. Cache retention follows a
+/// Velnor-only configuration and stays hosted otherwise, preserving GitHub
+/// reachability in both-mode.
 fn render_maintenance(config: &ProjectConfig) -> String {
     let cache_lane = if config.runners == RunnerMode::Velnor {
         RunnerMode::Velnor
@@ -1241,39 +1460,6 @@ mod tests {
             !workflow.contains("github.event_name == 'push'"),
             "maintenance must not inherit the Velnor trusted-event gate: {workflow}"
         );
-    }
-
-    fn assert_maintenance_runner_split(workflow: &str, config: &ProjectConfig) {
-        let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
-        let velnor = format!("runs-on: {}", configured_runner(config, RunnerMode::Velnor));
-        let runs_on: Vec<&str> = workflow
-            .lines()
-            .filter(|line| line.trim_start().starts_with("runs-on:"))
-            .map(str::trim)
-            .collect();
-        assert_eq!(
-            runs_on.as_slice(),
-            [hosted.as_str(), velnor.as_str()],
-            "only PR pruning is GitHub-hosted: {workflow}"
-        );
-        assert!(!workflow.contains("setup-velnor-workflow"));
-        let prune_if = format!(
-            "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
-            config.default_branch
-        );
-        assert!(
-            workflow.contains(&prune_if),
-            "closed-PR prune must stay live: {workflow}"
-        );
-        let cache_gate = format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            config.default_branch
-        );
-        assert!(
-            workflow.contains(&cache_gate),
-            "Velnor cache retention must stay on the trusted lane: {workflow}"
-        );
-        assert!(!workflow.contains("\n  push:"));
     }
 
     /// A scanned throwaway repository: the only way to obtain a real shape.
@@ -1532,51 +1718,13 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_splits_prune_and_cache_when_runners_are_velnor() {
-        let mut cfg = config(&["maintenance.yml"], None);
-        cfg.runners = RunnerMode::Velnor;
-
-        let direct = super::render_maintenance(&cfg);
-        assert_maintenance_runner_split(&direct, &cfg);
-
-        let root = scanned_root("maintenance-hosted");
-        let surface = generate(&root, &cfg, None);
-        let generated = rendered(&surface, "maintenance.yml");
-        assert!(
-            generated.starts_with(crate::GENERATED_HEADER),
-            "generated maintenance.yml must carry the header: {generated}"
-        );
-        assert_maintenance_runner_split(&generated, &cfg);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn maintenance_uses_configured_runners_for_github_hosted_modes() {
+    fn maintenance_uses_configured_runners_for_all_hosted_modes() {
         for runners in [RunnerMode::Github, RunnerMode::Both] {
             let mut cfg = config(&["maintenance.yml"], None);
             cfg.runners = runners;
             let workflow = super::render_maintenance(&cfg);
             assert_maintenance_is_github_hosted(&workflow, &cfg);
         }
-    }
-
-    #[test]
-    fn maintenance_uses_configured_github_runner_when_runners_are_velnor() {
-        let mut cfg = config(&["maintenance.yml"], None);
-        cfg.runners = RunnerMode::Velnor;
-        cfg.github_runner = "ubuntu-22.04".to_owned();
-        cfg.default_branch = "trunk".to_owned();
-
-        let workflow = super::render_maintenance(&cfg);
-        assert_maintenance_runner_split(&workflow, &cfg);
-        assert!(
-            workflow.contains("runs-on: ubuntu-22.04"),
-            "maintenance must honor config.github_runner: {workflow}"
-        );
-        assert!(
-            !workflow.contains("runs-on: ubuntu-24.04"),
-            "maintenance must not keep the template runner when github_runner differs: {workflow}"
-        );
     }
 
     /// An incomplete contract omits the publisher exactly as the legacy path
@@ -1628,32 +1776,130 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_static_workflow_renders_the_declared_body() {
-        let root = scanned_root("static");
-        let config = config(&[], None);
-        let surface = generate(
-            &root,
-            &config,
-            Some(
-                "[[declare]]\nprimitive = \"static-workflow\"\nfile = \"custom.yml\"\n\n\
-                 [declare.args]\ntemplate = '''\nname: Custom\n\njobs:\n  probe:\n    runs-on: __VELNOR_GITHUB_RUNNER__\n    steps:\n      - run: velnor-workflow --rev __VELNOR_WORKFLOW_SOURCE_REV__\n'''\n",
+    fn a_declared_native_release_admits_github_writer_only() {
+        for (name, package, image, consumer) in [
+            (
+                "native-release",
+                "example",
+                "ghcr.io/example/app",
+                "example/apt",
             ),
-        );
-        let custom = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/custom.yml"))
-            .unwrap_or_else(|| panic!("a declared static workflow must render its file"));
-        assert!(
-            custom.starts_with(crate::GENERATED_HEADER),
-            "the rendered body carries the generated header: {custom}"
-        );
-        assert!(custom.contains("runs-on: ubuntu-24.04"), "{custom}");
-        assert!(
-            custom.contains(crate::VELNOR_WORKFLOW_SOURCE_REV),
-            "source pins are refreshed: {custom}"
-        );
-        assert_eq!(surface.added_files, vec!["custom.yml".to_owned()]);
-        let _ = fs::remove_dir_all(root);
+            (
+                "native-release-acme",
+                "widget",
+                "ghcr.io/acme/widget",
+                "acme/apt",
+            ),
+        ] {
+            let root = scanned_root(name);
+            let config = config(&["preview.yml"], None);
+            let surface = generate(
+                &root,
+                &config,
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"native\"\npackage = \"{package}\"\n\
+                     binary = \"{package}\"\n\
+                     targets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
+                     image = \"{image}\"\n\
+                     consumer_repository = \"{consumer}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("a declared native release must render release.yml"));
+            assert!(release.contains("name: Admit release runner"), "{release}");
+            assert!(
+                release.contains("native release publishes from GitHub only"),
+                "{release}"
+            );
+            assert!(release.contains("Publish container image"), "{release}");
+            assert!(release.contains(image), "{release}");
+            assert!(release.contains("github.ref_name"), "{release}");
+            assert!(
+                !release.contains(
+                    "  image:\n    name: Publish container image\n    needs: [admit-runner, verify, build, image]"
+                ),
+                "image must not depend on itself: {release}"
+            );
+            assert!(release.contains("Package Debian artifacts"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains("default: github"), "{release}");
+            assert!(!release.contains("default: velnor"), "{release}");
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn a_declared_homebrew_feed_mutates_from_github_only() {
+        for (name, package, source) in [
+            ("homebrew-feed", "example", "example/app"),
+            ("homebrew-feed-acme", "widget", "acme/widget"),
+        ] {
+            let root = scanned_root(name);
+            let surface = generate(
+                &root,
+                &config(&[], None),
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"homebrew\"\npackage = \"{package}\"\n\
+                     source_repository = \"{source}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("a homebrew feed must render release.yml"));
+            assert!(release.contains("Package feed"), "{release}");
+            assert!(release.contains("homebrew"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains(source), "{release}");
+            assert!(release.contains("default: github"), "{release}");
+            assert!(
+                release.contains("feed mutation publishes from GitHub only"),
+                "{release}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn a_declared_apt_feed_mutates_from_github_only() {
+        for (name, package, consumer) in [
+            ("apt-feed", "example", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/apt"),
+        ] {
+            let root = scanned_root(name);
+            let surface = generate(
+                &root,
+                &config(&[], None),
+                Some(&format!(
+                    "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                     [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
+                     consumer_repository = \"{consumer}\"\n"
+                )),
+            );
+            let release = surface
+                .files
+                .get(&PathBuf::from(".github/workflows/release.yml"))
+                .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
+            assert!(release.contains("Package feed"), "{release}");
+            assert!(release.contains("--kind apt"), "{release}");
+            assert!(
+                release.contains(&format!("--package {package}")),
+                "{release}"
+            );
+            assert!(release.contains(consumer), "{release}");
+            assert!(release.contains("default: github"), "{release}");
+            let _ = fs::remove_dir_all(root);
+        }
     }
 
     /// Every incomplete or misdirected declaration fails closed.
@@ -1677,11 +1923,6 @@ mod tests {
                 "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
                  [declare.args]\npackage = \"example\"\n",
                 "needs `kind`",
-            ),
-            (
-                "static workflow without template",
-                "[[declare]]\nprimitive = \"static-workflow\"\nfile = \"custom.yml\"\n",
-                "needs a `template`",
             ),
             (
                 "renamed release file",
@@ -1727,9 +1968,7 @@ mod tests {
             &config,
             Some(
                 "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"rust-example\"]\nfile = \"ci-rust-example.yml\"\n\n\
-                 [declare.args]\ncoverage = \"explicit\"\n\n\
-                 [[declare]]\nprimitive = \"static-workflow\"\nfile = \"ci-rust-other.yml\"\n\n\
-                 [declare.args]\ntemplate = '''\nname: Custom\n'''\n",
+                 [declare.args]\ncoverage = \"explicit\"\n",
             ),
         ) {
             Ok(_) => panic!("a declared nested-unit file must fail closed, and did not"),
