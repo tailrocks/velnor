@@ -11607,6 +11607,18 @@ fn merged_partial_step_logs(streamed: Vec<StepLog>) -> Vec<StepLog> {
 /// Upload the combined job log as a per-job `job-log-<job-id>` artifact
 /// (best-effort). This stays as an explicit fallback even when GitHub's native
 /// log endpoint works. Artifact names must not collide across jobs in one run.
+///
+/// Single owner: this is the only producer of the job-log fallback artifact,
+/// and it runs only on the executed-job completion path
+/// (`complete_run_service_job`). The pre-execution rejection path
+/// (`complete_acquired_job_outcome`) publishes the blob and step log only, so
+/// one job attempt can never emit the artifact from two sites.
+///
+/// The upload is idempotent (`overwrite`): the Results Service accepts a
+/// repeated name instead of rejecting it, so a non-overwriting re-upload would
+/// accumulate a second `(job, name)` row and listings would resolve that name
+/// ambiguously (run 34711777480: of 16 Velnor-lane jobs, 11 were rejected after
+/// the first of 5 legacy cross-job `job-log` rows landed).
 async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
     if step_logs.is_empty() {
         return;
@@ -11633,7 +11645,11 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
             &job_id,
             &upload_artifact_name,
             &[("job-log.txt".to_string(), content)],
-            crate::protocol::ArtifactUploadOptions::default(),
+            // Replace this job's own stale row instead of stacking a duplicate.
+            crate::protocol::ArtifactUploadOptions {
+                overwrite: true,
+                ..crate::protocol::ArtifactUploadOptions::default()
+            },
         )
     })
     .await;
@@ -22273,6 +22289,74 @@ runs:
         assert!(body.contains("compiling a"), "{body}");
         assert!(body.contains("compiling b"), "{body}");
         server.verify().await;
+    }
+
+    /// Re-running the completion path for one job attempt must leave exactly
+    /// one job-log artifact row behind. The Results Service accepts a repeated
+    /// name instead of rejecting it, so a non-idempotent upload would stack a
+    /// second `(job, name)` row and listings would resolve that name
+    /// ambiguously (run 34711777480: of 16 Velnor-lane jobs, 11 were rejected
+    /// after the first of 5 legacy cross-job `job-log` rows landed).
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn job_log_artifact_upload_twice_yields_one_artifact() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let store = crate::test_support::results_artifact_store::Store::mount().await;
+
+        let job = results_job(&store.uri());
+        let step_logs = vec![partial_step_log("build", &["output"], "")];
+
+        upload_job_log_artifact(&job, &step_logs).await;
+        upload_job_log_artifact(&job, &step_logs).await;
+
+        let rows = store.rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a repeated job-log upload must replace its row, not stack one: {rows:?}"
+        );
+        let (_, uploaded_job_id, uploaded_name) = &rows[0];
+        assert_eq!(uploaded_job_id, "job-1");
+        assert_eq!(
+            uploaded_name,
+            &job_log_artifact_name("job-1"),
+            "the legacy constant 'job-log' name must not come back"
+        );
+        assert_eq!(
+            store.deleted_ids().len(),
+            1,
+            "the second upload must remove the first upload's row"
+        );
+        assert_eq!(store.created_names().len(), 2);
+    }
+
+    /// The job-log fallback is the repair path for a duplicated `(job, name)`
+    /// pair: the delete phase enumerates raw rows (no identity contract), so
+    /// re-uploading collapses the pair to one row instead of aborting.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn job_log_artifact_upload_self_heals_a_duplicate_row_pair() {
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let store = crate::test_support::results_artifact_store::Store::mount().await;
+        store.seed(7, "job-1", &job_log_artifact_name("job-1"));
+        store.seed(8, "job-1", &job_log_artifact_name("job-1"));
+
+        let job = results_job(&store.uri());
+        let step_logs = vec![partial_step_log("build", &["output"], "")];
+        upload_job_log_artifact(&job, &step_logs).await;
+
+        let rows = store.rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the duplicated pair must collapse to one row: {rows:?}"
+        );
+        assert_eq!(rows[0].1, "job-1");
+        assert_eq!(rows[0].2, job_log_artifact_name("job-1"));
+        assert_eq!(store.deleted_ids(), vec![7, 8]);
+        assert_eq!(store.created_names(), vec![job_log_artifact_name("job-1")]);
     }
 
     #[cfg(feature = "test-support")]
