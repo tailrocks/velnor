@@ -21,6 +21,7 @@ mod isolation;
 mod net;
 mod snapshot;
 mod step_conditions;
+mod step_outcome;
 mod unix_api;
 
 pub use artifacts::{

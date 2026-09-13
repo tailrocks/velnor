@@ -12427,7 +12427,7 @@ pub(crate) struct JobExecutionState {
     /// state is built; cache and artifact paths namespace by it. Empty reads
     /// as fail-closed: states built without a scope resolve untrusted stores.
     trust_scope: String,
-    env: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
     /// Snapshot of runner-authoritative job values. Action-local env and
     /// workflow command state must never rewrite identity or credentials used
     /// for authenticated artifact operations.
@@ -12436,20 +12436,20 @@ pub(crate) struct JobExecutionState {
     workflow_env: Vec<(String, String)>,
     /// Env accumulated at runtime via GITHUB_ENV / ::set-env, in set order —
     /// GitHub appends these after the workflow env in the `env:` block.
-    dynamic_env: Vec<(String, String)>,
+    pub(crate) dynamic_env: Vec<(String, String)>,
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
-    outputs: BTreeMap<String, BTreeMap<String, String>>,
-    action_states: BTreeMap<String, BTreeMap<String, String>>,
-    outcomes: BTreeMap<String, StepOutcome>,
+    pub(crate) outputs: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) action_states: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) outcomes: BTreeMap<String, StepOutcome>,
     pub(crate) conclusions: BTreeMap<String, StepOutcome>,
     /// Nested composite conclusion scopes (open-umbrella stack plus the
     /// ignored-umbrella conversion set). The scope machinery lives in
     /// `execution::composite_scopes`; this state only delegates to it.
     pub(crate) composite_scopes: CompositeConclusionScopes,
-    path: Vec<String>,
-    masks: Vec<String>,
+    pub(crate) path: Vec<String>,
+    pub(crate) masks: Vec<String>,
     /// The running job's cancellation, so `success()`, `failure()` and
     /// `cancelled()` answer from the job's real status instead of from a
     /// constant. The engine installs its own required token here before the
@@ -12655,66 +12655,6 @@ impl JobExecutionState {
     /// The stacks stay untouched — only the status scans change.
     fn convert_open_composite_scopes(&mut self) {
         self.composite_scopes.convert_open_scopes();
-    }
-
-    pub(crate) fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
-        let outcome = if result.skipped {
-            StepOutcome::Skipped
-        } else if result.exit_code == 0 {
-            StepOutcome::Success
-        } else {
-            StepOutcome::Failure
-        };
-        let conclusion = if result.failure_ignored && outcome == StepOutcome::Failure {
-            StepOutcome::Success
-        } else {
-            outcome
-        };
-        self.outcomes.insert(step_id.to_string(), outcome);
-        self.conclusions.insert(step_id.to_string(), conclusion);
-        self.composite_scopes.record(step_id, conclusion);
-
-        if !result.state.outputs.is_empty() {
-            self.outputs
-                .insert(step_id.to_string(), result.state.outputs.clone());
-        }
-        if !result.state.state.is_empty() {
-            self.action_states
-                .entry(step_id.to_string())
-                .or_default()
-                .extend(result.state.state.clone());
-        }
-        for (name, value) in &result.state.env {
-            self.env.insert(name.clone(), value.clone());
-            if let Some(existing) = self
-                .dynamic_env
-                .iter_mut()
-                .find(|(existing_name, _)| existing_name == name)
-            {
-                existing.1 = value.clone();
-            } else {
-                self.dynamic_env.push((name.clone(), value.clone()));
-            }
-        }
-        for path in result.state.path.iter().rev() {
-            self.path.insert(0, path.clone());
-        }
-        self.masks.extend(result.state.masks.iter().cloned());
-    }
-
-    /// Record a step killed by cancellation. Upstream completes it
-    /// `TaskResult.Canceled` (`src/Runner.Worker/StepsRunner.cs:331-337`),
-    /// so `steps.<id>.outcome` and `steps.<id>.conclusion` read `cancelled`
-    /// — never `failure`, and never converted by `continue-on-error`
-    /// (`ApplyContinueOnError` only converts `Failed`).
-    pub(crate) fn apply_cancelled(&mut self, step_id: &str, result: &StepExecutionResult) {
-        self.apply(step_id, result);
-        self.outcomes
-            .insert(step_id.to_string(), StepOutcome::Cancelled);
-        self.conclusions
-            .insert(step_id.to_string(), StepOutcome::Cancelled);
-        self.composite_scopes
-            .record(step_id, StepOutcome::Cancelled);
     }
 
     fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
@@ -12941,7 +12881,7 @@ fn node_reads_runtime_context(node: &expression::Node) -> bool {
 /// against, mirroring `IExecutionContext.ExpressionValues` /
 /// `ExpressionFunctions` (`src/Runner.Worker/StepsRunner.cs:92-106`).
 pub(crate) struct JobExpressionContext<'a> {
-    state: &'a JobExecutionState,
+    pub(crate) state: &'a JobExecutionState,
 }
 
 /// The root contexts GitHub always defines for a step. Referencing anything
@@ -13069,62 +13009,6 @@ impl JobExpressionContext<'_> {
                 .map(|(name, value)| (name.clone(), expression::Value::string(value)))
                 .collect(),
         ))
-    }
-
-    /// `steps.<id>.{outputs,outcome,conclusion}`, built from the runtime
-    /// step state rather than parsed out of the expression text.
-    fn steps_context(&self) -> expression::Value {
-        let mut ids: Vec<&String> = Vec::new();
-        for id in self
-            .state
-            .outputs
-            .keys()
-            .chain(self.state.outcomes.keys())
-            .chain(self.state.conclusions.keys())
-        {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-
-        let entries = ids
-            .into_iter()
-            .map(|id| {
-                let mut step: Vec<(String, expression::Value)> = Vec::new();
-                let outputs = self
-                    .state
-                    .outputs
-                    .get(id)
-                    .map(|outputs| {
-                        outputs
-                            .iter()
-                            .map(|(name, value)| (name.clone(), expression::Value::string(value)))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                step.push((
-                    "outputs".to_string(),
-                    expression::Value::Object(expression::ObjectValue::new(outputs)),
-                ));
-                if let Some(outcome) = self.state.outcomes.get(id) {
-                    step.push((
-                        "outcome".to_string(),
-                        expression::Value::string(outcome.as_str()),
-                    ));
-                }
-                if let Some(conclusion) = self.state.conclusions.get(id) {
-                    step.push((
-                        "conclusion".to_string(),
-                        expression::Value::string(conclusion.as_str()),
-                    ));
-                }
-                (
-                    id.clone(),
-                    expression::Value::Object(expression::ObjectValue::new(step)),
-                )
-            })
-            .collect();
-        expression::Value::Object(expression::ObjectValue::new(entries))
     }
 
     fn job_context(&self) -> expression::Value {
@@ -20739,55 +20623,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
-    fn job_state_flows_env_and_path_to_later_steps() {
-        let mut state = JobExecutionState::default();
-        state.apply(
-            "producer",
-            &StepExecutionResult {
-                exit_code: 0,
-                skipped: false,
-                failure_ignored: false,
-                state: StepCommandState {
-                    outputs: [("answer".to_string(), "42".to_string())].into(),
-                    env: [("NAME".to_string(), "value".to_string())].into(),
-                    path: vec!["/opt/tool".to_string()],
-                    masks: vec!["secret".to_string()],
-                    ..Default::default()
-                },
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-
-        let env = state.step_env(&[("GITHUB_OUTPUT".into(), "/__t/out".into())]);
-
-        assert!(env.contains(&("NAME".into(), "value".into())));
-        assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
-        assert!(!env.iter().any(|(name, _)| name == "PATH"));
-        assert_eq!(state.path, vec!["/opt/tool"]);
-        assert_eq!(state.masks, vec!["secret"]);
-        assert_eq!(
-            state
-                .resolve_expressions("value=${{ steps.producer.outputs.answer }}")
-                .unwrap(),
-            "value=42"
-        );
-        assert_eq!(
-            state
-                .resolve_expressions("value=${{ steps.producer.outputs['answer'] }}")
-                .unwrap(),
-            "value=42"
-        );
-        // A context value that is not set is null, and null renders as the
-        // empty string (EvaluationResult.cs:140-141). The deleted evaluator
-        // rendered the source text instead, which is divergence D-4.
-        assert_eq!(
-            state.resolve_expressions("keep=${{ github.ref }}").unwrap(),
-            "keep="
-        );
-    }
-
-    #[test]
     fn checkout_uses_prior_step_output_token_instead_of_planning_fallback() {
         let mut state = JobExecutionState::default();
         state.apply(
@@ -20884,31 +20719,6 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .iter()
             .any(|arg| arg.contains("steps.source.outputs.sha")));
         fs::remove_dir_all(temp).unwrap();
-    }
-
-    #[test]
-    fn resolves_step_outputs_in_later_action_env() {
-        let mut state = JobExecutionState::default();
-        state.apply(
-            "meta",
-            &StepExecutionResult {
-                exit_code: 0,
-                skipped: false,
-                failure_ignored: false,
-                state: StepCommandState {
-                    outputs: [("tags".to_string(), "image:latest".to_string())].into(),
-                    ..Default::default()
-                },
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-        );
-
-        let env = state
-            .resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())])
-            .unwrap();
-
-        assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
     }
 
     #[test]
