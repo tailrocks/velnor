@@ -4722,9 +4722,17 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
             if before && after {
-                // Get surrounding context for the error message
-                let start = abs.saturating_sub(30);
-                let end = (abs + lane.len() + 30).min(cleaned.len());
+                // Get surrounding context for the error message. The window
+                // edges are byte offsets that can split a multi-byte char,
+                // so floor the start and ceil the end onto char boundaries.
+                let mut start = abs.saturating_sub(30);
+                while !cleaned.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let mut end = (abs + lane.len() + 30).min(cleaned.len());
+                while end < cleaned.len() && !cleaned.is_char_boundary(end) {
+                    end += 1;
+                }
                 issues.push(format!(
                     "{ctx}: hardcoded lane string '{}' in steps (use ${{{{ matrix.config.lane }}}} instead): ...{}...",
                     lane,
@@ -4751,6 +4759,24 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardcoded_lane_context_window_survives_multibyte_chars() {
+        // 19 `é` (2 bytes each) put both context-window edges mid-char:
+        // `abs - 30` lands on the second byte of an `é` before the lane,
+        // and `abs + len + 30` inside an `é` after it. The old plain
+        // `&cleaned[start..end]` panicked; the edges now floor/ceil onto
+        // char boundaries.
+        let pad = "é".repeat(19);
+        let steps_yaml = format!("run: {pad} github {pad}");
+        let issues = find_hardcoded_lane_strings(&steps_yaml, "job.test");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].contains("hardcoded lane string 'github'"),
+            "{}",
+            issues[0]
+        );
+    }
 
     #[test]
     fn latest_semver_tag_from_ls_remote_ignores_non_release_tags() {

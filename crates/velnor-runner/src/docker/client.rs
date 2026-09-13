@@ -1054,11 +1054,27 @@ fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn container_rm_args_with_claimed_ids(args: &[String], ids: &[String]) -> Vec<String> {
-    let mut claimed = vec![args[0].clone()];
+#[derive(Clone, Copy)]
+pub(crate) struct NonEmptyDockerArgs<'a> {
+    first: &'a String,
+    rest: &'a [String],
+}
+
+impl<'a> NonEmptyDockerArgs<'a> {
+    pub(crate) fn new(args: &'a [String]) -> Option<Self> {
+        let (first, rest) = args.split_first()?;
+        Some(Self { first, rest })
+    }
+}
+
+pub(crate) fn container_rm_args_with_claimed_ids(
+    args: NonEmptyDockerArgs<'_>,
+    ids: &[String],
+) -> Vec<String> {
+    let mut claimed = vec![args.first.clone()];
     claimed.extend(
-        args.iter()
-            .skip(1)
+        args.rest
+            .iter()
             .filter(|arg| arg.starts_with('-'))
             .cloned(),
     );
@@ -1213,7 +1229,12 @@ pub(crate) fn host_call_bounded(args: &[String], timeout: Duration) -> Result<St
     }
     let claimed_args = rm_claim
         .as_ref()
-        .map(|claim| container_rm_args_with_claimed_ids(args, &claim.ids));
+        .map(|claim| {
+            NonEmptyDockerArgs::new(args)
+                .map(|args| container_rm_args_with_claimed_ids(args, &claim.ids))
+                .ok_or_else(|| anyhow::anyhow!("docker rm claim requires non-empty arguments"))
+        })
+        .transpose()?;
     let args = claimed_args.as_deref().unwrap_or(args);
     let mut command = host_docker_command(args)?;
     let child = command
@@ -1643,6 +1664,19 @@ mod tests {
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.
+
+    #[test]
+    fn empty_argv_cannot_form_a_claimed_rm_argument_view() {
+        assert!(NonEmptyDockerArgs::new(&[]).is_none());
+        let argv = vec!["rm".to_string(), "-f".to_string(), "stale".to_string()];
+        assert_eq!(
+            container_rm_args_with_claimed_ids(
+                NonEmptyDockerArgs::new(&argv).unwrap(),
+                &["id-a".to_string()],
+            ),
+            vec!["rm".to_string(), "-f".to_string(), "id-a".to_string()]
+        );
+    }
 
     #[test]
     fn readiness_maps_every_status_word_to_the_wait_loop_decision() {
