@@ -2344,11 +2344,26 @@ pub(crate) fn inline_policy_job_for_lane(
     trusted_gate: Option<&str>,
 ) -> String {
     let trusted_gate = trusted_gate.unwrap_or_default();
-    format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n          # Static policy validation only; fork head checkout is intentional.\n          allow-unsafe-pr-checkout: true\n      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: {cache_backend}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n",
+    let checkout_safety = if cache_backend == "github" {
+        "          # Static policy validation only; fork head checkout is intentional.\n          allow-unsafe-pr-checkout: true\n"
+    } else {
+        "          # Velnor's native checkout uses its supported full-repository fetch.\n"
+    };
+    let rendered = format!(
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout caller workflow data\n        uses: {}\n        with:\n          repository: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n          ref: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          path: policy-checkout\n          sparse-checkout: |\n            .github/workflows\n          sparse-checkout-cone-mode: true\n          fetch-depth: 1\n          persist-credentials: false\n{checkout_safety}      - name: Set up Mr. Boxington\n        uses: {}\n        with:\n          backend: {cache_backend}\n          version: {MR_BOXINGTON_VERSION}\n          cache-key: velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-{revision}\n          restore-keys: |\n            velnor-policy-mbx-{MR_BOXINGTON_VERSION}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}-\n      - name: Install pinned Velnor workflow runtime\n        env:\n          CARGO_HOME: ${{{{ runner.temp }}}}/velnor-workflow-cargo-home\n          CARGO_TARGET_DIR: ${{{{ runner.temp }}}}/velnor-workflow-cargo-target\n          VELNOR_WORKFLOW_INSTALL_DIR: ${{{{ runner.temp }}}}/velnor-workflow-install\n          VELNOR_WORKFLOW_ROOT: ${{{{ runner.temp }}}}/velnor-workflow\n        run: |\n          set -euo pipefail\n          install -d -m 700 \\\n            \"$CARGO_HOME\" \\\n            \"$CARGO_TARGET_DIR\" \\\n            \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cd \"$VELNOR_WORKFLOW_INSTALL_DIR\"\n          cargo install \\\n            --locked \\\n            --git {VELNOR_WORKFLOW_INSTALL_GIT_URL} \\\n            --rev {revision} \\\n            --root \"$VELNOR_WORKFLOW_ROOT\" \\\n            velnor-workflow \\\n            --bin velnor-workflow\n          echo \"$VELNOR_WORKFLOW_ROOT/bin\" >> \"$GITHUB_PATH\"\n      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: velnor-workflow policy --workflow-root \"$WORKFLOW_ROOT\"\n",
         ActionPin::Checkout.reference(),
         ActionPin::MrBoxington.reference(),
-    )
+    );
+    if cache_backend == "local" {
+        rendered
+            .replace(
+                "          sparse-checkout: |\n            .github/workflows\n",
+                "",
+            )
+            .replace("          sparse-checkout-cone-mode: true\n", "")
+    } else {
+        rendered
+    }
 }
 
 /// The workflow names the inline policy job renders under: the advisory lane in
@@ -6956,6 +6971,27 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .any(|call| call.ends_with("/crates/app/Cargo.toml")));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inline_policy_checkout_inputs_match_runner_lane() {
+        let hosted =
+            inline_policy_job_for_lane("Policy", "revision", "ubuntu-24.04", "github", None);
+        assert!(hosted.contains("allow-unsafe-pr-checkout: true"));
+        assert!(hosted.contains("sparse-checkout: |"));
+        assert!(hosted.contains("sparse-checkout-cone-mode: true"));
+
+        let velnor = inline_policy_job_for_lane(
+            "Policy",
+            "revision",
+            "[self-hosted, velnor]",
+            "local",
+            None,
+        );
+        assert!(!velnor.contains("allow-unsafe-pr-checkout"));
+        assert!(!velnor.contains("sparse-checkout:"));
+        assert!(!velnor.contains("sparse-checkout-cone-mode"));
+        assert!(velnor.contains("path: policy-checkout"));
     }
 
     #[test]
