@@ -29,9 +29,9 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@ca1bb1458e06d7d8e385088f48130e9b39bf841f
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@20927051d368ed1ecd8e46e6777d18899176a536
         with:
-          rev: ca1bb1458e06d7d8e385088f48130e9b39bf841f
+          rev: 20927051d368ed1ecd8e46e6777d18899176a536
       - name: Set trusted workflow policy revision
         run: echo "VELNOR_WORKFLOW_POLICY_REVISION=ca1bb1458e06d7d8e385088f48130e9b39bf841f" >> "$GITHUB_ENV"
       - name: Select affected units
@@ -46,7 +46,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-ca1bb1458e06d7d8e385088f48130e9b39bf841f
+          name: velnor-workflow-runtime-20927051d368ed1ecd8e46e6777d18899176a536
           path: ~/.cargo/bin/velnor-workflow
           if-no-files-found: error
           retention-days: 7
