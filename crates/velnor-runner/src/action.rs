@@ -1737,9 +1737,38 @@ fn rewrite_step_output_refs(value: &str, step_ids: &BTreeMap<String, String>) ->
 }
 
 fn composite_step_id(prefix: &str, id: Option<&str>, index: usize) -> String {
-    id.map(|id| format!("{prefix}-{}", sanitize_segment(id)))
+    // Flattened composite steps are addressed as `steps.<id>` in rendered
+    // expressions, so the synthesized id has to lex as an identifier. The
+    // prefix falls back to the internal job-message GUID when the parent step
+    // has no YAML `id:`, and a GUID both starts with a digit and may end in a
+    // dotted suffix — neither survives `ExpressionUtility.IsLegalKeyword`.
+    let prefix = expression_legal_segment(prefix);
+    id.map(|id| format!("{prefix}-{}", expression_legal_segment(id)))
         .filter(|value| !value.ends_with('-'))
         .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
+}
+
+/// Map `value` onto a segment the expression lexer accepts
+/// (`ExpressionUtility.IsLegalKeyword`): keep `[A-Za-z0-9_-]`, replace every
+/// other character — dots included, unlike [`sanitize_segment`] — with `_`,
+/// and prefix a digit-leading segment with `_` so the first character is a
+/// letter or underscore.
+fn expression_legal_segment(value: &str) -> String {
+    let segment: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    match segment.chars().next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => segment,
+        Some(_) => format!("_{segment}"),
+        None => segment,
+    }
 }
 
 pub fn canonicalize_input_map(
@@ -2400,6 +2429,113 @@ runs:
         assert!(steps[0]
             .script
             .contains("test -d \"/__w/.github/actions/aggregate-needs\""));
+    }
+
+    struct ExpressionParseEnv;
+
+    impl crate::expression::parser::ParseEnvironment for ExpressionParseEnv {
+        fn is_named_value(&self, name: &str) -> bool {
+            crate::expression::ROOT_CONTEXTS
+                .iter()
+                .any(|root| root.eq_ignore_ascii_case(name))
+        }
+
+        fn function_arity(&self, name: &str) -> Option<(usize, usize)> {
+            crate::expression::RUNNER_FUNCTIONS
+                .iter()
+                .find(|(known, _, _)| known.eq_ignore_ascii_case(name))
+                .map(|(_, min, max)| (*min, *max))
+        }
+    }
+
+    /// A composite step id is only usable if rendered references such as
+    /// `steps.<id>.outputs.checked` survive `ExpressionUtility.IsLegalKeyword`
+    /// and the parser behind it.
+    fn assert_expression_identifier(id: &str) {
+        assert!(
+            crate::expression::lexer::is_legal_keyword(id),
+            "`{id}` must lex as an expression identifier"
+        );
+        assert!(
+            matches!(
+                crate::expression::parse(
+                    &format!("steps.{id}.outputs.checked"),
+                    &ExpressionParseEnv
+                ),
+                Ok(Some(_))
+            ),
+            "`steps.{id}.outputs.checked` must parse"
+        );
+    }
+
+    #[test]
+    fn composite_step_ids_stay_expression_legal_without_a_yaml_step_id() {
+        // No ContextName, so step_id() falls back to the internal job-message
+        // GUID. A GUID starts with a digit, which used to render references
+        // like `steps.26f576d4-...-check.outputs.checked` that fail expression
+        // parsing at byte 0.
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "26f576d4-0368-407e-817d-c34c2f1e8103",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/aggregate-needs"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let plans = local_action_plans(&steps, Path::new("/tmp/workspace")).unwrap();
+        assert_eq!(plans.len(), 1);
+
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      run: echo checked
+"#,
+        )
+        .unwrap();
+
+        let expanded = composite_script_steps(&plans[0], &metadata, "/__w").unwrap();
+        assert_eq!(expanded.len(), 1);
+        assert_eq!(
+            expanded[0].id,
+            "_26f576d4-0368-407e-817d-c34c2f1e8103-check"
+        );
+        assert_expression_identifier(&expanded[0].id);
+    }
+
+    #[test]
+    fn composite_step_ids_map_illegal_characters_and_digit_leading_ids() {
+        // Digit-leading prefix (GUID fallback for the parent step).
+        assert_eq!(
+            composite_step_id("0abc1234", Some("check"), 0),
+            "_0abc1234-check"
+        );
+        // Dots are not legal inside identifiers, unlike in sanitize_segment.
+        assert_eq!(
+            composite_step_id("aggregate", Some("a.b"), 0),
+            "aggregate-a_b"
+        );
+        // Already-legal ids and the positional fallback stay untouched.
+        assert_eq!(
+            composite_step_id("aggregate", Some("check"), 0),
+            "aggregate-check"
+        );
+        assert_eq!(composite_step_id("aggregate", None, 2), "aggregate-3");
+        // A trailing dash still falls back to the positional id.
+        assert_eq!(
+            composite_step_id("aggregate", Some("check-"), 0),
+            "aggregate-1"
+        );
+
+        for id in ["_0abc1234-check", "aggregate-a_b", "aggregate-3"] {
+            assert_expression_identifier(id);
+        }
     }
 
     #[test]
