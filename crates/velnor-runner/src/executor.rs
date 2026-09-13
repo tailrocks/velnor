@@ -12291,6 +12291,10 @@ pub(crate) struct JobExecutionState {
 struct CompositeConclusionFrame {
     step_id: String,
     conclusions: BTreeMap<String, StepOutcome>,
+    /// Transitive inner ids popped from nested scopes. Kept separate from
+    /// `conclusions` so the scope status scan never sees them; an ignored
+    /// outer umbrella converts them with its own direct ids.
+    descendants: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12499,12 +12503,16 @@ impl JobExecutionState {
             .push(CompositeConclusionFrame {
                 step_id: step_id.to_string(),
                 conclusions: BTreeMap::new(),
+                descendants: BTreeSet::new(),
             });
     }
 
-    /// Pop a composite scope, returning the inner step ids recorded in
-    /// it. An ignored umbrella conclusion converts these ids (see
-    /// `convert_conclusions`); a standing one leaves them raw.
+    /// Pop a composite scope, returning the transitive inner step ids
+    /// (direct plus nested descendants). The transitive set always
+    /// propagates to the parent frame's descendants — even when this
+    /// level stands — so an ignored outer umbrella converts nested
+    /// failures with its own. Descendants never enter `conclusions`,
+    /// so the scope status scan is unchanged.
     fn pop_composite(&mut self, step_id: &str) -> Vec<String> {
         if self
             .composite_stack
@@ -12518,10 +12526,17 @@ impl JobExecutionState {
             .last()
             .is_some_and(|frame| frame.step_id == step_id)
         {
-            self.composite_conclusion_stack
-                .pop()
-                .map(|frame| frame.conclusions.into_keys().collect())
-                .unwrap_or_default()
+            match self.composite_conclusion_stack.pop() {
+                Some(frame) => {
+                    let mut transitive: BTreeSet<String> = frame.conclusions.into_keys().collect();
+                    transitive.extend(frame.descendants);
+                    if let Some(parent) = self.composite_conclusion_stack.last_mut() {
+                        parent.descendants.extend(transitive.iter().cloned());
+                    }
+                    transitive.into_iter().collect()
+                }
+                None => Vec::new(),
+            }
         } else {
             Vec::new()
         }
@@ -12543,7 +12558,13 @@ impl JobExecutionState {
         let ids: Vec<String> = self
             .composite_conclusion_stack
             .iter()
-            .flat_map(|frame| frame.conclusions.keys().cloned())
+            .flat_map(|frame| {
+                frame
+                    .conclusions
+                    .keys()
+                    .cloned()
+                    .chain(frame.descendants.iter().cloned())
+            })
             .collect();
         self.convert_conclusions(ids);
     }
@@ -22435,6 +22456,84 @@ fi"#
         assert!(
             temp.join("on-success.sh").exists(),
             "success() must run after an ignored umbrella"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.join("reader.sh")).unwrap(),
+            "echo boom=failure status=success\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Nested ignored umbrella converts transitive inner ids: the inner
+    /// umbrella stands (no `continue-on-error`), so its End converts
+    /// nothing, but the ignored outer umbrella must still convert the
+    /// inner-inner failure for job-scope status. Without descendant
+    /// propagation `job.status` wrongly reports failure while the job
+    /// conclusion says success.
+    #[test]
+    fn nested_ignored_umbrella_converts_transitive_failures() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "outer".into(),
+                display_name: "Run outer".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: true,
+            },
+            ExecutableStep::CompositeStart {
+                step_id: "inner".into(),
+                display_name: "Run inner".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            script_step("boom", "exit 1", None),
+            ExecutableStep::CompositeEnd {
+                step_id: "inner".into(),
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "outer".into(),
+            },
+            script_step("on-failure", "echo failure", Some("failure()")),
+            script_step(
+                "reader",
+                "echo boom=${{ steps.boom.conclusion }} status=${{ job.status }}",
+                Some("always()"),
+            ),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(
+            summary
+                .step_results
+                .iter()
+                .any(|result| result.exit_code == 1),
+            "boom must fail for this test to mean anything: {:?}",
+            summary.step_results
+        );
+        assert!(
+            !temp.join("on-failure.sh").exists(),
+            "failure() must not run after a nested ignored umbrella"
         );
         assert_eq!(
             fs::read_to_string(temp.join("reader.sh")).unwrap(),
