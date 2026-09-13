@@ -874,13 +874,10 @@ impl WorkflowIr {
             output.push('\n');
         }
         output.push_str("jobs:\n");
-        // Runner mode is global; only trusted-event jobs receive the extra
-        // default-branch gate needed for Velnor execution.
+        // Runner mode is global; every self-hosted job receives the
+        // default-branch trusted-event gate needed for Velnor execution.
         let trusted_event = kind != WorkflowKind::PullRequest;
         let runners = self.runners;
-        // Velnor-only control-plane jobs admit pull requests through the
-        // untrusted Velnor path. GitHub/Both retain their hosted PR behavior
-        // and trusted-only Velnor lane.
         self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
@@ -1089,7 +1086,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_event_expression())
+            format!("always() && {}", self.trusted_event_expression())
         } else {
             "always()".to_owned()
         };
@@ -1179,8 +1176,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     /// The lane jobs a nested unit workflow emits: the hosted lane saves the
-    /// cache and is untrusted. Velnor-only pull requests use the untrusted
-    /// Velnor path; trusted event gates still guard persistent cache writes.
+    /// cache and is untrusted. Velnor jobs are trusted-event-only because they
+    /// execute on the self-hosted runner pool.
     pub(crate) fn default_lane_jobs(cache_save: bool) -> Vec<LaneJob> {
         vec![
             LaneJob {
@@ -1506,14 +1503,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
-            format!(
-                "    if: ${{{{ {} }}}}\n",
-                if self.runners == RunnerMode::Velnor {
-                    self.velnor_event_expression()
-                } else {
-                    self.trusted_event_expression()
-                }
-            )
+            format!("    if: ${{{{ {} }}}}\n", self.trusted_event_expression())
         } else {
             String::new()
         }
@@ -1533,22 +1523,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         )
     }
 
-    fn aggregate_event_expression(&self) -> String {
-        format!(
-            "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
-            self.default_branch
-        )
-    }
-
     fn base_sha_expression(&self) -> String {
         format!(
             "github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/{}'",
             self.default_branch
         )
-    }
-
-    fn velnor_event_expression(&self) -> String {
-        self.aggregate_event_expression()
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
@@ -1570,10 +1549,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 | (RunnerMode::Both, RunnerMode::Velnor | RunnerMode::Github)
         );
         if automatic {
-            format!("{} || ({dispatch})", self.automatic_event_expression())
+            if lane == RunnerMode::Velnor {
+                self.velnor_lane_event_expression(&dispatch)
+            } else {
+                format!("{} || ({dispatch})", self.automatic_event_expression())
+            }
         } else {
             dispatch.to_owned()
         }
+    }
+
+    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
+        format!(
+            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
+            self.default_branch
+        )
     }
 
     pub(crate) fn render_verify_github(
@@ -1598,11 +1588,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(if self.runners == RunnerMode::Velnor {
-            self.velnor_event_expression()
-        } else {
-            self.trusted_event_expression()
-        });
+        let condition = Some(self.trusted_event_expression());
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,

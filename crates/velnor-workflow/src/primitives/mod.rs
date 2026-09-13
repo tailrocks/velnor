@@ -132,9 +132,8 @@ pub(crate) struct LaneJob {
     /// The hosted lane is the only lane allowed to save a cache entry: entries
     /// are written from trusted events only.
     pub(crate) cache_save: bool,
-    /// The Velnor lane carries the generated event gate. Velnor-only surfaces
-    /// admit pull requests through the untrusted trust path; persistent cache
-    /// writes remain restricted to trusted events.
+    /// The Velnor lane carries the generated default-branch trusted-event
+    /// gate. Persistent cache writes remain restricted to trusted events.
     pub(crate) trusted: bool,
 }
 
