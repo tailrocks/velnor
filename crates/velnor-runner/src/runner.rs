@@ -6800,7 +6800,8 @@ async fn handle_job_request(
         // is entry- and byte-capped (oldest evicted first, evictions
         // counted) so a stalled publisher plus a chatty job cannot grow
         // it without bound.
-        let streamed_step_logs = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        let streamed_step_logs =
+            Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let step_logs_publisher = start_step_log_publisher(
             job.clone(),
             step_log_receiver,
@@ -7027,12 +7028,13 @@ async fn handle_job_request(
             // publisher, oldest-first evictions inside it). Persist what ran
             // instead of completing with an empty log, and stamp a marker
             // when any of it was lost so the gap is GitHub-visible.
-            let mut mirror = streamed_step_logs
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mirror_evicted = mirror.evicted();
-            let streamed = mirror.take_logs();
-            drop(mirror);
+            // Drain under one async lock hold, convert after unlock: the
+            // `try_unwrap`/clone walk must not run while holding the mutex.
+            let (mirror_evicted, drained) = {
+                let mut mirror = streamed_step_logs.lock().await;
+                (mirror.evicted(), mirror.drain())
+            };
+            let streamed = StreamedStepLogMirror::unwrap_drained(drained);
             step_logs = merged_partial_step_logs(
                 streamed,
                 step_log_drops.load(Ordering::Relaxed),
@@ -7175,7 +7177,7 @@ async fn drain_step_publishers(
     forensics: SlotForensics,
     step_start_drops: &AtomicU64,
     step_log_drops: &AtomicU64,
-    streamed_step_logs: &Arc<Mutex<StreamedStepLogMirror>>,
+    streamed_step_logs: &Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) {
     let started = Instant::now();
     tokio::join!(
@@ -7189,10 +7191,7 @@ async fn drain_step_publishers(
     // Read after both publishers exit so no further mirror push can land:
     // on the cancel path this count (with the channel drops) is the only
     // record of what the persisted partial log lost.
-    let mirror_evicted = streamed_step_logs
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .evicted();
+    let mirror_evicted = streamed_step_logs.lock().await.evicted();
     forensics.lifecycle(&format!(
         "step-publishers-drained elapsed_ms={} dropped_step_starts={} dropped_step_logs={} mirror_evicted_logs={}",
         duration_ms(started.elapsed()),
@@ -7779,13 +7778,13 @@ fn start_broker_cancellation_poll(
 /// mirror therefore retains ~one reference per record instead of a second
 /// full copy of every chunk.
 ///
-/// The publisher locks this behind a `std::sync::Mutex` on a tokio worker,
-/// so the critical section must stay O(1): the byte size is computed BEFORE
+/// The publisher locks this behind a `tokio::sync::Mutex`: the per-chunk
+/// push runs on a tokio worker, and a blocking `std` mutex there parks the
+/// executor whenever the cancel path holds the lock across its drain. The
+/// critical section still stays O(1): the byte size is computed BEFORE
 /// locking and stored per record (eviction subtracts it, never rescans),
 /// leaving an Arc bump plus integer math under the lock — no clone, no
-/// string scan, no syscall. That hold is nanoseconds and never parks the
-/// executor, which is why a `std` mutex (rather than an async one) stays
-/// correct here.
+/// string scan, no syscall.
 #[derive(Debug, Default)]
 struct StreamedStepLogMirror {
     logs: VecDeque<MirroredStepLog>,
@@ -7818,9 +7817,19 @@ impl StreamedStepLogMirror {
         self.logs.push_back(MirroredStepLog { log, bytes });
     }
 
-    fn take_logs(&mut self) -> Vec<StepLog> {
+    /// Move every record out, resetting the byte gauge. Runs under the
+    /// mirror lock; the caller converts the result with
+    /// [`Self::unwrap_drained`] after unlocking.
+    fn drain(&mut self) -> VecDeque<MirroredStepLog> {
         self.bytes = 0;
         std::mem::take(&mut self.logs)
+    }
+
+    /// Convert drained records into owned logs. Runs AFTER the mirror
+    /// lock is released: the `try_unwrap`/clone walk is O(records) and
+    /// must not extend the critical section.
+    fn unwrap_drained(drained: VecDeque<MirroredStepLog>) -> Vec<StepLog> {
+        drained
             .into_iter()
             .map(|entry| {
                 // Cancel path only, after the publishers drained: the mirror
@@ -7830,6 +7839,12 @@ impl StreamedStepLogMirror {
                 Arc::try_unwrap(entry.log).unwrap_or_else(|shared| (*shared).clone())
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn take_logs(&mut self) -> Vec<StepLog> {
+        let drained = self.drain();
+        Self::unwrap_drained(drained)
     }
 
     /// Records evicted oldest-first past the caps. Read after the step-log
@@ -7946,7 +7961,7 @@ fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: Receiver<StepLog>,
     console_log_path: Option<PathBuf>,
-    streamed_step_logs: Arc<Mutex<StreamedStepLogMirror>>,
+    streamed_step_logs: Arc<tokio::sync::Mutex<StreamedStepLogMirror>>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -8065,10 +8080,7 @@ fn start_step_log_publisher(
                 // critical section stays O(1) on this tokio worker.
                 let log = Arc::new(log);
                 let size = step_log_mirror_bytes(&log);
-                streamed_step_logs
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(Arc::clone(&log), size);
+                streamed_step_logs.lock().await.push(Arc::clone(&log), size);
                 let masker = job_masks.with_extra(&log.masks);
                 let lines = mask_log_lines_with(&log.lines, &masker);
                 let line_count = lines.len() as i64;
@@ -22738,6 +22750,39 @@ runs:
     }
 
     #[tokio::test]
+    async fn streamed_step_log_mirror_push_pends_without_parking_the_executor() {
+        // The per-chunk push runs on a tokio worker behind an async mutex:
+        // while the lock is held, a contending push must pend WITHOUT
+        // blocking the thread. This runs on the current-thread runtime, so
+        // a blocking `std` mutex here would wedge the only thread and the
+        // timeout below could never elapse.
+        let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
+        let held = mirror.lock().await;
+        let mut contender = tokio::spawn({
+            let mirror = Arc::clone(&mirror);
+            async move {
+                let log = Arc::new(partial_step_log("contended", &["line"], ""));
+                let size = step_log_mirror_bytes(&log);
+                mirror.lock().await.push(log, size);
+            }
+        });
+        // Executor still makes progress while the contender waits: the
+        // timer fires instead of parking behind a blocked worker.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut contender)
+                .await
+                .is_err(),
+            "contending push must pend while the lock is held"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), contender)
+            .await
+            .expect("push must complete after unlock")
+            .unwrap();
+        assert_eq!(mirror.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn publish_with_timeout_for_bounds_stalled_publish() {
         let err = publish_with_timeout_for::<()>(
             Duration::from_millis(10),
@@ -22788,12 +22833,13 @@ runs:
         let forensics = SlotForensics::new(log_dir.clone(), "r1pub-drain-test".to_string());
         let start_drops = AtomicU64::new(4);
         let log_drops = AtomicU64::new(9);
-        let mirror = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         for index in 0..STREAMED_STEP_LOG_MIRROR_MAX_LOGS + 7 {
-            mirror
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push_owned(partial_step_log(&format!("step-{index}"), &["line"], ""));
+            mirror.lock().await.push_owned(partial_step_log(
+                &format!("step-{index}"),
+                &["line"],
+                "",
+            ));
         }
         drain_step_publishers(
             timeline,
@@ -22839,7 +22885,7 @@ runs:
         // neither may grow with the number of emitted events.
         let (tx, mut rx) = tokio::sync::mpsc::channel(STEP_PUBLISH_CHANNEL_CAPACITY);
         let sender = BoundedStepSender::new(tx);
-        let mirror = Arc::new(Mutex::new(StreamedStepLogMirror::default()));
+        let mirror = Arc::new(tokio::sync::Mutex::new(StreamedStepLogMirror::default()));
         let started = Instant::now();
         let events: u64 = 100_000;
         for index in 0..events {
@@ -22847,17 +22893,13 @@ runs:
             log.lines = vec![format!("soak line {index}")];
             sender.send_best_effort(log.clone());
             // Same push the log publisher performs per streamed record.
+            // Sync test, uncontended: `blocking_lock` outside a runtime.
             let log = Arc::new(log);
             let size = step_log_mirror_bytes(&log);
-            mirror
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(Arc::clone(&log), size);
+            mirror.blocking_lock().push(Arc::clone(&log), size);
         }
         let elapsed = started.elapsed();
-        let mirror_guard = mirror
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mirror_guard = mirror.blocking_lock();
         eprintln!(
             "step-publish soak: {events} events in {elapsed:?}, drops={}, mirror_len={}, mirror_bytes={}",
             sender.drops(),
