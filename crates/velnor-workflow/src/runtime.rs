@@ -1409,7 +1409,7 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         }
 
         // Velnor policy is intentionally a separate approved shape: it uses
-        // the local cache backend and a self-hosted runner, and the trusted
+        // the local cache backend and a self-hosted runner, and the safe
         // event gate is mandatory. Runner labels and the default branch are
         // repository configuration, so compare those two lane fields through
         // the generic static-runner/trusted-gate validators below while the
@@ -1853,6 +1853,12 @@ fn has_trusted_runner_gate(value: &str) -> bool {
         || value == "always()&&github.event_name=='pull_request_target'"
     {
         return true;
+    }
+    if let Some(trusted) = value
+        .strip_prefix("github.event_name=='pull_request_target'||(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return has_trusted_runner_gate(trusted);
     }
     let marker = "github.ref=='refs/heads/";
     let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
@@ -2912,9 +2918,9 @@ jobs:
         let root = policy_fixture("inline-drifted-step", &workflow, "github")?;
         assert!(!run_policy(root)?);
 
-        // Velnor policy uses the local cache backend and a trusted default-
-        // branch event gate, while preserving the same pinned revision.
-        let trusted_gate = "    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}\n";
+        // Velnor policy uses the local cache backend and a pull-request-safe
+        // event gate, while preserving the same pinned revision.
+        let trusted_gate = "    if: ${{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
         let workflow = format!(
             "name: Velnor caller\non: push\njobs:\n{}",
             crate::inline_policy_job_for_lane(
