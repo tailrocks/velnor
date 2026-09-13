@@ -1001,7 +1001,17 @@ fn decode_chunked(framed: &[u8]) -> FaultResult<Vec<u8>> {
                 "chunk size overflows the body".to_string(),
             )
         })?;
-        if framed.len() < data_end + 2 || &framed[data_end..data_end + 2] != b"\r\n" {
+        // `data_end` is attacker-shaped (`cursor + size` with a daemon-sent
+        // size), so the trailing CRLF offset is checked too: `data_end + 2`
+        // overflows when the size lands `data_end` at `usize::MAX - 1`, and
+        // the facade must answer Framing (CLI fallback), never panic.
+        let after_data = data_end.checked_add(2).ok_or_else(|| {
+            (
+                EngineFaultKind::Framing,
+                "chunk size overflows the body".to_string(),
+            )
+        })?;
+        if framed.len() < after_data || &framed[data_end..after_data] != b"\r\n" {
             return Err((
                 EngineFaultKind::Framing,
                 "chunk data is short or unterminated".to_string(),
@@ -1014,7 +1024,7 @@ fn decode_chunked(framed: &[u8]) -> FaultResult<Vec<u8>> {
             ));
         }
         body.extend_from_slice(&framed[cursor..data_end]);
-        cursor = data_end + 2;
+        cursor = after_data;
     }
 }
 
@@ -1822,6 +1832,31 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn huge_chunk_sizes_frame_error_into_cli_fallback_instead_of_panicking() {
+        // The worst case the daemon can send: `usize::MAX - 1` trips the
+        // `cursor + size` check, and the boundary size below lands `data_end`
+        // exactly at `usize::MAX - 1`, tripping the `data_end + 2` check the
+        // old code computed with a plain `+`. Both are Framing, which the
+        // facade answers with its CLI fallback.
+        let framed = b"FFFFFFFFFFFFFFFE\r\n";
+        assert_eq!(
+            decode_chunked(framed).unwrap_err().0,
+            EngineFaultKind::Framing,
+            "{framed:?}"
+        );
+        let width = format!("{:X}", usize::MAX).len();
+        let size = usize::MAX - 1 - (width + 2);
+        let size_text = format!("{size:X}");
+        assert_eq!(size_text.len(), width);
+        let framed = format!("{size_text}\r\n");
+        assert_eq!(
+            decode_chunked(framed.as_bytes()).unwrap_err().0,
+            EngineFaultKind::Framing,
+            "{framed:?}"
+        );
     }
 
     #[tokio::test]

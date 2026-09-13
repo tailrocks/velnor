@@ -1055,7 +1055,14 @@ fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
 }
 
 pub(crate) fn container_rm_args_with_claimed_ids(args: &[String], ids: &[String]) -> Vec<String> {
-    let mut claimed = vec![args[0].clone()];
+    // Both production callers only reach here with a non-empty `rm` argv
+    // (a claim exists only when `args.first()` is `Some("rm")`), but this
+    // is `pub(crate)`: an empty argv degrades to the claimed ids instead
+    // of panicking on `args[0]`.
+    let Some(first) = args.first() else {
+        return ids.to_vec();
+    };
+    let mut claimed = vec![first.clone()];
     claimed.extend(
         args.iter()
             .skip(1)
@@ -1643,6 +1650,20 @@ mod tests {
 
     /// Every fixture below is output captured from a real Engine 29.4.0
     /// invocation of the exact argument vector the parser consumes.
+
+    #[test]
+    fn claimed_rm_args_degrade_on_empty_argv_instead_of_panicking() {
+        // The production callers only pass a non-empty `rm` argv, but the
+        // helper is `pub(crate)`: an empty argv yields the claimed ids
+        // instead of panicking on `args[0]`.
+        let ids = vec!["id-a".to_string()];
+        assert_eq!(container_rm_args_with_claimed_ids(&[], &ids), ids);
+        let argv = vec!["rm".to_string(), "-f".to_string(), "stale".to_string()];
+        assert_eq!(
+            container_rm_args_with_claimed_ids(&argv, &ids),
+            vec!["rm".to_string(), "-f".to_string(), "id-a".to_string()]
+        );
+    }
 
     #[test]
     fn readiness_maps_every_status_word_to_the_wait_loop_decision() {
