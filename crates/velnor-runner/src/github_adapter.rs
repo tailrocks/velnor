@@ -404,8 +404,10 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
 }
 
 /// Advertise the operator-selected pool backend to jobs as
-/// `VELNOR_EXECUTION_BACKEND`. Repository-controlled env of the same name is
-/// dropped first: a workflow must not spoof the pool's isolation level.
+/// `VELNOR_EXECUTION_BACKEND`, plus the runner build identity
+/// (`VELNOR_SOURCE_SHA`, `VELNOR_MANIFEST_VERSION`). Repository-controlled
+/// env of the same names is dropped first: a workflow must not spoof the
+/// pool's isolation level or the release it runs under.
 /// `GITHUB_*` is dropped too: container env merges under the authoritative
 /// job env, so any `GITHUB_*` the broker omits would otherwise survive into
 /// the immutable environment that derives the BuildKit trust tier.
@@ -415,12 +417,22 @@ fn backend_advertising_env(
 ) -> Vec<(String, String)> {
     env.retain(|(name, _)| {
         name != "VELNOR_EXECUTION_BACKEND"
+            && name != "VELNOR_SOURCE_SHA"
+            && name != "VELNOR_MANIFEST_VERSION"
             && !is_docker_control_env(name)
             && !is_runner_owned_env(name)
     });
     env.push((
         "VELNOR_EXECUTION_BACKEND".to_string(),
         backend.as_str().to_string(),
+    ));
+    env.push((
+        "VELNOR_SOURCE_SHA".to_string(),
+        env!("VELNOR_SOURCE_SHA").to_string(),
+    ));
+    env.push((
+        "VELNOR_MANIFEST_VERSION".to_string(),
+        crate::manifest::MANIFEST_VERSION.to_string(),
     ));
     env
 }
@@ -1757,6 +1769,8 @@ mod tests {
                     "VELNOR_EXECUTION_BACKEND".to_string(),
                     "microvm".to_string(),
                 ),
+                ("VELNOR_SOURCE_SHA".to_string(), "spoofed".to_string()),
+                ("VELNOR_MANIFEST_VERSION".to_string(), "spoofed".to_string()),
             ],
             velnor_model::ExecutionBackendKind::Docker,
         );
@@ -1765,6 +1779,14 @@ mod tests {
             vec![
                 ("NODE_OPTIONS".to_string(), "x".to_string()),
                 ("VELNOR_EXECUTION_BACKEND".to_string(), "docker".to_string()),
+                (
+                    "VELNOR_SOURCE_SHA".to_string(),
+                    env!("VELNOR_SOURCE_SHA").to_string(),
+                ),
+                (
+                    "VELNOR_MANIFEST_VERSION".to_string(),
+                    crate::manifest::MANIFEST_VERSION.to_string(),
+                ),
             ]
         );
     }
@@ -1811,6 +1833,14 @@ mod tests {
             vec![
                 ("NODE_OPTIONS".to_string(), "x".to_string()),
                 ("VELNOR_EXECUTION_BACKEND".to_string(), "docker".to_string()),
+                (
+                    "VELNOR_SOURCE_SHA".to_string(),
+                    env!("VELNOR_SOURCE_SHA").to_string(),
+                ),
+                (
+                    "VELNOR_MANIFEST_VERSION".to_string(),
+                    crate::manifest::MANIFEST_VERSION.to_string(),
+                ),
             ]
         );
     }
