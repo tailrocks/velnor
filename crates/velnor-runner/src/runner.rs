@@ -4747,9 +4747,13 @@ fn maybe_startup_host_docker_reclaim_with(
 /// job network + container leak; enough leaked `velnor-net-*` networks exhaust
 /// Docker's address pool and then EVERY new job fails to create its network
 /// ("all predefined address pools have been fully subnetted"). Pruning on
-/// startup makes a crash self-healing. Best-effort — never fails startup. Use
-/// non-force removal so Docker refuses a container that is still live while
-/// stopped stale containers can be cleaned.
+/// startup makes a crash self-healing. Best-effort — never fails startup.
+///
+/// Force-remove. Startup runs before slots accept jobs, so any still-Up
+/// container labelled with this daemon is an orphan from a previous
+/// generation (cancelled run, 401 completion, crash). Non-force `docker rm`
+/// leaves those Up, their networks stay allocated, and the next job fails
+/// with the address-pool error above. Foreign daemons are not in `containers`.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| {
         let owned = args.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -4808,8 +4812,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         })
         .collect::<Vec<_>>();
     if !containers.is_empty() {
-        let mut args = vec!["rm".to_string()];
-        args.extend(containers.iter().cloned());
+        let args = stale_job_container_remove_args(&containers);
         let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
         eprintln!(
             "Pruned {} stale Velnor container(s) at startup.",
@@ -4850,6 +4853,12 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
             networks.len()
         );
     }
+}
+
+fn stale_job_container_remove_args(ids: &[String]) -> Vec<String> {
+    let mut args = vec!["rm".to_string(), "--force".to_string()];
+    args.extend(ids.iter().cloned());
+    args
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
@@ -16784,6 +16793,25 @@ jobs:
             0,
             "/daemon/work"
         ));
+    }
+
+    #[test]
+    fn stale_job_container_remove_force_deletes_running_orphans() {
+        // Startup prune used to call `docker rm` without --force. Running
+        // orphans (cancelled jobs, 401 completion) stayed Up, kept their
+        // networks, and exhausted Docker's address pool.
+        assert_eq!(
+            stale_job_container_remove_args(&[
+                "velnor-job-aaaa".to_owned(),
+                "velnor-job-bbbb".to_owned()
+            ]),
+            vec![
+                "rm".to_owned(),
+                "--force".to_owned(),
+                "velnor-job-aaaa".to_owned(),
+                "velnor-job-bbbb".to_owned()
+            ]
+        );
     }
 
     #[test]
