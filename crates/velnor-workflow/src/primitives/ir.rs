@@ -22,9 +22,9 @@ use crate::{
     unit_group, unit_group_job_id, unit_job_id, unit_needs, velnor_runner, velnor_runner_group,
     workflow_runtime_artifact_upload, workflow_runtime_download, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_selection_artifact_download,
-    workflow_selection_artifact_upload, yaml_scalar, CachePurpose, CacheSpec, GeneratorError,
-    ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind, GENERATED_HEADER,
-    MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
+    workflow_selection_artifact_upload, workflow_setup_install_rev, yaml_scalar, CachePurpose,
+    CacheSpec, GeneratorError, ProjectConfig, RunnerMode, RustToolchain, Unit, UnitKind,
+    GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION, VELNOR_POLICY_WORKFLOW_REV,
 };
 
 /// The snapshot namespace the unit-lane compiler snapshots live in.
@@ -819,6 +819,7 @@ pub(crate) struct WorkflowIr {
     pub(crate) ci_required: bool,
     pub(crate) velnor_runner_group: Option<String>,
     pub(crate) pull_request_on_velnor: VelnorPullRequest,
+    pub(crate) repository: String,
     pub(crate) runners: RunnerMode,
     pub(crate) automatic: RunnerMode,
     pub(crate) tools: BTreeSet<ToolRequirement>,
@@ -1109,6 +1110,7 @@ impl WorkflowIr {
             } else {
                 VelnorPullRequest::TrustedOnly
             },
+            repository: config.repository.clone(),
             runners: config.runners,
             automatic: config.automatic,
             tools,
@@ -1830,8 +1832,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         // Planning follows `[workflow] automatic`. `automatic = velnor` keeps
         // the control plane off GitHub-hosted runners. `automatic = both`
         // plans on GitHub so this repository can compare lanes. GitHub
-        // planning pins `uses:` to SOURCE_REV and installs `${{ github.sha }}`
-        // so same-repo `plan` understands generation-time fields.
+        // planning pins `uses:` to SOURCE_REV. `rev:` is `${{ github.sha }}`
+        // only when this repository owns the setup action.
         let runners = self.control_plane_lane();
         let gate = if runners == RunnerMode::Velnor {
             format!(
@@ -1846,7 +1848,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             workflow_runtime_setup_with_install_rev(
                 RunnerMode::Github,
-                &github_expression("github.sha"),
+                &workflow_setup_install_rev(&self.repository),
             )
         };
         let mut outputs = vec![

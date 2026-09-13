@@ -16,10 +16,11 @@ use super::{
     WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::{
-    github_expression, lane_supports_unit, rendered_cache_values, shell_quote, velnor_runner,
-    velnor_runner_group, workflow_runtime_setup, workflow_runtime_setup_with_install_rev,
-    yaml_scalar, ActionPin, GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode,
-    GENERATED_HEADER, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
+    github_expression, lane_supports_unit, rendered_cache_values, shell_quote, unit_display_label,
+    velnor_runner, velnor_runner_group, workflow_runtime_setup,
+    workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
+    GeneratorError, ProjectConfig, ReleaseSpec, RunnerMode, Unit, UnitKind, GENERATED_HEADER,
+    VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
 };
 
 /// The release-side file families and the canonical file each one renders.
@@ -353,22 +354,39 @@ fn guest_seed_recipe_globs(config: &ProjectConfig) -> Vec<String> {
         if root.starts_with("crates/") {
             globs.push(format!("{root}/**"));
         }
-        if root.contains("runner") {
-            globs.push(format!("{root}/Cargo.toml"));
-            globs.push(format!("{root}/build.rs"));
-            globs.push(format!("{root}/src/**"));
-        }
     }
     globs.sort();
     globs.dedup();
     globs
 }
 
-fn guest_agent_bin(release: &ReleaseSpec) -> String {
-    if release.package.contains("runner") || release.binary.contains("runner") {
-        "velnor-guest-agent".to_owned()
-    } else {
-        format!("{}-guest-agent", release.package)
+fn rust_package_unit<'a>(config: &'a ProjectConfig, package: &str) -> Option<&'a Unit> {
+    config
+        .units
+        .iter()
+        .find(|unit| unit.kind == UnitKind::Rust && unit_display_label(unit) == package)
+}
+
+fn detected_package_bin(config: &ProjectConfig, kind: &str, package: &str) -> Option<String> {
+    let prefix = format!("{kind}:{package}:");
+    config
+        .analysis
+        .detected
+        .iter()
+        .find_map(|item| item.strip_prefix(&prefix).map(str::to_owned))
+}
+
+fn guest_payload_bins(config: &ProjectConfig, package: &str) -> Option<(String, String)> {
+    let agent = detected_package_bin(config, "guest-agent", package)?;
+    let image = detected_package_bin(config, "guest-image", package)?;
+    Some((agent, image))
+}
+
+fn release_package_guest_dir(config: &ProjectConfig, package: &str) -> String {
+    match rust_package_unit(config, package) {
+        Some(unit) if unit.root == "." || unit.root.is_empty() => "release/microvm".to_owned(),
+        Some(unit) => format!("{}/release/microvm", unit.root.trim_end_matches('/')),
+        None => "release/microvm".to_owned(),
     }
 }
 
@@ -387,12 +405,15 @@ fn render_guest_seed_steps(
     recipe_globs: &[String],
     package: &str,
     agent_bin: &str,
+    image_bin: &str,
+    cargo_cmd: &str,
 ) -> String {
     let hashfiles = hashfiles_expr(recipe_globs);
     let restore = ActionPin::CacheRestore.reference();
     let save = ActionPin::CacheSave.reference();
     let package = yaml_scalar(package);
     let agent_bin = yaml_scalar(agent_bin);
+    let image_bin = yaml_scalar(image_bin);
     format!(
         r#"      - name: Restore guest seed
         id: guest-seed
@@ -404,31 +425,74 @@ fn render_guest_seed_steps(
         run: |
           set -euo pipefail
           agent="target/$TARGET/release/{agent_bin}"
-          cargo build --locked --release --package {package} --bin {agent_bin} --target "$TARGET"
+          {cargo_cmd} build --locked --release --package {package} --bin {agent_bin} --target "$TARGET"
           test -x "$agent"
       - name: Reuse verified guest seed
         id: guest-seed-reuse
         run: |
           set -euo pipefail
           seed=".guest-seed/${{{{ matrix.arch }}}}"
-          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/rootfs.ext4" ]; then
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/vmlinux.sha256" ] || [ ! -s "$seed/rootfs.ext4" ] || [ ! -s "$seed/rootfs.sha256" ]; then
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          agent="target/$TARGET/release/{agent_bin}"
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          if ! DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/{agent_bin} $agent_dump" "$seed/rootfs.ext4" >/dev/null \
+            || ! cmp -- "$agent_dump" "$agent"; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dist/microvm
+          cp "$seed/vmlinux" "$seed/vmlinux.sha256" "$seed/rootfs.ext4" dist/microvm/
+          cp "$seed/rootfs.sha256" dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/{agent_bin}
+          sha256sum "$agent" | awk '{{print $1}}' > dist/microvm/guest-agent.sha256
           echo "restored=true" >> "$GITHUB_OUTPUT"
       - name: Download pinned kernel tarball
         if: steps.guest-seed-reuse.outputs.restored != 'true'
-        run: velnor-workflow release package-guest --arch "${{{{ matrix.arch }}}}"
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
       - name: Build guest vmlinux and rootfs.ext4
         if: steps.guest-seed-reuse.outputs.restored != 'true'
-        run: velnor-workflow release package-guest --arch "${{{{ matrix.arch }}}}"
+        run: |
+          set -euo pipefail
+          mkdir -p dist/microvm
+          agent="target/$TARGET/release/{agent_bin}"
+          {cargo_cmd} run --locked --release --package {package} --bin {image_bin} -- \
+            build --arch "${{{{ matrix.arch }}}}" --out dist/microvm --tarball linux.tar.xz \
+            --guest-agent "$agent"
+          test -s dist/microvm/vmlinux
+          test -s dist/microvm/rootfs.ext4
+          sha256sum dist/microvm/rootfs.ext4 | awk '{{print $1}}' > dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/{agent_bin}
+          sha256sum "$agent" | awk '{{print $1}}' > dist/microvm/guest-agent.sha256
       - name: Collect verified guest seed
         if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           seed=".guest-seed/${{{{ matrix.arch }}}}"
           mkdir -p "$seed"
-          echo "restored=false" >> "$GITHUB_OUTPUT"
+          cp dist/microvm/vmlinux dist/microvm/rootfs.ext4 dist/microvm/rootfs.sha256 "$seed/"
+          (cd "$seed" && sha256sum vmlinux > vmlinux.sha256)
+          (cd "$seed" && sha256sum rootfs.ext4 > rootfs.sha256)
+          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
       - name: Save guest seed
         if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
         uses: {save}
@@ -439,22 +503,138 @@ fn render_guest_seed_steps(
     )
 }
 
+fn guest_arch_matrix(config: &ProjectConfig) -> String {
+    let mut matrix = String::new();
+    for (arch, target) in [
+        ("x86_64", "x86_64-unknown-linux-gnu"),
+        ("aarch64", "aarch64-unknown-linux-gnu"),
+    ] {
+        let _ = writeln!(
+            matrix,
+            "          - arch: {arch}\n            target: {target}\n            runner: {}",
+            release_runner(config, target),
+        );
+    }
+    matrix
+}
+
 fn render_guest_payload_job(config: &ProjectConfig, release: &ReleaseSpec) -> Option<String> {
     let globs = guest_seed_recipe_globs(config);
     if globs.is_empty() {
         return None;
     }
-    let runner = yaml_scalar(&config.github_runner);
+    let (agent_bin, image_bin) = guest_payload_bins(config, &release.package)?;
     let checkout = ActionPin::Checkout.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let mut setup = String::new();
+    let workflow = WorkflowIr::from_config(config);
+    let cargo_cmd = if let Some(unit) = rust_package_unit(config, &release.package) {
+        workflow.render_tool_provisioning(&mut setup, RunnerMode::Github, unit, true);
+        "mbx"
+    } else if let Some(toolchain) = crate::config_rust_toolchain(config) {
+        render_pinned_toolchain_steps(
+            &mut setup,
+            ActionPin::CacheRestore.reference(),
+            ActionPin::CacheSave.reference(),
+            &toolchain,
+            Some(&format!(
+                "github.event_name == 'push' && github.ref == 'refs/heads/{}' && steps.rustup-toolchain.outputs.cache-hit != 'true'",
+                config.default_branch
+            )),
+        );
+        "cargo"
+    } else {
+        "cargo"
+    };
+    setup.push_str(
+        r#"      - name: Add Rust target
+        run: rustup target add "$TARGET"
+      - name: Install guest seed tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
+            mmdebstrap debootstrap arch-test
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          else
+            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+            sudo update-binfmts --enable qemu-aarch64 || true
+          fi
+"#,
+    );
     let steps = render_guest_seed_steps(
         &config.default_branch,
         &globs,
         &release.package,
-        &guest_agent_bin(release),
+        &agent_bin,
+        &image_bin,
+        cargo_cmd,
     );
+    let matrix = guest_arch_matrix(config);
     Some(format!(
-        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: {runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - arch: x86_64\n            target: x86_64-unknown-linux-gnu\n          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{steps}"
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}{steps}      - name: Upload guest payload\n        uses: {upload}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm/*\n          if-no-files-found: error\n"
     ))
+}
+
+fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool) -> String {
+    let package = yaml_scalar(&release.package);
+    let checkout = ActionPin::Checkout.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let attest = ActionPin::Attest.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let mut setup = workflow_runtime_setup_for_config(config);
+    let workflow = WorkflowIr::from_config(config);
+    if let Some(unit) = rust_package_unit(config, &release.package) {
+        workflow.render_tool_provisioning(&mut setup, RunnerMode::Github, unit, false);
+    }
+    let mut needs = vec![
+        "admit-runner".to_owned(),
+        "verify".to_owned(),
+        "build".to_owned(),
+    ];
+    if guest {
+        needs.push("guest-payload".to_owned());
+    }
+    let needs = needs.join(", ");
+    let mut steps = format!(
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{setup}      - name: Download release artifacts\n        uses: {download}\n        with:\n          path: dist\n          pattern: {}-*\n          merge-multiple: true\n",
+        canonical_lane(config),
+    );
+    let mut package_cmd = format!(
+        "          velnor-workflow release package-deb --package {package} --version \"${{VERSION#v}}\""
+    );
+    if guest {
+        let (agent_bin, image_bin) = guest_payload_bins(config, &release.package)
+            .map(|(agent, image)| (yaml_scalar(&agent), yaml_scalar(&image)))
+            .unwrap_or_default();
+        let stage_root = shell_quote(&release_package_guest_dir(config, &release.package));
+        let cargo_cmd = if rust_package_unit(config, &release.package).is_some() {
+            "mbx"
+        } else {
+            "cargo"
+        };
+        let _ = write!(
+            steps,
+            "      - name: Download guest payload\n        uses: {download}\n        with:\n          name: guest-payload-${{{{ matrix.arch }}}}\n          path: dist/microvm\n      - name: Stage guest payload\n        run: |\n          set -euo pipefail\n          arch=\"${{{{ matrix.arch }}}}\"\n          root={stage_root}\n          mkdir -p \"$root\" extracted\n          url=\"$(jq -er --arg a \"$arch\" '.tarballs[$a].url' microvm/pins.json)\"\n          sha=\"$(jq -er --arg a \"$arch\" '.tarballs[$a].sha256' microvm/pins.json)\"\n          fc_member=\"$(jq -er --arg a \"$arch\" '.tarballs[$a].firecracker_member' microvm/pins.json)\"\n          jailer_member=\"$(jq -er --arg a \"$arch\" '.tarballs[$a].jailer_member' microvm/pins.json)\"\n          curl --fail --show-error --silent --location --http1.1 \\\n            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \\\n            --retry-max-time 1800 --connect-timeout 30 --max-time 900 \\\n            -o firecracker.tgz \"$url\"\n          echo \"$sha  firecracker.tgz\" | sha256sum -c -\n          tar -xzf firecracker.tgz -C extracted\n          cp \"extracted/${{fc_member}}\" \"$root/firecracker\"\n          cp \"extracted/${{jailer_member}}\" \"$root/jailer\"\n          test -s dist/microvm/{agent_bin}\n          test -s dist/microvm/guest-agent.sha256\n          test -s dist/microvm/vmlinux\n          test -s dist/microvm/rootfs.ext4\n          test -s dist/microvm/rootfs.sha256\n          guest_agent_sha256=\"$(awk '{{print $1}}' dist/microvm/guest-agent.sha256)\"\n          rootfs_sha256=\"$(awk '{{print $1}}' dist/microvm/rootfs.sha256)\"\n          cp dist/microvm/{agent_bin} \"$root/{agent_bin}\"\n          cp dist/microvm/vmlinux \"$root/vmlinux\"\n          cp dist/microvm/rootfs.ext4 \"$root/rootfs.ext4\"\n          chmod 0755 \"$root/firecracker\" \"$root/jailer\" \"$root/{agent_bin}\"\n          {cargo_cmd} run --locked --release --package {package} --bin {image_bin} -- \\\n            stage --root \"$root\" --arch \"$arch\" \\\n            --rootfs-sha256 \"$rootfs_sha256\" \\\n            --guest-agent-sha256 \"$guest_agent_sha256\"\n"
+        );
+        package_cmd.push_str(" --guest dist/microvm --target \"${{ matrix.target }}\"");
+    }
+    let header = if guest {
+        format!(
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            guest_arch_matrix(config),
+        )
+    } else {
+        format!(
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            yaml_scalar(&config.github_runner),
+        )
+    };
+    format!(
+        "{header}{steps}      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n{package_cmd}\n      - name: Attest Debian packages\n        uses: {attest}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n"
+    )
 }
 
 fn release_runner(config: &ProjectConfig, target: &str) -> String {
@@ -944,21 +1124,15 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ));
         publish_needs.push("image".to_owned());
     }
-    if !release.consumer_repository.is_empty() {
-        let package = yaml_scalar(&release.package);
-        extra.push_str(&format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [admit-runner, verify, build]\n    runs-on: {github_runner}\n    timeout-minutes: 45\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Download release artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Build Debian packages\n        env:\n          VERSION: ${{{{ github.ref_name }}}}\n        run: |\n          set -euo pipefail\n          velnor-workflow release package-deb --package {package} --version \"${{VERSION#v}}\"\n      - name: Attest Debian packages\n        uses: {}\n        with:\n          subject-path: dist/*.deb\n      - name: Upload Debian packages\n        uses: {}\n        with:\n          name: debian-packages\n          path: dist/*.deb\n          if-no-files-found: error\n          retention-days: 2\n",
-            ActionPin::Checkout.reference(),
-            ActionPin::DownloadArtifact.reference(),
-            ActionPin::Attest.reference(),
-            ActionPin::UploadArtifact.reference(),
-        ));
-        publish_needs.push("debian".to_owned());
-    }
-    if let Some(guest_job) = render_guest_payload_job(config, release) {
-        extra.push_str(&guest_job);
+    let guest_job = render_guest_payload_job(config, release);
+    if let Some(guest_job) = &guest_job {
+        extra.push_str(guest_job);
         extra.push('\n');
         publish_needs.push("guest-payload".to_owned());
+    }
+    if !release.consumer_repository.is_empty() {
+        extra.push_str(&render_debian_job(config, release, guest_job.is_some()));
+        publish_needs.push("debian".to_owned());
     }
     if !extra.is_empty() {
         output = output.replace("\n  publish:", &format!("\n{extra}\n  publish:"));
@@ -1283,10 +1457,9 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 
 /// Maintenance keeps closed-PR pruning on the hosted image. The cache-budget
 /// lane follows the configured CI mode: Velnor for `runners = "velnor"`, and
-/// hosted otherwise. Hosted cache-budget dispatch uses the literal `SOURCE_REV`
-/// action pin (GitHub Actions rejects expressions in `uses:` versions) while
-/// `rev:` is `${{ github.sha }}` so dispatch installs HEAD through the pinned
-/// action yaml's `CONTROLLED_BOOTSTRAP` path.
+/// hosted otherwise. `uses:` stays on the `SOURCE_REV` pin (GitHub Actions
+/// rejects expressions in `uses:` versions). `rev:` is `${{ github.sha }}`
+/// only when this repository owns the setup action.
 fn render_maintenance(config: &ProjectConfig) -> String {
     let cache_lane = if config.runners == RunnerMode::Velnor {
         RunnerMode::Velnor
@@ -1308,7 +1481,7 @@ fn render_maintenance(config: &ProjectConfig) -> String {
     let setup = if cache_lane == RunnerMode::Github {
         workflow_runtime_setup_with_install_rev(
             RunnerMode::Github,
-            &github_expression("github.sha"),
+            &workflow_setup_install_rev(&config.repository),
         )
     } else {
         String::new()
@@ -1459,15 +1632,17 @@ mod tests {
             !uses_line.contains("github.sha"),
             "GitHub Actions forbids expressions in uses: versions: {uses_line}"
         );
-        let head_rev = github_expression("github.sha");
+        let expected_rev = crate::workflow_setup_install_rev(&config.repository);
         assert!(
-            workflow.contains(&format!("rev: {head_rev}")),
-            "maintenance cache-plan must install HEAD: {workflow}"
+            workflow.contains(&format!("rev: {expected_rev}")),
+            "maintenance install rev follows setup-action ownership: {workflow}"
         );
-        assert!(
-            !workflow.contains(&format!("rev: {}", crate::VELNOR_WORKFLOW_SOURCE_REV)),
-            "maintenance must not pin cache-plan to SOURCE_REV: {workflow}"
-        );
+        if config.repository != crate::workflow_setup_action_repository() {
+            assert!(
+                !workflow.contains(&format!("rev: {}", github_expression("github.sha"))),
+                "foreign maintenance must not cargo-install a foreign github.sha: {workflow}"
+            );
+        }
         assert!(
             !workflow.contains("[self-hosted,"),
             "maintenance must not select the Velnor lane: {workflow}"
@@ -1752,7 +1927,7 @@ mod tests {
             ),
             (
                 "maintenance.yml",
-                "f9041ceee42ed9d07984da77e7d64b6cb4b4014d76c44f0216eb5477797f92a6",
+                "e74f1578d7cfd692a3a0165386f87fa58ef120ed20c27aaf1503aacf56144160",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1932,6 +2107,18 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_installs_head_when_this_repository_owns_setup() {
+        let mut cfg = config(&["maintenance.yml"], None);
+        cfg.repository = crate::workflow_setup_action_repository().to_owned();
+        let workflow = super::render_maintenance(&cfg);
+        assert_maintenance_is_github_hosted(&workflow, &cfg);
+        assert!(
+            workflow.contains(&format!("rev: {}", github_expression("github.sha"))),
+            "the setup-action owner installs HEAD: {workflow}"
+        );
+    }
+
+    #[test]
     fn maintenance_uses_configured_github_runner_when_runners_are_velnor() {
         let mut cfg = config(&["maintenance.yml"], None);
         cfg.runners = RunnerMode::Velnor;
@@ -2054,6 +2241,115 @@ mod tests {
             );
             assert!(release.contains("default: github"), "{release}");
             assert!(!release.contains("default: velnor"), "{release}");
+            assert!(
+                !release.contains("guest-payload"),
+                "native release without a scanned guest image must not emit guest-payload: {release}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn native_guest_payload_uses_scanned_guest_bins() {
+        for (name, package) in [("guest-widget", "widget"), ("guest-acme", "acme-box")] {
+            let agent = format!("{package}-guest-agent");
+            let image = format!("{package}-guest-image");
+            let root = scanned_root(name);
+            must(
+                fs::write(
+                    root.join("Cargo.toml"),
+                    format!(
+                        "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                         [[bin]]\nname = \"{package}\"\npath = \"src/main.rs\"\n\n\
+                         [[bin]]\nname = \"{agent}\"\npath = \"src/bin/agent.rs\"\n\n\
+                         [[bin]]\nname = \"{image}\"\npath = \"src/bin/image.rs\"\n"
+                    ),
+                ),
+                "write guest crate manifest",
+            );
+            must(fs::create_dir_all(root.join("src/bin")), "create bin dir");
+            must(
+                fs::write(root.join("src/main.rs"), "fn main() {}\n"),
+                "write main",
+            );
+            must(
+                fs::write(root.join("src/bin/agent.rs"), "fn main() {}\n"),
+                "write agent",
+            );
+            must(
+                fs::write(root.join("src/bin/image.rs"), "fn main() {}\n"),
+                "write image",
+            );
+            must(fs::create_dir_all(root.join("microvm")), "create microvm");
+            must(
+                fs::write(
+                    root.join("microvm/pins.json"),
+                    "{\n  \"kernel_tarball\": \"https://example.invalid/linux.tar.xz\",\n  \"kernel_tarball_sha256\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n",
+                ),
+                "write pins",
+            );
+            let shape = must(
+                crate::scan::scan_shape(&root, crate::RunnerMode::Github, "main", &[]),
+                "scan guest fixture",
+            );
+            let mut scanned = crate::ProjectConfig::from(shape.clone());
+            for unit in &mut scanned.units {
+                if !unit.watch.iter().any(|path| path.contains("microvm")) {
+                    unit.watch.push("microvm/**".to_owned());
+                }
+            }
+            scanned.workflow_files = vec!["release.yml".to_owned(), "preview.yml".to_owned()];
+            scanned.release_enabled = true;
+            scanned.release = Some(ReleaseSpec {
+                kind: "native".to_owned(),
+                package: package.to_owned(),
+                packages: Vec::new(),
+                binary: package.to_owned(),
+                targets: vec![
+                    "x86_64-unknown-linux-gnu".to_owned(),
+                    "aarch64-unknown-linux-gnu".to_owned(),
+                ],
+                image: format!("ghcr.io/{package}/app"),
+                source_repository: String::new(),
+                consumer_repository: format!("{package}/apt"),
+                artifact_path: String::new(),
+                description: String::new(),
+            });
+            let surface = must(
+                super::super::generate(&root, &shape, &scanned, None),
+                "generate guest surface",
+            );
+            let preview = rendered(&surface, "preview.yml");
+            let release = rendered(&surface, "release.yml");
+            must(
+                crate::validate_guest_seed_lifecycle(&preview, "main"),
+                "preview guest seed lifecycle",
+            );
+            must(
+                crate::validate_guest_seed_lifecycle(&release, "main"),
+                "release guest seed lifecycle",
+            );
+            assert!(preview.contains(&format!("--bin {agent}")), "{preview}");
+            assert!(preview.contains(&format!("--bin {image}")), "{preview}");
+            assert!(!preview.contains("velnor-guest-"), "{preview}");
+            assert!(
+                !preview.contains("velnor-workflow release package-guest"),
+                "{preview}"
+            );
+            assert!(
+                release.contains("needs: [admit-runner, verify, build, guest-payload]"),
+                "{release}"
+            );
+            assert!(release.contains(&format!("--bin {image}")), "{release}");
+            assert!(
+                release.contains("stage --root \"$root\" --arch"),
+                "{release}"
+            );
+            assert!(release.contains("--rootfs-sha256"), "{release}");
+            assert!(release.contains("--guest-agent-sha256"), "{release}");
+            assert!(release.contains(".tarballs[$a].url"), "{release}");
+            assert!(release.contains("--guest dist/microvm"), "{release}");
+            assert!(!release.contains("velnor-guest-"), "{release}");
             let _ = fs::remove_dir_all(root);
         }
     }

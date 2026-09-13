@@ -500,11 +500,19 @@ fn analyze_rust_manifests(
             ));
         }
         if !manifest.binary_targets.is_empty() {
+            let package = manifest.package_name.as_deref().unwrap_or(&manifest.root);
             result.detected.push(format!(
-                "rust-binaries:{}:{}",
-                manifest.package_name.as_deref().unwrap_or(&manifest.root),
+                "rust-binaries:{package}:{}",
                 manifest.binary_targets.len()
             ));
+            for bin in &manifest.binary_targets {
+                if bin.ends_with("-guest-agent") {
+                    result.detected.push(format!("guest-agent:{package}:{bin}"));
+                }
+                if bin.ends_with("-guest-image") {
+                    result.detected.push(format!("guest-image:{package}:{bin}"));
+                }
+            }
         }
         if !manifest.test_targets.is_empty() || has_test_sources {
             result.detected.push(format!(

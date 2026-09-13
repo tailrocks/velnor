@@ -12,6 +12,7 @@ exclude = ["migrations/**"]
 [workflow]
 runners = "both"
 automatic = "both"
+default_branch = "main"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]

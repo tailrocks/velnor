@@ -2752,34 +2752,202 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["package", "version"])?;
+    let options = parse_options(arguments, &["package", "version", "guest", "target"])?;
     let package = required_option(&options, "package")?;
     let version = required_option(&options, "version")?;
     if !valid_package(package) || !is_artifact_version(version) {
         return Err(GeneratorError::usage("invalid package or version"));
     }
-    let status = Command::new("cargo")
-        .args(["deb", "--no-strip", "--package", package])
+    if let Some(guest) = options.get("guest") {
+        let guest = Path::new(guest);
+        if !guest.is_dir() {
+            return Err(GeneratorError::usage(format!(
+                "guest payload directory is missing: {}",
+                guest.display()
+            )));
+        }
+        let dest = cargo_package_manifest_dir(package)?.join("release/microvm");
+        copy_dir_files(guest, &dest)?;
+    }
+    let mut command = Command::new("cargo");
+    command.args([
+        "deb",
+        "--no-strip",
+        "--package",
+        package,
+        "--deb-version",
+        version,
+    ]);
+    if let Some(target) = options.get("target") {
+        if !valid_target(target) {
+            return Err(GeneratorError::usage("invalid package target"));
+        }
+        command.args(["--target", target]);
+    }
+    let status = command
         .status()
         .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
     if !status.success() {
         return Err(GeneratorError::usage("cargo deb failed"));
     }
+    collect_debian_packages(options.get("target").map(String::as_str))
+}
+
+fn cargo_package_manifest_dir(package: &str) -> Result<PathBuf, GeneratorError> {
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1", "--locked"])
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("cargo metadata failed: {error}")))?;
+    if !metadata.status.success() {
+        return Err(GeneratorError::usage("cargo metadata failed"));
+    }
+    let document: serde_json::Value = serde_json::from_slice(&metadata.stdout)
+        .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
+    document["packages"]
+        .as_array()
+        .and_then(|packages| {
+            packages.iter().find_map(|item| {
+                (item["name"].as_str() == Some(package)).then(|| {
+                    item["manifest_path"]
+                        .as_str()
+                        .map(PathBuf::from)
+                        .and_then(|path| path.parent().map(Path::to_path_buf))
+                })
+            })
+        })
+        .flatten()
+        .ok_or_else(|| GeneratorError::usage(format!("cargo package `{package}` was not found")))
+}
+
+fn copy_dir_files(src: &Path, dest: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(dest)
+        .map_err(|error| GeneratorError::io("create guest package directory", dest, &error))?;
+    let entries =
+        fs::read_dir(src).map_err(|error| GeneratorError::io("read guest payload", src, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read guest payload entry", src, &error))?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("stat guest payload entry", &from, &error))?;
+        if file_type.is_dir() {
+            copy_dir_files(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|error| GeneratorError::io("copy guest payload file", &to, &error))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_debian_packages(target: Option<&str>) -> Result<(), GeneratorError> {
+    let dist = Path::new("dist");
+    fs::create_dir_all(dist)
+        .map_err(|error| GeneratorError::io("create release directory", dist, &error))?;
+    let mut sources = vec![PathBuf::from("target/debian")];
+    if let Some(target) = target {
+        sources.push(PathBuf::from("target").join(target).join("debian"));
+    }
+    let mut copied = 0_usize;
+    for source in sources {
+        let Ok(entries) = fs::read_dir(&source) else {
+            continue;
+        };
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| GeneratorError::io("read debian output", &source, &error))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("deb") {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            fs::copy(&path, dist.join(name))
+                .map_err(|error| GeneratorError::io("copy debian package", &path, &error))?;
+            copied += 1;
+        }
+    }
+    if copied == 0 {
+        return Err(GeneratorError::usage(
+            "cargo deb produced no .deb under target/debian",
+        ));
+    }
     Ok(())
 }
 
 fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["arch"])?;
+    let options = parse_options(arguments, &["arch", "package", "bin", "agent"])?;
     let arch = required_option(&options, "arch")?;
     if !matches!(arch, "x86_64" | "aarch64") {
         return Err(GeneratorError::usage(
             "guest arch must be x86_64 or aarch64",
         ));
     }
+    let pins = Path::new("microvm/pins.json");
+    if pins.is_file() {
+        let package = required_option(&options, "package")?;
+        let bin = required_option(&options, "bin")?;
+        let agent = required_option(&options, "agent")?;
+        if !valid_package(package) || !valid_binary(bin) || !valid_binary(agent) {
+            return Err(GeneratorError::usage(
+                "invalid guest package, bin, or agent",
+            ));
+        }
+        let status = Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"
+set -euo pipefail
+url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+curl --fail --show-error --silent --location --http1.1 \
+  --connect-timeout 30 --max-time 900 \
+  -o linux.tar.xz "$url"
+echo "$sha  linux.tar.xz" | sha256sum -c -
+"#,
+            )
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("download guest kernel: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest kernel download failed"));
+        }
+        fs::create_dir_all("dist/microvm").map_err(|error| {
+            GeneratorError::io("create guest output", Path::new("dist/microvm"), &error)
+        })?;
+        let status = Command::new("cargo")
+            .args([
+                "run",
+                "--locked",
+                "--release",
+                "--package",
+                package,
+                "--bin",
+                bin,
+                "--",
+                "build",
+                "--arch",
+                arch,
+                "--out",
+                "dist/microvm",
+                "--tarball",
+                "linux.tar.xz",
+                "--guest-agent",
+                agent,
+            ])
+            .status()
+            .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+        if !status.success() {
+            return Err(GeneratorError::usage("guest image build failed"));
+        }
+        return Ok(());
+    }
     let script = Path::new("microvm/build.sh");
     if !script.is_file() {
         return Err(GeneratorError::usage(
-            "guest image requires a repository-owned microvm/build.sh",
+            "guest image requires microvm/pins.json or a repository-owned microvm/build.sh",
         ));
     }
     let status = Command::new("bash")

@@ -329,14 +329,18 @@ fn pull_request_on_velnor_opt_in_admits_automatic_pr() {
     );
     let main = generated.workflow("ci-main.yml");
     assert!(
-        main.contains("rev: ${{ github.sha }}"),
-        "Planning installs HEAD so plan understands automatic: {main}"
+        main.contains("rev: 0fa68740830638a3e16437400ff3fc1729f31fcd"),
+        "foreign Planning installs the published pin: {main}"
     );
     assert!(
         !main.contains(
             "uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@${{ github.sha }}"
         ),
         "GitHub forbids expressions in uses: {main}"
+    );
+    assert!(
+        !main.contains("rev: ${{ github.sha }}"),
+        "foreign Planning must not cargo-install a foreign github.sha: {main}"
     );
     assert!(
         !main.contains("runs-on: { group:"),

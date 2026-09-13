@@ -180,7 +180,7 @@ permissions:
 jobs:
   guest-payload:
     name: Guest payload ${{ matrix.arch }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -188,8 +188,10 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
           - arch: aarch64
             target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -197,47 +199,192 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'
+      - name: Save Rust toolchain
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Set up Mise tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: aqua:nextest-rs/nextest/cargo-nextest
+          cache: true
+      - name: Set up Mr. Boxington
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          github-cache-mode: objects
+          version: 1.8.3
+          cache-key: velnor-mbx-v3-f33a0d175c9e-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-control/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'crates/velnor-runner/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-${{ hashFiles('crates/velnor-control/**/*.rs', 'crates/velnor-control/benches/**', 'crates/velnor-control/examples/**', 'crates/velnor-control/src/**', 'crates/velnor-control/tests/**', 'crates/velnor-model/**/*.rs', 'crates/velnor-model/benches/**', 'crates/velnor-model/examples/**', 'crates/velnor-model/src/**', 'crates/velnor-model/tests/**', 'crates/velnor-runner/**/*.rs', 'crates/velnor-runner/benches/**', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/debian/postinst', 'crates/velnor-runner/debian/postrm', 'crates/velnor-runner/debian/preinst', 'crates/velnor-runner/debian/prerm', 'crates/velnor-runner/debian/velnor-control.slice', 'crates/velnor-runner/debian/velnor-controller@.service', 'crates/velnor-runner/debian/velnor-daemon.service', 'crates/velnor-runner/debian/velnor-daemon@.service', 'crates/velnor-runner/debian/velnor-doctor.service', 'crates/velnor-runner/debian/velnor-doctor@.service', 'crates/velnor-runner/debian/velnor-guardian.service', 'crates/velnor-runner/debian/velnor-job@.service', 'crates/velnor-runner/debian/velnor-jobs.slice', 'crates/velnor-runner/debian/velnor-runner.tmpfiles', 'crates/velnor-runner/debian/velnor-slot@.service', 'crates/velnor-runner/debian/velnor.env', 'crates/velnor-runner/examples/**', 'crates/velnor-runner/src/**', 'crates/velnor-runner/src/cache.rs', 'crates/velnor-runner/src/execution/mod.rs', 'crates/velnor-runner/src/executor.rs', 'crates/velnor-runner/src/leftover_disk.rs', 'crates/velnor-runner/src/node/complete.rs', 'crates/velnor-runner/src/node/guardian.rs', 'crates/velnor-runner/src/node/job.rs', 'crates/velnor-runner/src/node/slot.rs', 'crates/velnor-runner/src/release.rs', 'crates/velnor-runner/src/runner.rs', 'crates/velnor-runner/tests/**', 'crates/velnor-runner/tests/fixtures/backend-parity.yml', 'crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.service', 'crates/velnor-tools/debian/velnor-fleet-policy-audit.timer', 'crates/velnor-workflow/src/runtime.rs', 'docker/job-mise.lock', 'docker/job-ubuntu.Dockerfile', 'fleet/**', 'microvm/**', 'microvm/kernel.config', 'microvm/manifest.json', 'microvm/pins.json', 'mise.lock', 'schemas/**', 'schemas/velnor.telemetry.v1.json', 'tools/unit-collector/**') }}
+          restore-keys: |
+            velnor-mbx-v3-f33a0d175c9e-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-${{ hashFiles('.cargo/**', 'Cargo.lock', 'Cargo.toml', 'crates/velnor-control/Cargo.toml', 'crates/velnor-model/Cargo.toml', 'crates/velnor-runner/Cargo.toml', 'rust-toolchain', 'rust-toolchain.toml') }}-
+            velnor-mbx-v3-f33a0d175c9e-${{ runner.os }}-${{ runner.arch }}-rust-velnor-runner-
+          save-on-workflow-dispatch: true
+      - name: Restore mold 2.42.0 cache
+        id: mold-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Set up mold 2.42.0
+        shell: bash
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+          mkdir -p "$cache_dir"
+          if [[ ! -s "$archive" ]]; then
+            temporary="$archive.download"
+            trap 'rm -f "$temporary"' EXIT
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              --output "$temporary" \
+              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+            mv "$temporary" "$archive"
+            trap - EXIT
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+          if [[ "$(id -u)" -eq 0 ]]; then
+            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
+          else
+            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+            sudo ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld 2>/dev/null || printf /usr/bin/ld)"
+          fi
+          mold --version | grep -F "$MOLD_VERSION"
+      - name: Save mold 2.42.0 cache
+        if: (((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))) && steps.mold-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+      - name: Install guest seed tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
+            mmdebstrap debootstrap arch-test
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+          else
+            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+            sudo update-binfmts --enable qemu-aarch64 || true
+          fi
       - name: Restore guest seed
         id: guest-seed
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
-          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'crates/velnor-bench/**', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-tools/**', 'crates/velnor-workflow-contract/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'microvm/**', 'rust-toolchain.toml') }}
+          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'crates/velnor-bench/**', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow-contract/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'microvm/**', 'rust-toolchain.toml') }}
       - name: Build guest agent for rootfs
         run: |
           set -euo pipefail
           agent="target/$TARGET/release/velnor-guest-agent"
-          cargo build --locked --release --package velnor-runner --bin velnor-guest-agent --target "$TARGET"
+          mbx build --locked --release --package velnor-runner --bin velnor-guest-agent --target "$TARGET"
           test -x "$agent"
       - name: Reuse verified guest seed
         id: guest-seed-reuse
         run: |
           set -euo pipefail
           seed=".guest-seed/${{ matrix.arch }}"
-          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/rootfs.ext4" ]; then
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/vmlinux.sha256" ] || [ ! -s "$seed/rootfs.ext4" ] || [ ! -s "$seed/rootfs.sha256" ]; then
             echo "restored=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          agent="target/$TARGET/release/velnor-guest-agent"
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          if ! DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" "$seed/rootfs.ext4" >/dev/null \
+            || ! cmp -- "$agent_dump" "$agent"; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dist/microvm
+          cp "$seed/vmlinux" "$seed/vmlinux.sha256" "$seed/rootfs.ext4" dist/microvm/
+          cp "$seed/rootfs.sha256" dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
           echo "restored=true" >> "$GITHUB_OUTPUT"
       - name: Download pinned kernel tarball
         if: steps.guest-seed-reuse.outputs.restored != 'true'
-        run: velnor-workflow release package-guest --arch "${{ matrix.arch }}"
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
       - name: Build guest vmlinux and rootfs.ext4
         if: steps.guest-seed-reuse.outputs.restored != 'true'
-        run: velnor-workflow release package-guest --arch "${{ matrix.arch }}"
+        run: |
+          set -euo pipefail
+          mkdir -p dist/microvm
+          agent="target/$TARGET/release/velnor-guest-agent"
+          mbx run --locked --release --package velnor-runner --bin velnor-guest-image -- \
+            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz \
+            --guest-agent "$agent"
+          test -s dist/microvm/vmlinux
+          test -s dist/microvm/rootfs.ext4
+          sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
       - name: Collect verified guest seed
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           seed=".guest-seed/${{ matrix.arch }}"
           mkdir -p "$seed"
-          echo "restored=false" >> "$GITHUB_OUTPUT"
+          cp dist/microvm/vmlinux dist/microvm/rootfs.ext4 dist/microvm/rootfs.sha256 "$seed/"
+          (cd "$seed" && sha256sum vmlinux > vmlinux.sha256)
+          (cd "$seed" && sha256sum rootfs.ext4 > rootfs.sha256)
+          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
       - name: Save guest seed
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .guest-seed/${{ matrix.arch }}
-          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'crates/velnor-bench/**', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-tools/**', 'crates/velnor-workflow-contract/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'microvm/**', 'rust-toolchain.toml') }}
+          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'crates/velnor-bench/**', 'crates/velnor-client/**', 'crates/velnor-control/**', 'crates/velnor-model/**', 'crates/velnor-render/**', 'crates/velnor-runner/**', 'crates/velnor-tools/**', 'crates/velnor-workflow-contract/**', 'crates/velnor-workflow/**', 'crates/velnorctl/**', 'microvm/**', 'rust-toolchain.toml') }}
+      - name: Upload guest payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: guest-payload-${{ matrix.arch }}
+          path: dist/microvm/*
+          if-no-files-found: error
 
   build:
     name: Preview / ${{ matrix.target }}
