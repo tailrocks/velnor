@@ -21,6 +21,21 @@
 //!   (largest first, du-measured), and the horizon path deletes builders
 //!   idle past [`IDLE_DELETE_AFTER`]. Builders are a cache: every destructive
 //!   action degrades the next build to cold, never to wrong.
+//! * **Sizing.** A builder daemon is not free compute: its CPU/memory ceiling
+//!   is the derived slot share times its current holder count, capped at the
+//!   host budget ([`crate::container::host_budget::SlotBudget::buildkit_size`]).
+//!   Creation sizes the daemon for the holders present at birth, every setup
+//!   resizes the live daemon for the holders present now, and every
+//!   post-action release shrinks it for the holders that remain — a ceiling
+//!   fixed at creation would leave a once-shared builder permanently
+//!   oversized or a new sharer permanently throttled. (The teardown backstop
+//!   release resizes nothing; the next setup converges it.) Concurrent setups
+//!   race here by design; each
+//!   resize is one idempotent `docker update`, so the last writer wins and
+//!   the ceiling converges instead of needing a lock. An unreadable claim
+//!   file skips the resize (the size stays whatever it was) rather than
+//!   guessing a holder count, and an unobservable budget falls back to the
+//!   static operator policy instead of inventing a ceiling.
 //!
 //! Trust partitioning: the scope segment namespaces builders exactly like the
 //! persistent stores, so a fork-PR job never shares a builder with a trusted
@@ -610,6 +625,24 @@ pub(crate) fn repair_absent_holders(
     Ok(holders)
 }
 
+/// How many jobs currently hold `builder`. Sizing input only: creation and
+/// every claim/release resize the daemon ceiling for this many holders.
+/// `None` is "unreadable" — the caller skips the resize and leaves the
+/// ceiling whatever it was. A torn file still ERROR-logs with its recovery
+/// step through the shared path; unlike the reclaim paths, sizing has no
+/// fail-closed holder count to assume, so it assumes none.
+pub(crate) fn builder_holder_count(run_root: &Path, builder: &str) -> Option<usize> {
+    let path = claims_file(run_root, builder);
+    let _lock = lock_claims(builder, &path).ok()?;
+    match read_claims(&path) {
+        Ok(claims) => Some(claims.holders.len()),
+        Err(error) => {
+            log_torn_claims(builder, &path, &error);
+            None
+        }
+    }
+}
+
 /// What one cap-enforcement pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct CapReport {
@@ -905,6 +938,55 @@ pub(crate) fn stop_builder_daemon(builder: &str) -> Result<bool> {
                 Ok(false)
             } else {
                 Err(error).with_context(|| format!("stop BuildKit daemon {daemon}"))
+            }
+        }
+    }
+}
+
+/// Resize one builder's daemon ceiling to the aggregate entitlement of its
+/// current holders. One idempotent `docker update`: concurrent setups each
+/// write the size for the holders they saw, and the last writer wins, so no
+/// lock is held across the call. Unknown dimensions are left alone, and a
+/// fully unknown size is a silent no-op — sizing never invents a ceiling.
+/// Missing reads as already gone. Returns true when an update acted.
+pub(crate) fn resize_builder_daemon(
+    builder: &str,
+    cpu_milli: Option<u64>,
+    memory_bytes: Option<u64>,
+) -> Result<bool> {
+    let cpu_milli = cpu_milli.filter(|milli| *milli > 0);
+    let memory_bytes = memory_bytes.filter(|bytes| *bytes > 0);
+    if cpu_milli.is_none() && memory_bytes.is_none() {
+        return Ok(false);
+    }
+    let daemon = daemon_container_name(builder);
+    let mut args = vec!["update".to_string()];
+    if let Some(milli) = cpu_milli {
+        args.push("--cpus".to_string());
+        args.push(crate::container::host_budget::format_cpu_milli(milli));
+    }
+    if let Some(bytes) = memory_bytes {
+        args.push("--memory".to_string());
+        args.push(bytes.to_string());
+    }
+    args.push(daemon.clone());
+    match crate::docker::client::host_call(&args) {
+        Ok(_) => {
+            tracing::debug!(
+                target: "velnor.buildkit",
+                builder,
+                cpu_milli,
+                memory_bytes,
+                "resized builder daemon ceiling"
+            );
+            Ok(true)
+        }
+        Err(error) => {
+            let detail = format!("{error:#}");
+            if crate::docker::client::daemon_reports_missing(&detail) {
+                Ok(false)
+            } else {
+                Err(error).with_context(|| format!("resize BuildKit daemon {daemon}"))
             }
         }
     }
@@ -1719,6 +1801,26 @@ mod tests {
                 restarted: false,
             }
         );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn holder_count_tracks_claims_for_sizing() {
+        let root = temp_root("holder-count");
+        let run_root = root.join("run");
+        let builder = test_builder();
+        let identity = test_identity();
+
+        // No claim file yet: zero holders, not "unreadable".
+        assert_eq!(builder_holder_count(&run_root, &builder), Some(0));
+        claim_builder(&run_root, &builder, &identity, "slot-1", "velnor-job-a").unwrap();
+        assert_eq!(builder_holder_count(&run_root, &builder), Some(1));
+        claim_builder(&run_root, &builder, &identity, "slot-2", "velnor-job-b").unwrap();
+        assert_eq!(builder_holder_count(&run_root, &builder), Some(2));
+        // A torn file is unreadable: the resize is skipped, never guessed.
+        std::fs::write(claims_file(&run_root, &builder), "{torn").unwrap();
+        assert_eq!(builder_holder_count(&run_root, &builder), None);
 
         std::fs::remove_dir_all(&root).unwrap();
     }

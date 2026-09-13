@@ -138,7 +138,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=velnor-cargo-registry
         && mise exec -- mbx cache import /velnor-cache-seed/mbx-closure.tar; \
     fi; \
     cd /opt/mise/config \
-    && CARGO_TARGET_DIR=/src/target mise exec -- mbx build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow
+    && CARGO_TARGET_DIR=/src/target mise exec -- mbx build --manifest-path /src/Cargo.toml --locked --release --bin velnor-runner --bin velnorctl --bin velnor-tools --bin velnor-workflow \
+    && rm -rf /out \
+    && mkdir -m 0755 -p /out \
+    && for binary in velnor-runner velnorctl velnor-tools velnor-workflow; do \
+        install -m 0755 "/src/target/release/$binary" "/out/$binary"; \
+        sha256sum "/out/$binary" > "/out/$binary.sha256"; \
+        sha256sum --check --strict "/out/$binary.sha256"; \
+    done
 
 # Mutable-cache extraction. Only a trusted full build targets this stage: it
 # copies the build's cache mounts back out and exports the mbx closure of this
@@ -173,10 +180,10 @@ RUN apt-get update \
         git \
         jq \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=release /src/target/release/velnorctl /usr/local/bin/velnorctl
-COPY --from=release /src/target/release/velnor-runner /usr/local/bin/velnor-runner
-COPY --from=release /src/target/release/velnor-tools /usr/local/bin/velnor-tools
-COPY --from=release /src/target/release/velnor-workflow /usr/local/bin/velnor-workflow
+COPY --from=release /out/velnorctl /usr/local/bin/velnorctl
+COPY --from=release /out/velnor-runner /usr/local/bin/velnor-runner
+COPY --from=release /out/velnor-tools /usr/local/bin/velnor-tools
+COPY --from=release /out/velnor-workflow /usr/local/bin/velnor-workflow
 RUN install -d -m 0755 /usr/local/share/velnor \
     && sha256sum /usr/local/bin/velnor-workflow \
         > /usr/local/share/velnor/velnor-workflow.sha256 \

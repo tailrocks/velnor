@@ -244,7 +244,7 @@ channel. The class fix is the missing manager, not just the bump.
 | 2026-09-13 | R1-bench correction closed all five review issues: fail-closed fault residue sampling (`Result` + uncontained-on-sampling-error, network `not found` vocabulary fixed live), soak image sampling with per-round build-image teardown, zero-filled intermittent census classes, records kept for uninjected runs with the nonzero exit preserved, and spawn interception in the fault decorator with kill documented as passthrough (§110). |
 | 2026-09-13 | R2-perf BC-14 deleted the mtime pin and the persistent target layer: checkout leaves wall-clock mtimes (GitHub-hosted parity, backdated-2001 pin), the 5th bench phase is gone (`CheckoutPhase::ALL` is 4, span table exact), target materialize/publish + generation store + traversal budgets removed from the executor, `target/` resolves as an ordinary workspace path for cache/artifacts, and `VELNOR_CARGO_TARGET_PERSIST` fails loud instead of silently no-opping; measured via the R1-bench span contract (real-checkout 4-span pin, wall-clock pin, subscriber round-trip). |
 | 2026-09-13 | R2-perf BC-14 correction closed both review issues: the shipped `velnor.env` no longer advertises the removed `VELNOR_CARGO_TARGET_PERSIST` knob (block deleted per the no-legacy rule; the daemon's fail-loud admission error remains the operator guidance), and the native rust-cache covered summary reports `Store: host-persistent cache class` with the `persistent_target` local renamed to `covered_by_persistent_storage`, matching the sibling actions/cache copy since coverage is static stores only — pinned by a no-knob env assertion and a summary assertion on the warm-static-directories test. |
-| 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §113: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
+| 2026-09-13 | R0-f4-warm remediated the BC-14 warm-build regression on the non-mbx Rust paths without touching the pin deletion: explicit-sccache and `MBX_DISABLE` opt-out jobs now check out into stable per-slot workspaces (`<slot>/stable-workspaces/<scope>/<repo-id>/workspace`, trust+repo namespaced, reaper-safe, 30 GiB LRU per slot) where `clean` keeps the anchored top-level `target/`; same-SHA re-checkout rewrites nothing so wall-clock mtimes stay fresh, new SHAs rebuild exactly the changed crates. New floor documented in code, `execution.mdx`, and §115: warm same-SHA on a warm slot is a fresh check, fingerprint misses pay content-hit rebuild (sccache hits per unit; opt-out full recompile). sccache-through-mbx stacking rejected (exclusivity by design; a hit would bypass mbx's managed-target bookkeeping with no documented stacking contract). Pinned by 16 tests incl. a real-git + real-cargo zero-unit rebuild pin with a build-script + proc-macro fixture. |
 
 ### BC-5 — Four disjoint lifecycle models, none of which is the control flow
 
@@ -6254,7 +6254,135 @@ Gates observed in this worktree (base `4e67b6fa`, branch
 --locked --all-features --package velnor-runner` 1924 passed, 0 failed,
 1 skipped (2 new tests).
 
-## 113. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
+## 113. R0-sem fast-follow: nested-scope corrections to F1–F7 — 2026-09-13
+
+Nine review corrections to #699 (branch `r0-sem-corr` from
+`origin/main` at `f841ced2`), each verified against upstream
+`actions/runner` `main`:
+
+- **Nested composite umbrellas.** Nested `CompositeStart` only bumped a
+  depth counter and nested `End` only decremented it, so nested outcomes
+  were never applied and parent `failure()` missed nested failures.
+  The single frame + counter is now a frame stack: every evaluated
+  umbrella pushes a frame, inner steps absorb into the innermost one,
+  and a nested `End` pops, applies the nested umbrella result to the
+  parent scope (the pop already removed the nested scope), and merges
+  the nested log into the parent frame. Nested Skip and EvalFailed are
+  seeded frames applied the same way at the nested `End` (applying at
+  `Start` would land in the discarded own scope); a failed nested
+  umbrella also pushes to results so the conclusion scan sees it.
+- **Umbrella `continue-on-error`.** `CompositeStart` carries the
+  umbrella's own flag; the planner no longer ORs the parent flag into
+  inner steps (upstream `ApplyContinueOnError` converts the umbrella
+  conclusion only). At `End` the ignored umbrella conclusion converts
+  the composite's own `results` range with it, so the job-conclusion
+  scan honors the flag while inner `steps.<id>` conclusions stay
+  failure. The umbrella's own condition failure never converts
+  (upstream completes it without running `RunStepAsync`).
+- **Embedded condition-eval break.** An unevaluable inner `if` now
+  breaks the inner loop (remaining inners skip) while the composite
+  outputs still process and the job continues — upstream
+  `CompositeActionHandler` `break` + `ProcessOutputs`.
+- **Display-name best-effort.** Step and umbrella display-name failures
+  carry the raw name and run instead of recording a failed step
+  (upstream `TryUpdateDisplayName` catch only traces).
+- **Post drain.** A throwing JS/Docker/native post records a failed
+  post step and the drain continues with the summary; the drain never
+  returns `Err` (the old `step_error` is gone).
+- **Command-result merge.** A failed workflow command sets
+  `StepCommandState::command_failed` (upstream `CommandResult`), merged
+  into step failure at the script/JS/Docker result sites — an invalid
+  `::echo::` value fails an otherwise green step.
+- **`add-mask` echo.** With echo on, `add-mask` emits the fixed
+  `::add-mask::***` line (upstream `AddMaskCommandExtension`), never
+  the secret; the old never-echoes test expectation is fixed.
+- **`stop-commands`/resume.** The stop and resume lines output input
+  unconditionally and other lines while stopped fall through verbatim
+  (upstream `TryProcessCommand` + `OutputManager`), instead of always
+  being consumed. The render pass has no opt-in policy, so it stops on
+  any stop line while the parse pass (which owns effects) still refuses
+  invalid tokens — display-only simplification, noted in code.
+- **Step debug source.** `step_debug()` reads `immutable_env` (the
+  server `Step_Debug` snapshot) instead of workflow-writable env, which
+  a step could spoof via `GITHUB_ENV` / `::set-env`.
+
+Tests: 9 new (nested-umbrella parent-scope, umbrella
+continue-on-error, inner-loop break + outputs, umbrella raw display,
+throwing post, command-result merge, step-debug spoof, add-mask echo,
+stop/resume render) plus 4 contract updates (display-name
+best-effort, 2 composite-expansion no-OR, add-mask echo expectation).
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --all-targets --locked` zero warnings; strict
+clippy clean on runner (`--all-targets -D warnings`); serial runner
+lib 1846 passed, 0 failed, 1 ignored; serial runner lib with
+`test-support` 1900 passed, 0 failed, 1 ignored.
+
+Out of scope, noted for follow-up: a nested umbrella's own condition
+error breaks only the nested region in Velnor while upstream breaks
+the parent loop (the failure still records in the parent scope and the
+job still fails either way); `steps` context stays job-global, so a
+job-level implicit `success()` after an ignored umbrella failure still
+reads the unconverted inner failure.
+
+## 114. R0-secc: checkout symlink containment + concurrency F1–F3 (service ladder, job wall clock, bounded terminal uploads) — 2026-09-13
+
+Base `origin/main` at `f841ced2` (post-#699). Four small verifier FAILs, one
+fix each:
+
+- **Security — checkout destination symlink traversal.** `checkout_path`
+  rejects absolute paths and `..` lexically, but the destination is created
+  and written host-side (`create_dir_all`, git, the `.git/config`
+  credential write), which all follow symlinks: a second checkout whose
+  `path:` traverses a link an earlier checkout's repo content planted
+  (`first/link/escape`) is lexically clean yet lands outside the workspace.
+  `execute_checkout_with_mirror` now takes the workspace root and refuses,
+  before any side effect, any destination whose nearest existing ancestor
+  canonicalizes outside it — the pages/artifact canonicalize-plus-containment
+  pattern from `executor.rs`. The check runs at execution time because plan
+  time cannot see links that do not exist yet. Two executor fixtures whose
+  plan destination sat beside (not under) the container workspace were
+  aligned with the production invariant (`runner.rs` joins plans under the
+  same root the spec carries).
+- **F1 — service containers never ladder-terminated.**
+  `ContainerRole::Service` terminates at `Forced` but nothing registered
+  Service targets. The broker-cancellation poller now registers the job's
+  services (names from `github_adapter::service_container_names`, the same
+  authority as the spec) alongside the sidecar and job container via the new
+  `register_owned_containers` helper; guards live in the poller task, so the
+  set is bounded by the job's own service list and deregisters on drop.
+- **F2 — job `timeout-minutes` never enforced.**
+  `CancelReason::JobTimeout` had no producer. New `arm_job_timeout`
+  enforcer in `execution/cancel.rs`: one watchdog thread per armed job
+  requests `JobTimeout` when the collective wall clock elapses, disarms on
+  drop (no join, so async teardown never blocks). Armed in
+  `handle_job_request` on the live job token with GitHub's default 360 min
+  (`DEFAULT_JOB_TIMEOUT`), marking the job canceled exactly as a server
+  message would.
+- **F3 — unbounded Azure blob PUT on the terminal completion path.**
+  `TwirpResultsClient` built its HTTP client with no timeout, and
+  `complete_run_service_job` awaited both log uploads before `CompleteJob`
+  with no bound while lease renewal continued. The client now carries a
+  30s per-request bound (`new_with_timeout` keeps tests fast), and the two
+  uploads race under a 180s outer bound (`upload_terminal_logs_for`, in the
+  `publish_with_timeout` shape) that exceeds the artifact leg's own 120s
+  grace floor.
+
+Tests: 6 new (planted-symlink refusal, owned-container registration +
+no-leak, enforcer fires `JobTimeout`, enforcer disarms on drop, stalled PUT
+fails fast, terminal race outward-bounded). Efficacy proven by mutation:
+with the containment call stubbed the symlink test fails; with the client
+`.timeout` removed the stalled PUT rides the full 30s delay and its test
+fails.
+
+Gates observed in this worktree: `cargo fmt --all -- --check` clean;
+`cargo check --workspace --locked` clean; strict clippy clean on runner
+(`--all-targets --locked --features test-support -D warnings`); serial
+runner lib with `test-support` 1897 passed, 0 failed, 1 ignored. (One
+parallel-only flake in untouched `checkout_emits_the_four_bench_phase_spans`,
+passing alone, matching the §111 note.)
+
+## 115. R0-f4-warm: stable per-slot workspaces for the non-mbx Rust paths — 2026-09-13
 
 BC-14 deleted the mtime pin and the persistent target layer for timestamp
 soundness. The measured effect on warm same-SHA cross-checkout: the mbx

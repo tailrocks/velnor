@@ -22,6 +22,26 @@
 //! unobservable CPU capacity produces no `CARGO_BUILD_JOBS`, no `--cpus`, and
 //! no scheduler sizing at all, because sizing to an invented number is how the
 //! defect got here in the first place.
+//!
+//! BuildKit sizing follows the same budget. A shared builder daemon does the
+//! compiling for every job holding it, so its ceiling is the aggregate
+//! entitlement of its current holders — the slot share times the holder
+//! count — capped at the host budget:
+//!
+//! * one holder gets exactly its slot's share, the same ceiling as its job
+//!   container, so a lone build cannot eat the machine;
+//! * every slot holding one builder converges on the whole host budget, which
+//!   is correct: the daemon is doing the work of the whole machine;
+//! * an unobservable budget sizes nothing, and setup falls back to the static
+//!   `resource_options` spelling of operator policy rather than inventing a
+//!   ceiling.
+//!
+//! See [`SlotBudget::buildkit_size`]. The holder count comes from the claim
+//! file ([`crate::buildkit`]); creation sizes the daemon, every setup resizes
+//! it for the current holders, and every post-action release shrinks it for
+//! the holders that remain, so the ceiling tracks sharing instead of being
+//! fixed at whatever the first job happened to need. The teardown backstop
+//! release resizes nothing; the next setup converges it.
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -270,6 +290,48 @@ impl SlotBudget {
         env
     }
 
+    /// CPU/memory ceiling for one shared buildkitd doing the compiling for
+    /// `holders` concurrent jobs: the slot share times the holder count,
+    /// capped at the host budget. `declared_memory` is the tightest explicit
+    /// operator/workflow `--memory` limit, if any; it narrows the aggregate
+    /// the same way it narrows one job container, never widens it. (Declared
+    /// `--cpus` needs no parameter: [`Self::capped_by_container_cpus`] already
+    /// narrowed this share before sizing.) A zero or unobservable share sizes
+    /// nothing — a daemon ceiling of zero would refuse to run, and an
+    /// invented ceiling is the defect this module exists to remove.
+    pub(crate) fn buildkit_size(
+        &self,
+        holders: NonZeroU32,
+        declared_memory: Option<u64>,
+    ) -> BuildkitSize {
+        let count = u64::from(holders.get());
+        let cpu_milli = match (&self.docker_cpu_milli, &self.host.cpu_milli) {
+            (Observation::Observed(share), Observation::Observed(host)) => {
+                let sized = share.saturating_mul(count).min(*host);
+                (sized > 0).then_some(sized)
+            }
+            _ => None,
+        };
+        let memory_bytes = match (&self.memory_bytes, &self.host.memory_bytes) {
+            (Observation::Observed(share), Observation::Observed(host)) => {
+                // The pool every slot divides; slot shares times the slot
+                // count land back here (modulo the floor), so the cap only
+                // ever binds a holder count the slot model cannot explain.
+                let pool = host / 100 * SCHEDULER_MEMORY_PERCENT;
+                let mut sized = share.saturating_mul(count).min(pool);
+                if let Some(declared) = declared_memory {
+                    sized = sized.min(declared.saturating_mul(count));
+                }
+                (sized > 0).then_some(sized)
+            }
+            _ => None,
+        };
+        BuildkitSize {
+            cpu_milli,
+            memory_bytes,
+        }
+    }
+
     /// One line explaining the budget, its division, and any workflow value it
     /// overrode. Silent resource policy is indistinguishable from a bug, so
     /// this is meant to be printed, not inspected.
@@ -314,6 +376,38 @@ impl SlotBudget {
     }
 }
 
+/// CPU/memory ceiling for one shared buildkitd, derived from the slot
+/// budget by [`SlotBudget::buildkit_size`]. `None` is "this dimension is
+/// unknown": the caller sizes nothing there rather than guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BuildkitSize {
+    pub(crate) cpu_milli: Option<u64>,
+    pub(crate) memory_bytes: Option<u64>,
+}
+
+impl BuildkitSize {
+    /// True when neither dimension is known: there is no derived ceiling at
+    /// all, and the caller falls back to the static operator policy.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.cpu_milli.is_none() && self.memory_bytes.is_none()
+    }
+
+    /// Render as docker-container `--driver-opt` entries: the cgroup v1
+    /// `cpu-period`/`cpu-quota` pair buildx documents for CPU, exact bytes
+    /// for memory so rounding never widens the share.
+    pub(crate) fn driver_opts(&self) -> Vec<String> {
+        let mut opts = Vec::new();
+        if let Some(milli) = self.cpu_milli.filter(|milli| *milli > 0) {
+            opts.push("cpu-period=100000".to_owned());
+            opts.push(format!("cpu-quota={}", milli.saturating_mul(100)));
+        }
+        if let Some(bytes) = self.memory_bytes.filter(|bytes| *bytes > 0) {
+            opts.push(format!("memory={bytes}"));
+        }
+        opts
+    }
+}
+
 fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
     if !cpus.is_finite() || cpus <= 0.0 {
         return None;
@@ -323,7 +417,9 @@ fn cpu_milli_from_cpus(cpus: f64) -> Option<u64> {
     Some(milli)
 }
 
-fn format_cpu_milli(milli: u64) -> String {
+/// Milli-CPUs as the decimal Docker flags accept (`3800` becomes `3.8`).
+/// Shared with the BuildKit daemon resize, which speaks `docker update`.
+pub(crate) fn format_cpu_milli(milli: u64) -> String {
     let whole = milli / 1000;
     let fraction = milli % 1000;
     if fraction == 0 {
@@ -830,5 +926,90 @@ mod tests {
         assert_eq!(parse_cpu_max("max 100000"), None);
         assert_eq!(parse_cpu_max("50000 100000"), Some(500));
         assert_eq!(parse_cpu_max("1520000 100000"), Some(15_200));
+    }
+
+    /// 16 CPUs and 16 GiB with a 4-slot daemon: the tree every BuildKit
+    /// sizing test shares.
+    fn sixteen_cpu_four_slot_tree(label: &str) -> (SyntheticRoot, SlotBudget) {
+        let root = SyntheticRoot::new(label);
+        write(root.path(), "proc/meminfo", "MemTotal:       16777216 kB\n");
+        write(
+            root.path(),
+            "sys/fs/cgroup/velnor-jobs.slice/cpu.max",
+            "1600000 100000\n",
+        );
+        let budget = HostBudget::observe(root.path(), Some(16));
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        assert_eq!(slot.docker_cpu_milli, Observation::Observed(4000));
+        (root, slot)
+    }
+
+    #[test]
+    fn a_lone_builder_holder_gets_exactly_its_slot_share() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("a_lone_builder_holder");
+        let size = slot.buildkit_size(NonZeroU32::MIN, None);
+        assert_eq!(size.cpu_milli, Some(4000));
+        let slot_mem = *slot.memory_bytes.value().unwrap();
+        assert_eq!(size.memory_bytes, Some(slot_mem));
+        assert_eq!(
+            size.driver_opts(),
+            vec![
+                "cpu-period=100000".to_owned(),
+                "cpu-quota=400000".to_owned(),
+                format!("memory={slot_mem}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn shared_builder_size_grows_with_holders_and_stops_at_the_host() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("shared_builder_grows");
+        let host_mem = *slot.host.memory_bytes.value().unwrap();
+        let pool = host_mem / 100 * 85;
+
+        let two = slot.buildkit_size(NonZeroU32::new(2).unwrap(), None);
+        assert_eq!(two.cpu_milli, Some(8000));
+        assert_eq!(two.memory_bytes, Some(pool / 4 * 2));
+
+        // All four slots on one builder: the whole machine, which is
+        // correct — the daemon is doing the whole machine's compiling.
+        let four = slot.buildkit_size(NonZeroU32::new(4).unwrap(), None);
+        assert_eq!(four.cpu_milli, Some(16_000));
+        assert_eq!(four.memory_bytes, Some(pool / 4 * 4));
+
+        // A holder count the slot model cannot explain still never exceeds
+        // the host: the caps bind, the multiplication does not escape.
+        let absurd = slot.buildkit_size(NonZeroU32::new(64).unwrap(), None);
+        assert_eq!(absurd.cpu_milli, Some(16_000));
+        assert_eq!(absurd.memory_bytes, Some(pool));
+    }
+
+    #[test]
+    fn a_declared_memory_limit_narrows_the_builder_aggregate() {
+        let (_root, slot) = sixteen_cpu_four_slot_tree("declared_memory_narrows");
+        let one_gb = 1024 * 1024 * 1024;
+        let size = slot.buildkit_size(NonZeroU32::new(2).unwrap(), Some(one_gb));
+        // Two holders entitled to 1 GiB each: 2 GiB, not two slot shares.
+        assert_eq!(size.memory_bytes, Some(2 * one_gb));
+        // A declared limit above the derived share changes nothing.
+        let loose = slot.buildkit_size(NonZeroU32::MIN, Some(64 * one_gb));
+        assert_eq!(loose.memory_bytes, slot.memory_bytes.value().copied());
+    }
+
+    #[test]
+    fn an_unobservable_budget_sizes_no_builder() {
+        let root = SyntheticRoot::new("an_unobservable_budget_sizes_no_builder");
+        let budget = HostBudget::observe(root.path(), None);
+        let slot = budget.per_slot(NonZeroU32::new(4).unwrap());
+        let size = slot.buildkit_size(NonZeroU32::new(2).unwrap(), None);
+        assert_eq!(
+            size,
+            BuildkitSize {
+                cpu_milli: None,
+                memory_bytes: None,
+            }
+        );
+        assert!(size.is_empty());
+        assert!(size.driver_opts().is_empty());
     }
 }

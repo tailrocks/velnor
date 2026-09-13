@@ -4007,6 +4007,13 @@ struct WorkflowStepsUpdateRequest<'a> {
     workflow_run_backend_id: &'a str,
 }
 
+/// Per-request bound for the Results Service calls issued through
+/// [`TwirpResultsClient`]'s own HTTP client — the Azure blob PUTs and the
+/// step-summary Twirp calls. (The step/job-log Twirp calls already carry
+/// their own 30s bound via `github_json_request`.) Without this, a stalled
+/// blob endpoint wedges terminal completion, which awaits the uploads.
+const TWIRP_RESULTS_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Client for the GitHub Actions Results Service Twirp API.
 pub struct TwirpResultsClient {
     results_service_url: String,
@@ -4016,6 +4023,14 @@ pub struct TwirpResultsClient {
 
 impl TwirpResultsClient {
     pub fn new(results_service_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        Self::new_with_timeout(results_service_url, token, TWIRP_RESULTS_REQUEST_TIMEOUT)
+    }
+
+    pub(crate) fn new_with_timeout(
+        results_service_url: impl Into<String>,
+        token: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self> {
         let results_service_url = results_service_url.into();
         let results_service_url = validate_known_service_url(
             &results_service_url,
@@ -4029,6 +4044,7 @@ impl TwirpResultsClient {
                 .to_string(),
             token: token.into(),
             http: Client::builder()
+                .timeout(timeout)
                 .redirect(reqwest::redirect::Policy::none())
                 .user_agent(RUNNER_USER_AGENT)
                 .build()

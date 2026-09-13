@@ -274,10 +274,53 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
 /// One Actions cache entry as the maintenance job collects it from the API.
 #[derive(Deserialize)]
 struct CacheEntryRecord {
+    #[serde(deserialize_with = "deserialize_cache_id")]
     id: String,
     key: String,
     size_in_bytes: u64,
     created_at: String,
+}
+
+/// Accept the Actions API's numeric cache id and carry it losslessly as the
+/// planner's string identity. The API has shipped both JSON shapes; treating
+/// its current numeric encoding as invalid turns retention into a cold-cache
+/// failure instead of the bounded maintenance it exists to perform.
+fn deserialize_cache_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct CacheIdVisitor;
+
+    impl serde::de::Visitor<'_> for CacheIdVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a numeric or string Actions cache id")
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.to_owned())
+        }
+    }
+
+    deserializer.deserialize_any(CacheIdVisitor)
 }
 
 /// Compute the retention eviction plan for the Actions cache account: the same
@@ -2260,6 +2303,17 @@ mod tests {
     const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
     const POLICY_REVISION: &str = "a1cbfcbe5ab179032e37125f0383cdcae8183c8c";
 
+    #[expect(
+        clippy::panic,
+        reason = "tests need setup failures to name their root cause"
+    )]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
     fn policy_fixture(
         name: &str,
         workflow: &str,
@@ -2286,6 +2340,19 @@ mod tests {
             format!("runners = \"{runners}\"\n"),
         )?;
         Ok(root)
+    }
+
+    #[test]
+    fn numeric_actions_cache_ids_become_lossless_internal_strings() {
+        let record: CacheEntryRecord = must(
+            serde_json::from_str(
+                r#"{"id":7636963307,"key":"example-docker-seed-Linux-X64",
+                "size_in_bytes":1,"created_at":"2026-09-01T00:00:00Z"}"#,
+            ),
+            "deserialize a numeric Actions cache id",
+        );
+        assert_eq!(record.id, "7636963307");
+        assert_eq!(record.key, "example-docker-seed-Linux-X64");
     }
 
     fn run_policy(root: std::path::PathBuf) -> Result<bool, Box<dyn Error>> {

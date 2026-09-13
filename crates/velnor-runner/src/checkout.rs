@@ -168,11 +168,16 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
 }
 
 #[cfg(test)]
-pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan, log: &mut Vec<String>) -> Result<()>
+pub fn execute_checkout<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    workspace_host: &Path,
+) -> Result<()>
 where
     R: CommandRunner,
 {
-    execute_checkout_with_mirror(runner, plan, log, None)
+    execute_checkout_with_mirror(runner, plan, log, None, workspace_host)
 }
 
 pub fn execute_checkout_with_mirror<R>(
@@ -180,10 +185,14 @@ pub fn execute_checkout_with_mirror<R>(
     plan: &CheckoutPlan,
     log: &mut Vec<String>,
     mirror_store: Option<&Path>,
+    workspace_host: &Path,
 ) -> Result<()>
 where
     R: CommandRunner,
 {
+    // Fail closed before any side effect: a destination that escapes the
+    // workspace must not even reap, let alone be created or credentialed.
+    ensure_checkout_destination_contained(workspace_host, &plan.destination)?;
     // Any credential an aborted job left on this host is unowned once its
     // process is gone; take it out before adding another one.
     reap_stale_checkout_credentials().context("reap stale checkout credentials")?;
@@ -237,6 +246,44 @@ where
     // ordinary wall-clock incremental compilation, while cross-checkout
     // reuse without a stable path still comes only from content-addressed
     // caches (mbx/sccache), which do not read mtimes at all.
+    Ok(())
+}
+
+/// Refuse a checkout destination that escapes `workspace_host` through a
+/// symlink, before anything is created or credentialed there.
+///
+/// `checkout_path` rejects absolute paths and `..` lexically, but the
+/// destination is created and written host-side (`create_dir_all`, git, the
+/// `.git/config` credential write), which all follow symlinks. A second
+/// checkout whose `path:` traverses a link an earlier checkout's repo content
+/// planted (`first/link/escape`) is lexically clean yet lands outside the
+/// workspace. This runs at execution time — plan time cannot see links that
+/// do not exist yet — and mirrors the pages/artifact containment in
+/// `executor.rs`: canonicalize both sides, require prefix containment.
+/// Missing trailing components cannot hide a symlink, so only the nearest
+/// existing ancestor is resolved.
+fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(workspace_host)
+        .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
+    let workspace = fs::canonicalize(workspace_host)
+        .with_context(|| format!("resolve checkout workspace {}", workspace_host.display()))?;
+    let mut existing: &Path = destination;
+    while !existing.exists() {
+        existing = existing.parent().with_context(|| {
+            format!(
+                "checkout destination '{}' has no existing ancestor",
+                destination.display()
+            )
+        })?;
+    }
+    let canonical = fs::canonicalize(existing)
+        .with_context(|| format!("resolve checkout destination '{}'", destination.display()))?;
+    if !canonical.starts_with(&workspace) {
+        bail!(
+            "refusing checkout destination '{}': resolves outside the workspace",
+            destination.display()
+        );
+    }
     Ok(())
 }
 
@@ -1794,7 +1841,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), &temp).unwrap();
 
         assert_eq!(runner.calls[0].0, "git");
         assert_eq!(runner.calls[0].1[0], "init");
@@ -1980,6 +2027,7 @@ mod tests {
             &mut runner,
             &test_checkout_plan(root.join("workspace")),
             &mut Vec::new(),
+            &root,
         )
         .expect_err("checkout must stop when stale credentials cannot be inspected");
 
@@ -2350,7 +2398,14 @@ mod tests {
         let mut runner = ProcessCommandRunner;
         let mut log = Vec::new();
 
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store())).unwrap();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
 
         let head = runner
             .run(
@@ -2465,8 +2520,14 @@ mod tests {
             initial_lock_available: None,
         };
 
-        execute_checkout_with_mirror(&mut runner, &plan, &mut Vec::new(), Some(&fixture.store()))
-            .unwrap();
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut Vec::new(),
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .unwrap();
 
         assert_eq!(
             runner.checkout_lock_available,
@@ -2522,6 +2583,7 @@ mod tests {
             &plan,
             &mut Vec::new(),
             Some(&fixture.store()),
+            &fixture.root,
         )
         .unwrap_err();
         assert!(
@@ -2565,6 +2627,7 @@ mod tests {
             &fixture.plan(fixture.root.join("warm")),
             &mut Vec::new(),
             Some(&store),
+            &fixture.root,
         )
         .unwrap();
         assert_eq!(fetches.swap(0, std::sync::atomic::Ordering::SeqCst), 1);
@@ -2572,13 +2635,20 @@ mod tests {
             for index in 0..6 {
                 let plan = fixture.plan(fixture.root.join(format!("matrix-{index}")));
                 let store = store.clone();
+                let workspace = fixture.root.clone();
                 let fetches = std::sync::Arc::clone(&fetches);
                 scope.spawn(move || {
                     let mut runner = CountingRunner {
                         network_fetches: fetches,
                     };
-                    execute_checkout_with_mirror(&mut runner, &plan, &mut Vec::new(), Some(&store))
-                        .unwrap();
+                    execute_checkout_with_mirror(
+                        &mut runner,
+                        &plan,
+                        &mut Vec::new(),
+                        Some(&store),
+                        &workspace,
+                    )
+                    .unwrap();
                 });
             }
         });
@@ -2598,6 +2668,45 @@ mod tests {
                 "one"
             );
         }
+    }
+
+    /// A second checkout whose `path:` traverses a symlink an earlier
+    /// checkout's repo content planted is lexically clean (`first/link/…`
+    /// has no `..`) yet resolves outside the workspace. Execution must
+    /// refuse it before anything is created or credentialed there.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_destination_traversing_a_planted_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-symlink-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("first")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("first/link")).unwrap();
+
+        let mut plan = test_checkout_plan(workspace.join("first/link/escape"));
+        plan.persist_credentials = true;
+        plan.token = Some("token".into());
+        let mut runner = RecordingRunner::default();
+        let error = execute_checkout(&mut runner, &plan, &mut Vec::new(), &workspace)
+            .expect_err("a symlink escape must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        assert!(
+            !outside.join("escape").exists(),
+            "nothing may be created outside the workspace"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
@@ -2709,7 +2818,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new(), &temp).unwrap();
 
         let fetch = runner
             .calls
@@ -3598,7 +3707,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             let mut runner = ProcessCommandRunner;
             let mut log = Vec::new();
-            execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&store))
+            execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&store), &fixture.root)
                 .expect("checkout over a file:// origin succeeds");
         });
 
@@ -3648,8 +3757,14 @@ mod tests {
         let started = std::time::SystemTime::now();
         let mut runner = ProcessCommandRunner;
         let mut log = Vec::new();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("checkout over a file:// origin succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("checkout over a file:// origin succeeds");
 
         let mut checked = 0usize;
         let mut pending = vec![workspace];
@@ -3716,16 +3831,28 @@ mod tests {
         plan.preserve_target = true;
         let mut runner = ProcessCommandRunner;
         let mut log = Vec::new();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("first checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("first checkout succeeds");
         let before = tracked_mtimes(&workspace);
         assert!(!before.is_empty());
         let artifact = workspace.join("target").join("artifact");
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
         std::fs::write(&artifact, b"fingerprint").unwrap();
         std::fs::write(workspace.join("scratch.txt"), b"stray").unwrap();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("second checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("second checkout succeeds");
         assert!(artifact.is_file(), "stable clean must keep target/");
         assert!(
             !workspace.join("scratch.txt").exists(),
@@ -3749,13 +3876,25 @@ mod tests {
         assert!(!plan.preserve_target);
         let mut runner = ProcessCommandRunner;
         let mut log = Vec::new();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("first checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("first checkout succeeds");
         let artifact = workspace.join("target").join("artifact");
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
         std::fs::write(&artifact, b"fingerprint").unwrap();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("second checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("second checkout succeeds");
         assert!(!artifact.exists(), "ephemeral clean must remove target/");
     }
 
@@ -3807,8 +3946,14 @@ mod tests {
         plan.preserve_target = true;
         let mut runner = ProcessCommandRunner;
         let mut log = Vec::new();
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("checkout succeeds");
         let cargo_home = fixture.root.join("cargo-home");
         std::fs::create_dir_all(&cargo_home).unwrap();
 
@@ -3820,8 +3965,14 @@ mod tests {
             "the fixture must compile on a cold target"
         );
 
-        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
-            .expect("same-SHA re-checkout succeeds");
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut log,
+            Some(&fixture.store()),
+            &fixture.root,
+        )
+        .expect("same-SHA re-checkout succeeds");
         assert_eq!(
             tracked_mtimes(&workspace),
             before,

@@ -1107,17 +1107,19 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           fi
           arch-test arm64
 
-      - name: Download pinned kernel tarball
-        run: |
-          set -euo pipefail
-          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
-          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-          curl --fail --show-error --silent --location --http1.1 \
-            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
-            --retry-max-time 1800 \
-            --connect-timeout 30 --max-time 900 \
-            -o linux.tar.xz "$url"
-          echo "$sha  linux.tar.xz" | sha256sum -c -
+      # Guest products are tiny immutable payloads, not compilation state.
+      # Their identity is the complete guest recipe/source closure; github.sha
+      # is deliberately absent. A prefix restores the newest compatible seed,
+      # and an exact miss mints the matching immutable generation after its
+      # digest and embedded agent have been revalidated.
+      - name: Restore guest seed
+        id: guest-seed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .guest-seed/${{ matrix.arch }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-guest-seed-${{ matrix.arch }}-
 
       - name: Build guest agent for rootfs
         run: |
@@ -1139,7 +1141,52 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
               ;;
           esac
 
+      - name: Reuse verified guest seed
+        id: guest-seed-reuse
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${GUEST_ARCH}"
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/vmlinux.sha256" ] || [ ! -s "$seed/rootfs.ext4" ] || [ ! -s "$seed/rootfs.sha256" ]; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A prefix restore of an older generation must rebuild, not fail the job.
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          agent="target/$TARGET/release/velnor-guest-agent"
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          if ! DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" "$seed/rootfs.ext4" >/dev/null \
+            || ! cmp -- "$agent_dump" "$agent"; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dist/microvm
+          cp "$seed/vmlinux" "$seed/vmlinux.sha256" "$seed/rootfs.ext4" dist/microvm/
+          cp "$seed/rootfs.sha256" dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download pinned kernel tarball
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
+
       - name: Build guest vmlinux and rootfs.ext4
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
           mkdir -p dist/microvm
@@ -1163,6 +1210,28 @@ __VELNOR_PINNED_TOOLCHAIN_STEPS__
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
           cp "$agent" dist/microvm/velnor-guest-agent
           sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
+
+      - name: Collect verified guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${GUEST_ARCH}"
+          mkdir -p "$seed"
+          cp dist/microvm/vmlinux dist/microvm/rootfs.ext4 dist/microvm/rootfs.sha256 "$seed/"
+          (cd "$seed" && sha256sum vmlinux > vmlinux.sha256)
+          (cd "$seed" && sha256sum rootfs.ext4 > rootfs.sha256)
+          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
+          test -s "$seed/vmlinux"
+          test -s "$seed/vmlinux.sha256"
+          test -s "$seed/rootfs.ext4"
+
+      - name: Save guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .guest-seed/${{ matrix.arch }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -2183,17 +2252,19 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
           fi
           arch-test arm64
 
-      - name: Download pinned kernel tarball
-        run: |
-          set -euo pipefail
-          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
-          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
-          curl --fail --show-error --silent --location --http1.1 \
-            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
-            --retry-max-time 1800 \
-            --connect-timeout 30 --max-time 900 \
-            -o linux.tar.xz "$url"
-          echo "$sha  linux.tar.xz" | sha256sum -c -
+      # Guest products are tiny immutable payloads, not compilation state.
+      # Their identity is the complete guest recipe/source closure; github.sha
+      # is deliberately absent. A prefix restores the newest compatible seed,
+      # and an exact miss mints the matching immutable generation after its
+      # digest and embedded agent have been revalidated.
+      - name: Restore guest seed
+        id: guest-seed
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .guest-seed/${{ matrix.arch }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            velnor-guest-seed-${{ matrix.arch }}-
 
       - name: Build guest agent for rootfs
         run: |
@@ -2215,7 +2286,52 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
               ;;
           esac
 
+      - name: Reuse verified guest seed
+        id: guest-seed-reuse
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${GUEST_ARCH}"
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/vmlinux.sha256" ] || [ ! -s "$seed/rootfs.ext4" ] || [ ! -s "$seed/rootfs.sha256" ]; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A prefix restore of an older generation must rebuild, not fail the job.
+          if ! (cd "$seed" && sha256sum --check --strict vmlinux.sha256) \
+            || ! (cd "$seed" && sha256sum --check --strict rootfs.sha256); then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          agent="target/$TARGET/release/velnor-guest-agent"
+          agent_dump="$(mktemp)"
+          trap 'rm -f -- "$agent_dump"' EXIT
+          # shellcheck disable=SC2209
+          if ! DEBUGFS_PAGER=cat debugfs -R "dump /usr/bin/velnor-guest-agent $agent_dump" "$seed/rootfs.ext4" >/dev/null \
+            || ! cmp -- "$agent_dump" "$agent"; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dist/microvm
+          cp "$seed/vmlinux" "$seed/vmlinux.sha256" "$seed/rootfs.ext4" dist/microvm/
+          cp "$seed/rootfs.sha256" dist/microvm/rootfs.sha256
+          cp "$agent" dist/microvm/velnor-guest-agent
+          sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+
+      - name: Download pinned kernel tarball
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl --fail --show-error --silent --location --http1.1 \
+            --continue-at - --retry 20 --retry-all-errors --retry-delay 5 \
+            --retry-max-time 1800 \
+            --connect-timeout 30 --max-time 900 \
+            -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
+
       - name: Build guest vmlinux and rootfs.ext4
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
         run: |
           set -euo pipefail
           mkdir -p dist/microvm
@@ -2239,6 +2355,28 @@ __VELNOR_TRUSTED_PINNED_TOOLCHAIN_STEPS__
           sha256sum dist/microvm/rootfs.ext4 | awk '{print $1}' > dist/microvm/rootfs.sha256
           cp "$agent" dist/microvm/velnor-guest-agent
           sha256sum "$agent" | awk '{print $1}' > dist/microvm/guest-agent.sha256
+
+      - name: Collect verified guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${GUEST_ARCH}"
+          mkdir -p "$seed"
+          cp dist/microvm/vmlinux dist/microvm/rootfs.ext4 dist/microvm/rootfs.sha256 "$seed/"
+          (cd "$seed" && sha256sum vmlinux > vmlinux.sha256)
+          (cd "$seed" && sha256sum rootfs.ext4 > rootfs.sha256)
+          (cd "$seed" && sha256sum --check --strict vmlinux.sha256)
+          (cd "$seed" && sha256sum --check --strict rootfs.sha256)
+          test -s "$seed/vmlinux"
+          test -s "$seed/vmlinux.sha256"
+          test -s "$seed/rootfs.ext4"
+
+      - name: Save guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .guest-seed/${{ matrix.arch }}
+          key: velnor-guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'crates/velnor-runner/Cargo.toml', 'crates/velnor-runner/build.rs', 'crates/velnor-runner/src/**', 'crates/velnor-model/**', 'crates/velnor-control/**', 'Cargo.lock', 'rust-toolchain.toml') }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
