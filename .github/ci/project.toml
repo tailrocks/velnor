@@ -21,7 +21,7 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 [release]
 enabled = true
 reason = "Release contract is explicitly cataloged; review credentials, environments, and tag protection before cutover."
-kind = "velnor-native"
+kind = "native"
 package = "velnor-runner"
 packages = []
 binary = "velnor-runner"

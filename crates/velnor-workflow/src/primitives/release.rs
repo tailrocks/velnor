@@ -92,30 +92,10 @@ impl Primitive for StaticWorkflow {
         &["template"]
     }
 
-    fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
-        let file = ctx
-            .file
-            .filter(|file| !file.is_empty())
-            .ok_or_else(|| {
-                GeneratorError::usage(format!(
-                    "`{STATIC_WORKFLOW}` renders one workflow file and needs `file`"
-                ))
-            })?
-            .to_owned();
-        let template = args.string("template")?.ok_or_else(|| {
-            GeneratorError::usage(format!(
-                "`{STATIC_WORKFLOW}` declares `{file}`, which needs a `template`; the workflow body is explicit input, never a guess"
-            ))
-        })?;
-        let content = crate::render_static_template_for_config(ctx.config, &file, &template)?;
-        Ok(Rendered {
-            files: std::iter::once((
-                std::path::PathBuf::from(".github/workflows").join(file),
-                content,
-            ))
-            .collect(),
-            ..Rendered::default()
-        })
+    fn render(&self, _ctx: &RenderCtx<'_>, _args: &Args<'_>) -> Result<Rendered, GeneratorError> {
+        Err(GeneratorError::usage(
+            "`static-workflow` is not supported; imported workflow bodies are not a generation input. Declare a typed `release`, `preview`, `release-signer`, or `package-feed` capability",
+        ))
     }
 }
 
@@ -359,6 +339,128 @@ fn release_watch_paths(config: &ProjectConfig) -> String {
     output
 }
 
+fn guest_seed_recipe_globs(config: &ProjectConfig) -> Vec<String> {
+    if !config
+        .units
+        .iter()
+        .any(|unit| unit.watch.iter().any(|path| path.contains("microvm")))
+    {
+        return Vec::new();
+    }
+    let mut globs = vec![
+        "microvm/**".to_owned(),
+        "Cargo.lock".to_owned(),
+        "rust-toolchain.toml".to_owned(),
+    ];
+    for unit in &config.units {
+        let root = unit.root.trim_end_matches('/');
+        if root.starts_with("crates/") {
+            globs.push(format!("{root}/**"));
+        }
+        if root.contains("runner") {
+            globs.push(format!("{root}/Cargo.toml"));
+            globs.push(format!("{root}/build.rs"));
+            globs.push(format!("{root}/src/**"));
+        }
+    }
+    globs.sort();
+    globs.dedup();
+    globs
+}
+
+fn guest_agent_bin(release: &ReleaseSpec) -> String {
+    if release.package.contains("runner") || release.binary.contains("runner") {
+        "velnor-guest-agent".to_owned()
+    } else {
+        format!("{}-guest-agent", release.package)
+    }
+}
+
+fn hashfiles_expr(globs: &[String]) -> String {
+    globs
+        .iter()
+        .map(|glob| format!("'{glob}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Restore/reuse/collect/save a recipe-identity guest seed. Exact-only restore;
+/// save only on a trusted default-branch miss.
+fn render_guest_seed_steps(
+    default_branch: &str,
+    recipe_globs: &[String],
+    package: &str,
+    agent_bin: &str,
+) -> String {
+    let hashfiles = hashfiles_expr(recipe_globs);
+    let restore = ActionPin::CacheRestore.reference();
+    let save = ActionPin::CacheSave.reference();
+    let package = yaml_scalar(package);
+    let agent_bin = yaml_scalar(agent_bin);
+    format!(
+        r#"      - name: Restore guest seed
+        id: guest-seed
+        uses: {restore}
+        with:
+          path: .guest-seed/${{{{ matrix.arch }}}}
+          key: guest-seed-${{{{ matrix.arch }}}}-${{{{ hashFiles({hashfiles}) }}}}
+      - name: Build guest agent for rootfs
+        run: |
+          set -euo pipefail
+          agent="target/$TARGET/release/{agent_bin}"
+          cargo build --locked --release --package {package} --bin {agent_bin} --target "$TARGET"
+          test -x "$agent"
+      - name: Reuse verified guest seed
+        id: guest-seed-reuse
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${{{{ matrix.arch }}}}"
+          if [ ! -s "$seed/vmlinux" ] || [ ! -s "$seed/rootfs.ext4" ]; then
+            echo "restored=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+      - name: Download pinned kernel tarball
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: velnor-workflow release package-guest --arch "${{{{ matrix.arch }}}}"
+      - name: Build guest vmlinux and rootfs.ext4
+        if: steps.guest-seed-reuse.outputs.restored != 'true'
+        run: velnor-workflow release package-guest --arch "${{{{ matrix.arch }}}}"
+      - name: Collect verified guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          seed=".guest-seed/${{{{ matrix.arch }}}}"
+          mkdir -p "$seed"
+          echo "restored=false" >> "$GITHUB_OUTPUT"
+      - name: Save guest seed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && steps.guest-seed.outputs.cache-hit != 'true'
+        uses: {save}
+        with:
+          path: .guest-seed/${{{{ matrix.arch }}}}
+          key: guest-seed-${{{{ matrix.arch }}}}-${{{{ hashFiles({hashfiles}) }}}}
+"#
+    )
+}
+
+fn render_guest_payload_job(config: &ProjectConfig, release: &ReleaseSpec) -> Option<String> {
+    let globs = guest_seed_recipe_globs(config);
+    if globs.is_empty() {
+        return None;
+    }
+    let runner = yaml_scalar(&config.github_runner);
+    let checkout = ActionPin::Checkout.reference();
+    let steps = render_guest_seed_steps(
+        &config.default_branch,
+        &globs,
+        &release.package,
+        &guest_agent_bin(release),
+    );
+    Some(format!(
+        "  guest-payload:\n    name: Guest payload ${{{{ matrix.arch }}}}\n    runs-on: {runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - arch: x86_64\n            target: x86_64-unknown-linux-gnu\n          - arch: aarch64\n            target: aarch64-unknown-linux-gnu\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          persist-credentials: false\n{steps}"
+    ))
+}
+
 fn release_runner(target: &str) -> &'static str {
     if target.ends_with("-apple-darwin") {
         "macos-15"
@@ -407,7 +509,9 @@ fn canonical_lane(config: &ProjectConfig) -> &'static str {
 }
 
 fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> String {
-    let Some(release) = release.filter(|release| release.kind == "rust-binary") else {
+    let Some(release) =
+        release.filter(|release| matches!(release.kind.as_str(), "rust-binary" | "native"))
+    else {
         return format!(
             "{GENERATED_HEADER}# Preview is omitted: no complete Rust binary release contract.\n"
         );
@@ -443,7 +547,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             );
         }
     }
-    format!(
+    let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
         ActionPin::Checkout.reference(),
@@ -512,7 +616,11 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
             canonical_lane(config)
         ),
     )
-    .replace("run: cargo build ", "run: mbx build ")
+    .replace("run: cargo build ", "run: mbx build ");
+    if let Some(guest) = render_guest_payload_job(config, release) {
+        output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
+    }
+    output
 }
 
 pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
@@ -853,17 +961,10 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ));
         publish_needs.push("debian".to_owned());
     }
-    let guest = config
-        .units
-        .iter()
-        .any(|unit| unit.watch.iter().any(|path| path.contains("microvm")));
-    if guest {
-        extra.push_str(&format!(
-            "  guest:\n    name: Guest kernel/rootfs ${{{{ matrix.arch }}}}\n    needs: [admit-runner, verify]\n    runs-on: {github_runner}\n    timeout-minutes: 180\n    strategy:\n      fail-fast: false\n      matrix:\n        arch: [x86_64, aarch64]\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Build guest image\n        run: velnor-workflow release package-guest --arch \"${{{{ matrix.arch }}}}\"\n      - name: Upload guest image\n        uses: {}\n        with:\n          name: guest-${{{{ matrix.arch }}}}\n          path: dist/guest-*\n          if-no-files-found: error\n          retention-days: 2\n",
-            ActionPin::Checkout.reference(),
-            ActionPin::UploadArtifact.reference(),
-        ));
-        publish_needs.push("guest".to_owned());
+    if let Some(guest_job) = render_guest_payload_job(config, release) {
+        extra.push_str(&guest_job);
+        extra.push('\n');
+        publish_needs.push("guest-payload".to_owned());
     }
     if !extra.is_empty() {
         output = output.replace("\n  publish:", &format!("\n{extra}\n  publish:"));
@@ -1807,31 +1908,24 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_static_workflow_renders_the_declared_body() {
+    fn a_declared_static_workflow_is_rejected() {
         let root = scanned_root("static");
         let config = config(&[], None);
-        let surface = generate(
+        let error = match try_generate(
             &root,
             &config,
             Some(
                 "[[declare]]\nprimitive = \"static-workflow\"\nfile = \"custom.yml\"\n\n\
-                 [declare.args]\ntemplate = '''\nname: Custom\n\njobs:\n  probe:\n    runs-on: __VELNOR_GITHUB_RUNNER__\n    steps:\n      - run: velnor-workflow --rev __VELNOR_WORKFLOW_SOURCE_REV__\n'''\n",
+                 [declare.args]\ntemplate = '''\nname: Custom\n'''\n",
             ),
-        );
-        let custom = surface
-            .files
-            .get(&PathBuf::from(".github/workflows/custom.yml"))
-            .unwrap_or_else(|| panic!("a declared static workflow must render its file"));
+        ) {
+            Ok(_) => panic!("static-workflow must fail closed"),
+            Err(error) => error.to_string(),
+        };
         assert!(
-            custom.starts_with(crate::GENERATED_HEADER),
-            "the rendered body carries the generated header: {custom}"
+            error.contains("static-workflow") && error.contains("not supported"),
+            "{error}"
         );
-        assert!(custom.contains("runs-on: ubuntu-24.04"), "{custom}");
-        assert!(
-            custom.contains(crate::VELNOR_WORKFLOW_SOURCE_REV),
-            "source pins are refreshed: {custom}"
-        );
-        assert_eq!(surface.added_files, vec!["custom.yml".to_owned()]);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1860,7 +1954,7 @@ mod tests {
             (
                 "static workflow without template",
                 "[[declare]]\nprimitive = \"static-workflow\"\nfile = \"custom.yml\"\n",
-                "needs a `template`",
+                "not supported",
             ),
             (
                 "renamed release file",
