@@ -1808,6 +1808,10 @@ mod tests {
 
     #[test]
     fn active_token_is_restored_when_the_guard_drops() {
+        // Serialized with the Engine routing tests: while this cancelled
+        // token is installed, a concurrent facade API attempt would observe
+        // the cancellation and fall back, flaking its scripted runner.
+        let _serial = crate::docker::metrics::lock_serial_for_test();
         let token = JobCancellation::recording(None);
         assert!(active().is_none());
         {

@@ -7273,7 +7273,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn generated_maintenance_stays_github_hosted_when_runners_are_velnor() {
+    fn generated_maintenance_splits_prune_and_cache_when_runners_are_velnor() {
         let config = scanned_fixture(RunnerMode::Velnor);
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -7281,6 +7281,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "generated maintenance.yml",
         );
         let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let velnor = fixture_lane_selector();
         let runs_on: Vec<&str> = workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
@@ -7288,31 +7289,49 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .collect();
         assert_eq!(
             runs_on.as_slice(),
-            [hosted.as_str(), hosted.as_str()],
-            "both maintenance jobs must stay GitHub-hosted: {workflow}"
+            [hosted.as_str(), velnor.as_str()],
+            "only PR pruning is GitHub-hosted: {workflow}"
         );
-        assert!(
-            workflow.contains("setup-velnor-workflow"),
-            "maintenance must install the hosted workflow runtime: {workflow}"
-        );
-        assert!(
-            !workflow.contains("[self-hosted,"),
-            "maintenance must not select the Velnor lane: {workflow}"
-        );
-        assert!(
-            !workflow.contains(&fixture_lane_selector()),
-            "maintenance must not use the Velnor lane selector: {workflow}"
-        );
+        assert!(!workflow.contains("setup-velnor-workflow"));
         assert!(
             workflow.contains("github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '')"),
             "closed-PR prune must stay live: {workflow}"
         );
         assert!(
             workflow.contains(
-                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+                "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
             ),
-            "cache retention must keep schedule and dispatch: {workflow}"
+            "cache retention must stay on the trusted Velnor lane: {workflow}"
         );
+        assert!(!workflow.contains("\n  push:"));
+    }
+
+    #[test]
+    fn generated_maintenance_keeps_hosted_lanes_for_github_and_both() {
+        for runners in [RunnerMode::Github, RunnerMode::Both] {
+            let config = scanned_fixture(runners);
+            let files = must(generated_files(&config), "generate");
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows/maintenance.yml")),
+                "generated maintenance.yml",
+            );
+            let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+            let runs_on: Vec<&str> = workflow
+                .lines()
+                .filter(|line| line.trim_start().starts_with("runs-on:"))
+                .map(str::trim)
+                .collect();
+            assert_eq!(
+                runs_on.as_slice(),
+                [hosted.as_str(), hosted.as_str()],
+                "GitHub and Both maintenance lanes stay hosted: {workflow}"
+            );
+            assert!(workflow.contains("setup-velnor-workflow"));
+            assert!(workflow.contains(
+                "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+            ));
+            assert!(!workflow.contains("\n  push:"));
+        }
     }
 
     /// The `id:` job body a generated aggregate renders, from the job key
@@ -7345,7 +7364,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn generated_planning_stays_github_hosted_when_runners_are_velnor() {
+    fn generated_planning_uses_configured_velnor_lane_without_runtime_artifact() {
         let config = scanned_fixture(RunnerMode::Velnor);
         let files = must(generated_files(&config), "generate");
         let workflow = must_some(
@@ -7353,7 +7372,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "generated ci-main.yml",
         );
         let plan = yaml_job(workflow, "plan");
-        let hosted = format!("runs-on: {}", yaml_scalar(&config.github_runner));
+        let velnor = fixture_lane_selector();
         let plan_runs_on: Vec<&str> = plan
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
@@ -7361,37 +7380,31 @@ const INCLUDED: &str = include_str!("fixture.txt");
             .collect();
         assert_eq!(
             plan_runs_on.as_slice(),
-            [hosted.as_str()],
-            "Planning must stay GitHub-hosted: {plan}"
+            [velnor.as_str()],
+            "Planning must stay on config.runners: {plan}"
         );
         assert!(
-            plan.contains("setup-velnor-workflow"),
-            "Planning must install the hosted workflow runtime: {plan}"
+            !plan.contains("setup-velnor-workflow"),
+            "Velnor Planning must use the image runtime: {plan}"
         );
         assert!(
-            plan.contains("name: Publish Velnor workflow runtime"),
-            "Planning must publish the SOURCE_REV runtime: {plan}"
+            !plan.contains("name: Prepare Velnor workflow runtime"),
+            "Velnor Planning must not prepare a runtime artifact: {plan}"
         );
         assert!(
-            !plan.contains("[self-hosted,"),
-            "Planning must not select the Velnor lane: {plan}"
+            !plan.contains("name: Publish Velnor workflow runtime"),
+            "Velnor Planning must not publish a runtime artifact: {plan}"
         );
-        let velnor = fixture_lane_selector();
-        let other_runs_on: Vec<&str> = workflow
+        let all_runs_on: Vec<&str> = workflow
             .lines()
             .filter(|line| line.trim_start().starts_with("runs-on:"))
             .map(str::trim)
-            .filter(|line| *line != hosted.as_str())
             .collect();
-        assert!(
-            !other_runs_on.is_empty(),
-            "unit jobs must still select the Velnor lane: {workflow}"
-        );
-        for runs_on in &other_runs_on {
+        for runs_on in &all_runs_on {
             assert_eq!(
                 *runs_on,
                 velnor.as_str(),
-                "unit/matrix jobs stay on config.runners: {workflow}"
+                "all generated jobs stay on config.runners: {workflow}"
             );
         }
         for (path, content) in &files {
