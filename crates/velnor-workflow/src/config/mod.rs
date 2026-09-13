@@ -978,7 +978,14 @@ fn is_contained_repository_path(path: &str) -> bool {
 
 /// The publishers the renderer implements, and the contract fields each one
 /// renders from.
-const RELEASE_KINDS: &[&str] = &["crates", "rust-binary", "pages"];
+const RELEASE_KINDS: &[&str] = &[
+    "crates",
+    "rust-binary",
+    "native",
+    "pages",
+    "homebrew",
+    "apt",
+];
 
 /// A `kind` the renderer does not implement has no rendered `release.yml`: it
 /// is accepted only from a repository that renders its own publisher verbatim
@@ -1007,6 +1014,37 @@ impl RepoGenerationConfig {
                 .artifact_path
                 .as_deref()
                 .is_some_and(|value| !value.is_empty()),
+            "native" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .binary
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    && !release.targets.is_empty()
+            }
+            "homebrew" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .source_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
+            "apt" => {
+                release
+                    .package
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                    && release
+                        .consumer_repository
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+            }
             _ => false,
         };
         if complete {

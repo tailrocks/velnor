@@ -398,13 +398,9 @@ fn analyze_rust_manifests(
             ""
         };
         let test_command = if has_nextest {
-            format!(
-                "{command_prefix}cargo nextest run {cargo_lock_flag} {package_selector}"
-            )
+            format!("{command_prefix}cargo nextest run {cargo_lock_flag} {package_selector}")
         } else {
-            format!(
-                "{command_prefix}cargo test {cargo_lock_flag} {package_selector}"
-            )
+            format!("{command_prefix}cargo test {cargo_lock_flag} {package_selector}")
         };
         let commands = vec![
             format!(

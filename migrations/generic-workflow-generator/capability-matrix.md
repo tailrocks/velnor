@@ -11,7 +11,7 @@ Status: partial. `static-workflow` for velnor `release.yml` is still C.
 | Docker mutable-mount seed | B | Typed cache; commands materialized |
 | Bun / Node / Gradle / Swift / OpenTofu / docs | A | Detected |
 | GitHub default runner | A | Automatic events |
-| Optional Velnor | B | `runners` + `velnor_labels`; dispatch only |
+| Optional Velnor | B | `runners` + `velnor_labels`; dispatch-only unless `runners = "velnor"` (trusted default-branch events) |
 | Required check `CI / Required` | A | Job id `ci-required` |
 | Native binary + GHCR + guest image + deb release | C | Still static `release.yml` |
 | Homebrew tap update | C | Needed by holla/ruxel/tablerock/jackin-dev |

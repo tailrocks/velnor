@@ -263,9 +263,7 @@ fn command_arrays_in_generation_config_are_rejected() {
     let root = unique_dir("command-arrays");
     write_rust_fixture(&root, 1);
     let mut config = fs::read_to_string(root.join(".github-gen/velnor-workflow.toml")).unwrap();
-    config.push_str(
-        "\n[[units]]\nid = \"rust-crate00\"\npr_commands = [\"cargo test\"]\n",
-    );
+    config.push_str("\n[[units]]\nid = \"rust-crate00\"\npr_commands = [\"cargo test\"]\n");
     fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
     let error = generate_fail(&root, &[]);
     assert!(

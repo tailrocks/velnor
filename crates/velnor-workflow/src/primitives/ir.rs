@@ -888,16 +888,18 @@ impl WorkflowIr {
         output.push_str("jobs:\n");
         // Runner mode is global; every self-hosted job receives the
         // default-branch trusted-event gate needed for Velnor execution.
+        // Pull-request planning stays GitHub-hosted so untrusted code never
+        // runs on self-hosted runners and `ci-required` can publish.
         let trusted_event = kind != WorkflowKind::PullRequest;
         let runners = self.runners;
-        self.render_plan(&mut output, runners, runners == RunnerMode::Velnor);
+        self.render_plan(&mut output, runners, trusted_event);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(&mut output, runners, runners == RunnerMode::Velnor);
         }
         self.render_hierarchy_groups(&mut output, kind != WorkflowKind::PullRequest);
         let cache_save = kind != WorkflowKind::PullRequest;
-        // GitHub jobs always run on automatic events. Velnor jobs exist only
-        // when that backend is supported, and stay dispatch-only.
+        // GitHub jobs always exist so omitted-dispatch and PR CI work without
+        // a Velnor server. Velnor jobs exist when that backend is configured.
         self.render_verify_github(
             &mut output,
             None,
@@ -962,13 +964,14 @@ impl WorkflowIr {
             output,
             "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\nconcurrency:\n  group: ci-${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number || github.ref }}}}\n  cancel-in-progress: {cancel_in_progress}\n\npermissions:\n  actions: read\n  contents: read\n\njobs:"
         );
-        // The plan job is a contributed node: the aggregate composes the graph
-        // the declared primitives built and renders no job of its own.
-        let plan = nodes
-            .iter()
-            .find_map(GraphNode::plan_job)
-            .unwrap_or_default();
-        output.push_str(plan);
+        // Planning lane depends on the aggregate's trust class. Pull requests
+        // stay GitHub-hosted so untrusted code never runs on self-hosted
+        // runners and `ci-required` can publish. Trusted aggregates follow
+        // config.runners (Velnor-first when configured). The affected-plan
+        // primitive still contributes the graph node that proves a plan exists.
+        let mut plan = String::new();
+        self.render_plan(&mut plan, self.runners, kind != WorkflowKind::PullRequest);
+        output.push_str(&plan);
         if kind != WorkflowKind::PullRequest {
             self.render_policy(
                 &mut output,
@@ -1181,8 +1184,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     /// The lane jobs a nested unit workflow emits. GitHub is always present
-    /// (automatic default). Velnor is emitted only when that backend is
-    /// supported, and those jobs stay dispatch-only plus trusted-event-gated.
+    /// (automatic default on untrusted events). Velnor is emitted when that
+    /// backend is configured; Velnor-first repositories also run it on
+    /// trusted default-branch events.
     pub(crate) fn default_lane_jobs(runners: RunnerMode, cache_save: bool) -> Vec<LaneJob> {
         let mut jobs = vec![LaneJob {
             lane: RunnerMode::Github,
@@ -1446,13 +1450,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_runtime_download(lane));
     }
 
-    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
-        // Plan always runs on GitHub so default operation needs no Velnor
-        // server or credentials. It also publishes the SOURCE_REV runtime
-        // product (fleet 0.1.274 ≠ pin). Velnor unit jobs consume the artifact.
-        let runners = RunnerMode::Github;
-        let gate = String::new();
-        let runtime_setup = workflow_runtime_setup(RunnerMode::Github);
+    pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, trusted: bool) {
+        // Planning follows config.runners on trusted aggregates. Velnor uses
+        // the image-provided runtime. Pull-request and GitHub-configured
+        // planning stay GitHub-hosted and publish the SOURCE_REV runtime
+        // product for GitHub unit jobs.
+        let runners = if self.runners == RunnerMode::Velnor && trusted {
+            RunnerMode::Velnor
+        } else {
+            RunnerMode::Github
+        };
+        let gate = if runners == RunnerMode::Velnor {
+            format!(
+                "    if: ${{{{ {} }}}}\n",
+                self.velnor_control_plane_expression()
+            )
+        } else {
+            String::new()
+        };
+        let runtime_setup = if runners == RunnerMode::Velnor {
+            String::new()
+        } else {
+            workflow_runtime_setup(RunnerMode::Github)
+        };
         let mut outputs = vec![
             "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
             "      units: ${{ steps.plan.outputs.units }}".to_owned(),
@@ -1531,15 +1551,31 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     }
 
     fn lane_event_expression(&self, lane: RunnerMode) -> String {
+        let dispatch_github = "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == '')";
+        let dispatch_velnor = "github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')";
         match lane {
-            RunnerMode::Github => format!(
-                "{} || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'github' || github.event.inputs.runner == 'both' || github.event.inputs.runner == ''))",
-                self.automatic_event_expression()
-            ),
-            RunnerMode::Velnor => format!(
-                "github.ref == 'refs/heads/{}' && github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both')",
-                self.default_branch
-            ),
+            RunnerMode::Github => {
+                if self.runners == RunnerMode::Velnor {
+                    format!(
+                        "github.event_name == 'pull_request' || github.event_name == 'merge_group' || ({dispatch_github})"
+                    )
+                } else {
+                    format!(
+                        "{} || ({dispatch_github})",
+                        self.automatic_event_expression()
+                    )
+                }
+            }
+            RunnerMode::Velnor => {
+                if self.runners == RunnerMode::Velnor {
+                    self.velnor_lane_event_expression(dispatch_velnor)
+                } else {
+                    format!(
+                        "github.ref == 'refs/heads/{}' && {dispatch_velnor}",
+                        self.default_branch
+                    )
+                }
+            }
             RunnerMode::Both => "github.event_name == 'workflow_dispatch'".to_owned(),
         }
     }

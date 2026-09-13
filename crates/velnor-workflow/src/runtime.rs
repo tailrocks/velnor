@@ -2096,12 +2096,16 @@ impl PolicyFindings {
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary ...",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed",
         ));
     };
     match command {
         "verify-tag" => verify_tag(&arguments[1..]),
         "package-binary" => package_binary(&arguments[1..]),
+        "package-deb" => package_deb(&arguments[1..]),
+        "package-guest" => package_guest(&arguments[1..]),
+        "verify-feed" => verify_feed(&arguments[1..]),
+        "update-feed" => update_feed(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -2219,6 +2223,102 @@ fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
     .map_err(|error| GeneratorError::io("write release checksum", &checksum, &error))?;
     println!("{}", archive.display());
     Ok(())
+}
+
+fn package_deb(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["package", "version"])?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    if !valid_package(package) || !is_artifact_version(version) {
+        return Err(GeneratorError::usage("invalid package or version"));
+    }
+    let status = Command::new("cargo")
+        .args(["deb", "--no-strip", "--package", package])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("cargo deb: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("cargo deb failed"));
+    }
+    Ok(())
+}
+
+fn package_guest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["arch"])?;
+    let arch = required_option(&options, "arch")?;
+    if !matches!(arch, "x86_64" | "aarch64") {
+        return Err(GeneratorError::usage(
+            "guest arch must be x86_64 or aarch64",
+        ));
+    }
+    let script = Path::new("microvm/build.sh");
+    if !script.is_file() {
+        return Err(GeneratorError::usage(
+            "guest image requires a repository-owned microvm/build.sh",
+        ));
+    }
+    let status = Command::new("bash")
+        .args(["microvm/build.sh", arch])
+        .status()
+        .map_err(|error| GeneratorError::usage(format!("build guest image: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage("guest image build failed"));
+    }
+    Ok(())
+}
+
+fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate"])?;
+    let kind = required_option(&options, "kind")?;
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
+    match kind {
+        "homebrew" => {
+            let formula = Path::new("Formula").join(format!("{package}.rb"));
+            if !formula.is_file() {
+                return Err(GeneratorError::usage(format!(
+                    "homebrew feed requires {}",
+                    formula.display()
+                )));
+            }
+        }
+        "apt" => {
+            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
+                return Err(GeneratorError::usage(
+                    "apt feed requires conf/distributions or debian/",
+                ));
+            }
+        }
+        other => {
+            return Err(GeneratorError::usage(format!(
+                "unsupported feed kind: {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
+    verify_feed(arguments)?;
+    let kind = required_option(&options, "kind")?;
+    let channel = options
+        .get("channel")
+        .map(String::as_str)
+        .unwrap_or("stable");
+    if !matches!(channel, "stable" | "preview") {
+        return Err(GeneratorError::usage("channel must be stable or preview"));
+    }
+    match kind {
+        "homebrew" | "apt" => {
+            println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
+            Ok(())
+        }
+        other => Err(GeneratorError::usage(format!(
+            "unsupported feed kind: {other}"
+        ))),
+    }
 }
 
 fn required_option<'a>(
