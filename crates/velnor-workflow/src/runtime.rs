@@ -2164,6 +2164,10 @@ fn has_trusted_runner_gate(value: &str) -> bool {
 }
 
 fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
+    strip_inputs_unit_selector(value).or_else(|| strip_selected_units_selector(value))
+}
+
+fn strip_inputs_unit_selector(value: &str) -> Option<&str> {
     let value = value.strip_prefix("inputs.unit=='")?;
     let separator = value.find("'&&(")?;
     let unit = &value[..separator];
@@ -2171,6 +2175,19 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
+}
+
+fn strip_selected_units_selector(value: &str) -> Option<&str> {
+    // contains(format(',{0},',inputs.selected_units),',unit,')&&(gate)
+    const PREFIX: &str = "contains(format(',{0},',inputs.selected_units),'";
+    let rest = value.strip_prefix(PREFIX)?;
+    let rest = rest.strip_prefix(',')?;
+    let separator = rest.find(",')&&(")?;
+    let unit = &rest[..separator];
+    if !is_unit_id(unit) {
+        return None;
+    }
+    rest[separator + ",')&&(".len()..].strip_suffix(')')
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -3235,6 +3252,11 @@ on:
 jobs:
   verify:
     if: ${{ inputs.unit == 'rust-policy' && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+  selected:
+    if: ${{ contains(format(',{0},', inputs.selected_units), ',rust-policy,') && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) || (github.event_name == 'workflow_dispatch' && (github.event.inputs.runner == 'velnor' || github.event.inputs.runner == 'both'))) }}
     runs-on: [self-hosted, example-velnor]
     steps:
       - run: true

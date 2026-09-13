@@ -7724,8 +7724,10 @@ channel = "stable"
             config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
             "Rust fixture unit",
         );
-        assert!(root.contains("name: ${{ matrix.label }}"));
-        assert!(root.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
+        assert!(root.contains("selected_units: ${{ needs.plan.outputs.units }}"));
+        assert!(root.contains("needs.plan.outputs.rust_matrix != '[]'"));
+        assert!(!root.contains("name: ${{ matrix.label }}"));
+        assert!(!root.contains("fromJSON(needs.plan.outputs.rust_matrix)"));
         for unit in &config.units {
             let sidebar_name = sidebar_group_name(unit);
             assert!(!sidebar_name.contains(" / "));
@@ -7755,8 +7757,10 @@ channel = "stable"
         assert!(crate_workflow.contains("runs-on: ubuntu-24.04"));
         assert!(crate_workflow.contains(&fixture_lane_selector()));
         assert!(crate_workflow.contains("CI_SCOPE: ${{ inputs.scope }}"));
-        assert!(crate_workflow.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
-        assert!(crate_workflow.contains("inputs:\n      unit:"));
+        assert!(crate_workflow.contains("CI_UNIT_ID: rust-"));
+        assert!(crate_workflow.contains("inputs:\n      selected_units:"));
+        assert!(crate_workflow.contains("BASE_SHA: ${{ inputs.base_sha }}"));
+        assert!(crate_workflow.contains("HEAD_SHA: ${{ inputs.head_sha }}"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'velnor'"));
         assert!(crate_workflow.contains("github.event.inputs.runner == 'github'"));
     }
