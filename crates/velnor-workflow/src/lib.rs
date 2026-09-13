@@ -2379,7 +2379,7 @@ fn control_plane_runner(config: &ProjectConfig) -> String {
 
 fn control_plane_trusted_gate(default_branch: &str) -> String {
     format!(
-        "    if: ${{{{ github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}}}\n"
+        "    if: ${{{{ github.event_name == 'pull_request_target' || (github.ref == 'refs/heads/{default_branch}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}}}\n"
     )
 }
 
@@ -7100,8 +7100,16 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!velnor.contains("backend: github"));
         assert!(!velnor.contains("github-hosted"));
         assert!(velnor.contains(&fixture_lane_selector()));
-        assert!(velnor
-            .contains("if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push'"));
+        assert!(velnor.contains(
+            "if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main'"
+        ));
+
+        let velnor_pr = WorkflowIr::from_config(&scanned_fixture(RunnerMode::Velnor))
+            .render(WorkflowKind::PullRequest);
+        assert!(velnor_pr.contains("on:\n  pull_request:"));
+        assert!(velnor_pr.contains("github.event_name == 'pull_request'"));
+        assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
+        assert!(!velnor_pr.contains("runs-on: ubuntu-24.04"));
 
         let both =
             WorkflowIr::from_config(&scanned_fixture(RunnerMode::Both)).render(WorkflowKind::Main);
