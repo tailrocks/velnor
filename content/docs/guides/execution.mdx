@@ -249,6 +249,32 @@ default Mr Boxington path nothing sets `MBX_DISABLE` or `RUSTC_WRAPPER`, so
 setting `MBX_DISABLE=1` in the workflow does disable Mr Boxington and leaves
 plain Cargo.
 
+#### Warm workspaces on the non-mbx paths
+
+The sccache and plain-Cargo opt-out paths check out into a stable workspace
+that persists across jobs on the same slot, namespaced by trust scope and
+repository (`<slot>/stable-workspaces/<scope>/<repository-id>/workspace`).
+Consecutive jobs for the same repository re-check out over it instead of
+into a fresh directory, and `clean` keeps the top-level `target/` while
+still removing every other untracked file — so a warm same-SHA rebuild
+finds Cargo fingerprints intact and reports fresh, exactly like a
+long-lived developer checkout. Mtimes stay wall-clock throughout: changed
+sources rebuild, unchanged sources do not, and no artifact is ever restored
+from a store. The mbx default path is unaffected and keeps the ephemeral
+per-job workspace, since mbx manages its own targets.
+
+Each slot's stable tree is capped at 30 GiB (the same allowance as mbx's
+managed targets); when a new repository scope arrives over budget, the
+least-recently-used idle scopes are evicted. A job without a repository id,
+or any stable-allocation failure, falls back to an ephemeral workspace with
+a forensics line — warmth is an optimization and never fails a build.
+
+The floor this sets: a warm same-SHA rebuild on a warm slot is a fresh
+check (sub-second). Anything that misses the fingerprints — a new SHA, a
+cold slot, an evicted scope — pays a content-hit rebuild instead: every
+unit re-invoked, each hitting its content cache on the sccache path, or a
+full recompile on the plain-Cargo opt-out path.
+
 Kache and the former Velnor compiler-cache service are not available.
 
 ### MicroVM

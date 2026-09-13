@@ -8694,10 +8694,12 @@ fn execute_script_job(
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .backend();
-    let job_dir = job_work_dir(config_dir, work_dir, job);
+    let slot_work_dir = slot_work_dir(config_dir, work_dir.as_deref());
+    let job_dir = slot_work_dir.join(sanitize_path_segment(&job.job_id));
     register_job_cache_session(job);
     let result = execute_script_job_inner(
         &job_dir,
+        &slot_work_dir,
         docker_host_work_dir,
         docker_image,
         resource_options,
@@ -9194,6 +9196,7 @@ fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn execute_script_job_inner(
     job_dir: &std::path::Path,
+    slot_work_dir: &std::path::Path,
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
@@ -9234,7 +9237,13 @@ fn execute_script_job_inner(
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.
     let side_effects = JobSideEffectCounters::default();
-    let workspace = job_dir.join("workspace");
+    // Non-mbx Rust jobs (explicit sccache, `MBX_DISABLE` opt-out) check out
+    // into a stable per-slot workspace so Cargo fingerprints survive warm
+    // same-SHA rebuilds; see `stable_workspace`. The mbx default path keeps
+    // the ephemeral per-job workspace: mbx manages its own targets.
+    let stable_workspace = stable_workspace_for_job(job, slot_work_dir, effective_trust_scope);
+    let stable = stable_workspace.is_some();
+    let workspace = stable_workspace.unwrap_or_else(|| job_dir.join("workspace"));
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
     let actions = job_dir.join("actions");
@@ -9315,7 +9324,14 @@ fn execute_script_job_inner(
         sender.send_best_effort(setup_log.clone());
     }
     let mut command_runner = ProcessCommandRunner;
-    let checkout_plans = checkout_plans(job, &workspace)?;
+    let mut checkout_plans = checkout_plans(job, &workspace)?;
+    if stable {
+        // The workspace persists across jobs: keep `target/` through clean
+        // so the stable path actually stays warm (see `stable_workspace`).
+        for plan in &mut checkout_plans {
+            plan.preserve_target = true;
+        }
+    }
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
         .into_iter()
         .partition(CheckoutPlan::requires_runtime_context);
@@ -11321,14 +11337,64 @@ fn append_native_action_step_from_plan(
     Ok(true)
 }
 
+/// This slot's work directory: the parent of the per-job UUID directories
+/// (and of the stable-workspace tree). Resolved once here so the job
+/// directory and the stable allocator cannot disagree about the root.
+fn slot_work_dir(config_dir: &std::path::Path, work_dir: Option<&std::path::Path>) -> PathBuf {
+    work_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| config_dir.join("_work"))
+}
+
 fn job_work_dir(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
     job: &AgentJobRequestMessage,
 ) -> PathBuf {
-    work_dir
-        .unwrap_or_else(|| config_dir.join("_work"))
-        .join(sanitize_path_segment(&job.job_id))
+    slot_work_dir(config_dir, work_dir.as_deref()).join(sanitize_path_segment(&job.job_id))
+}
+
+/// Stable workspace for one Docker job, or `None` for the ephemeral per-job
+/// workspace. `None` covers three cases: the job runs under mbx (which
+/// manages its own targets), the repository id is missing or invalid (no
+/// safe namespace exists — same refusal as the compiler stores), and stable
+/// allocation itself failed (a cache optimization must never red a build,
+/// so the fallback is loud but non-fatal).
+fn stable_workspace_for_job(
+    job: &AgentJobRequestMessage,
+    slot_work_dir: &std::path::Path,
+    trust_scope: &str,
+) -> Option<PathBuf> {
+    if !crate::manifest::wants_stable_workspace(job) {
+        return None;
+    }
+    let repository_id = crate::github_adapter::job_variable(job, "github.repository_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|id| *id != 0);
+    let Some(repository_id) = repository_id else {
+        eprintln!(
+            "forensics.lifecycle: stable workspace refused: missing or invalid github.repository_id"
+        );
+        return None;
+    };
+    match crate::stable_workspace::prepare(slot_work_dir, trust_scope, repository_id) {
+        Ok(stable) => {
+            eprintln!(
+                "forensics.lifecycle: stable workspace {} (scope {}, fresh scope {})",
+                stable.workspace.display(),
+                crate::trust_scope::normalize_scope(trust_scope),
+                stable.fresh_scope,
+            );
+            Some(stable.workspace)
+        }
+        Err(error) => {
+            eprintln!(
+                "forensics.lifecycle: stable workspace allocation failed, \
+                 using ephemeral workspace: {error:#}"
+            );
+            None
+        }
+    }
 }
 
 /// Host path of the live console file the job container tails as PID 1. Lives
@@ -20361,6 +20427,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -20396,6 +20463,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -20424,6 +20492,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -21515,6 +21584,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -21941,6 +22011,73 @@ runs:
         let job_dir = unique_temp_dir("missing-job-workspace");
 
         remove_job_workspace(&job_dir).unwrap();
+    }
+
+    fn stable_selection_job(
+        variables: serde_json::Value,
+        env: serde_json::Value,
+    ) -> crate::job_message::AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "550e8400-e29b-41d4-a716-446655440000",
+            "jobDisplayName": "Rust",
+            "requestId": 1,
+            "variables": variables,
+            "environmentVariables": [env],
+            "steps": [{
+                "id": "build",
+                "enabled": true,
+                "reference": { "type": "Script" }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stable_workspace_serves_non_mbx_jobs_with_a_repository_id() {
+        let slot = unique_temp_dir("stable-selection");
+        let repo = serde_json::json!({ "github.repository_id": { "value": "41" } });
+
+        let opt_out = stable_selection_job(repo.clone(), serde_json::json!({ "MBX_DISABLE": "1" }));
+        let stable = stable_workspace_for_job(&opt_out, &slot, "trusted")
+            .expect("opt-out gets a stable workspace");
+        assert_eq!(
+            stable,
+            slot.join("stable-workspaces")
+                .join("trusted")
+                .join("41")
+                .join("workspace")
+        );
+        assert!(stable.is_dir());
+
+        // The mbx default path keeps the ephemeral per-job workspace.
+        let plain = stable_selection_job(repo, serde_json::json!({ "OTHER": "1" }));
+        assert!(stable_workspace_for_job(&plain, &slot, "trusted").is_none());
+
+        fs::remove_dir_all(slot).unwrap();
+    }
+
+    #[test]
+    fn stable_workspace_refuses_jobs_without_a_repository_id() {
+        let slot = unique_temp_dir("stable-selection-norepo");
+        for variables in [
+            serde_json::json!({}),
+            serde_json::json!({ "github.repository_id": { "value": "0" } }),
+            serde_json::json!({ "github.repository_id": { "value": "not-a-number" } }),
+        ] {
+            let job = stable_selection_job(variables, serde_json::json!({ "MBX_DISABLE": "1" }));
+            assert!(
+                stable_workspace_for_job(&job, &slot, "trusted").is_none(),
+                "no repository id means no shared namespace"
+            );
+        }
+        assert!(
+            !slot.join("stable-workspaces").exists(),
+            "a refused job must not create the stable tree"
+        );
+        fs::remove_dir_all(slot).ok();
     }
 
     fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
@@ -22485,6 +22622,7 @@ runs:
             fetch_tags: false,
             persist_credentials: false,
             clean: true,
+            preserve_target: false,
             lfs: true,
             condition: None,
             continue_on_error: false,
@@ -22509,6 +22647,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,

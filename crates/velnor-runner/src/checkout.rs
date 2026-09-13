@@ -30,6 +30,18 @@ pub struct CheckoutPlan {
     pub fetch_tags: bool,
     pub persist_credentials: bool,
     pub clean: bool,
+    /// Keep the top-level `target/` directory when `clean` runs.
+    ///
+    /// Set by the runner — never parsed from workflow input — when the
+    /// destination lives in a stable per-slot workspace (the non-mbx Rust
+    /// paths). The workspace persists across jobs so Cargo fingerprints
+    /// survive warm same-SHA rebuilds; without this exclusion `git clean
+    /// -ffdx` would delete `target/` on every checkout and the stable path
+    /// would buy nothing. Only the anchored top-level `target/` is
+    /// excluded; every other untracked file is still removed, and mtimes
+    /// stay wall-clock, so this is ordinary incremental compilation, not
+    /// the deleted mtime pin or persistent-target restore.
+    pub preserve_target: bool,
     /// `lfs: true` input — download Git LFS objects during checkout. Default false
     /// (matches actions/checkout: leave LFS pointers, do not fetch blobs).
     pub lfs: bool,
@@ -136,6 +148,9 @@ pub(crate) fn checkout_plan(
         fetch_tags: checkout_fetch_tags(step),
         persist_credentials: checkout_persist_credentials(step),
         clean: checkout_clean(step),
+        // Ephemeral by default: only the runner flips this for destinations
+        // inside a stable per-slot workspace.
+        preserve_target: false,
         lfs: checkout_lfs(step),
         condition: step.condition.clone(),
         continue_on_error: crate::script_step::step_continue_on_error(step),
@@ -206,6 +221,7 @@ where
         plan.fetch_tags,
         plan.persist_credentials,
         plan.clean,
+        plan.preserve_target,
         plan.lfs,
         mirror,
         log,
@@ -215,9 +231,12 @@ where
     // made stale build artifacts read as fresh whenever dep-info outlived
     // the sources it was built from — a staleness class no SHA gate can
     // close for key-driven caches, and directory pinning additionally
-    // defeated rerun-if-changed=<dir> add/remove detection. Compiler reuse
-    // now comes only from content-addressed caches (mbx/sccache), which do
-    // not read mtimes at all.
+    // defeated rerun-if-changed=<dir> add/remove detection. Stable
+    // workspaces (the non-mbx Rust paths) additionally keep Cargo
+    // fingerprints warm across jobs by preserving `target/`; that reuse is
+    // ordinary wall-clock incremental compilation, while cross-checkout
+    // reuse without a stable path still comes only from content-addressed
+    // caches (mbx/sccache), which do not read mtimes at all.
     Ok(())
 }
 
@@ -643,6 +662,7 @@ pub fn fetch_git_ref<R>(
     fetch_tags: bool,
     persist_credentials: bool,
     clean: bool,
+    preserve_target: bool,
     lfs: bool,
     mirror: Option<crate::git_mirror::MirrorCheckout>,
     log: &mut Vec<String>,
@@ -769,7 +789,11 @@ where
             } else {
                 run_git(runner, &reset, log)?;
             }
-            run_git(runner, &checkout_clean_args(destination), log)?;
+            run_git(
+                runner,
+                &checkout_clean_args(destination, preserve_target),
+                log,
+            )?;
         }
     }
 
@@ -1000,18 +1024,30 @@ fn write_fetch_head(git_dir: &Path, sha: &str, git_ref: &str, clone_url: &str) -
     .with_context(|| format!("write {}", path.display()))
 }
 
-fn checkout_clean_args(destination: &Path) -> Vec<String> {
-    // Full actions/checkout clean semantics: the workspace is ephemeral, so
-    // no `target/` survives between jobs. (A persistent Cargo target layer
-    // used to be excluded here; it was deleted with the mtime pin because
+fn checkout_clean_args(destination: &Path, preserve_target: bool) -> Vec<String> {
+    // Full actions/checkout clean semantics on ephemeral workspaces: no
+    // `target/` survives between jobs. (A persistent Cargo target layer used
+    // to be excluded here; it was deleted with the mtime pin because
     // wall-clock sources made its mtime-based reuse always-dirty, and pinned
-    // mtimes made it stale-prone. Compiler reuse is content-addressed now.)
-    vec![
+    // mtimes made it stale-prone.)
+    //
+    // Stable per-slot workspaces (the non-mbx Rust paths) exclude the
+    // anchored top-level `target/` so Cargo fingerprints survive warm
+    // same-SHA rebuilds. The exclusion is anchored (`/target`): nested
+    // `target/` directories and every other untracked file are still
+    // removed. Mtimes stay wall-clock, so the reuse is ordinary
+    // incremental compilation, not the deleted pin.
+    let mut args = vec![
         "-C".to_string(),
         path_arg(destination),
         "clean".to_string(),
         "-ffdx".to_string(),
-    ]
+    ];
+    if preserve_target {
+        args.push("-e".to_string());
+        args.push("/target".to_string());
+    }
+    args
 }
 
 /// `git -c` args that make the git-lfs smudge/process filters skip downloading
@@ -1750,6 +1786,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -2072,6 +2109,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             None,
             &mut Vec::new(),
@@ -2088,6 +2126,53 @@ mod tests {
 
     /// A real repository served over `file://`, so the mirror and the workspace
     /// hydration run the actual git commands rather than a mock.
+    /// Zero-dependency Cargo fixture: a binary over a build-script crate
+    /// and a proc-macro crate, the slow-crate shapes in miniature. No
+    /// registry access, so the rebuild tests run fully offline.
+    const CARGO_FIXTURE_FILES: [(&str, &str); 7] = [
+        (
+            "Cargo.toml",
+            "[package]\n\
+             name = \"stable-probe\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             \n\
+             [dependencies]\n\
+             probe-macro = { path = \"crates/probe-macro\" }\n\
+             probe-build = { path = \"crates/probe-build\" }\n\
+             \n\
+             [workspace]\n",
+        ),
+        (
+            "src/main.rs",
+            "fn main() {\n    println!(\"value={} answer={}\", probe_build::VALUE, probe_macro::answer!());\n}\n",
+        ),
+        (
+            "crates/probe-macro/Cargo.toml",
+            "[package]\n\
+             name = \"probe-macro\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             \n\
+             [lib]\n\
+             proc-macro = true\n",
+        ),
+        (
+            "crates/probe-macro/src/lib.rs",
+            "extern crate proc_macro;\nuse proc_macro::TokenStream;\n\n#[proc_macro]\npub fn answer(_input: TokenStream) -> TokenStream {\n    \"42\".parse().unwrap()\n}\n",
+        ),
+        (
+            "crates/probe-build/Cargo.toml",
+            "[package]\n\
+             name = \"probe-build\"\n\
+             version = \"0.1.0\"\n\
+             edition = \"2021\"\n\
+             build = \"build.rs\"\n",
+        ),
+        ("crates/probe-build/build.rs", "fn main() {\n    println!(\"cargo:rerun-if-changed=build.rs\");\n}\n"),
+        ("crates/probe-build/src/lib.rs", "pub const VALUE: u32 = 7;\n"),
+    ];
+
     struct RepoFixture {
         root: PathBuf,
         origin: PathBuf,
@@ -2104,6 +2189,48 @@ mod tests {
         /// wall-clock checkout leaves them at now.
         fn new_backdated() -> Self {
             Self::new_inner(Some("2001-02-03T04:05:06+00:00"))
+        }
+
+        /// Same repo plus a zero-dependency Cargo workspace shaped like the
+        /// slow-crate classes the bench measures on real estates: a
+        /// build-script crate (native-code shape) and a proc-macro crate
+        /// (host-compiled, downstream-invalidating), consumed by one binary.
+        fn new_cargo() -> Self {
+            let mut fixture = Self::new_inner(None);
+            let work = fixture.root.join("seed");
+            for (name, contents) in CARGO_FIXTURE_FILES {
+                let path = work.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, contents).unwrap();
+            }
+            let mut runner = ProcessCommandRunner;
+            let mut git = |args: Vec<String>| {
+                let result = runner.run("git", &args).unwrap();
+                assert_eq!(result.code, 0, "git {args:?}: {}", result.stderr);
+                result.stdout.trim().to_string()
+            };
+            git(vec!["-C".into(), path_arg(&work), "add".into(), ".".into()]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "commit".into(),
+                "-m".into(),
+                "cargo fixture".into(),
+            ]);
+            git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "push".into(),
+                path_arg(&fixture.origin),
+                "HEAD:master".into(),
+            ]);
+            fixture.sha = git(vec![
+                "-C".into(),
+                path_arg(&work),
+                "rev-parse".into(),
+                "HEAD".into(),
+            ]);
+            fixture
         }
 
         fn new_inner(commit_date: Option<&str>) -> Self {
@@ -2196,6 +2323,7 @@ mod tests {
                 fetch_tags: false,
                 persist_credentials: false,
                 clean: false,
+                preserve_target: false,
                 lfs: false,
                 condition: None,
                 continue_on_error: false,
@@ -2484,6 +2612,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: false,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -2509,6 +2638,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -2541,6 +2671,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: false,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -2570,6 +2701,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -2661,6 +2793,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             None,
             &mut log,
         )
@@ -2700,6 +2833,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             None,
             &mut log,
@@ -2774,6 +2908,7 @@ mod tests {
             true,
             false,
             true,
+            false,
             false,
             None,
             &mut Vec::new(),
@@ -3405,8 +3540,18 @@ mod tests {
         // No target/ exclusion: the workspace is ephemeral, so clean removes
         // everything, matching actions/checkout.
         assert_eq!(
-            checkout_clean_args(Path::new("/__w")),
+            checkout_clean_args(Path::new("/__w"), false),
             ["-C", "/__w", "clean", "-ffdx"]
+        );
+    }
+
+    #[test]
+    fn checkout_clean_on_stable_workspaces_excludes_only_top_level_target() {
+        // Stable workspaces preserve Cargo fingerprints across jobs; the
+        // exclusion is anchored so nested target/ trees still go.
+        assert_eq!(
+            checkout_clean_args(Path::new("/__w"), true),
+            ["-C", "/__w", "clean", "-ffdx", "-e", "/target"]
         );
     }
 
@@ -3531,5 +3676,171 @@ mod tests {
             }
         }
         assert!(checked > 0, "the checkout must contain files to check");
+    }
+
+    /// Mtimes of every file under a checkout excluding `.git/` (always
+    /// rewritten) and `target/` (build output, not sources).
+    fn tracked_mtimes(root: &Path) -> BTreeMap<PathBuf, std::time::SystemTime> {
+        let mut mtimes = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read checkout dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                if entry.file_type().expect("file type").is_dir() {
+                    if !matches!(entry.file_name().to_str(), Some(".git" | "target")) {
+                        pending.push(path);
+                    }
+                    continue;
+                }
+                let mtime = std::fs::metadata(&path)
+                    .expect("metadata")
+                    .modified()
+                    .expect("mtime");
+                mtimes.insert(path, mtime);
+            }
+        }
+        mtimes
+    }
+
+    #[test]
+    fn stable_checkout_preserves_target_and_tracked_mtimes() {
+        // The slot-reuse shape: two checkouts at the same SHA into the same
+        // destination with clean enabled. Stable workspaces keep `target/`
+        // across jobs, and the second checkout must not rewrite any tracked
+        // file — that mtime preservation is what makes Cargo report fresh.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("stable-workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        plan.preserve_target = true;
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("first checkout succeeds");
+        let before = tracked_mtimes(&workspace);
+        assert!(!before.is_empty());
+        let artifact = workspace.join("target").join("artifact");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"fingerprint").unwrap();
+        std::fs::write(workspace.join("scratch.txt"), b"stray").unwrap();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("second checkout succeeds");
+        assert!(artifact.is_file(), "stable clean must keep target/");
+        assert!(
+            !workspace.join("scratch.txt").exists(),
+            "stable clean still removes other untracked files"
+        );
+        assert_eq!(
+            tracked_mtimes(&workspace),
+            before,
+            "same-SHA re-checkout must not rewrite tracked files"
+        );
+    }
+
+    #[test]
+    fn ephemeral_checkout_still_removes_target() {
+        // Default behavior is unchanged: without the stable flag, clean
+        // removes everything including `target/`, matching actions/checkout.
+        let fixture = RepoFixture::new();
+        let workspace = fixture.root.join("workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        assert!(!plan.preserve_target);
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("first checkout succeeds");
+        let artifact = workspace.join("target").join("artifact");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"fingerprint").unwrap();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("second checkout succeeds");
+        assert!(!artifact.exists(), "ephemeral clean must remove target/");
+    }
+
+    /// Units a plain `cargo check` compiles in `workspace`, by status line.
+    /// Hermetic: an isolated `CARGO_HOME` (no ambient config or wrappers),
+    /// offline, no incremental — the production job shape for the opt-out
+    /// path, minus the container.
+    fn cargo_check_units(workspace: &Path, cargo_home: &Path) -> Vec<String> {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let output = std::process::Command::new(cargo)
+            .arg("check")
+            .current_dir(workspace)
+            .env("CARGO_HOME", cargo_home)
+            .env("CARGO_TERM_COLOR", "never")
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_NET_OFFLINE", "true")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_BUILD_TARGET")
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .output()
+            .expect("spawn cargo check");
+        assert!(
+            output.status.success(),
+            "cargo check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|line| line.contains("Checking ") || line.contains("Compiling "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn stable_workspace_warm_same_sha_rebuild_compiles_nothing() {
+        // Regression pin for the BC-14 warm-build regression on the non-mbx
+        // Rust paths: a warm same-SHA rebuild into a stable workspace must
+        // compile zero units (fresh check), while a changed source must
+        // still rebuild (wall-clock soundness — no false-fresh).
+        let fixture = RepoFixture::new_cargo();
+        let workspace = fixture.root.join("stable-workspace");
+        let mut plan = fixture.plan(workspace.clone());
+        plan.clean = true;
+        plan.preserve_target = true;
+        let mut runner = ProcessCommandRunner;
+        let mut log = Vec::new();
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("checkout succeeds");
+        let cargo_home = fixture.root.join("cargo-home");
+        std::fs::create_dir_all(&cargo_home).unwrap();
+
+        let before = tracked_mtimes(&workspace);
+        assert!(!before.is_empty());
+        let first = cargo_check_units(&workspace, &cargo_home);
+        assert!(
+            !first.is_empty(),
+            "the fixture must compile on a cold target"
+        );
+
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&fixture.store()))
+            .expect("same-SHA re-checkout succeeds");
+        assert_eq!(
+            tracked_mtimes(&workspace),
+            before,
+            "same-SHA re-checkout must not rewrite tracked files"
+        );
+        let second = cargo_check_units(&workspace, &cargo_home);
+        assert!(
+            second.is_empty(),
+            "warm same-SHA rebuild must compile nothing, compiled: {second:?}"
+        );
+
+        // A changed source rebuilds: 1.1 s crosses any whole-second mtime
+        // granularity, so the edit is strictly newer on every filesystem.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let lib = workspace.join("crates/probe-build/src/lib.rs");
+        let mut text = std::fs::read_to_string(&lib).unwrap();
+        text.push_str("\n// changed\n");
+        std::fs::write(&lib, text).unwrap();
+        let third = cargo_check_units(&workspace, &cargo_home);
+        assert!(!third.is_empty(), "changed sources must rebuild");
     }
 }
