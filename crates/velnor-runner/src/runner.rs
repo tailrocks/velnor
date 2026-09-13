@@ -6548,17 +6548,23 @@ async fn handle_job_request(
         let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
         let _job_cancellation_active =
             crate::execution::cancel::set_active(job_cancellation.clone());
+        // The ladder targets the job owns must outlive the poller task: the
+        // poller breaks right after `request()` on broker-driven cancel
+        // paths, so guards owned by the task deregister before escalation and
+        // Forced-tier services never terminate. Owned here, at job scope.
+        let service_container_names =
+            crate::github_adapter::service_container_names(&job, &effective_trust_scope);
+        let _owned_containers = register_owned_containers(
+            &job_cancellation,
+            &job_container_name(&job),
+            &service_container_names,
+        );
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
             broker_cancellation.disable_update,
             JobCancellationWatch {
                 job_id: job.job_id.clone(),
-                job_container_name: job_container_name(&job),
-                service_container_names: crate::github_adapter::service_container_names(
-                    &job,
-                    &effective_trust_scope,
-                ),
                 canceled: canceled.clone(),
                 cancellation: job_cancellation.clone(),
             },
@@ -7577,8 +7583,6 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
 /// with another job's cancellation token.
 struct JobCancellationWatch {
     job_id: String,
-    job_container_name: String,
-    service_container_names: Vec<String>,
     canceled: Arc<AtomicBool>,
     cancellation: crate::execution::cancel::JobCancellation,
 }
@@ -7586,8 +7590,10 @@ struct JobCancellationWatch {
 /// Register every container the job owns — the Docker-action sidecar, the job
 /// container, and each `services:` container — as a ladder target, so
 /// cancellation terminates them rather than a separate `docker kill` racing
-/// the ladder. The guards live as long as the poller task holds them: bounded
-/// by the job's own service list, deregistered on drop, never leaked.
+/// the ladder. The caller holds the guards at job scope: bounded by the
+/// job's own service list, deregistered on drop, never leaked. They must
+/// NOT live in the poller task, which breaks right after `request()` on
+/// broker-driven cancel paths — before `Forced` escalation runs.
 fn register_owned_containers(
     cancellation: &crate::execution::cancel::JobCancellation,
     job_container_name: &str,
@@ -7630,21 +7636,20 @@ fn start_broker_cancellation_poll(
 ) -> JoinHandle<()> {
     let JobCancellationWatch {
         job_id,
-        job_container_name,
-        service_container_names,
         canceled,
         cancellation,
     } = watch;
     tokio::spawn(async move {
-        // Register the containers the job owns as termination targets, so the
-        // ladder terminates them rather than a separate `docker kill` racing it.
+        // The job's owned containers are registered as termination targets by
+        // the caller at job scope, so the ladder terminates them rather than
+        // a separate `docker kill` racing it. The registration deliberately
+        // does NOT live here: this task breaks right after `request()`, and
+        // guards owned by it would deregister before `Forced` escalation.
         //
         // The eager kill this replaces ran on the line after `request()`, which
         // SIGKILLed the job container at *request* level — defeating the whole
         // point of `terminate_at()` sparing it until `Forced` so `always()` and
         // `cancelled()` post steps can still exec into a live container.
-        let _owned_containers =
-            register_owned_containers(&cancellation, &job_container_name, &service_container_names);
         let mut broker = broker;
         let mut error_streak: u32 = 0;
         loop {
@@ -9731,7 +9736,8 @@ fn execute_script_job_inner(
         eprintln!("Warning: cleanup failed after executor error: {error:#}");
     }
     let mut command_runner = executor.into_runner();
-    let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
+    let cleanup_result =
+        cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans, &workspace);
     let (summary, cleanup_traces) = combine_job_and_cleanup(
         summary_result,
         cleanup_result,
@@ -11006,7 +11012,7 @@ where
         if downloadable.is_empty() {
             break;
         }
-        let next = download_repository_actions(runner, &downloadable)?;
+        let next = download_repository_actions(runner, &downloadable, actions_host)?;
         resolved.extend(next);
 
         let nested = composite_repository_action_plans_from_resolved(&resolved, actions_host)?;
@@ -20156,6 +20162,73 @@ jobs:
         assert!(
             token.target_keys().is_empty(),
             "registrations must deregister on drop"
+        );
+    }
+
+    /// The poller breaks right after `request()` on broker-driven cancel
+    /// paths, so owned-container guards must live at job scope — not in the
+    /// poller task — or they deregister before `Forced` escalation and
+    /// services survive. Drives the real poller against a stub broker that
+    /// cancels the job, lets the task exit, then forces: the service target
+    /// must still terminate.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn broker_cancel_terminates_services_after_poller_task_exits() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let cancel = TaskAgentMessage {
+            message_id: 1,
+            message_type: JOB_CANCELLATION_MESSAGE.into(),
+            body: serde_json::json!({ "jobId": "job-1" }).to_string(),
+            iv_base64: None,
+        };
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/message"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(serde_json::to_string(&cancel).unwrap()),
+            )
+            .mount(&server)
+            .await;
+
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let canceled = Arc::new(AtomicBool::new(false));
+        // Job scope (mirrors `handle_job_request`): outlives the poller task.
+        let _owned_containers = register_owned_containers(
+            &token,
+            "velnor-job-1",
+            &["velnor-service-1-postgres".to_string()],
+        );
+        let broker = BrokerClient::new(&server.uri(), "token").unwrap();
+        start_broker_cancellation_poll(
+            broker,
+            "session-1".to_string(),
+            false,
+            JobCancellationWatch {
+                job_id: "job-1".to_string(),
+                canceled: canceled.clone(),
+                cancellation: token.clone(),
+            },
+            stored_config(),
+        )
+        .await
+        .unwrap();
+        assert!(canceled.load(Ordering::SeqCst));
+        assert_eq!(
+            token.reason(),
+            Some(crate::execution::cancel::CancelReason::ServerRequested)
+        );
+
+        token.force();
+        assert!(
+            token
+                .outcomes()
+                .iter()
+                .any(|outcome| outcome.target == "container:velnor-service-1-postgres"),
+            "forced escalation must terminate services registered at job scope: {:?}",
+            token.outcomes()
         );
     }
 

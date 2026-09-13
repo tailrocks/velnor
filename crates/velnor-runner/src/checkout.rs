@@ -225,6 +225,7 @@ where
         &plan.clone_url,
         plan.version.as_deref().unwrap_or("HEAD"),
         &plan.destination,
+        workspace_host,
         plan.token.as_deref(),
         plan.fetch_depth,
         plan.fetch_tags,
@@ -262,6 +263,16 @@ where
 /// `executor.rs`: canonicalize both sides, require prefix containment.
 /// Missing trailing components cannot hide a symlink, so only the nearest
 /// existing ancestor is resolved.
+///
+/// Callers run this twice: once up front as a fail-fast before any side
+/// effect, and once more after the destination exists (inside `fetch_git_ref`,
+/// immediately after `create_dir_all`). The re-assert closes the TOCTOU
+/// window between the pre-check and the first write, during which
+/// `ensure_mirror` performs minutes of network fetch while a concurrent
+/// workspace writer could swap a path component for a symlink. A swap after
+/// the re-assert is still reachable in principle — git itself is path-based,
+/// so no fd survives into its writes — but the window shrinks from minutes
+/// to the microseconds between one `canonicalize` and the first `git init`.
 fn ensure_checkout_destination_contained(workspace_host: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(workspace_host)
         .with_context(|| format!("create checkout workspace {}", workspace_host.display()))?;
@@ -302,6 +313,7 @@ fn mirror_want(plan: &CheckoutPlan) -> crate::git_mirror::MirrorWant {
 pub fn cleanup_checkout_credentials<R>(
     runner: &mut R,
     plans: &[CheckoutPlan],
+    workspace_host: &Path,
 ) -> Result<Vec<Vec<String>>>
 where
     R: CommandRunner,
@@ -309,7 +321,7 @@ where
     let mut traces = Vec::with_capacity(plans.len());
     for plan in plans {
         let mut log = Vec::new();
-        cleanup_checkout_credential(runner, plan, &mut log)?;
+        cleanup_checkout_credential(runner, plan, &mut log, workspace_host)?;
         traces.push(log);
     }
     Ok(traces)
@@ -319,6 +331,7 @@ fn cleanup_checkout_credential<R>(
     runner: &mut R,
     plan: &CheckoutPlan,
     log: &mut Vec<String>,
+    workspace_host: &Path,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -331,6 +344,12 @@ where
     if !git_dir.exists() {
         return Ok(());
     }
+    // The `git config --unset-all` below writes through whatever the
+    // destination resolves to *now*. A path component swapped for a symlink
+    // after checkout would turn cleanup into a write outside the workspace,
+    // so re-assert containment before touching git — after the existence
+    // check so a never-created destination stays a silent no-op.
+    ensure_checkout_destination_contained(workspace_host, &plan.destination)?;
     let config_path = git_dir.join("config");
     // Cleanup is unconditional. Keying it off `persist_credentials` assumed the
     // only writer of the credential was the persist path, which left every
@@ -708,6 +727,7 @@ pub fn fetch_git_ref<R>(
     clone_url: &str,
     git_ref: &str,
     destination: &Path,
+    workspace_host: &Path,
     token: Option<&str>,
     fetch_depth: Option<u32>,
     fetch_tags: bool,
@@ -723,6 +743,12 @@ where
 {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
+    // Post-create re-assert: the destination now exists, so this canonicalizes
+    // the destination itself rather than an ancestor. The pre-check in
+    // `execute_checkout_with_mirror` ran before `ensure_mirror`'s network
+    // fetch; a concurrent workspace writer could have swapped a path component
+    // for a symlink during those minutes. Refuse before the first git write.
+    ensure_checkout_destination_contained(workspace_host, destination)?;
 
     run_git(runner, &["init".to_string(), path_arg(destination)], log)?;
     // Remove a stale origin only when one exists: on a fresh workspace
@@ -2093,7 +2119,7 @@ mod tests {
 
         // This used to print a warning to stderr and report success, leaving a
         // credentialed workspace on the host.
-        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan]).unwrap_err();
+        let error = cleanup_checkout_credentials(&mut RefusingRunner, &[plan], &root).unwrap_err();
         assert!(
             format!("{error:#}").contains("cleanup of checkout credentials"),
             "{error:#}"
@@ -2127,7 +2153,7 @@ mod tests {
 
         // Cleanup used to return early whenever the plan said it had not
         // persisted anything, so a credential written by any other path stayed.
-        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan]).unwrap();
+        cleanup_checkout_credentials(&mut MissingKeyRunner, &[plan], &root).unwrap();
         assert!(!config_has_credential(&config));
         std::fs::remove_dir_all(root).ok();
     }
@@ -2165,6 +2191,7 @@ mod tests {
                 plan.persist_credentials = true;
                 plan
             }],
+            &root,
         )
         .unwrap();
         assert!(!config_has_credential(&workspace.join(".git/config")));
@@ -2184,6 +2211,7 @@ mod tests {
             "https://github.com/acme/repo.git",
             "abc123",
             &workspace,
+            &root,
             Some("token"),
             Some(1),
             false,
@@ -2741,6 +2769,94 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    /// The pre-check passes on a clean tree, but `ensure_mirror` then spends
+    /// minutes on network fetch before the first write; a concurrent
+    /// workspace writer swapping a path component for a symlink in that
+    /// window must still be refused — after `create_dir_all`, before the
+    /// first git command.
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_destination_swapped_out_after_the_precheck() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-toctou-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let parent = workspace.join("first");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let destination = parent.join("escape");
+
+        // The fail-fast pre-check sees a clean tree and passes.
+        ensure_checkout_destination_contained(&workspace, &destination).unwrap();
+        // A concurrent writer swaps the parent for a link during the mirror
+        // fetch window. (`fetch_git_ref` itself re-checks after creating the
+        // destination, which is what this test pins.)
+        std::fs::remove_dir(&parent).unwrap();
+        std::os::unix::fs::symlink(&outside, &parent).unwrap();
+
+        let mut runner = RecordingRunner::default();
+        let error = fetch_git_ref(
+            &mut runner,
+            "https://github.com/acme/repo.git",
+            "abc123",
+            &destination,
+            &workspace,
+            Some("token"),
+            Some(1),
+            false,
+            true,
+            true,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .expect_err("a swapped-out destination must fail the checkout");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A destination that resolves outside the workspace by cleanup time —
+    /// a path component swapped for a symlink after checkout — must refuse
+    /// the `git config --unset-all` rather than write through the link.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_refuses_credential_unset_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-swap-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(outside.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(outside.join("repo"), workspace.join("link")).unwrap();
+
+        let plan = test_checkout_plan(workspace.join("link"));
+        let mut runner = RecordingRunner::default();
+        let error = cleanup_checkout_credentials(&mut runner, &[plan], &workspace)
+            .expect_err("cleanup outside the workspace must fail closed");
+        assert!(
+            format!("{error:#}").contains("outside the workspace"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            runner.calls.is_empty(),
+            "no git command may run against an escaped destination: {:?}",
+            runner.calls
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
     fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
         CheckoutPlan {
             step_id: "checkout".into(),
@@ -2787,7 +2903,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+        cleanup_checkout_credentials(&mut runner, &[plan], &temp).unwrap();
 
         assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
             "config".into(),
@@ -2820,7 +2936,9 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+        // The destination was never created, so cleanup returns before the
+        // containment gate; the workspace value is never consulted.
+        cleanup_checkout_credentials(&mut runner, &[plan], std::path::Path::new("/tmp")).unwrap();
 
         assert!(runner.calls.is_empty());
     }
@@ -2928,6 +3046,7 @@ mod tests {
             "https://github.com/acme/repo.git",
             "abc123",
             &temp,
+            &temp,
             None,
             Some(1),
             false,
@@ -2968,6 +3087,7 @@ mod tests {
             &mut runner,
             "https://github.com/acme/repo.git",
             "abc123",
+            &temp,
             &temp,
             None,
             Some(1),
@@ -3044,6 +3164,7 @@ mod tests {
             source.to_str().unwrap(),
             &requested,
             &destination,
+            &root,
             None,
             None,
             true,
