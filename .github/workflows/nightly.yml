@@ -37,11 +37,11 @@ jobs:
           persist-credentials: false
       - name: Set up Velnor workflow runtime
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257
         with:
-          rev: d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd
+          rev: c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257
       - name: Set trusted workflow policy revision
-        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd" >> "$GITHUB_ENV"
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257" >> "$GITHUB_ENV"
       - name: Select affected units
         id: plan
         env:
@@ -54,7 +54,7 @@ jobs:
       - name: Publish Velnor workflow runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: velnor-workflow-runtime-d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd
+          name: velnor-workflow-runtime-c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257
           path: ~/.cargo/bin/velnor-workflow
           if-no-files-found: error
           retention-days: 7
@@ -90,7 +90,7 @@ jobs:
         with:
           backend: github
           version: 1.8.3
-          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd
+          cache-key: velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257
           restore-keys: |
             velnor-policy-mbx-1.8.3-${{ runner.os }}-${{ runner.arch }}-
       - name: Install pinned Velnor workflow runtime
@@ -109,7 +109,7 @@ jobs:
           cargo install \
             --locked \
             --git https://github.com/tailrocks/velnor \
-            --rev d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd \
+            --rev c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257 \
             --root "$VELNOR_WORKFLOW_ROOT" \
             velnor-workflow \
             --bin velnor-workflow
@@ -117,7 +117,7 @@ jobs:
       - name: Enforce workflow policy
         env:
           WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
-          VELNOR_WORKFLOW_POLICY_REVISION: d3b16aed81172c9f7b0a71c0e6d02b64a0b36dbd
+          VELNOR_WORKFLOW_POLICY_REVISION: c7c25c0fa7d2e81986d18e9f7ecd2e763a60e257
         run: velnor-workflow policy --workflow-root "$WORKFLOW_ROOT"
   group-unit-bun-velnor:
     name: "Bun · Bun package (velnor)"
