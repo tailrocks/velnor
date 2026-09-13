@@ -7683,10 +7683,10 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let velnor_pr = WorkflowIr::from_config(&scanned_fixture(RunnerMode::Velnor))
             .render(WorkflowKind::PullRequest);
         assert!(velnor_pr.contains("on:\n  pull_request:"));
-        assert!(velnor_pr.contains(
-            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"
-        ));
-        assert!(!velnor_pr.contains("github.event_name == 'pull_request'"));
+        assert!(
+            velnor_pr.contains("github.event_name == 'pull_request'"),
+            "automatic PR must admit the Velnor lane: {velnor_pr}"
+        );
         assert!(velnor_pr.contains("runs-on: [self-hosted, example-runner-label]"));
         assert!(!velnor_pr.contains("runs-on: ubuntu-24.04"));
         assert!(velnor_pr.contains("default: velnor"));

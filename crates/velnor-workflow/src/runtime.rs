@@ -1640,8 +1640,32 @@ fn is_static_self_hosted_runner(job: &Mapping) -> bool {
     analysis.self_hosted && !analysis.dynamic && !analysis.invalid
 }
 
-fn has_safe_runner_gate(condition: &str, _job: &Mapping) -> bool {
+fn is_static_velnor_runner(job: &Mapping) -> bool {
+    let Some(runs_on) = mapping_value(job, "runs-on") else {
+        return false;
+    };
+    let mut resolving = BTreeSet::new();
+    let analysis = analyze_runner(runs_on, None, &mut resolving);
+    analysis.self_hosted
+        && !analysis.dynamic
+        && !analysis.invalid
+        && contains_velnor_runner_label(runs_on)
+}
+
+fn contains_velnor_runner_label(value: &Value) -> bool {
+    match value {
+        Value::String(value) => value.to_ascii_lowercase().contains("velnor"),
+        Value::Mapping(mapping) => mapping.values().any(contains_velnor_runner_label),
+        Value::Sequence(sequence) => sequence.iter().any(contains_velnor_runner_label),
+        Value::Tagged(tagged) => contains_velnor_runner_label(tagged.value()),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
     has_trusted_runner_gate(condition)
+        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
+        || (has_manual_velnor_dispatch_gate(condition) && is_static_velnor_runner(job))
 }
 
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
@@ -1689,7 +1713,13 @@ fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &m
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| has_safe_runner_gate(condition, job));
+            .is_some_and(|condition| {
+                if claims_inline_policy_transport(job) {
+                    has_trusted_runner_gate(condition)
+                } else {
+                    has_safe_runner_gate(condition, job)
+                }
+            });
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
@@ -2069,6 +2099,81 @@ fn strip_reusable_unit_selector(value: &str) -> Option<&str> {
         return None;
     }
     value[separator + "'&&(".len()..].strip_suffix(')')
+}
+
+fn has_untrusted_pull_request_gate(value: &str) -> bool {
+    let value = normalize_gate_expression(value);
+    let value = strip_reusable_unit_selector(&value)
+        .map(str::to_owned)
+        .unwrap_or(value);
+    if value == "github.event_name=='pull_request'" {
+        return true;
+    }
+    if value
+        .strip_prefix("github.event_name=='pull_request'||(")
+        .and_then(|value| value.strip_suffix(')'))
+        .is_some_and(|trusted| {
+            has_trusted_runner_gate(trusted) || is_automatic_push_schedule_gate(trusted)
+        })
+    {
+        return true;
+    }
+    if value
+        .strip_prefix(
+            "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(",
+        )
+        .and_then(|rest| rest.strip_suffix(')'))
+        .is_some_and(is_automatic_push_schedule_gate)
+    {
+        return true;
+    }
+    let dispatch = "||(github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both'))";
+    value
+        .strip_prefix("github.event_name=='pull_request'||(")
+        .and_then(|rest| rest.strip_suffix(dispatch))
+        .map(|inner| inner.strip_suffix(')').unwrap_or(inner))
+        .is_some_and(is_automatic_push_schedule_gate)
+}
+
+fn has_manual_velnor_dispatch_gate(value: &str) -> bool {
+    let value = normalize_gate_expression(value);
+    let value = strip_reusable_unit_selector(&value)
+        .map(str::to_owned)
+        .unwrap_or(value);
+    value == "github.event_name=='workflow_dispatch'&&(github.event.inputs.runner=='velnor'||github.event.inputs.runner=='both')"
+        || has_untrusted_pull_request_gate(&value)
+}
+
+fn normalize_gate_expression(value: &str) -> String {
+    let value = value.trim();
+    let value = value
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map_or(value, str::trim)
+        .split_whitespace()
+        .collect::<String>();
+    let value = value.strip_prefix("always()&&").unwrap_or(&value);
+    value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(value)
+        .to_owned()
+}
+
+fn is_automatic_push_schedule_gate(value: &str) -> bool {
+    let marker = "github.ref=='refs/heads/";
+    let Some(start) = value.find(marker).map(|start| start + marker.len()) else {
+        return false;
+    };
+    let Some(end) = value[start..].find('\'').map(|end| start + end) else {
+        return false;
+    };
+    let branch = &value[start..end];
+    valid_branch(branch)
+        && value
+            == format!(
+                "github.ref=='refs/heads/{branch}'&&(github.event_name=='push'||github.event_name=='schedule')"
+            )
 }
 
 fn is_safe_trusted_gate_conjunction(value: &str) -> bool {
@@ -3050,7 +3155,7 @@ jobs:
     }
 
     #[test]
-    fn policy_rejects_untrusted_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
+    fn policy_accepts_fail_closed_velnor_pull_request_gates() -> Result<(), Box<dyn Error>> {
         let workflow = r"
 name: Velnor PR
 on:
@@ -3063,7 +3168,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
-        assert!(!run_policy(root)?);
+        assert!(run_policy(root)?);
 
         let workflow = r"
 name: Velnor PR aggregate
@@ -3076,7 +3181,7 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
-        assert!(!run_policy(root)?);
+        assert!(run_policy(root)?);
 
         let workflow = r"
 name: Velnor kind reusable
@@ -3089,6 +3194,20 @@ jobs:
       - run: true
 ";
         let root = policy_fixture("velnor-kind-reusable", workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Generic self-hosted PR
+on:
+  pull_request:
+jobs:
+  verify:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: [self-hosted, example-runner]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("generic-self-hosted-pr", workflow, "velnor")?;
         assert!(!run_policy(root)?);
         Ok(())
     }

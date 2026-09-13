@@ -1,6 +1,6 @@
-//! Velnor-first CI contract: PR workflows keep untrusted execution off the
-//! self-hosted lane, unique reusables stay under GitHub's limit, and manual
-//! dispatch can select runner and scope without regen.
+//! Velnor-first CI contract: automatic PR runs on the Velnor lane, unique
+//! reusables stay under GitHub's limit, and manual dispatch can select runner
+//! and scope without regen.
 
 #![expect(
     clippy::unwrap_used,
@@ -116,10 +116,9 @@ fn pull_request_plan_and_required_are_not_main_only() {
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("on:\n  pull_request:"));
     assert!(
-        pr.contains("github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')"),
-        "self-hosted PR jobs must carry the trusted main-only expression: {pr}"
+        pr.contains("github.event_name == 'pull_request'"),
+        "automatic PR plan and aggregate must admit pull_request: {pr}"
     );
-    assert!(!pr.contains("github.event_name == 'pull_request'"));
     assert!(pr.contains("  plan:"));
     assert!(pr.contains("  ci-required:"));
     assert!(pr.contains("runs-on: [self-hosted, example-runner]"));
@@ -148,6 +147,10 @@ fn automatic_pr_does_not_schedule_github_hosted_unit_jobs() {
     assert!(
         !github_if.contains("pull_request"),
         "automatic PR must not enable the GitHub-hosted lane: {github_if}"
+    );
+    assert!(
+        unit.contains("github.event_name == 'pull_request'"),
+        "automatic PR must enable the Velnor lane: {unit}"
     );
 }
 

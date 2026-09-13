@@ -1086,7 +1086,7 @@ impl WorkflowIr {
         }
         needs.extend(units);
         let if_condition = if self.runners == RunnerMode::Velnor {
-            format!("always() && {}", self.trusted_event_expression())
+            format!("always() && ({})", self.aggregate_event_expression())
         } else {
             "always()".to_owned()
         };
@@ -1503,7 +1503,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn trusted_runner_gate(&self, runners: RunnerMode, trusted: bool) -> String {
         if runners == RunnerMode::Velnor && trusted {
-            format!("    if: ${{{{ {} }}}}\n", self.trusted_event_expression())
+            format!("    if: ${{{{ {} }}}}\n", self.aggregate_event_expression())
         } else {
             String::new()
         }
@@ -1550,7 +1550,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         );
         if automatic {
             if lane == RunnerMode::Velnor {
-                self.velnor_lane_event_expression(&dispatch)
+                self.velnor_lane_event_expression(dispatch)
             } else {
                 format!("{} || ({dispatch})", self.automatic_event_expression())
             }
@@ -1559,11 +1559,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
     }
 
-    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
+    fn aggregate_event_expression(&self) -> String {
         format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || ({dispatch}))",
+            "github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule'))",
             self.default_branch
         )
+    }
+
+    fn velnor_lane_event_expression(&self, dispatch: &str) -> String {
+        format!("{} || ({dispatch})", self.automatic_event_expression())
     }
 
     pub(crate) fn render_verify_github(
@@ -1588,7 +1592,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         cache_save: bool,
         include_policy: bool,
     ) {
-        let condition = Some(self.trusted_event_expression());
+        let condition = Some(self.aggregate_event_expression());
         self.render_verify_lane(
             output,
             RunnerMode::Velnor,

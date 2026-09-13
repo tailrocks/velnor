@@ -42,7 +42,7 @@ permissions:
 jobs:
   plan:
     name: Planning
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
     runs-on: [self-hosted, velnor-target-mvp]
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
@@ -97,7 +97,7 @@ jobs:
           retention-days: 1
   policy:
     name: Advisory policy
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule')) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 10
     permissions:
@@ -213,7 +213,7 @@ jobs:
       selection-artifact: velnor-ci-selection
   ci-required:
     name: ci-required
-    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule'))) }}
     needs: [plan, policy, group-bun, group-docker, group-docs, group-opentofu, group-rust]
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 5
