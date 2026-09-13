@@ -7526,13 +7526,28 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "preparation must sit between the cache restore and verification"
         );
         assert!(workflow.contains("          cargo fetch --locked"));
+        // The fetch is the recovery path the offline restriction presumes: it
+        // must run online. A position comparison cannot prove that — an
+        // offline line inside the preparation step would satisfy any "later"
+        // assertion — so the step's own body is checked for the absence.
+        let preparation_end = preparation
+            + must_some(
+                workflow[preparation..].find("\n      - name: "),
+                "another step follows the preparation step",
+            );
+        let preparation_body = &workflow[preparation..preparation_end];
+        assert!(
+            !preparation_body.contains("CARGO_NET_OFFLINE"),
+            "the source-preparation fetch must run online; the offline\n         \
+             restriction belongs to verification only"
+        );
         assert!(workflow.contains("CARGO_NET_OFFLINE: \"true\""));
         let offline = must_some(
             workflow.find("CARGO_NET_OFFLINE"),
             "verification runs with the Cargo network restricted",
         );
         assert!(
-            offline > preparation,
+            offline > preparation_end,
             "the offline restriction belongs to verification, not to preparation"
         );
         // The policy unit resolves its own advisory databases: no fetch step,

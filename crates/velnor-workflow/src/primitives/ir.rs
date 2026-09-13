@@ -196,6 +196,22 @@ fn cargo_network_is_restricted(unit: &Unit) -> bool {
     !commands.any(|command| command_resolves_its_own_inputs(command))
 }
 
+/// Env for the source-preparation step: the mise auto-install suppression
+/// only. Preparation is the one Cargo step allowed to reach the network — it
+/// establishes the local source state that `CARGO_NET_OFFLINE` verification
+/// consumes afterwards, and it is the visible recovery when a cache restore
+/// missed. Restricting the fetch itself (release-preview runs failed exactly
+/// this way: `can't checkout from … you are in the offline mode` with no
+/// cached Git database to serve it) turns every cache miss into an
+/// unrecoverable failure.
+pub(crate) fn preparation_env() -> String {
+    let mut env = String::new();
+    env.push_str("\n          MISE_AUTO_INSTALL: \"false\"");
+    env.push_str("\n          MISE_EXEC_AUTO_INSTALL: \"false\"");
+    env.push_str("\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\"");
+    env
+}
+
 /// Env for the steps that run Cargo and repository commands, on both lanes:
 /// the `CARGO_NET_OFFLINE` restriction for lockfile-pinned units, and the
 /// suppression of every mise auto-install path. Verification must consume only
@@ -323,7 +339,9 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
 /// Fetch every declared Cargo source up front, after the cache restore and
 /// before verification. Verification then runs without package-origin
 /// downloads: registry archives and Git dependencies arrive here, once, where
-/// the fetch is visible and measurable on its own.
+/// the fetch is visible and measurable on its own. The fetch itself runs
+/// online (`preparation_env`, never `checks_env`) — it is the recovery path
+/// the offline restriction presumes already happened.
 pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) {
     if !cargo_network_is_restricted(unit) {
         return;
@@ -335,7 +353,7 @@ pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) 
         run: |
           set -euo pipefail
           {change_dir}cargo fetch --locked",
-        checks_env(unit)
+        preparation_env()
     );
 }
 

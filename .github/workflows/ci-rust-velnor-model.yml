@@ -131,7 +131,6 @@ jobs:
             ci-${{ runner.os }}-rust-velnor-model-
       - name: Prepare Cargo sources
         env:
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
@@ -307,7 +306,6 @@ jobs:
             ci-${{ runner.os }}-rust-velnor-model-
       - name: Prepare Cargo sources
         env:
-          CARGO_NET_OFFLINE: "true"
           MISE_AUTO_INSTALL: "false"
           MISE_EXEC_AUTO_INSTALL: "false"
           MISE_NOT_FOUND_AUTO_INSTALL: "false"
