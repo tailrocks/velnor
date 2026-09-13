@@ -1193,9 +1193,12 @@ enum Transport<'r> {
 ///
 /// Construct with [`Docker::job`] on the job path (cancellation-aware,
 /// metrics-attributed) or [`Docker::host`] on the maintenance/cancel path.
-/// Every method runs exactly one `docker` process under its class deadline
-/// and returns a typed value; a daemon that positively reports an object
-/// missing surfaces as [`NotFound`], never as an empty success.
+/// Every method returns a typed value; a daemon that positively reports an
+/// object missing surfaces as [`NotFound`], never as an empty success.
+/// Migrated queries try the Engine API first ([`Docker::engine_or_cli`]) and run
+/// their historical one-`docker`-process CLI query only when the API does
+/// not affirmatively succeed — unmigrated queries (the buildx pair, which
+/// have no Engine equivalent) always run the CLI.
 pub(crate) struct Docker<'r> {
     transport: Transport<'r>,
 }
@@ -1259,9 +1262,86 @@ impl<'r> Docker<'r> {
         }
     }
 
+    /// Engine-API fast path for one read-only query. `cli_args` is the query's
+    /// historical CLI vector: it classifies the operation and its class
+    /// deadline exactly as the CLI call would, so the API attempt and its
+    /// metrics carry the same class the policy always assigned this query.
+    ///
+    /// Returns the API value on success. On ANY API failure — transport,
+    /// timeout, status, framing, JSON, schema — records the fallback with
+    /// telemetry, logs the reason at `warn`, and returns `None` so the
+    /// caller runs its historical CLI query unchanged. Engine errors never
+    /// surface: the CLI stays the arbiter whenever the API does not
+    /// affirmatively succeed, which is what keeps results, error taxonomy
+    /// (`NotFound`, `DockerTimeout`, `DockerCommandError`), and deadlines
+    /// identical. A fallback costs exactly one subprocess: the same as
+    /// before the migration.
+    fn engine_or_cli<T, F>(
+        &self,
+        cli_args: &[String],
+        run: impl FnOnce(super::engine::EngineClient, Duration) -> F,
+    ) -> Option<T>
+    where
+        F: std::future::Future<Output = Result<T, super::engine::EngineError>>,
+    {
+        if !super::engine::engine_api_enabled() {
+            return None;
+        }
+        // An Engine answer is a host fact, so only a runner that spawns host
+        // processes may consult it — the same rule fact caching applies
+        // (`execution/docker.rs` consults `is_host_process_runner` too).
+        // Test doubles stay on their scripts, which keeps scripted tests
+        // hermetic on daemon hosts and immune to the process-global test
+        // override while a routing test holds it.
+        if let Transport::Job(runner) = &self.transport
+            && !runner.is_host_process_runner()
+        {
+            return None;
+        }
+        let (op, class_deadline) =
+            crate::docker::deadline_for(cli_args, crate::executor::DEFAULT_STEP_TIMEOUT);
+        debug_assert!(
+            op.is_control_plane(),
+            "engine fast path serves control-plane queries only"
+        );
+        let budget = super::engine::api_budget(class_deadline);
+        let engine = super::engine::EngineClient::new(super::engine::socket_path());
+        let started = std::time::Instant::now();
+        match super::engine::block_on_engine(run(engine, budget)) {
+            Ok(value) => {
+                crate::docker::observe_api(op, started.elapsed());
+                Some(value)
+            }
+            Err(error) => {
+                crate::docker::observe_api_fallback(op);
+                tracing::warn!(
+                    target: "velnor.docker",
+                    docker_op = op.label(),
+                    docker_transport = "cli-fallback",
+                    docker_api_fault = error.label(),
+                    reason = %error,
+                    "engine api failed; falling back to docker cli"
+                );
+                None
+            }
+        }
+    }
+
     /// Readiness of one container: health status when a healthcheck exists,
     /// else the lifecycle status.
     pub(crate) fn container_readiness(&mut self, name: &str) -> Result<Readiness> {
+        if let Some(readiness) =
+            self.engine_or_cli(&readiness_args(name), |engine, budget| async move {
+                Ok(Readiness::parse(
+                    engine
+                        .inspect_container(name, budget)
+                        .await?
+                        .readiness_word(),
+                ))
+            })
+        {
+            return Ok(readiness);
+        }
         let args = readiness_args(name);
         Ok(Readiness::parse(&self.call(&args, name)?))
     }
@@ -1270,6 +1350,13 @@ impl<'r> Docker<'r> {
     /// answer reads as not running; any other failure propagates so the
     /// caller takes its own fail-closed direction.
     pub(crate) fn container_running(&mut self, name: &str) -> Result<bool> {
+        if let Some(running) = self
+            .engine_or_cli(&running_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.running)
+            })
+        {
+            return Ok(running);
+        }
         let args = running_args(name);
         match self.call(&args, name) {
             Ok(output) => Ok(output.trim() == "true"),
@@ -1280,24 +1367,56 @@ impl<'r> Docker<'r> {
 
     /// Full id of one container.
     pub(crate) fn container_id(&mut self, name: &str) -> Result<String> {
+        if let Some(id) = self
+            .engine_or_cli(&container_id_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.id)
+            })
+        {
+            return Ok(id);
+        }
         let args = container_id_args(name);
         Ok(self.call(&args, name)?.trim().to_string())
     }
 
     /// Resolved id of one image reference.
     pub(crate) fn image_id(&mut self, reference: &str) -> Result<String> {
+        if let Some(id) = self
+            .engine_or_cli(&image_id_args(reference), |engine, budget| async move {
+                Ok(engine.inspect_image(reference, budget).await?.id)
+            })
+        {
+            return Ok(id);
+        }
         let args = image_id_args(reference);
         Ok(self.call(&args, reference)?.trim().to_string())
     }
 
     /// Published ports of one container.
     pub(crate) fn mapped_ports(&mut self, name: &str) -> Result<Vec<PortMapping>> {
+        if let Some(ports) = self
+            .engine_or_cli(&mapped_ports_args(name), |engine, budget| async move {
+                Ok(engine.inspect_container(name, budget).await?.ports)
+            })
+        {
+            return Ok(ports);
+        }
         let args = mapped_ports_args(name);
         Ok(parse_port_mappings(&self.call(&args, name)?))
     }
 
     /// The Engine's cgroup driver and version.
     pub(crate) fn daemon_cgroup(&mut self) -> Result<CgroupDriver> {
+        if let Some(cgroup) =
+            self.engine_or_cli(&daemon_cgroup_args(), |engine, budget| async move {
+                let info = engine.daemon_info(budget).await?;
+                Ok(CgroupDriver {
+                    driver: info.cgroup_driver,
+                    version: info.cgroup_version,
+                })
+            })
+        {
+            return Ok(cgroup);
+        }
         let args = daemon_cgroup_args();
         parse_cgroup_projection(&self.call(&args, "daemon cgroup")?)
     }
@@ -1310,6 +1429,15 @@ impl<'r> Docker<'r> {
 
     /// Lifecycle word and last stop time of one container.
     pub(crate) fn inspect_exit(&mut self, name: &str) -> Result<ExitInfo> {
+        if let Some(exit) = self.engine_or_cli(&exit_info_args(name), |engine, budget| async move {
+            let container = engine.inspect_container(name, budget).await?;
+            Ok(ExitInfo {
+                status: ContainerState::parse(&container.status),
+                finished: parse_finished_at(&container.finished_at),
+            })
+        }) {
+            return Ok(exit);
+        }
         let args = exit_info_args(name);
         parse_exit_info(&self.call(&args, name)?)
     }
@@ -1324,6 +1452,9 @@ impl<'r> Docker<'r> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docker::engine::mock::json_response;
+    use crate::docker::engine::{EngineTestGuard, MockEngine};
+    use crate::docker::{begin_job, snapshot};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Every fixture below is output captured from a real Engine 29.4.0
@@ -1562,6 +1693,7 @@ mod tests {
         results: std::collections::VecDeque<CommandResult>,
         calls: AtomicUsize,
         seen_args: std::sync::Mutex<Vec<Vec<String>>>,
+        host: bool,
     }
 
     impl ScriptRunner {
@@ -1570,11 +1702,28 @@ mod tests {
                 results: results.into(),
                 calls: AtomicUsize::new(0),
                 seen_args: std::sync::Mutex::new(Vec::new()),
+                host: false,
+            }
+        }
+
+        /// Scripted runner that passes as a host process runner, so the
+        /// facade routes it through the Engine fast path like production.
+        /// Only routing tests use this, all under the shared serial lock.
+        fn scripted_host(results: Vec<CommandResult>) -> Self {
+            Self {
+                results: results.into(),
+                calls: AtomicUsize::new(0),
+                seen_args: std::sync::Mutex::new(Vec::new()),
+                host: true,
             }
         }
     }
 
     impl CommandRunner for ScriptRunner {
+        fn is_host_process_runner(&self) -> bool {
+            self.host
+        }
+
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             assert_eq!(program, "docker");
             self.calls.fetch_add(1, Ordering::SeqCst);
@@ -1775,5 +1924,201 @@ Total:\t\t6.054MB
 
         assert!(timed_out);
         assert!(!output.status.success());
+    }
+
+    // ------------------------------------------------------------------
+    // Engine-API routing: identical values, subprocesses only on fallback
+    // ------------------------------------------------------------------
+
+    const ROUTED_INSPECT: &str = r#"{"Id":"a530e70d9e1e35941b6fc12db9b51a7b19c6d02","State":{"Running":true,"Status":"running","FinishedAt":"0001-01-01T00:00:00Z","Health":{"Status":"healthy"}},"NetworkSettings":{"Ports":{"8080/tcp":[{"HostIp":"0.0.0.0","HostPort":"41062"},{"HostIp":"::","HostPort":"41062"}]}}}"#;
+    const ROUTED_IMAGE: &str = r#"{"Id":"sha256:feedface"}"#;
+    const ROUTED_INFO: &str = r#"{"CgroupDriver":"systemd","CgroupVersion":2}"#;
+
+    fn routed_mock(connections: usize) -> MockEngine {
+        MockEngine::serve(
+            |head| {
+                if head.contains("GET /info ") {
+                    json_response(ROUTED_INFO)
+                } else if head.contains("GET /images/") {
+                    json_response(ROUTED_IMAGE)
+                } else {
+                    json_response(ROUTED_INSPECT)
+                }
+            },
+            connections,
+        )
+    }
+
+    /// The seven migrated queries in one fixed order, returning their typed
+    /// values for cross-transport comparison.
+    type RoutedValues = (
+        Readiness,
+        bool,
+        String,
+        String,
+        Vec<PortMapping>,
+        CgroupDriver,
+        ExitInfo,
+    );
+
+    fn routed_sequence(docker: &mut Docker<'_>) -> Result<RoutedValues> {
+        Ok((
+            docker.container_readiness("svc")?,
+            docker.container_running("svc")?,
+            docker.container_id("svc")?,
+            docker.image_id("img:tag")?,
+            docker.mapped_ports("svc")?,
+            docker.daemon_cgroup()?,
+            docker.inspect_exit("svc")?,
+        ))
+    }
+
+    fn cli_script_for_routed_sequence() -> Vec<CommandResult> {
+        vec![
+            ok("healthy\n"),
+            ok("true\n"),
+            ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n"),
+            ok("sha256:feedface\n"),
+            ok("8080/tcp -> 0.0.0.0:41062\n8080/tcp -> [::]:41062\n"),
+            ok("systemd 2\n"),
+            ok("running 0001-01-01T00:00:00Z\n"),
+        ]
+    }
+
+    #[test]
+    fn representative_sequence_is_identical_with_zero_subprocess_on_api() {
+        let mock = routed_mock(7);
+
+        // Before: engine off (the test default), every query is one CLI call.
+        let cli_values = {
+            let _serial = crate::docker::metrics::lock_serial_for_test();
+            let _scope = begin_job("seq-cli");
+            let mut runner = ScriptRunner::scripted_host(cli_script_for_routed_sequence());
+            let values = {
+                let mut docker = Docker::job(&mut runner);
+                routed_sequence(&mut docker).expect("cli sequence serves")
+            };
+            assert_eq!(runner.calls.load(Ordering::SeqCst), 7);
+            let counts = snapshot();
+            assert_eq!(counts.api_calls, 0);
+            assert_eq!(counts.api_fallbacks, 0);
+            // The scripted runner bypasses the real spawn seam where
+            // `invocations` is observed, so it stays zero here; the seven
+            // runner calls above are the seven subprocesses, one per query,
+            // as `each_query_costs_exactly_one_process` pins down.
+            assert_eq!(counts.invocations, 0);
+            values
+        };
+
+        // After: engine on, the same values with no runner call at all.
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-api");
+        let mut runner = ScriptRunner::scripted_host(Vec::new());
+        let api_values = {
+            let mut docker = Docker::job(&mut runner);
+            routed_sequence(&mut docker).expect("api sequence serves")
+        };
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            0,
+            "no CLI call may run while the API serves"
+        );
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 7);
+        assert_eq!(counts.api_fallbacks, 0);
+        assert_eq!(counts.invocations, 0);
+        assert_eq!(api_values, cli_values, "transports must agree exactly");
+    }
+
+    #[test]
+    fn api_status_failure_falls_back_to_one_cli_call() {
+        let mock = MockEngine::serve(
+            |_| b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-fallback-status");
+        let mut runner =
+            ScriptRunner::scripted_host(vec![ok("a530e70d9e1e35941b6fc12db9b51a7b19c6d02\n")]);
+        let id = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_id("svc").expect("fallback serves")
+        };
+        assert_eq!(id, "a530e70d9e1e35941b6fc12db9b51a7b19c6d02");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 1);
+    }
+
+    #[test]
+    fn api_timeout_falls_back_to_cli() {
+        let mock = MockEngine::serve(
+            |_| {
+                std::thread::sleep(Duration::from_millis(300));
+                json_response(ROUTED_INSPECT)
+            },
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), Some(30));
+        let _scope = begin_job("seq-fallback-timeout");
+        let mut runner = ScriptRunner::scripted_host(vec![ok("healthy\n")]);
+        let readiness = {
+            let mut docker = Docker::job(&mut runner);
+            docker.container_readiness("svc").expect("fallback serves")
+        };
+        assert_eq!(readiness, Readiness::Healthy);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn missing_container_falls_back_and_still_reads_as_not_running() {
+        let mock = MockEngine::serve(
+            |_| b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            1,
+        );
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-fallback-missing");
+        let mut runner =
+            ScriptRunner::scripted_host(vec![failed(1, "Error: No such object: svc\n")]);
+        let running = {
+            let mut docker = Docker::job(&mut runner);
+            docker
+                .container_running("svc")
+                .expect("missing reads as not running")
+        };
+        assert!(!running);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(snapshot().api_fallbacks, 1);
+    }
+
+    #[test]
+    fn buildx_queries_stay_on_cli_without_api_attempts() {
+        let mock = routed_mock(0);
+        let _guard = EngineTestGuard::serve(mock.socket.clone(), None);
+        let _scope = begin_job("seq-buildx-cli");
+        let mut runner = ScriptRunner::scripted_host(vec![
+            ok("velnor-builder-shared-trusted-o_r0\n"),
+            ok("Total:\t\t6.054MB\n"),
+        ]);
+        let (builders, usage) = {
+            let mut docker = Docker::job(&mut runner);
+            (
+                docker.buildx_builders().expect("builders list"),
+                docker
+                    .buildx_disk_usage("velnor-builder-shared-trusted-o_r0")
+                    .expect("disk usage"),
+            )
+        };
+        assert_eq!(
+            builders,
+            vec!["velnor-builder-shared-trusted-o_r0".to_string()]
+        );
+        assert_eq!(usage, 6_054_000);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 2);
+        let counts = snapshot();
+        assert_eq!(counts.api_calls, 0);
+        assert_eq!(counts.api_fallbacks, 0);
     }
 }

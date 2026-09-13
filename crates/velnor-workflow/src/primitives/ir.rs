@@ -1445,7 +1445,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
 
     pub(crate) fn render_plan(&self, output: &mut String, _runners: RunnerMode, _trusted: bool) {
         // Plan always runs on GitHub so default operation needs no Velnor
-        // server or credentials. Velnor unit jobs consume the same artifact.
+        // server or credentials. It also publishes the SOURCE_REV runtime
+        // product (fleet 0.1.274 ≠ pin). Velnor unit jobs consume the artifact.
         let runners = RunnerMode::Github;
         let gate = String::new();
         let runtime_setup = workflow_runtime_setup(RunnerMode::Github);

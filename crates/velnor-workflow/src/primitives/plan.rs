@@ -5,9 +5,9 @@ use crate::{GeneratorError, RunnerMode};
 
 /// Render the `plan:` job.
 ///
-/// Planning executes checked-in shell files on the selected control-plane
-/// runner. Self-hosted planning is restricted to the default branch and
-/// trusted event types by the generated expression.
+/// Control-plane Planning publishes the SOURCE_REV runtime product; it cannot
+/// use the apt/image CLI (fleet 0.1.274 ≠ pin). Unit jobs stay on
+/// `config.runners`.
 pub(crate) struct AffectedPlan;
 
 impl Primitive for AffectedPlan {
