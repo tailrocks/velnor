@@ -923,7 +923,7 @@ jobs:
   prune-pr-cache:
     name: Prune closed-PR cache
     if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}
-    runs-on: ubuntu-24.04
+    runs-on: __MAINTENANCE_PRUNE_RUNNER__
     timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
@@ -957,7 +957,7 @@ jobs:
   cache-budget:
     name: Cache retention
     if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-24.04
+    runs-on: __MAINTENANCE_CACHE_RUNNER__
     timeout-minutes: 10
     steps:
 VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
@@ -1065,38 +1065,43 @@ VELNOR_RUNTIME_SETUP_STEPS      - name: Collect Actions cache account
 "#;
 
 fn render_maintenance(config: &ProjectConfig) -> String {
-    let setup = workflow_runtime_setup_for_config(config);
-    let mut output = MAINTENANCE_WORKFLOW.replace("VELNOR_RUNTIME_SETUP_STEPS", &setup);
-    output = output
-        .replace("runs-on: ubuntu-24.04", &format!("runs-on: {}", selected_runner(config)))
+    let cache_lane = if config.runners == RunnerMode::Github {
+        RunnerMode::Github
+    } else {
+        RunnerMode::Velnor
+    };
+    let prune_gate = format!(
+        "github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '')",
+        config.default_branch
+    );
+    let cache_gate = format!(
+        "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
+        config.default_branch
+    );
+    let setup = if cache_lane == RunnerMode::Github {
+        workflow_runtime_setup(RunnerMode::Github)
+    } else {
+        String::new()
+    };
+
+    MAINTENANCE_WORKFLOW
+        .replace("VELNOR_RUNTIME_SETUP_STEPS", &setup)
         .replace(
-        "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
-        &format!(
-            "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
-            config.default_branch
-        ),
-        );
-    if config.runners == RunnerMode::Velnor {
-        let gate = format!(
-            "github.ref == 'refs/heads/{}' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')",
-            config.default_branch
-        );
-        output = output
-            .replace(
-                &format!(
-                    "if: ${{{{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/{}' && inputs.pull_request_number != '') }}}}",
-                    config.default_branch
-                ),
-                &format!(
-                    "if: ${{{{ {gate} && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}}}"
-                ),
-            )
-            .replace(
-                "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
-                &format!("if: ${{{{ {gate} }}}}"),
-            );
-    }
-    output
+            "__MAINTENANCE_PRUNE_RUNNER__",
+            &configured_runner(config, RunnerMode::Github),
+        )
+        .replace(
+            "__MAINTENANCE_CACHE_RUNNER__",
+            &configured_runner(config, cache_lane),
+        )
+        .replace(
+            "if: ${{ github.event_name == 'pull_request' || inputs.pull_request_number != '' }}",
+            &format!("if: ${{{{ {prune_gate} }}}}"),
+        )
+        .replace(
+            "if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}",
+            &format!("if: ${{{{ {cache_gate} }}}}"),
+        )
 }
 
 #[cfg(test)]
@@ -1308,15 +1313,15 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "d0501d22f8c24afa0a8fb126661eda86948a171a5e3cda8a1bf3b7fb0c1db843",
+                "4638b9015da9a537bf09f5458f34a957bcfa3993e0126bc615d7f3695fb03f9d",
             ),
             (
                 "preview.yml",
-                "23d172dc36e090130a95b03d19fdb2dbb96e736f52db15acfc896ab9c1ad93d8",
+                "475849f68167298965962f60bffa01077a6f015613ac19d58634bb3e738f1ee1",
             ),
             (
                 "maintenance.yml",
-                "f7e24857963b1f28d9255a1ebc8216778590c0496bc12fefd57c49994352435f",
+                "a969870d4e5c28f0fce414dd94c93fc6c9239d4783f3c1b84ad8193d0281fb96",
             ),
             (
                 "ci-release-package-signer.yml",
@@ -1393,6 +1398,74 @@ mod tests {
             assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
             assert!(!workflow.contains("github-hosted"), "{workflow}");
         }
+    }
+
+    #[test]
+    fn maintenance_keeps_only_prune_on_github_hosted_runner() {
+        let mut config = config(&["maintenance.yml"], None);
+        config.runners = RunnerMode::Velnor;
+
+        let workflow = super::render_maintenance(&config);
+        let runs_on: Vec<&str> = workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("runs-on:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            runs_on,
+            vec![
+                "runs-on: ubuntu-24.04",
+                "runs-on: [self-hosted, example-runner]",
+            ],
+            "prune is the only hosted maintenance job: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}"
+            ),
+            "prune allows closed PRs and trusted manual dispatch only: {workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"
+            ),
+            "cache budget dispatch is main-only: {workflow}"
+        );
+        assert!(
+            !workflow.contains("setup-velnor-workflow"),
+            "Velnor cache budget uses the packaged image runtime: {workflow}"
+        );
+        assert!(!workflow.contains("\n  push:"));
+
+        let root = scanned_root("maintenance-velnor-default");
+        let surface = generate(&root, &config, None);
+        let generated = rendered(&surface, "maintenance.yml");
+        assert_eq!(
+            generated.strip_prefix(crate::GENERATED_HEADER),
+            Some(workflow.as_str())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn maintenance_honors_explicit_github_runner_for_all_jobs() {
+        let mut config = config(&["maintenance.yml"], None);
+        config.runners = RunnerMode::Github;
+        config.github_runner = "ubuntu-22.04".to_owned();
+        config.default_branch = "trunk".to_owned();
+
+        let workflow = super::render_maintenance(&config);
+        let runs_on: Vec<&str> = workflow
+            .lines()
+            .filter(|line| line.trim_start().starts_with("runs-on:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            runs_on,
+            vec!["runs-on: ubuntu-22.04", "runs-on: ubuntu-22.04"]
+        );
+        assert!(workflow.contains("setup-velnor-workflow"));
+        assert!(workflow.contains("refs/heads/trunk"));
     }
 
     /// An incomplete contract omits the publisher exactly as the legacy path

@@ -25,8 +25,8 @@ concurrency:
 jobs:
   prune-pr-cache:
     name: Prune closed-PR cache
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.event_name == 'workflow_dispatch' && inputs.pull_request_number != '' }}
-    runs-on: [self-hosted, velnor-target-mvp]
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Delete merge-ref cache namespace
