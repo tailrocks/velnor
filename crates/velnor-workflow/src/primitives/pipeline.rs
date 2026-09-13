@@ -1,14 +1,9 @@
 //! The per-unit verification pipelines.
 //!
-//! One primitive per unit kind, one declared row per unit, one reusable
-//! workflow file per unit. Every pipeline renders the same surface — the lane
-//! jobs, their tool provisioning, the unit's cache, and the single command that
-//! runs the unit — and differs only in which unit kind it accepts and in the
-//! tools that kind needs provisioned. Adding a unit to the scan therefore adds
-//! exactly one workflow file and one CI graph node, and removing it removes
-//! both.
-
-use std::path::PathBuf;
+//! One primitive per unit kind and one declared row per unit. Units of a kind
+//! share one reusable workflow file so a monorepo stays under GitHub's unique
+//! reusable-workflow limit. Each row contributes a CI graph node; the kind
+//! workflow body is rendered once by the generator.
 
 use super::{
     Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, UnitContract, BUN_PACKAGE,
@@ -25,35 +20,42 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
             ctx.family
         ))
     })?;
-    // An undeclared file is the canonical nested name for the unit.
-    let file = ctx
-        .file
-        .filter(|file| !file.is_empty())
-        .map_or_else(|| crate::nested_unit_workflow_file(unit), str::to_owned);
     super::validate_cache_transports_for_unit(ctx.lanes.ir(), unit)?;
     super::validate_mutable_mount_seed(unit)?;
     let contract = UnitContract {
         lanes: declared_lanes(ctx, args)?,
         timeout_minutes: declared_timeout(ctx, args)?,
         cache: declared_cache(ctx, args)?,
-        // The emitted surface is the trusted-event surface, so its hosted lane
-        // carries the cache save step.
+        // The hosted lane's save step is still guarded by the generated
+        // trusted-event expression; the contract only records that the
+        // pipeline permits the save lifecycle.
         cache_save: true,
         mutable_mount_seed: unit
             .cache
             .as_ref()
             .is_some_and(|cache| cache.mutable_mount_seed),
     };
-    let content = ctx.lanes.ir().render_unit_surface(unit, &contract);
+    let mut contracts = std::collections::BTreeMap::new();
+    contracts.insert(unit.id.clone(), contract);
+    if let Some(file) = ctx.file.filter(|file| !file.is_empty()) {
+        let canonical = crate::nested_unit_workflow_file(unit);
+        if file != canonical {
+            return Err(GeneratorError::usage(format!(
+                "`{}` must declare unit `{}` as `{canonical}`, not `{file}`; the aggregate callers invoke the canonical file name",
+                ctx.family,
+                unit.id
+            )));
+        }
+    }
     let nodes = vec![GraphNode::Unit {
         unit_id: unit.id.clone(),
-        job_id: crate::unit_group_job_id(unit),
+        job_id: crate::stack_group_job_id(unit.kind),
         name: crate::sidebar_group_name(unit),
-        file: file.clone(),
+        file: crate::nested_unit_workflow_file(unit),
     }];
     Ok(Rendered {
-        files: std::iter::once((PathBuf::from(".github/workflows").join(file), content)).collect(),
         nodes,
+        contracts,
         ..Rendered::default()
     })
 }

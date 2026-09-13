@@ -6548,17 +6548,23 @@ async fn handle_job_request(
         let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
         let _job_cancellation_active =
             crate::execution::cancel::set_active(job_cancellation.clone());
+        // The ladder targets the job owns must outlive the poller task: the
+        // poller breaks right after `request()` on broker-driven cancel
+        // paths, so guards owned by the task deregister before escalation and
+        // Forced-tier services never terminate. Owned here, at job scope.
+        let service_container_names =
+            crate::github_adapter::service_container_names(&job, &effective_trust_scope);
+        let _owned_containers = register_owned_containers(
+            &job_cancellation,
+            &job_container_name(&job),
+            &service_container_names,
+        );
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
             broker_cancellation.disable_update,
             JobCancellationWatch {
                 job_id: job.job_id.clone(),
-                job_container_name: job_container_name(&job),
-                service_container_names: crate::github_adapter::service_container_names(
-                    &job,
-                    &effective_trust_scope,
-                ),
                 canceled: canceled.clone(),
                 cancellation: job_cancellation.clone(),
             },
@@ -7577,8 +7583,6 @@ fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
 /// with another job's cancellation token.
 struct JobCancellationWatch {
     job_id: String,
-    job_container_name: String,
-    service_container_names: Vec<String>,
     canceled: Arc<AtomicBool>,
     cancellation: crate::execution::cancel::JobCancellation,
 }
@@ -7586,8 +7590,11 @@ struct JobCancellationWatch {
 /// Register every container the job owns — the Docker-action sidecar, the job
 /// container, and each `services:` container — as a ladder target, so
 /// cancellation terminates them rather than a separate `docker kill` racing
-/// the ladder. The guards live as long as the poller task holds them: bounded
-/// by the job's own service list, deregistered on drop, never leaked.
+/// the ladder. The caller holds the guards at job scope: bounded by the
+/// job's own service list, deregistered on drop, never leaked. They must
+/// NOT live in the poller task, which breaks right after `request()` on
+/// broker-driven cancel paths — before `Forced` escalation runs.
+#[must_use = "owned-container guards deregister on drop; hold them at job scope"]
 fn register_owned_containers(
     cancellation: &crate::execution::cancel::JobCancellation,
     job_container_name: &str,
@@ -7630,21 +7637,20 @@ fn start_broker_cancellation_poll(
 ) -> JoinHandle<()> {
     let JobCancellationWatch {
         job_id,
-        job_container_name,
-        service_container_names,
         canceled,
         cancellation,
     } = watch;
     tokio::spawn(async move {
-        // Register the containers the job owns as termination targets, so the
-        // ladder terminates them rather than a separate `docker kill` racing it.
+        // The job's owned containers are registered as termination targets by
+        // the caller at job scope, so the ladder terminates them rather than
+        // a separate `docker kill` racing it. The registration deliberately
+        // does NOT live here: this task breaks right after `request()`, and
+        // guards owned by it would deregister before `Forced` escalation.
         //
         // The eager kill this replaces ran on the line after `request()`, which
         // SIGKILLed the job container at *request* level — defeating the whole
         // point of `terminate_at()` sparing it until `Forced` so `always()` and
         // `cancelled()` post steps can still exec into a live container.
-        let _owned_containers =
-            register_owned_containers(&cancellation, &job_container_name, &service_container_names);
         let mut broker = broker;
         let mut error_streak: u32 = 0;
         loop {
@@ -8758,10 +8764,12 @@ fn execute_script_job(
     let execution_backend = crate::execution::load_execution_file(config_dir, None)
         .map_err(|error| anyhow::anyhow!("{error}"))?
         .backend();
-    let job_dir = job_work_dir(config_dir, work_dir, job);
+    let slot_work_dir = slot_work_dir(config_dir, work_dir.as_deref());
+    let job_dir = slot_work_dir.join(sanitize_path_segment(&job.job_id));
     register_job_cache_session(job);
     let result = execute_script_job_inner(
         &job_dir,
+        &slot_work_dir,
         docker_host_work_dir,
         docker_image,
         resource_options,
@@ -9258,6 +9266,7 @@ fn microvm_step_is_admitted(step: &crate::job_message::ActionStep) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn execute_script_job_inner(
     job_dir: &std::path::Path,
+    slot_work_dir: &std::path::Path,
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     resource_options: Vec<String>,
@@ -9298,7 +9307,13 @@ fn execute_script_job_inner(
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.
     let side_effects = JobSideEffectCounters::default();
-    let workspace = job_dir.join("workspace");
+    // Non-mbx Rust jobs (explicit sccache, `MBX_DISABLE` opt-out) check out
+    // into a stable per-slot workspace so Cargo fingerprints survive warm
+    // same-SHA rebuilds; see `stable_workspace`. The mbx default path keeps
+    // the ephemeral per-job workspace: mbx manages its own targets.
+    let stable_workspace = stable_workspace_for_job(job, slot_work_dir, effective_trust_scope);
+    let stable = stable_workspace.is_some();
+    let workspace = stable_workspace.unwrap_or_else(|| job_dir.join("workspace"));
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
     let actions = job_dir.join("actions");
@@ -9379,7 +9394,27 @@ fn execute_script_job_inner(
         sender.send_best_effort(setup_log.clone());
     }
     let mut command_runner = ProcessCommandRunner;
-    let checkout_plans = checkout_plans(job, &workspace)?;
+    let mut checkout_plans = checkout_plans(job, &workspace)?;
+    if stable {
+        // The workspace persists across jobs: keep `target/` through clean
+        // so the stable path actually stays warm (see `stable_workspace`),
+        // and force `clean` on: checkout-time clean only removes
+        // prior-job state, while `clean: false` would leak it.
+        apply_stable_checkout_policy(&mut checkout_plans);
+        // Drop destinations the previous job left behind before any
+        // checkout runs (see `stable_workspace::prune_stale_destinations`).
+        if let Some(scope_dir) = workspace.parent() {
+            let destinations: Vec<PathBuf> = checkout_plans
+                .iter()
+                .map(|plan| plan.destination.clone())
+                .collect();
+            crate::stable_workspace::prune_stale_destinations(
+                scope_dir,
+                &workspace,
+                &destinations,
+            )?;
+        }
+    }
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
         .into_iter()
         .partition(CheckoutPlan::requires_runtime_context);
@@ -9702,16 +9737,14 @@ fn execute_script_job_inner(
         eprintln!("Warning: cleanup failed after executor error: {error:#}");
     }
     let mut command_runner = executor.into_runner();
-    let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
-    let (summary, cleanup_traces) = match (summary_result, cleanup_result) {
-        (Ok(summary), Ok(traces)) => (summary, traces),
-        (Ok(_), Err(error)) => return Err(error.context("cleanup checkout credentials")),
-        (Err(error), Ok(_)) => return Err(error),
-        (Err(error), Err(cleanup_error)) => {
-            eprintln!("Checkout credential cleanup failed after job error: {cleanup_error:#}");
-            return Err(error);
-        }
-    };
+    let cleanup_result =
+        cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans, &workspace);
+    let (summary, cleanup_traces) = combine_job_and_cleanup(
+        summary_result,
+        cleanup_result,
+        stable,
+        &cleanup_checkout_plans,
+    )?;
     if !summary.job_outputs.is_empty() {
         println!("Evaluated {} job output(s).", summary.job_outputs.len());
     }
@@ -10980,7 +11013,7 @@ where
         if downloadable.is_empty() {
             break;
         }
-        let next = download_repository_actions(runner, &downloadable)?;
+        let next = download_repository_actions(runner, &downloadable, actions_host)?;
         resolved.extend(next);
 
         let nested = composite_repository_action_plans_from_resolved(&resolved, actions_host)?;
@@ -11369,12 +11402,12 @@ fn append_native_action_step_from_plan(
             environment: None,
             inputs: Some(serde_json::to_value(&plan.inputs)?),
         };
-        ordered.push(ExecutableStep::Checkout(checkout_plan(
-            job,
-            workspace_host,
-            &step,
-            0,
-        )?));
+        let mut checkout = checkout_plan(job, workspace_host, &step, 0)?;
+        if crate::stable_workspace::is_stable_workspace(workspace_host) {
+            checkout.preserve_target = true;
+            checkout.clean = true;
+        }
+        ordered.push(ExecutableStep::Checkout(checkout));
         return Ok(true);
     }
     ordered.push(ExecutableStep::Native {
@@ -11388,14 +11421,155 @@ fn append_native_action_step_from_plan(
     Ok(true)
 }
 
+/// This slot's work directory: the parent of the per-job UUID directories
+/// (and of the stable-workspace tree). Resolved once here so the job
+/// directory and the stable allocator cannot disagree about the root.
+fn slot_work_dir(config_dir: &std::path::Path, work_dir: Option<&std::path::Path>) -> PathBuf {
+    work_dir
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| config_dir.join("_work"))
+}
+
 fn job_work_dir(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
     job: &AgentJobRequestMessage,
 ) -> PathBuf {
-    work_dir
-        .unwrap_or_else(|| config_dir.join("_work"))
-        .join(sanitize_path_segment(&job.job_id))
+    slot_work_dir(config_dir, work_dir.as_deref()).join(sanitize_path_segment(&job.job_id))
+}
+
+/// Stable workspace for one Docker job, or `None` for the ephemeral per-job
+/// workspace. `None` covers five cases: the job runs under mbx (which
+/// manages its own targets), the job has no enabled checkout step (it must
+/// not inherit the previous tree), checkout plans are empty or invalid
+/// (same refusal, checked before allocating), the repository id is missing
+/// or invalid (no safe namespace exists — same refusal as the compiler
+/// stores), and stable allocation itself failed (a cache optimization must
+/// never red a build, so the fallback is loud but non-fatal).
+fn stable_workspace_for_job(
+    job: &AgentJobRequestMessage,
+    slot_work_dir: &std::path::Path,
+    trust_scope: &str,
+) -> Option<PathBuf> {
+    if !crate::manifest::wants_stable_workspace(job) {
+        return None;
+    }
+    // A job that never checks out must not see the previous job's tree.
+    let has_enabled_checkout = job
+        .steps
+        .iter()
+        .any(|step| step.enabled && crate::checkout::is_checkout_step(step));
+    if !has_enabled_checkout {
+        eprintln!(
+            "forensics.lifecycle: stable workspace refused: job has no enabled checkout step"
+        );
+        return None;
+    }
+    match crate::checkout::checkout_plans(job, slot_work_dir) {
+        Ok(plans) if !plans.is_empty() => {}
+        Ok(_) => {
+            eprintln!(
+                "forensics.lifecycle: stable workspace refused: job has empty checkout plans"
+            );
+            return None;
+        }
+        Err(_) => {
+            eprintln!("forensics.lifecycle: stable workspace refused: checkout plans invalid");
+            return None;
+        }
+    }
+    let repository_id = crate::github_adapter::job_variable(job, "github.repository_id")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|id| *id != 0);
+    let Some(repository_id) = repository_id else {
+        eprintln!(
+            "forensics.lifecycle: stable workspace refused: missing or invalid github.repository_id"
+        );
+        return None;
+    };
+    match crate::stable_workspace::prepare(slot_work_dir, trust_scope, repository_id) {
+        Ok(stable) => {
+            eprintln!(
+                "forensics.lifecycle: stable workspace {} (scope {}, fresh scope {})",
+                stable.workspace.display(),
+                crate::trust_scope::normalize_scope(trust_scope),
+                stable.fresh_scope,
+            );
+            Some(stable.workspace)
+        }
+        Err(error) => {
+            eprintln!(
+                "forensics.lifecycle: stable workspace allocation failed, \
+                 using ephemeral workspace: {error:#}"
+            );
+            None
+        }
+    }
+}
+
+/// Stable checkout policy: keep the anchored top-level `target/` through
+/// clean, and force `clean` on. A stable workspace persists across jobs,
+/// so checkout-time clean only removes prior-job state; honoring
+/// `clean: false` would leak the previous job's untracked files.
+fn apply_stable_checkout_policy(plans: &mut [CheckoutPlan]) {
+    for plan in plans {
+        plan.preserve_target = true;
+        plan.clean = true;
+    }
+}
+
+/// Best-effort scrub of stable checkout credentials after a cleanup
+/// failure. Stable workspaces persist across jobs, so a token left in
+/// `.git/config` would be readable by the next job (cross-fork within the
+/// untrusted floor). Ephemeral workspaces are deleted with the job dir.
+fn scrub_stable_checkout_credentials(plans: &[CheckoutPlan]) {
+    for plan in plans {
+        let config = plan.destination.join(".git/config");
+        match crate::checkout::scrub_config_credentials(&config) {
+            Ok(true) => eprintln!(
+                "forensics.lifecycle: scrubbed residual stable checkout credential at {}",
+                config.display()
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "forensics.lifecycle: stable credential scrub failed at {}: {error:#}",
+                config.display()
+            ),
+        }
+    }
+}
+
+/// Combine the job summary with checkout-credential cleanup.
+///
+/// The double-failure path used to mask the cleanup error behind the job
+/// error. For stable destinations that hides a token left in a persisted
+/// `.git/config`, so stable failures scrub and fail loud with both errors.
+fn combine_job_and_cleanup<T>(
+    summary_result: Result<T>,
+    cleanup_result: Result<Vec<Vec<String>>>,
+    stable: bool,
+    cleanup_plans: &[CheckoutPlan],
+) -> Result<(T, Vec<Vec<String>>)> {
+    match (summary_result, cleanup_result) {
+        (Ok(summary), Ok(traces)) => Ok((summary, traces)),
+        (Ok(_), Err(error)) => {
+            if stable {
+                scrub_stable_checkout_credentials(cleanup_plans);
+            }
+            Err(error.context("cleanup checkout credentials"))
+        }
+        (Err(error), Ok(_)) => Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            eprintln!("Checkout credential cleanup failed after job error: {cleanup_error:#}");
+            if stable {
+                scrub_stable_checkout_credentials(cleanup_plans);
+                return Err(anyhow::anyhow!(
+                    "job failed: {error:#}; checkout credential cleanup also failed: {cleanup_error:#}"
+                ));
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Host path of the live console file the job container tails as PID 1. Lives
@@ -19992,6 +20166,83 @@ jobs:
         );
     }
 
+    /// The poller breaks right after `request()` on broker-driven cancel
+    /// paths, so owned-container guards must live at job scope — not in the
+    /// poller task — or they deregister before `Forced` escalation and
+    /// services survive. Drives the real poller against a stub broker that
+    /// cancels the job, lets the task exit, then forces: the service target
+    /// must still terminate.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn broker_cancel_terminates_services_after_poller_task_exits() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        let cancel = TaskAgentMessage {
+            message_id: 1,
+            message_type: JOB_CANCELLATION_MESSAGE.into(),
+            body: serde_json::json!({ "jobId": "job-1" }).to_string(),
+            iv_base64: None,
+        };
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/message"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(serde_json::to_string(&cancel).unwrap()),
+            )
+            .mount(&server)
+            .await;
+
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let canceled = Arc::new(AtomicBool::new(false));
+        // Job scope (mirrors `handle_job_request`): outlives the poller task.
+        let _owned_containers = register_owned_containers(
+            &token,
+            "velnor-job-1",
+            &["velnor-service-1-postgres".to_string()],
+        );
+        let broker = BrokerClient::new(&server.uri(), "token").unwrap();
+        start_broker_cancellation_poll(
+            broker,
+            "session-1".to_string(),
+            false,
+            JobCancellationWatch {
+                job_id: "job-1".to_string(),
+                canceled: canceled.clone(),
+                cancellation: token.clone(),
+            },
+            stored_config(),
+        )
+        .await
+        .unwrap();
+        assert!(canceled.load(Ordering::SeqCst));
+        assert_eq!(
+            token.reason(),
+            Some(crate::execution::cancel::CancelReason::ServerRequested)
+        );
+        // The poller task has exited; the service registration must have
+        // survived it — this pins the job-scope `_owned_containers` binding
+        // in `handle_job_request` that this test mirrors.
+        assert!(
+            token
+                .target_keys()
+                .contains(&"container:velnor-service-1-postgres".to_string()),
+            "service registration must survive poller task exit: {:?}",
+            token.target_keys()
+        );
+
+        token.force();
+        assert!(
+            token
+                .outcomes()
+                .iter()
+                .any(|outcome| outcome.target == "container:velnor-service-1-postgres"),
+            "forced escalation must terminate services registered at job scope: {:?}",
+            token.outcomes()
+        );
+    }
+
     #[test]
     fn parses_broker_migration_message_url() {
         let message = TaskAgentMessage {
@@ -20487,6 +20738,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -20522,6 +20774,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -20550,6 +20803,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -21649,6 +21903,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
@@ -22077,6 +22332,259 @@ runs:
         remove_job_workspace(&job_dir).unwrap();
     }
 
+    fn stable_selection_job(
+        variables: serde_json::Value,
+        env: serde_json::Value,
+    ) -> crate::job_message::AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "550e8400-e29b-41d4-a716-446655440000",
+            "jobDisplayName": "Rust",
+            "requestId": 1,
+            "variables": variables,
+            "environmentVariables": [env],
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "checkout",
+                    "enabled": true,
+                    "reference": { "type": "Repository", "name": "actions/checkout" }
+                },
+                {
+                    "id": "build",
+                    "enabled": true,
+                    "reference": { "type": "Script" }
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn stable_selection_job_without_checkout(
+        variables: serde_json::Value,
+        env: serde_json::Value,
+    ) -> crate::job_message::AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "550e8400-e29b-41d4-a716-446655440000",
+            "jobDisplayName": "Rust",
+            "requestId": 1,
+            "variables": variables,
+            "environmentVariables": [env],
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "id": "build",
+                "enabled": true,
+                "reference": { "type": "Script" }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stable_workspace_serves_non_mbx_jobs_with_a_repository_id() {
+        let slot = unique_temp_dir("stable-selection");
+        let repo = serde_json::json!({ "github.repository_id": { "value": "41" } });
+
+        let opt_out = stable_selection_job(repo.clone(), serde_json::json!({ "MBX_DISABLE": "1" }));
+        let stable = stable_workspace_for_job(&opt_out, &slot, "trusted")
+            .expect("opt-out gets a stable workspace");
+        assert_eq!(
+            stable,
+            slot.join("stable-workspaces")
+                .join("trusted")
+                .join("41")
+                .join("workspace")
+        );
+        assert!(stable.is_dir());
+
+        // The mbx default path keeps the ephemeral per-job workspace.
+        let plain = stable_selection_job(repo, serde_json::json!({ "OTHER": "1" }));
+        assert!(stable_workspace_for_job(&plain, &slot, "trusted").is_none());
+
+        fs::remove_dir_all(slot).unwrap();
+    }
+
+    #[test]
+    fn stable_workspace_refuses_jobs_without_a_repository_id() {
+        let slot = unique_temp_dir("stable-selection-norepo");
+        for variables in [
+            serde_json::json!({}),
+            serde_json::json!({ "github.repository_id": { "value": "0" } }),
+            serde_json::json!({ "github.repository_id": { "value": "not-a-number" } }),
+        ] {
+            let job = stable_selection_job(variables, serde_json::json!({ "MBX_DISABLE": "1" }));
+            assert!(
+                stable_workspace_for_job(&job, &slot, "trusted").is_none(),
+                "no repository id means no shared namespace"
+            );
+        }
+        assert!(
+            !slot.join("stable-workspaces").exists(),
+            "a refused job must not create the stable tree"
+        );
+        fs::remove_dir_all(slot).ok();
+    }
+
+    #[test]
+    fn stable_workspace_refuses_jobs_without_an_enabled_checkout() {
+        // A job that never checks out must not inherit the previous tree.
+        let slot = unique_temp_dir("stable-selection-nocheckout");
+        let repo = serde_json::json!({ "github.repository_id": { "value": "41" } });
+        let job = stable_selection_job_without_checkout(
+            repo.clone(),
+            serde_json::json!({ "MBX_DISABLE": "1" }),
+        );
+        assert!(
+            stable_workspace_for_job(&job, &slot, "trusted").is_none(),
+            "no checkout step means no stable workspace"
+        );
+        let mut disabled: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "550e8400-e29b-41d4-a716-446655440000",
+                "jobDisplayName": "Rust",
+                "requestId": 1,
+                "variables": repo,
+                "environmentVariables": [{ "MBX_DISABLE": "1" }],
+                "resources": {
+                    "repositories": [{
+                        "alias": "self",
+                        "name": "acme/repo",
+                        "version": "abc123",
+                        "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                    }]
+                },
+                "steps": [{
+                    "id": "checkout",
+                    "enabled": false,
+                    "reference": { "type": "Repository", "name": "actions/checkout" }
+                }]
+            }))
+            .unwrap();
+        // Disabled steps are filtered before planning, so the plan list is
+        // empty even though a checkout step exists.
+        assert!(
+            stable_workspace_for_job(&disabled, &slot, "trusted").is_none(),
+            "a disabled checkout must not grant a stable workspace"
+        );
+        // Flip to enabled: the same job now qualifies.
+        disabled.steps[0].enabled = true;
+        assert!(
+            stable_workspace_for_job(&disabled, &slot, "trusted").is_some(),
+            "an enabled checkout restores the stable workspace"
+        );
+        fs::remove_dir_all(slot).ok();
+    }
+
+    #[test]
+    fn stable_checkout_policy_forces_clean_and_preserves_target() {
+        // `clean: false` on a stable workspace would leak the previous
+        // job's untracked files; checkout-time clean only removes
+        // prior-job state, so it is forced on.
+        let mut plans = vec![crate::checkout::CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: PathBuf::from("/tmp/work"),
+            token: None,
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: false,
+            preserve_target: false,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        apply_stable_checkout_policy(&mut plans);
+        assert!(plans[0].clean, "stable must force clean on");
+        assert!(plans[0].preserve_target, "stable must keep target/");
+    }
+
+    #[test]
+    fn stable_double_failure_scrubs_and_fails_loud() {
+        // The (Err, Err) path used to mask the cleanup error behind the job
+        // error, leaving a token in a persisted `.git/config`. Stable must
+        // scrub and surface both errors; ephemeral keeps the old masking.
+        let root = unique_temp_dir("stable-double-failure");
+        let workspace = root.join("workspace");
+        let git_dir = workspace.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let config = git_dir.join("config");
+        fs::write(
+            &config,
+            "[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        let plan = crate::checkout::CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: workspace.clone(),
+            token: None,
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            preserve_target: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+        let plans = [plan];
+        let job_err = || anyhow::anyhow!("job boom");
+        let cleanup_err = || anyhow::anyhow!("cleanup boom");
+        let stable_err =
+            combine_job_and_cleanup::<()>(Err(job_err()), Err(cleanup_err()), true, &plans)
+                .unwrap_err();
+        let text = format!("{stable_err:#}");
+        assert!(text.contains("job boom"), "job error survives: {text}");
+        assert!(
+            text.contains("cleanup boom"),
+            "stable must not mask cleanup failure: {text}"
+        );
+        assert!(
+            !fs::read_to_string(&config).unwrap().contains("extraheader"),
+            "stable double failure must scrub the token"
+        );
+        // Ephemeral keeps the old behavior: the job error wins.
+        fs::write(
+            &config,
+            "[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic c2VjcmV0\n",
+        )
+        .unwrap();
+        let ephemeral_err =
+            combine_job_and_cleanup::<()>(Err(job_err()), Err(cleanup_err()), false, &plans)
+                .unwrap_err();
+        assert_eq!(format!("{ephemeral_err:#}"), "job boom");
+        fs::remove_dir_all(root).ok();
+    }
+
     fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
         JobTimingRecord {
             v: 1,
@@ -22149,6 +22657,7 @@ runs:
             node_action_image: String::new(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            packaged_workflow_cli_host: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
@@ -22619,6 +23128,7 @@ runs:
             fetch_tags: false,
             persist_credentials: false,
             clean: true,
+            preserve_target: false,
             lfs: true,
             condition: None,
             continue_on_error: false,
@@ -22643,6 +23153,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            preserve_target: false,
             lfs: false,
             condition: None,
             continue_on_error: false,
