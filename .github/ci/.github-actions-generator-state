@@ -1,36 +1,24 @@
 # Generated ownership state; do not edit.
 schema = 2
 [inputs]
-config	0aa13d747559e612
-scan	88e42558ab4f635d
-generator	9
+config	cf61764583edcabb
+scan	bc9e8b59a81acf78
+generator	10
 [outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/setup-velnor-workflow/action.yml	389525f4d40f377c
-.github/ci/project.toml	5705fb4ad2e2a29a
+.github/ci/project.toml	e514c765857f5183
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
-.github/workflows/ci-bun-velnor.yml	2b5507068a2e4451
-.github/workflows/ci-docker-docker.yml	838e045f1da14004
-.github/workflows/ci-docs-docs.yml	966efc83caf48a55
-.github/workflows/ci-main.yml	16fd37a875ce7e83
-.github/workflows/ci-opentofu-opentofu.yml	320cc21a9e1d5647
-.github/workflows/ci-policy.yml	bba16203e142906c
-.github/workflows/ci-pr.yml	47e978f3f9ab3846
+.github/workflows/ci-main.yml	ee6ce9e792d6aeaa
+.github/workflows/ci-policy.yml	588e3a57e32deb23
+.github/workflows/ci-pr.yml	847d7f95ad022bed
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-rust-policy.yml	c57bc77f988747d8
-.github/workflows/ci-rust-production-topology.yml	f75390f6f0b2991d
-.github/workflows/ci-rust-unit-collector.yml	4eca5c64071391a9
-.github/workflows/ci-rust-velnor-bench.yml	f922faac0b1bbbd3
-.github/workflows/ci-rust-velnor-client.yml	d2bd83e778e8dc5c
-.github/workflows/ci-rust-velnor-control.yml	ae02855e2f67ec39
-.github/workflows/ci-rust-velnor-model.yml	e7c28b91c48c4a42
-.github/workflows/ci-rust-velnor-render.yml	3dee98078bfc338c
-.github/workflows/ci-rust-velnor-runner.yml	2ed847ccfb88188b
-.github/workflows/ci-rust-velnor-tools.yml	ecf4f98eff3ad61e
-.github/workflows/ci-rust-velnor-workflow-contract.yml	ec61d44de6c397d6
-.github/workflows/ci-rust-velnor-workflow.yml	b37ed70eb6aa6225
-.github/workflows/ci-rust-velnorctl.yml	1e5a32b378ef1229
-.github/workflows/maintenance.yml	c2515bc3cdd226ee
-.github/workflows/nightly.yml	7336a2194097ad13
+.github/workflows/ci-unit-bun.yml	f10976476cb8f60e
+.github/workflows/ci-unit-docker.yml	55c10be0a95de697
+.github/workflows/ci-unit-docs.yml	0c77aee1538adbe1
+.github/workflows/ci-unit-opentofu.yml	39c98ad102527f0e
+.github/workflows/ci-unit-rust.yml	cd949206f20ccc44
+.github/workflows/maintenance.yml	26ef3cbfa07f8da4
+.github/workflows/nightly.yml	b1aceb188c72f6f6
 .github/workflows/preview.yml	e81e0c042a3260ad
 .github/workflows/release.yml	776be6571a20a344
