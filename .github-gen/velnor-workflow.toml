@@ -3,6 +3,9 @@ schema = 1
 [generator]
 repository = "tailrocks/velnor"
 
+[scan]
+exclude = ["migrations/**"]
+
 # Runner placement: the hosted image the GitHub lane pins, and the self-hosted
 # labels the trust-gated Velnor lane selects by.
 [workflow]

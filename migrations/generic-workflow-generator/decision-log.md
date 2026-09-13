@@ -11,3 +11,5 @@ Verified decisions only.
 - 2026-09-13: Rust clippy/test no longer pass `--all-features` by default.
 - 2026-09-13: `ci_tasks` names must exist in `mise.toml`. Not a shell-command array.
 - 2026-09-13: static-workflow still present for this repo's `release.yml` until a generic native-release capability replaces it. That remains an open removal.
+- 2026-09-13: This repository generates `runners = "github"` until the policy pin can move to a SHA that admits dispatch-only Velnor gates. Optional Velnor is a follow-up after PR 745 merges.
+- 2026-09-13: Dual check names: job `ci-required` (existing ruleset) and job `required` named `Required` (`CI / Required`).
