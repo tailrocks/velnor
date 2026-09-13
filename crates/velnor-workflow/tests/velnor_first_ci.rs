@@ -67,7 +67,7 @@ fn write_rust_fixture(root: &Path, crates: usize) {
     .unwrap();
 }
 
-fn generate(root: &Path) -> Generated {
+fn generate_with_runners(root: &Path, runners: &str) -> Generated {
     let output = root.parent().unwrap().join(format!(
         "{}-out",
         root.file_name().and_then(|name| name.to_str()).unwrap()
@@ -79,7 +79,7 @@ fn generate(root: &Path) -> Generated {
             "--default-branch",
             "main",
             "--runners",
-            "velnor",
+            runners,
             "--output",
             output.to_str().unwrap(),
             root.to_str().unwrap(),
@@ -92,6 +92,10 @@ fn generate(root: &Path) -> Generated {
         String::from_utf8_lossy(&outcome.stderr)
     );
     Generated { output }
+}
+
+fn generate(root: &Path) -> Generated {
+    generate_with_runners(root, "velnor")
 }
 
 fn unique_reusable_calls(workflow: &str) -> BTreeSet<&str> {
@@ -193,6 +197,22 @@ fn fifty_one_units_stay_under_github_unique_reusable_limit() {
         .output
         .join(".github/workflows/ci-rust-crate00.yml")
         .exists());
+}
+
+#[test]
+fn github_only_projects_omit_self_hosted_unit_jobs() {
+    let root = unique_dir("github-only");
+    write_rust_fixture(&root, 2);
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        "schema = 1\n\n[generator]\nrepository = \"example/monorepo\"\n\n[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n",
+    )
+    .unwrap();
+    let generated = generate_with_runners(&root, "github");
+    let unit = generated.workflow("ci-unit-rust.yml");
+    assert!(unit.contains("runs-on: ubuntu-24.04"));
+    assert!(!unit.contains("self-hosted"), "{unit}");
+    assert!(!unit.contains("name: Velnor\n"), "{unit}");
 }
 
 #[test]

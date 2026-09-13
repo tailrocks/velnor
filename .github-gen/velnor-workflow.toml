@@ -6,6 +6,10 @@ repository = "tailrocks/velnor"
 # Runner placement: the hosted image the GitHub lane pins, and the self-hosted
 # labels the trust-gated Velnor lane selects by.
 [workflow]
+# This repository's merge gate is GitHub-hosted `ci-required`. Keep the
+# generated unit files off self-hosted until main's policy validator admits
+# fail-closed pull_request jobs on Velnor (today: trusted default-branch only).
+runners = "github"
 github_runner = "ubuntu-24.04"
 profile = "rust-workspace-release"
 velnor_labels = ["self-hosted", "velnor-target-mvp"]

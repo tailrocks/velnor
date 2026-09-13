@@ -1197,13 +1197,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// seed lifecycle rendered for it exactly as a declared pipeline would —
     /// the default contract defaults the lane surface, never the cache
     /// transport a unit declared.
-    #[expect(
-        clippy::unused_self,
-        reason = "unit contracts stay on WorkflowIr so callers keep one render environment"
-    )]
     pub(crate) fn default_unit_contract(&self, unit: &Unit, cache_save: bool) -> UnitContract {
         UnitContract {
-            lanes: Self::default_lane_jobs(cache_save),
+            lanes: self.lane_jobs_for_project(cache_save),
             timeout_minutes: DEFAULT_UNIT_TIMEOUT_MINUTES,
             cache: CacheBackend::Detected,
             cache_save,
@@ -1230,6 +1226,22 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 trusted: true,
             },
         ]
+    }
+
+    /// GitHub-only projects omit the self-hosted lane so current policy
+    /// (`self-hosted jobs require a default-branch trusted-event gate`) still
+    /// admits their generated files. Velnor-default and dual-lane projects
+    /// keep both jobs; dispatch selects the hosted lane without regen.
+    pub(crate) fn lane_jobs_for_project(&self, cache_save: bool) -> Vec<LaneJob> {
+        if self.runners == RunnerMode::Github {
+            vec![LaneJob {
+                lane: RunnerMode::Github,
+                cache_save,
+                trusted: false,
+            }]
+        } else {
+            Self::default_lane_jobs(cache_save)
+        }
     }
 
     /// Render one unit's reusable workflow surface.
