@@ -1507,7 +1507,7 @@ fn is_approved_inline_policy_job(job: &Mapping, trusted_revision: &str) -> bool 
         // remaining job structure stays an exact generator comparison.
         if !mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(has_trusted_runner_gate)
+            .is_some_and(|condition| has_safe_runner_gate(condition, job))
         {
             return false;
         }
@@ -1573,6 +1573,11 @@ fn contains_velnor_runner_label(value: &Value) -> bool {
     }
 }
 
+fn has_safe_runner_gate(condition: &str, job: &Mapping) -> bool {
+    has_trusted_runner_gate(condition)
+        || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
+}
+
 fn strip_inline_policy_lane_fields(value: &Value) -> Value {
     let Some(mapping) = value.as_mapping() else {
         return value.clone();
@@ -1618,10 +1623,7 @@ fn inspect_jobs(value: &Value, path: &Path, trusted_revision: &str, failures: &m
         }
         let trusted_gate = mapping_value(job, "if")
             .and_then(Value::as_str)
-            .is_some_and(|condition| {
-                has_trusted_runner_gate(condition)
-                    || (has_untrusted_pull_request_gate(condition) && is_static_velnor_runner(job))
-            });
+            .is_some_and(|condition| has_safe_runner_gate(condition, job));
         let matrix = mapping_value(job, "strategy")
             .and_then(Value::as_mapping)
             .and_then(|strategy| mapping_value(strategy, "matrix"))
@@ -1994,6 +1996,10 @@ fn has_untrusted_pull_request_gate(value: &str) -> bool {
         .split_whitespace()
         .collect::<String>();
     let value = value.strip_prefix("always()&&").unwrap_or(&value);
+    let value = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(value);
     if value == "github.event_name=='pull_request'" {
         return true;
     }
@@ -2976,6 +2982,19 @@ jobs:
 ";
         let root = policy_fixture("velnor-pull-request", workflow, "velnor")?;
         assert!(run_policy(root)?);
+
+        let workflow = r"
+name: Velnor PR aggregate
+on: push
+jobs:
+  verify:
+    if: ${{ always() && (github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))) }}
+    runs-on: [self-hosted, example-velnor]
+    steps:
+      - run: true
+";
+        let root = policy_fixture("velnor-pull-request-aggregate", workflow, "velnor")?;
+        assert!(run_policy(root)?);
         Ok(())
     }
 
@@ -3023,6 +3042,20 @@ jobs:
             )
         );
         let root = policy_fixture("inline-velnor", &workflow, "velnor")?;
+        assert!(run_policy(root)?);
+
+        let pull_request_gate = "    if: ${{ github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) }}\n";
+        let workflow = format!(
+            "name: Velnor pull request policy\non: push\njobs:\n{}",
+            crate::inline_policy_job_for_lane(
+                "Advisory policy",
+                POLICY_REVISION,
+                "[self-hosted, example-velnor]",
+                "local",
+                Some(pull_request_gate),
+            )
+        );
+        let root = policy_fixture("inline-velnor-pull-request", &workflow, "velnor")?;
         assert!(run_policy(root)?);
 
         // The Velnor lane remains fail-closed for both revision drift and
