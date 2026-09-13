@@ -1,9 +1,9 @@
-# Composite replacement for the former inline `cargo install` step, following
-# the jdx/mise-action model: declare a revision, get the binary on PATH,
-# cached. Source-build phase: installs velnor-workflow with cargo and caches
-# the result. Mainline CI publishes a revision-named runtime artifact; this
-# action consumes that artifact before falling back to the one-time bootstrap
-# source build needed to publish a revision for the first time.
+# Composite replacement for the former inline `cargo install` step. A revision
+# resolves only through a platform-qualified artifact whose manifest proves the
+# producer repository, default branch, exact revision, successful run, runner
+# platform, and binary digest. A source build is controlled bootstrap only:
+# trusted default-branch pushes and same-repository PRs may bootstrap a
+# revision; forks and every other context fail closed without a product.
 name: Set up Velnor workflow runtime
 description: Install the velnor-workflow binary with cache and toolchain-env isolation
 
@@ -33,11 +33,8 @@ runs:
       if: inputs.cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: |
-          ~/.cargo/git
-          ~/.cargo/registry
-          ~/.cargo/bin/velnor-workflow
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}
+        path: ~/.cache/velnor/workflow-runtime
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.rev }}
 
     - name: Download prebuilt runtime from trusted mainline
       id: prebuilt
@@ -49,20 +46,34 @@ runs:
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         set -euo pipefail
-        artifact_name="velnor-workflow-runtime-${INSTALL_REV}"
+        test "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }
+        artifact_name="velnor-workflow-runtime-${INSTALL_REV}-${RUNNER_OS}-${RUNNER_ARCH}"
         artifact_id="$(gh api --paginate \
           "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$artifact_name&per_page=100" \
-          --jq '.artifacts[] | select(.expired == false and .workflow_run.head_branch == env.DEFAULT_BRANCH and .workflow_run.head_repository_id == .workflow_run.repository_id) | .id' \
+          --jq '.artifacts[] | select(.expired == false and .workflow_run.head_branch == env.DEFAULT_BRANCH and .workflow_run.head_sha == env.INSTALL_REV and .workflow_run.conclusion == "success" and .workflow_run.head_repository_id == .workflow_run.repository_id) | .id' \
           | sed -n '1p')"
         if [[ -z "$artifact_id" ]]; then
           echo 'found=false' >> "$GITHUB_OUTPUT"
           exit 0
         fi
+        artifact_run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id" --jq '.workflow_run.id')"
         temporary="$(mktemp -d)"
         trap 'rm -rf -- "$temporary"' EXIT
         gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$temporary/runtime.zip"
         unzip -q "$temporary/runtime.zip" -d "$temporary/runtime"
-        install -Dm0755 "$temporary/runtime/velnor-workflow" "$HOME/.cargo/bin/velnor-workflow"
+        jq -e \
+          --arg repository "$GITHUB_REPOSITORY" \
+          --arg revision "$INSTALL_REV" \
+          --arg head_branch "$DEFAULT_BRANCH" \
+          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+          --arg run_id "$artifact_run_id" \
+          '.repository == $repository and .revision == $revision and .head_branch == $head_branch and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$"))' \
+          "$temporary/runtime/manifest.json" >/dev/null
+        actual="$(sha256sum "$temporary/runtime/velnor-workflow" | awk '{print $1}')"
+        expected="$(jq -er '.binary_sha256' "$temporary/runtime/manifest.json")"
+        [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+        install -Dm0755 "$temporary/runtime/velnor-workflow" "$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV/velnor-workflow"
+        install -m 0644 "$temporary/runtime/manifest.json" "$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV/manifest.json"
         echo 'found=true' >> "$GITHUB_OUTPUT"
 
     - name: Install runtime from source
@@ -71,8 +82,15 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         INSTALL_REV: ${{ inputs.rev }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        CONTROLLED_BOOTSTRAP: ${{ (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
       run: |
         set -euo pipefail
+        [[ "$CONTROLLED_BOOTSTRAP" == 'true' ]] || {
+          echo "::error::no trusted runtime product for $INSTALL_REV; source recovery is default-branch-push or same-repository-PR only" >&2
+          exit 1
+        }
         # Authenticate git for the install below (public repo; also covers
         # anonymous rate limits and private dependency mirrors).
         git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
@@ -80,22 +98,56 @@ runs:
         # setup step runs later in the job, so any inherited RUSTC_WRAPPER
         # points at a binary that does not exist yet and breaks the build.
         env -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL \
-          cargo install --locked --git https://github.com/tailrocks/velnor.git \
+          cargo install --locked --git "$SOURCE_REPOSITORY" \
             --rev "$INSTALL_REV" velnor-workflow --bin velnor-workflow
+        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
+        mkdir -p "$runtime"
+        install -Dm0755 "$HOME/.cargo/bin/velnor-workflow" "$runtime/velnor-workflow"
+        binary_sha256="$(sha256sum "$runtime/velnor-workflow" | awk '{print $1}')"
+        jq -n \
+          --arg repository "$GITHUB_REPOSITORY" \
+          --arg revision "$INSTALL_REV" \
+          --arg head_branch "$DEFAULT_BRANCH" \
+          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+          --arg run_id "$GITHUB_RUN_ID" \
+          --arg job_id "${{ github.job }}" \
+          --arg binary_sha256 "$binary_sha256" \
+          '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' \
+          > "$runtime/manifest.json"
+
+    - name: Verify runtime product
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        INSTALL_REV: ${{ inputs.rev }}
+      run: |
+        set -euo pipefail
+        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
+        jq -e \
+          --arg repository "$GITHUB_REPOSITORY" \
+          --arg revision "$INSTALL_REV" \
+          --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+          '.repository == $repository and .revision == $revision and .platform == $platform and (.run_id | test("^[0-9]+$")) and .job_id != ""' \
+          "$runtime/manifest.json" >/dev/null
+        expected="$(jq -er '.binary_sha256' "$runtime/manifest.json")"
+        actual="$(sha256sum "$runtime/velnor-workflow" | awk '{print $1}')"
+        [[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }
 
     - name: Add runtime to PATH
       shell: bash
+      env:
+        INSTALL_REV: ${{ inputs.rev }}
       run: |
         set -euo pipefail
-        test -x "$HOME/.cargo/bin/velnor-workflow"
+        runtime="$HOME/.cache/velnor/workflow-runtime/$INSTALL_REV"
+        test -x "$runtime/velnor-workflow"
+        test -s "$runtime/manifest.json"
+        install -Dm0755 "$runtime/velnor-workflow" "$HOME/.cargo/bin/velnor-workflow"
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
     - name: Save runtime cache
       if: inputs.cache == 'true' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: |
-          ~/.cargo/git
-          ~/.cargo/registry
-          ~/.cargo/bin/velnor-workflow
-        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain', 'mise.toml', 'mise.lock') }}-${{ inputs.rev }}
+        path: ~/.cache/velnor/workflow-runtime
+        key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.rev }}
