@@ -5361,6 +5361,8 @@ mod tests {
         ));
         let expected_source = format!("SOURCE_REPOSITORY: {VELNOR_WORKFLOW_INSTALL_GIT_URL}");
         assert!(action.contains(&expected_source));
+        assert!(!action
+            .contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}"));
         assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
