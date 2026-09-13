@@ -2057,7 +2057,7 @@ pub(crate) fn render_static_template_for_config(
         .replace(SNAPSHOT_STATE_PLACEHOLDER, &state);
     let rendered = render_pinned_toolchain_fill(config, &rendered)?;
     validate_static_template_cache_transports(&rendered)?;
-    validate_guest_seed_lifecycle(&rendered)?;
+    validate_guest_seed_lifecycle(&rendered, &config.default_branch)?;
     Ok(rendered)
 }
 
@@ -2213,13 +2213,16 @@ fn static_workflow_job_blocks(rendered: &str) -> Vec<(String, String)> {
 /// Guest-payload jobs restore a recipe-identity seed, verify it against the
 /// rebuilt guest agent, and save only on a trusted exact miss. A restore
 /// without a matching save would rebuild kernel and rootfs on every run.
-fn validate_guest_seed_lifecycle(rendered: &str) -> Result<(), GeneratorError> {
+fn validate_guest_seed_lifecycle(
+    rendered: &str,
+    default_branch: &str,
+) -> Result<(), GeneratorError> {
     for (job, block) in static_workflow_job_blocks(rendered) {
         let steps = named_workflow_steps(&block);
         if !steps.iter().any(|(name, _)| name == "Restore guest seed") {
             continue;
         }
-        validate_guest_seed_job(&job, &steps)?;
+        validate_guest_seed_job(&job, &steps, default_branch)?;
     }
     Ok(())
 }
@@ -2246,7 +2249,11 @@ fn named_workflow_steps(block: &str) -> Vec<(String, String)> {
     steps
 }
 
-fn validate_guest_seed_job(job: &str, steps: &[(String, String)]) -> Result<(), GeneratorError> {
+fn validate_guest_seed_job(
+    job: &str,
+    steps: &[(String, String)],
+    default_branch: &str,
+) -> Result<(), GeneratorError> {
     let required = [
         "Restore guest seed",
         "Build guest agent",
@@ -2281,7 +2288,7 @@ fn validate_guest_seed_job(job: &str, steps: &[(String, String)]) -> Result<(), 
     let save = &steps[indexes[6]].1;
     let restore_key = validate_guest_seed_restore_key(job, restore)?;
     validate_guest_seed_reuse_gates(job, reuse, kernel, image)?;
-    validate_guest_seed_trusted_save(job, collect, save, &restore_key)
+    validate_guest_seed_trusted_save(job, collect, save, &restore_key, default_branch)
 }
 
 fn validate_guest_seed_restore_key(job: &str, restore: &str) -> Result<String, GeneratorError> {
@@ -2296,19 +2303,11 @@ fn validate_guest_seed_restore_key(job: &str, restore: &str) -> Result<String, G
              is the guest recipe/source closure, never github.sha"
         )));
     }
-    let restore_keys = step_restore_keys(restore);
-    if restore_keys.is_empty() {
+    if !step_restore_keys(restore).is_empty() {
         return Err(GeneratorError::usage(format!(
-            "static workflow job `{job}` restores a guest seed without prefix restore-keys"
+            "static workflow job `{job}` restores a guest seed with restore-keys; guest-seed \
+             restores must be exact-only so a new recipe cannot reuse an older same-arch seed"
         )));
-    }
-    for key in &restore_keys {
-        if key.contains("github.sha") || key == &restore_key || !key.ends_with('-') {
-            return Err(GeneratorError::usage(format!(
-                "static workflow job `{job}` lists guest-seed restore-keys `{key}` as a complete \
-                 generation; list a prefix only"
-            )));
-        }
     }
     Ok(restore_key)
 }
@@ -2351,21 +2350,22 @@ fn validate_guest_seed_trusted_save(
     collect: &str,
     save: &str,
     restore_key: &str,
+    default_branch: &str,
 ) -> Result<(), GeneratorError> {
-    let trusted_miss = "github.event_name == 'push' && github.ref == 'refs/heads/'";
-    // Collect and save share the trusted exact-miss gate so a prefix restore
-    // can mint the current recipe identity while an exact hit writes nothing.
+    let trusted_miss = format!(
+        "if: github.event_name == 'push' && github.ref == 'refs/heads/{default_branch}' && \
+         steps.guest-seed.outputs.cache-hit != 'true'"
+    );
+    // Collect and save share the trusted exact-miss gate. The branch is the
+    // configured default branch, never an arbitrary refs/heads/* value.
     for (name, body) in [
         ("Collect verified guest seed", collect),
         ("Save guest seed", save),
     ] {
-        if !body.contains("github.event_name == 'push'")
-            || !body.contains("github.ref == 'refs/heads/")
-            || !body.contains("steps.guest-seed.outputs.cache-hit != 'true'")
-        {
+        if !body.lines().any(|line| line.trim() == trusted_miss) {
             return Err(GeneratorError::usage(format!(
                 "static workflow job `{job}` step `{name}` must save only on a trusted \
-                 default-branch push and an exact restore miss (`{trusted_miss}` + cache-hit)"
+                 default-branch push and an exact restore miss (`{trusted_miss}`)"
             )));
         }
     }
@@ -5231,9 +5231,7 @@ mod tests {
         assert!(action.contains(
             "(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)"
         ));
-        assert!(
-            action.contains("SOURCE_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}")
-        );
+        assert!(action.contains("SOURCE_REPOSITORY: https://github.com/tailrocks/velnor"));
         assert!(action.contains("cargo install --locked --git \"$SOURCE_REPOSITORY\""));
         assert!(action.contains("head_sha == env.INSTALL_REV"));
         assert!(action.contains("actions/runs/$artifact_run_id"));
@@ -6520,14 +6518,21 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
     }
 
-    fn guest_seed_job() -> String {
+    fn guest_seed_job_with_prefix() -> String {
         "name: Preview\njobs:\n  guest-payload:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Restore guest seed\n        id: guest-seed\n        uses: actions/cache/restore@sha\n        with:\n          path: .guest-seed/${{ matrix.arch }}\n          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'Cargo.lock') }}\n          restore-keys: |\n            guest-seed-${{ matrix.arch }}-\n      - name: Build guest agent for rootfs\n        run: true\n      - name: Reuse verified guest seed\n        id: guest-seed-reuse\n        run: true\n      - name: Download pinned kernel tarball\n        if: steps.guest-seed-reuse.outputs.restored != 'true'\n        run: true\n      - name: Build guest vmlinux and rootfs.ext4\n        if: steps.guest-seed-reuse.outputs.restored != 'true'\n        run: true\n      - name: Collect verified guest seed\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'\n        run: true\n      - name: Save guest seed\n        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.guest-seed.outputs.cache-hit != 'true'\n        uses: actions/cache/save@sha\n        with:\n          path: .guest-seed/${{ matrix.arch }}\n          key: guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'Cargo.lock') }}\n".to_owned()
+    }
+
+    fn guest_seed_job() -> String {
+        guest_seed_job_with_prefix().replace(
+            "          restore-keys: |\n            guest-seed-${{ matrix.arch }}-\n",
+            "",
+        )
     }
 
     #[test]
     fn guest_seed_lifecycle_requires_trusted_exact_miss_save() {
         must(
-            validate_guest_seed_lifecycle(&guest_seed_job()),
+            validate_guest_seed_lifecycle(&guest_seed_job(), "main"),
             "a complete guest-seed lifecycle is accepted",
         );
 
@@ -6536,7 +6541,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "",
         );
         let error = must_fail(
-            validate_guest_seed_lifecycle(&missing_save),
+            validate_guest_seed_lifecycle(&missing_save, "main"),
             "a restore without save must be rejected",
         );
         assert!(error.to_string().contains("Save guest seed"), "{error}");
@@ -6546,7 +6551,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "guest-seed-${{ matrix.arch }}-${{ github.sha }}",
         );
         let error = must_fail(
-            validate_guest_seed_lifecycle(&keyed_by_sha),
+            validate_guest_seed_lifecycle(&keyed_by_sha, "main"),
             "a github.sha guest-seed key must be rejected",
         );
         assert!(error.to_string().contains("github.sha"), "{error}");
@@ -6556,20 +6561,30 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "      - name: Download pinned kernel tarball\n",
         );
         let error = must_fail(
-            validate_guest_seed_lifecycle(&ungated_kernel),
+            validate_guest_seed_lifecycle(&ungated_kernel, "main"),
             "an ungated kernel tarball download must be rejected",
         );
         assert!(error.to_string().contains("kernel tarball"), "{error}");
 
-        let complete_restore_key = guest_seed_job().replace(
-            "          restore-keys: |\n            guest-seed-${{ matrix.arch }}-\n",
-            "          restore-keys: |\n            guest-seed-${{ matrix.arch }}-${{ hashFiles('microvm/**', 'Cargo.lock') }}\n",
-        );
+        let prefix_restore_key = guest_seed_job_with_prefix();
         let error = must_fail(
-            validate_guest_seed_lifecycle(&complete_restore_key),
-            "a complete guest-seed restore key must be rejected",
+            validate_guest_seed_lifecycle(&prefix_restore_key, "main"),
+            "a prefix guest-seed restore must be rejected",
         );
-        assert!(error.to_string().contains("prefix"), "{error}");
+        assert!(error.to_string().contains("exact-only"), "{error}");
+
+        let trunk = guest_seed_job().replace("refs/heads/main", "refs/heads/trunk");
+        must(
+            validate_guest_seed_lifecycle(&trunk, "trunk"),
+            "the configured default branch is accepted",
+        );
+
+        let arbitrary_branch = guest_seed_job().replace("refs/heads/main", "refs/heads/feature");
+        let error = must_fail(
+            validate_guest_seed_lifecycle(&arbitrary_branch, "main"),
+            "an arbitrary branch must be rejected",
+        );
+        assert!(error.to_string().contains("default-branch"), "{error}");
     }
 
     #[test]
@@ -6599,7 +6614,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         )
         .clone();
         must(
-            validate_guest_seed_lifecycle(&preview),
+            validate_guest_seed_lifecycle(&preview, &scanned.config.default_branch),
             "preview guest seed lifecycle",
         );
         assert!(preview.contains("- name: Restore guest seed"));
@@ -6624,6 +6639,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             preview.find("- name: Build guest agent for rootfs"),
             "agent step",
         );
+        assert!(!preview[restore..agent].contains("restore-keys:"));
         let reuse = must_some(
             preview.find("- name: Reuse verified guest seed"),
             "reuse step",
@@ -6658,7 +6674,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "release.yml",
         );
         must(
-            validate_guest_seed_lifecycle(release),
+            validate_guest_seed_lifecycle(release, &scanned.config.default_branch),
             "release guest seed lifecycle",
         );
         assert!(release.contains("- name: Save guest seed"));
