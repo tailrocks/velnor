@@ -54,7 +54,6 @@ const OWNERSHIP_STATE_HEADER: &str = "# Generated ownership state; do not edit.\
 // `parse_ownership_state` for the fail-closed migration rule.
 const OWNERSHIP_STATE_SCHEMA: &str = "2";
 const OPEN_TOFU_VERSION: &str = "1.12.6";
-const PER_CRATE_TEST_COMMAND: &str = "velnor-workflow test-crates --config .github/ci/project.toml";
 const VELNOR_WORKFLOW_SETUP_ACTION: &str = "tailrocks/velnor/.github/actions/setup-velnor-workflow";
 const VELNOR_WORKFLOW_INSTALL_GIT_URL: &str = "https://github.com/tailrocks/velnor";
 // The pinned revision of the policy-enforcing runtime binary. It is the single
@@ -279,7 +278,7 @@ pub struct Cli {
     long_about = None
 )]
 struct RawCli {
-    /// Local path, GitHub URL, owner/repository, or `estate`. Prefix with
+    /// Local path, GitHub URL, or owner/repository. Prefix with
     /// `generate` for the explicit `generate TARGET` form.
     #[arg(value_name = "TARGET")]
     target: Option<OsString>,
@@ -869,8 +868,7 @@ fn scan_target(
             }
         }
     }
-    let config = load_workflow_templates(root, config, generation.as_ref())?;
-    let mut config = estate::apply_legacy_runner_profile(root, config);
+    let mut config = load_workflow_templates(root, config, generation.as_ref())?;
     // The repo-owned config is validated against the resolved surface before
     // it can influence anything: a declared unit the scan did not find, or a
     // channel grant for an owner block the render does not declare, is a hard
@@ -2183,14 +2181,10 @@ pub(crate) fn velnor_runner(labels: &[String], group: Option<&str>) -> String {
     })
 }
 
-/// The group a repository's self-hosted lane selects by: declared by the
-/// repository's own generation config, and only the catalog's apt value while
-/// a repository has not adopted one.
+/// The group a repository's self-hosted lane selects by, as declared by the
+/// repository's own generation config.
 fn velnor_runner_group(config: &ProjectConfig) -> Option<&str> {
-    config
-        .velnor_runner_group
-        .as_deref()
-        .or_else(|| estate::legacy_velnor_runner_group(&config.repository))
+    config.velnor_runner_group.as_deref()
 }
 
 pub(crate) fn github_expression(expression: &str) -> String {
@@ -2314,9 +2308,6 @@ pub fn run_from_env() -> Result<(), GeneratorError> {
 }
 
 fn run(cli: &Cli) -> Result<(), GeneratorError> {
-    if cli.target == "estate" {
-        return estate::run_estate(cli);
-    }
     if !cli.plain && io::stdin().is_terminal() && io::stdout().is_terminal() {
         return tui::run(cli);
     }
@@ -2382,8 +2373,8 @@ fn generated_files_with_surface(
     let workflow = WorkflowIr::from_config(config);
     primitives::validate_cache_transports(&workflow)?;
     // The toolchain contract is a generation precondition, checked here so no
-    // rendering path — scanned, declared, or catalog — can emit a Rust job
-    // without a pin or a release matrix the pin does not declare.
+    // rendering path — scanned or declared — can emit a Rust job without a
+    // pin or a release matrix the pin does not declare.
     validate_rust_units_are_pinned(config)?;
     validate_release_targets_are_pinned(config)?;
     let mut files = BTreeMap::new();
@@ -3416,9 +3407,6 @@ fn verify_generated_ownership(
         let Some(current) = preimage.bytes() else {
             continue;
         };
-        if is_known_legacy_actionlint_config(relative, current) {
-            continue;
-        }
         if is_known_legacy_workflows_agents_md(relative, current) {
             continue;
         }
@@ -3451,11 +3439,6 @@ fn verify_generated_ownership(
         }
     }
     Ok(needs_refresh)
-}
-
-fn is_known_legacy_actionlint_config(relative: &Path, current: &[u8]) -> bool {
-    relative == Path::new(".github/actionlint.yaml")
-        && current == crate::estate::LEGACY_ACTIONLINT_CONFIG.as_bytes()
 }
 
 /// The hand-written nested rule file the velnor estate shipped before the
@@ -3534,8 +3517,9 @@ impl GenerationInputs {
         })
     }
 
-    /// The canonical "no config, no scan" form used by the estate catalog,
-    /// whose generation is a function of code-owned profiles only.
+    /// The canonical "no config, no scan" form: the inputs a test plants when
+    /// it exercises the file plan directly instead of a scanned repository.
+    #[cfg(test)]
     fn parts(config: u64, scan: u64) -> Self {
         Self {
             config,
@@ -4362,73 +4346,6 @@ fn github_coordinates(value: &str) -> Option<(String, String)> {
     Some((owner.to_owned(), repository.to_owned()))
 }
 
-fn local_github_repository(root: &Path) -> Option<String> {
-    let config = fs::read_to_string(git_config_path(root)?).ok()?;
-    let mut origin = false;
-    for line in config.lines().map(str::trim) {
-        if let Some(remote) = line
-            .strip_prefix("[remote \"")
-            .and_then(|value| value.strip_suffix("\"]"))
-        {
-            origin = remote == "origin";
-            continue;
-        }
-        if line.starts_with('[') {
-            origin = false;
-            continue;
-        }
-        if !origin {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "url" {
-            continue;
-        }
-        let (owner, repository) = github_coordinates(value.trim())?;
-        return Some(format!("{owner}/{repository}"));
-    }
-    None
-}
-
-fn git_config_path(root: &Path) -> Option<PathBuf> {
-    let dot_git = root.join(".git");
-    if fs::metadata(&dot_git).ok()?.is_dir() {
-        return Some(dot_git.join("config"));
-    }
-
-    // Linked worktrees store a gitdir pointer in root/.git and the remote
-    // configuration in the common git directory named by commondir.
-    let gitfile = fs::read_to_string(&dot_git).ok()?;
-    let gitdir_value = gitfile
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("gitdir:").map(str::trim))
-        .filter(|value| !value.is_empty())?;
-    let gitdir = resolve_git_path(root, gitdir_value);
-    let config_dir = fs::read_to_string(gitdir.join("commondir"))
-        .ok()
-        .and_then(|commondir| {
-            commondir
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| resolve_git_path(&gitdir, line))
-        })
-        .unwrap_or(gitdir);
-    Some(config_dir.join("config"))
-}
-
-fn resolve_git_path(base: &Path, value: &str) -> PathBuf {
-    let path = Path::new(value);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        base.join(path)
-    }
-}
-
 fn valid_github_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 100
@@ -4540,11 +4457,12 @@ impl Drop for Checkout {
 
 #[cfg(test)]
 mod tests {
+    /// The per-crate fanout command the runtime's `test-crates` subcommand
+    /// implements; tests use it as the canonical non-cargo-prefixed command.
+    const PER_CRATE_TEST_COMMAND: &str =
+        "velnor-workflow test-crates --config .github/ci/project.toml";
     use super::*;
-    use crate::estate::{
-        catalog_config_with_default_branch, catalog_unit, catalog_units, estate_profile,
-        render_apt_package_update_template, RepositoryProfile, ESTATE_PROFILES,
-    };
+    use crate::estate::render_apt_package_update_template;
     use crate::scan::rust::{parse_cargo_manifest, parse_include_str_literals, CargoDependency};
 
     #[expect(
@@ -4696,15 +4614,6 @@ mod tests {
                 ..
             })
         ));
-        let estate = Cli::parse_args([OsString::from("estate"), OsString::from("--check")]);
-        assert!(matches!(
-            estate,
-            Ok(Cli {
-                target,
-                check: true,
-                ..
-            }) if target == "estate"
-        ));
         let explicit_branch = Cli::parse_args([
             OsString::from("."),
             OsString::from("--default-branch"),
@@ -4749,16 +4658,6 @@ mod tests {
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
         assert!(workflow.contains("branches: [trunk]"));
         assert!(workflow.contains("refs/heads/trunk"));
-    }
-
-    #[test]
-    fn estate_catalog_uses_explicit_default_branch() {
-        let config =
-            catalog_config_with_default_branch(&ESTATE_PROFILES[0], RunnerMode::Github, "trunk");
-        assert_eq!(config.default_branch, "trunk");
-        assert!(WorkflowIr::from_config(&config)
-            .render(WorkflowKind::Main)
-            .contains("branches: [trunk]"));
     }
 
     #[test]
@@ -4858,10 +4757,10 @@ mod tests {
     #[test]
     fn cli_accepts_generate_target_and_rejects_extra_positionals() {
         let cli = must(
-            Cli::parse_args([OsString::from("generate"), OsString::from("estate")]),
+            Cli::parse_args([OsString::from("generate"), OsString::from("example/repo")]),
             "parse explicit generate target",
         );
-        assert_eq!(cli.target, "estate");
+        assert_eq!(cli.target, "example/repo");
 
         let too_many = must_some(
             parse_raw_clap([
@@ -4939,42 +4838,6 @@ mod tests {
         assert!(github_coordinates("../example-repo").is_none());
         assert!(github_coordinates("example-org/..").is_none());
         assert!(github_coordinates("https://github.com/example-org/example-repo/issues").is_none());
-    }
-
-    #[test]
-    fn local_repository_parser_reads_linked_worktree_config() {
-        let root = temporary_repository("linked-worktree");
-        let common_git = temporary_repository("linked-worktree-common-git");
-        let worktree_git = common_git.join("worktrees/name");
-        must(
-            fs::create_dir_all(&worktree_git),
-            "create linked worktree metadata",
-        );
-        must(
-            fs::write(
-                root.join(".git"),
-                format!("gitdir: {}\n", worktree_git.display()),
-            ),
-            "write linked worktree pointer",
-        );
-        must(
-            fs::write(worktree_git.join("commondir"), "../..\n"),
-            "write linked worktree common directory",
-        );
-        must(
-            fs::write(
-                common_git.join("config"),
-                "[remote \"origin\"]\n    url = https://github.com/example/owned.git\n",
-            ),
-            "write common git config",
-        );
-
-        assert_eq!(
-            local_github_repository(&root),
-            Some("example/owned".to_owned())
-        );
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(common_git);
     }
 
     #[test]
@@ -5786,54 +5649,38 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn reviewed_rust_workspace_uses_per_crate_test_fanout() {
-        let profile = must_some(
-            ESTATE_PROFILES
-                .iter()
-                .find(|profile| catalog_units(profile).iter().any(|unit| unit.id == "rust")),
-            "catalog profile with a reviewed Rust unit",
-        );
-        let rust = must_some(
-            catalog_units(profile)
-                .into_iter()
-                .find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
-        );
-        assert!(rust
-            .pr_commands
-            .contains(&PER_CRATE_TEST_COMMAND.to_owned()));
-        assert!(rust
-            .full_commands
-            .contains(&PER_CRATE_TEST_COMMAND.to_owned()));
-        assert!(!rust
-            .pr_commands
+        let config = scanned_fixture(RunnerMode::Both);
+        let rust_units = config
+            .units
             .iter()
-            .any(|command| command.contains("cargo test --workspace")));
-        assert!(!rust
-            .full_commands
+            .filter(|unit| unit.kind == UnitKind::Rust)
+            .count();
+        assert!(rust_units > 0, "the scanned fixture has a Rust unit");
+        for unit in config
+            .units
             .iter()
-            .any(|command| command == "mise run check"));
-        for unit in catalog_units(profile)
-            .into_iter()
             .filter(|unit| unit.kind == UnitKind::Rust)
         {
-            assert!(unit
-                .pr_commands
-                .iter()
-                .chain(&unit.full_commands)
-                .all(|command| !command.contains("cargo test --workspace")));
+            let mut commands = unit.pr_commands.iter().chain(&unit.full_commands);
+            let test_command = must_some(
+                commands.find(|command| command.contains("mbx test")),
+                "every Rust unit verifies its tests",
+            );
+            assert!(
+                test_command.contains("--package") || test_command.contains("--manifest-path"),
+                "tests fan out per crate, not per workspace: {test_command}"
+            );
+            assert!(commands
+                .all(|command| !command.contains("--workspace") && command != "mise run check"));
         }
     }
 
     #[test]
     fn phase_report_step_renders_in_both_unit_paths() {
-        let profile = must_some(
-            ESTATE_PROFILES.iter().find(|profile| profile.verified),
-            "verified catalog profile",
-        );
-        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
+        let config = scanned_fixture(RunnerMode::Both);
         let rust = must_some(
-            config.units.iter().find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
         );
         let nested = WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
         let legacy = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
@@ -6529,45 +6376,33 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn apt_runner_mode_selects_trusted_group_and_preserves_other_profiles() {
-        let apt = must_some(
-            ESTATE_PROFILES
-                .iter()
-                .find(|profile| profile.profile == RepositoryProfile::AptRepository),
-            "APT estate profile",
-        );
-        let apt_workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
-            apt,
-            RunnerMode::Velnor,
-            "main",
-        ))
-        .render(WorkflowKind::Main);
-        let group = crate::estate::APT_VELNOR_RUNNER_GROUP;
-        let labels = apt.labels.join(", ");
-        assert!(apt_workflow.contains(&format!(
+    fn declared_runner_group_selects_the_trusted_lane_and_preserves_the_rest() {
+        let group = "example-runner-group";
+        let mut velnor = scanned_fixture(RunnerMode::Velnor);
+        velnor.velnor_runner_group = Some(group.to_owned());
+        let velnor_workflow = WorkflowIr::from_config(&velnor).render(WorkflowKind::Main);
+        let labels = FIXTURE_LABELS.join(", ");
+        assert!(velnor_workflow.contains(&format!(
             "runs-on: {{ group: {group}, labels: [{labels}] }}"
         )));
 
-        let apt_github_workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
-            apt,
-            RunnerMode::Github,
-            "main",
-        ))
-        .render(WorkflowKind::Main);
-        assert!(apt_github_workflow.contains("runs-on: ubuntu-24.04"));
-        assert!(!apt_github_workflow.contains(crate::estate::APT_VELNOR_RUNNER_GROUP));
+        let mut github = scanned_fixture(RunnerMode::Github);
+        github.velnor_runner_group = Some(group.to_owned());
+        let github_workflow = WorkflowIr::from_config(&github).render(WorkflowKind::Main);
+        assert!(github_workflow.contains("runs-on: ubuntu-24.04"));
+        assert!(!github_workflow.contains(group));
 
         let generic = scanned_fixture(RunnerMode::Velnor);
         let generic_workflow = WorkflowIr::from_config(&generic).render(WorkflowKind::Main);
         assert!(generic_workflow.contains(&fixture_lane_selector()));
-        assert!(!generic_workflow.contains(crate::estate::APT_VELNOR_RUNNER_GROUP));
+        assert!(!generic_workflow.contains(group));
     }
 
     #[test]
     fn apt_adopted_templates_migrate_legacy_velnor_selector() {
         let mut apt = scanned_fixture(RunnerMode::Both);
         apt.repository = "example/apt".to_owned();
-        apt.velnor_runner_group = Some(crate::estate::APT_VELNOR_RUNNER_GROUP.to_owned());
+        apt.velnor_runner_group = Some("example-runner-group".to_owned());
         apt.velnor_labels = FIXTURE_LABELS
             .iter()
             .map(|label| (*label).to_owned())
@@ -6589,7 +6424,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
         let declared_selector = format!(
             "fromJSON('{{\"group\":{},\"labels\":[{}]}}')",
-            crate::yaml_scalar(crate::estate::APT_VELNOR_RUNNER_GROUP),
+            crate::yaml_scalar("example-runner-group"),
             FIXTURE_LABELS
                 .iter()
                 .map(|label| crate::yaml_scalar(label))
@@ -6614,7 +6449,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
     fn apt_package_updater_splits_lanes_into_static_runner_jobs() {
         let mut apt = scanned_fixture(RunnerMode::Both);
         apt.repository = "example/apt".to_owned();
-        apt.velnor_runner_group = Some(crate::estate::APT_VELNOR_RUNNER_GROUP.to_owned());
+        apt.velnor_runner_group = Some("example-runner-group".to_owned());
         apt.velnor_labels = FIXTURE_LABELS
             .iter()
             .map(|label| (*label).to_owned())
@@ -6622,7 +6457,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         apt.workflow_files = vec!["package-updater.yml".to_owned()];
         let dynamic_runner = format!(
             "fromJSON('{{\"group\":{},\"labels\":[{}]}}')",
-            crate::yaml_scalar(crate::estate::APT_VELNOR_RUNNER_GROUP),
+            crate::yaml_scalar("example-runner-group"),
             FIXTURE_LABELS
                 .iter()
                 .map(|label| crate::yaml_scalar(label))
@@ -6648,7 +6483,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(rendered.contains("  mutate-github:"));
         let static_selector = format!(
             "    runs-on:\n      group: {}\n      labels: [{}]",
-            crate::estate::APT_VELNOR_RUNNER_GROUP,
+            "example-runner-group",
             FIXTURE_LABELS.join(", ")
         );
         assert!(rendered.contains(&static_selector), "{rendered}");
@@ -6689,8 +6524,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
         apt.workflow_templates.insert(
             "package-update.yml".to_owned(),
             format!(
-                "name: Package update\njobs:\n  package-update-required:\n    runs-on: ${{{{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && 'ubuntu-26.04' || fromJSON('{{\"group\":{}}}')) }}}}\n",
-                crate::yaml_scalar(crate::estate::APT_VELNOR_RUNNER_GROUP)
+                "name: Package update\njobs:\n  package-update-required:\n    runs-on: ${{{{ github.event_name == 'workflow_dispatch' && (inputs.lanes == 'github' && 'ubuntu-26.04' || inputs.lanes == 'velnor' && fromJSON('{{\"group\":{}}}'))) }}}}\n",
+                crate::yaml_scalar("example-runner-group")
             ),
         );
         apt.adopted_workflow_surface = true;
@@ -6702,7 +6537,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         );
         assert!(rendered.contains("runs-on: ubuntu-24.04"));
         assert!(!rendered.contains("runs-on: ${{"));
-        assert!(!rendered.contains(crate::estate::APT_VELNOR_RUNNER_GROUP));
+        assert!(!rendered.contains("example-runner-group"));
         assert_eq!(
             render_apt_package_update_template(&apt, rendered),
             rendered.as_str(),
@@ -6851,176 +6686,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
     }
 
     #[test]
-    fn runner_mode_contract_holds_across_every_catalog_ci_workflow() {
-        for profile in ESTATE_PROFILES {
-            if !profile.verified {
-                continue;
-            }
-            // Without catalog units there is no execution lane to contract;
-            // the fixture's surface is seeded from crate assets, not rendered.
-            if catalog_units(profile).is_empty() {
-                continue;
-            }
-            for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
-                let workflow = WorkflowIr::from_config(&catalog_config_with_default_branch(
-                    profile, runners, "main",
-                ));
-                for kind in [
-                    WorkflowKind::PullRequest,
-                    WorkflowKind::Main,
-                    WorkflowKind::Nightly,
-                ] {
-                    let rendered = workflow.render(kind);
-                    match runners {
-                        RunnerMode::Github => {
-                            assert!(rendered.contains("  github-"));
-                            assert!(!rendered.contains("\n  velnor-"));
-                            assert!(!rendered.contains("self-hosted"));
-                        }
-                        RunnerMode::Velnor => {
-                            assert!(!rendered.contains("  github-"));
-                            assert!(rendered.contains("  velnor-"));
-                            assert!(rendered.contains("ubuntu-24.04"));
-                            assert!(rendered.contains("self-hosted"));
-                        }
-                        RunnerMode::Both => {
-                            assert!(rendered.contains("  github-"));
-                            assert!(rendered.contains("  velnor-"));
-                            assert!(rendered.contains("ubuntu-24.04"));
-                            assert!(rendered.contains("self-hosted"));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// The legacy catalog records no toolchain pin for its Rust units, so
-    /// generation refuses those surfaces; a refusal is only legitimate for a
-    /// profile that actually carries Rust units, and only for that reason.
-    fn assert_catalog_refusal_is_an_unpinned_rust_surface(
-        profile: &crate::estate::EstateProfile,
-        config: &ProjectConfig,
-        error: &GeneratorError,
-    ) {
-        assert!(
-            config.units.iter().any(|unit| unit.kind == UnitKind::Rust),
-            "catalog profile {} must only refuse for its unpinned Rust units: {error}",
-            profile.repository
-        );
-        assert!(
-            error.to_string().contains("records no toolchain pin"),
-            "catalog profile {} refused with an unexpected error: {error}",
-            profile.repository
-        );
-    }
-
-    #[test]
-    fn generated_runner_mode_contract_holds_across_every_workflow_file() {
-        for profile in ESTATE_PROFILES {
-            if !profile.verified {
-                continue;
-            }
-            for runners in [RunnerMode::Github, RunnerMode::Velnor, RunnerMode::Both] {
-                let config = catalog_config_with_default_branch(profile, runners, "main");
-                // The legacy catalog records no toolchain pin for its Rust
-                // units, so those surfaces refuse generation; the runner
-                // contract below keeps asserting for the ones that render.
-                let files = match generated_files(&config) {
-                    Ok(files) => files,
-                    Err(error) => {
-                        assert_catalog_refusal_is_an_unpinned_rust_surface(
-                            profile, &config, &error,
-                        );
-                        continue;
-                    }
-                };
-                let project = must_some(
-                    files.get(&PathBuf::from(".github/ci/project.toml")),
-                    "generated project config",
-                );
-                assert!(project.contains(&format!("runners = \"{}\"", runners.as_str())));
-                for (path, content) in files {
-                    let Some(workflow_name) = path
-                        .strip_prefix(".github/workflows/")
-                        .ok()
-                        .and_then(Path::to_str)
-                    else {
-                        continue;
-                    };
-                    // The surface carries one non-workflow rule file; the
-                    // runner contract below only inspects workflows.
-                    let is_workflow = path.extension().is_some_and(|extension| {
-                        extension.eq_ignore_ascii_case("yml")
-                            || extension.eq_ignore_ascii_case("yaml")
-                    });
-                    if !is_workflow {
-                        continue;
-                    }
-                    let runner_lines = content
-                        .lines()
-                        .filter(|line| {
-                            let line = line.trim_start();
-                            line.starts_with("runs-on:") || line.starts_with("runner:")
-                        })
-                        .collect::<Vec<_>>();
-                    if runner_lines.is_empty() {
-                        assert!(
-                            content.contains("uses: ./.github/workflows/")
-                                || content.contains("name: Advisory policy")
-                                || content.contains("name: Policy"),
-                            "no runner, reusable-workflow call, or inline policy job in {workflow_name}"
-                        );
-                        continue;
-                    }
-                    if content.contains("uses: ./.github/workflows/") {
-                        continue;
-                    }
-                    if matches!(
-                        workflow_name,
-                        "maintenance.yml" | "ci-release-package-signer.yml" | "ci-policy.yml"
-                    ) {
-                        continue;
-                    }
-                    match runners {
-                        RunnerMode::Github => assert!(runner_lines.iter().all(|line| {
-                            !line.contains("self-hosted") && !line.contains("velnor")
-                        })),
-                        RunnerMode::Velnor => {
-                            // Plan and policy intentionally stay on GitHub-hosted
-                            // runners; only checked-in CI units may use Velnor.
-                            assert!(
-                                runner_lines.iter().any(|line| line.contains("self-hosted")),
-                                "Velnor workflow has no self-hosted execution lane: {workflow_name}"
-                            );
-                            assert!(runner_lines.iter().all(|line| !line.contains("macos")));
-                        }
-                        RunnerMode::Both => {
-                            let dual_lane_workflow = matches!(
-                                workflow_name,
-                                "ci-pr.yml"
-                                    | "ci-main.yml"
-                                    | "nightly.yml"
-                                    | "preview.yml"
-                                    | "release.yml"
-                            ) || content.contains("name: Velnor");
-                            if dual_lane_workflow {
-                                assert!(runner_lines
-                                    .iter()
-                                    .any(|line| line.contains("self-hosted")));
-                            } else {
-                                assert!(runner_lines
-                                    .iter()
-                                    .all(|line| !line.contains("self-hosted")));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn detected_cargo_source_caches_render_alongside_mr_boxington() {
         let root = temporary_repository("rust-cache");
         must(
@@ -7116,14 +6781,18 @@ const INCLUDED: &str = include_str!("fixture.txt");
 
     #[test]
     fn mr_boxington_units_restore_their_declared_cargo_sources_on_both_lanes() {
-        let profile = must_some(
-            estate_profile(native_workspace_consumer()),
-            "estate profile",
+        let config = scanned_fixture(RunnerMode::Both);
+        let rust_id = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Rust)
+                .map(|unit| unit.id.clone()),
+            "scanned Rust unit",
         );
-        let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
         let rust = must_some(
-            config.units.iter().find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
+            config.units.iter().find(|unit| unit.id == rust_id),
+            "scanned Rust unit",
         );
         let workflow =
             WorkflowIr::from_config(&config).render_nested_unit(rust, WorkflowKind::Main);
@@ -7139,27 +6808,26 @@ const INCLUDED: &str = include_str!("fixture.txt");
         for lane in [github_lane, velnor_lane] {
             // Audit 4.1: the declared Cargo-source cache must be restored
             // exactly where the compiler cache is restored.
-            assert!(lane.contains("name: Restore \"Rust workspace\" cache"));
+            assert!(lane.contains("name: Restore \"Rust crate (fixture)\" cache"));
             assert!(lane.contains("~/.cargo/registry"));
             assert!(!lane.contains("target/"));
         }
         // Only the hosted lane saves, and only on trusted events.
-        assert!(github_lane.contains("name: Save \"Rust workspace\" cache"));
-        assert!(!velnor_lane.contains("name: Save \"Rust workspace\" cache"));
+        assert!(github_lane.contains("name: Save \"Rust crate (fixture)\" cache"));
+        assert!(!velnor_lane.contains("name: Save \"Rust crate (fixture)\" cache"));
     }
 
     #[test]
     fn raw_output_caches_alongside_mr_boxington_need_a_justification() {
-        let profile = must_some(
-            estate_profile(native_workspace_consumer()),
-            "estate profile",
+        let mut config = scanned_fixture(RunnerMode::Github);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
         );
-        let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
-        let rust = must_some(
-            config.units.iter_mut().find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
-        );
-        rust.cache = Some(CacheSpec {
+        config.units[rust_index].cache = Some(CacheSpec {
             key_files: vec!["Cargo.toml".to_owned()],
             paths: vec!["target".to_owned()],
             purpose: CachePurpose::Outputs,
@@ -7172,11 +6840,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(rejected
             .err()
             .is_some_and(|error| error.to_string().contains("mbx_output_cache_justification")));
-        let rust = must_some(
-            config.units.iter_mut().find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
-        );
-        rust.cache = Some(CacheSpec {
+        config.units[rust_index].cache = Some(CacheSpec {
             key_files: vec!["Cargo.toml".to_owned()],
             paths: vec!["target".to_owned()],
             purpose: CachePurpose::Outputs,
@@ -7190,42 +6854,58 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "justified output cache is accepted",
         );
         let workflow = WorkflowIr::from_config(&config)
-            .render_nested_unit(&config.units[0], WorkflowKind::Main);
+            .render_nested_unit(&config.units[rust_index], WorkflowKind::Main);
         assert!(workflow.contains(
             "# output cache retained alongside mbx: bench baselines read raw target artifacts the object transport drops"
         ));
-        assert!(workflow.contains("name: Restore \"Rust workspace\" cache"));
+        assert!(workflow.contains("name: Restore \"Rust crate (fixture)\" cache"));
         assert!(workflow.contains("\n            target\n"));
     }
 
     #[test]
     fn rust_units_fetch_sources_first_and_verify_offline_except_policy() {
-        let profile = must_some(
-            estate_profile(native_workspace_consumer()),
-            "estate profile",
+        let mut config = scanned_fixture(RunnerMode::Github);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
         );
-        let mut config = catalog_config_with_default_branch(profile, RunnerMode::Github, "main");
-        let mut policy = catalog_unit(
-            "rust-dependency-policy",
-            "Rust dependency policy",
-            UnitKind::Rust,
-            &["Cargo.toml"],
-            // Both exempt shapes are pinned: a toolchain modifier and a quoted
-            // env value that splits into extra tokens must not break the
-            // command-shape exemption.
-            &["cargo +nightly deny check"],
-            &["RUSTFLAGS='-D warnings' mbx deny check"],
-            None,
-        );
-        // Pin the lockfile so the test exercises the command-shape exemption
-        // itself: without the pin, the unit is unexempt for the trivial reason
-        // that `cargo fetch --locked` cannot be rendered at all.
-        policy.pinned_lockfile = true;
-        config.units.push(policy);
+        // The scan derives the lockfile pin from a root Cargo.lock the fixture
+        // does not carry, so the hand-built config pins it explicitly: the test
+        // exercises the fetch/offline contract itself, not the pin's absence.
+        config.units[rust_index].pinned_lockfile = true;
+        // Both exempt shapes are pinned in the commands: a toolchain modifier
+        // and a quoted env value that splits into extra tokens must not break
+        // the command-shape exemption.
+        let toolchain = config
+            .units
+            .iter()
+            .find(|unit| unit.kind == UnitKind::Rust)
+            .and_then(|unit| unit.toolchain.clone());
+        config.units.push(Unit {
+            id: "rust-dependency-policy".to_owned(),
+            label: "Rust dependency policy".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.toml".to_owned()],
+            pr_commands: vec!["cargo +nightly deny check".to_owned()],
+            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            toolchain,
+        });
         let ir = WorkflowIr::from_config(&config);
         let rust = must_some(
-            config.units.iter().find(|unit| unit.id == "rust"),
-            "reviewed Rust unit",
+            config.units.iter().find(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
         );
         let workflow = ir.render_nested_unit(rust, WorkflowKind::Main);
         let preparation = must_some(
@@ -7233,7 +6913,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "Cargo-source preparation step is rendered",
         );
         let restore = must_some(
-            workflow.find("      - name: Restore \"Rust workspace\" cache"),
+            workflow.find("      - name: Restore \"Rust crate (fixture)\" cache"),
             "Cargo-source cache restore is rendered",
         );
         let checks = must_some(
@@ -8162,68 +7842,33 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
-    /// A verified native-workspace consumer drives the same render paths the
-    /// deleted velnor profile exercised, without naming a repository here.
-    fn native_workspace_consumer() -> &'static str {
-        must_some(
-            ESTATE_PROFILES
-                .iter()
-                .find(|profile| {
-                    profile.verified && profile.profile == RepositoryProfile::RustWorkspaceNative
-                })
-                .map(|profile| profile.repository),
-            "native-workspace consumer on the legacy table",
-        )
-    }
-
     #[test]
-    fn estate_remote_repository_scans_and_adopts_its_own_workflows() {
-        // The consumer comes from the legacy table itself, so the generator
-        // source never names a specific estate repository.
-        let consumer = must_some(
-            ESTATE_PROFILES
-                .iter()
-                .find(|profile| profile.profile == RepositoryProfile::AptRepository)
-                .map(|profile| profile.repository),
-            "apt consumer on the legacy table",
-        );
-        let root = temporary_repository("estate-remote-self-scan");
-        must(
-            fs::create_dir_all(root.join(".git")),
-            "create repository metadata directory",
-        );
-        must(
-            fs::write(
-                root.join(".git/config"),
-                format!("[remote \"origin\"]\n    url = git@github.com:{consumer}.git\n"),
-            ),
-            "write repository remote metadata",
+    fn declared_repository_scans_and_adopts_its_own_workflows() {
+        // A checkout carries exactly one identity: the one its own generation
+        // config declares.
+        let consumer = "example/apt-consumer";
+        let config = format!(
+            "schema = 1\n\n\
+             [generator]\n\
+             repository = \"{consumer}\"\n\n\
+             [workflow]\n\
+             github_runner = \"ubuntu-26.04\"\n\
+             velnor_labels = [\"self-hosted\", \"example-lane\"]\n\
+             templates = \".github-gen/generated-templates\"\n"
         );
         let self_hosted = format!(
             "{GENERATED_HEADER}name: CI\njobs:\n  call:\n    uses: {consumer}/.github/workflows/ci.yml@0123456789012345678901234567890123456789\n"
         );
-        let template = root.join(WORKFLOW_TEMPLATE_DIR).join("ci.yml");
-        must(
-            fs::create_dir_all(must_some(template.parent(), "template parent")),
-            "create repository template directory",
-        );
-        must(
-            fs::write(&template, &self_hosted),
-            "write repository template",
-        );
-        let workflow = root.join(".github/workflows/ci.yml");
-        must(
-            fs::create_dir_all(must_some(workflow.parent(), "workflow parent")),
-            "create repository workflow directory",
-        );
-        must(
-            fs::write(&workflow, &self_hosted),
-            "write repository workflow",
+        let root = declared_surface_repository(
+            "declared-repository-self-scan",
+            &config,
+            &[("ci.yml", &self_hosted)],
+            &[],
         );
 
         let config = must(
             scan_repository(&root, RunnerMode::Github),
-            "scan remote-identified repository",
+            "scan the declared-identity repository",
         );
         assert_eq!(config.repository, consumer);
         must(
@@ -8441,70 +8086,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(matches!(outcome, WriteOutcome::Written { .. }));
         assert!(root.join(OWNERSHIP_STATE).is_file());
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn estate_catalog_has_exact_profile_and_workflow_contracts() {
-        assert_eq!(ESTATE_PROFILES.len(), 30);
-        let repositories = ESTATE_PROFILES
-            .iter()
-            .map(|profile| profile.repository)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(repositories.len(), ESTATE_PROFILES.len());
-
-        for profile in ESTATE_PROFILES {
-            let config = catalog_config_with_default_branch(profile, RunnerMode::Both, "main");
-            // The legacy catalog table records no toolchain pin for its Rust
-            // units, so generation refuses those surfaces — the same
-            // fail-closed contract every scanned repository satisfies. The
-            // refusal is the catalog's problem to fix by deletion, never a
-            // reason to weaken the validation.
-            let files = match generated_files(&config) {
-                Ok(files) => files,
-                Err(error) => {
-                    assert!(
-                        config.units.iter().any(|unit| unit.kind == UnitKind::Rust),
-                        "catalog profile {} must only refuse for its unpinned Rust units: {error}",
-                        profile.repository
-                    );
-                    assert!(
-                        error.to_string().contains("records no toolchain pin"),
-                        "catalog profile {} refused with an unexpected error: {error}",
-                        profile.repository
-                    );
-                    continue;
-                }
-            };
-            let actual_workflows = files
-                .keys()
-                .filter_map(|path| path.strip_prefix(".github/workflows/").ok())
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect::<BTreeSet<_>>();
-            let configured_workflows = config
-                .workflow_files
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            assert!(
-                configured_workflows.is_subset(&actual_workflows),
-                "workflow contract drift: {}",
-                profile.repository
-            );
-            assert!(!actual_workflows.contains("ci.yml"));
-            if !profile.verified {
-                assert!(config.units.is_empty());
-                assert!(actual_workflows.is_empty());
-            }
-            if config.release_enabled {
-                assert!(actual_workflows.contains("release.yml"));
-                assert!(config
-                    .release
-                    .as_ref()
-                    .is_some_and(crate::primitives::release::release_contract_complete));
-            } else {
-                assert!(!actual_workflows.contains("release.yml"));
-            }
-        }
     }
 
     /// A repository that declares everything about itself: identity, runner
@@ -8755,20 +8336,39 @@ const INCLUDED: &str = include_str!("fixture.txt");
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A marker a template body misspells survives rendering untouched, and a
+    /// regeneration check stays green because both sides regenerate from the
+    /// same typo — so the renderer itself must name it and refuse.
+    #[test]
+    fn generation_refuses_an_unresolved_template_marker() {
+        let root = declared_surface_repository(
+            "unresolved-template-marker",
+            DECLARED_SURFACE_CONFIG,
+            &[(
+                "custom.yml",
+                &format!(
+                    "{GENERATED_HEADER}name: Custom\n\njobs:\n  probe:\n    runs-on: ubuntu-24.04\n__VELNOR_TYPO_STEPS__\n"
+                ),
+            )],
+            &[],
+        );
+        let config = must(
+            scan_repository(&root, RunnerMode::Both),
+            "scan the declared surface",
+        );
+        let error = must_some(
+            generated_files(&config).err(),
+            "an unresolved template marker fails generation",
+        );
+        assert!(
+            error.to_string().contains("__VELNOR_TYPO_STEPS__"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_repository_without_a_config_gets_no_seeded_surface() {
-        let catalog = must_some(
-            ESTATE_PROFILES.iter().find(|profile| profile.verified),
-            "the catalog keeps a verified entry",
-        );
-        let config = catalog_config_with_default_branch(catalog, RunnerMode::Both, "main");
-        // The catalog still carries the runner placement of a repository that
-        // has not adopted a config: that is the boundary that remains.
-        assert!(
-            !config.velnor_labels.is_empty(),
-            "catalog runner placement is the only remaining source of labels"
-        );
-
         let root = temporary_repository("no-config-surface");
         let git = root.join(".git");
         must(fs::create_dir_all(&git), "create git metadata");
@@ -8793,7 +8393,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
         assert!(!config.adopted_workflow_surface);
         assert!(config.workflow_templates.is_empty());
         assert!(config.static_files.is_empty());
-        // A repository neither the catalog nor a config names stays unnamed.
+        // A repository no config names stays unnamed.
         assert!(config.repository.is_empty());
         assert!(config.velnor_labels.is_empty());
         let _ = fs::remove_dir_all(root);
@@ -8835,24 +8435,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "unexpected error: {error}"
         );
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn estate_catalog_declares_reverse_dependency_edges() {
-        // Every declared dependency edge must resolve inside the same profile's
-        // catalog: a rename can never leave a dangling unit id behind.
-        for profile in ESTATE_PROFILES {
-            let units = catalog_units(profile);
-            for unit in &units {
-                for dependency in &unit.depends_on {
-                    assert!(
-                        units.iter().any(|candidate| candidate.id == *dependency),
-                        "{} declares dependency {dependency} with no catalog unit",
-                        unit.id
-                    );
-                }
-            }
-        }
     }
 
     #[test]
