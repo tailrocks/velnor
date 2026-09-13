@@ -5188,10 +5188,27 @@ mod tests {
         assert!(workflow.contains(&format!("rev: {VELNOR_WORKFLOW_SOURCE_REV}")));
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
         assert!(workflow.contains("name: Download Velnor workflow runtime"));
+        assert!(workflow.contains("name: Verify Velnor workflow runtime"));
+        assert!(workflow.contains(".run_id == $run_id"));
+        assert!(workflow.contains(".platform == $platform"));
+        assert!(workflow.contains("runtime digest mismatch"));
         assert!(workflow.contains("name: velnor-workflow-runtime-"));
         assert!(workflow.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(workflow.contains("manifest.json"));
         assert!(!workflow.contains("cargo install --locked --git"));
+    }
+
+    #[test]
+    fn velnor_runtime_does_not_publish_an_orphan_artifact() {
+        let config = must(
+            scan_repository_with_default_branch(&fixture_root(), RunnerMode::Velnor, "main"),
+            "scan fixture for Velnor runtime handoff",
+        );
+        let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::Main);
+
+        assert!(!workflow.contains("name: Prepare Velnor workflow runtime"));
+        assert!(!workflow.contains("name: Publish Velnor workflow runtime"));
+        assert!(!workflow.contains("name: Download Velnor workflow runtime"));
     }
 
     #[test]
