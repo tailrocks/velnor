@@ -88,8 +88,8 @@ async fn controller_drains_on_fresh_desired_draining() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// (e) A marker latched by another process drains the controller through
-/// the journal leg alone: no ledger, no rewrite, no permits.
+/// (e) A marker latched through another handle drains the controller
+/// through the journal leg alone: no ledger, no rewrite, no permits.
 #[tokio::test]
 async fn controller_exits_on_latched_journal_marker_without_ledger() {
     enable_flag();
