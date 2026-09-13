@@ -11,8 +11,8 @@ use crate::{
     expression,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::{
-        parse_workflow_commands_with_job_env, rendered_output_lines, step_debug_enabled,
-        DeprecatedCommandScope,
+        parse_workflow_commands_with_job_env, rendered_output_lines_with_policy,
+        step_debug_enabled, DeprecatedCommandScope,
     },
 };
 use anyhow::{bail, Context, Result};
@@ -1419,10 +1419,11 @@ impl CompositeFrame {
         self.lines.push(format!("##[group]{name}"));
         self.lines.extend(prelude.iter().cloned());
         self.lines.push("##[endgroup]".to_string());
-        self.lines.extend(rendered_output_lines(
+        self.lines.extend(rendered_output_lines_with_policy(
             &result.stdout,
             &result.stderr,
             step_debug,
+            result.state.allow_unsecure_stop_command_tokens,
         ));
     }
 
@@ -2317,11 +2318,11 @@ where
         // (job/parent) scope while inner conditions keep their own.
         let mut composite_depth: usize = 0;
         let mut skip_depth: Option<usize> = None;
-        // Depth an embedded condition-eval error broke out of: upstream's
-        // composite loop `break`s on an unevaluable inner condition
-        // (`CompositeActionHandler.cs`) while the job continues, so the
-        // remaining inner steps of that composite skip but its outputs
-        // still process (the `CompositeOutputs` exemption below).
+        // Resume depth for an embedded condition-eval error. Upstream breaks
+        // the active composite loop, and a nested composite reports that
+        // failure to its parent loop. A failure therefore propagates through
+        // every open composite until the outermost matching End; each open
+        // frame's own outputs still process before that frame closes.
         let mut break_depth: Option<usize> = None;
         for step in steps {
             match step {
@@ -2515,15 +2516,24 @@ where
                 ExecutableStep::CompositeEnd { step_id } => {
                     // A nested End inside a skipped or broken umbrella only
                     // moves the lexical counter back: its Start pushed
-                    // nothing, so this pops nothing.
+                    // nothing, so this pops nothing. A real frame still has
+                    // to close even while a nested failure is propagating;
+                    // otherwise its scope and result would leak into the
+                    // parent.
                     composite_depth = composite_depth.saturating_sub(1);
-                    if skip_depth.is_some_and(|resume| composite_depth > resume)
-                        || break_depth.is_some_and(|resume| composite_depth > resume)
+                    let closes_active_frame = composite_frames
+                        .last()
+                        .is_some_and(|frame| frame.step_id == *step_id);
+                    if (skip_depth.is_some_and(|resume| composite_depth > resume)
+                        || break_depth.is_some_and(|resume| composite_depth > resume))
+                        && !closes_active_frame
                     {
                         continue;
                     }
                     skip_depth = None;
-                    break_depth = None;
+                    if break_depth.is_some_and(|resume| composite_depth <= resume) {
+                        break_depth = None;
+                    }
                     state.pop_composite(step_id);
                     // F6: the umbrella records its own outcome/conclusion
                     // under its step id, so later steps read
@@ -2565,14 +2575,15 @@ where
                         continue;
                     }
                     // A broken composite skips its remaining inner steps,
-                    // but its outputs still process — upstream `break`s
-                    // the inner loop and then runs `ProcessOutputs`. Only
-                    // the breaking composite's own outputs step is
-                    // exempt: deeper (nested) outputs stay skipped, and a
-                    // skipped umbrella never reaches its outputs.
+                    // but every still-open frame's own outputs process —
+                    // upstream breaks each nested handler and then runs its
+                    // `ProcessOutputs` before returning the failure to the
+                    // parent handler. A nested boundary encountered after
+                    // the break has no frame and its outputs stay skipped.
                     if let Some(resume) = break_depth {
                         let own_outputs = matches!(step, ExecutableStep::CompositeOutputs { .. })
-                            && composite_depth == resume + 1;
+                            && composite_depth <= composite_frames.len()
+                            && composite_depth > resume;
                         if !own_outputs {
                             continue;
                         }
@@ -2628,10 +2639,12 @@ where
                         // An unevaluable inner condition still fails the
                         // composite: without the absorb the umbrella would
                         // render exit 0 while the job fails. It also
-                        // breaks the inner loop — upstream `break`s out of
-                        // the composite steps here
-                        // (`CompositeActionHandler.cs`) — while the job
-                        // itself continues below.
+                        // breaks the current composite loop here
+                        // (`CompositeActionHandler.cs`). A nested composite
+                        // returns that failure to its parent, so the parent
+                        // loop must also stop before its sibling steps; the
+                        // outermost frame's outputs and the job itself still
+                        // continue below.
                         if step.reports_timeline_start() {
                             frame.append_inner(
                                 &display_name,
@@ -2642,7 +2655,7 @@ where
                         } else {
                             frame.absorb(&result);
                         }
-                        break_depth = Some(composite_depth.saturating_sub(1));
+                        break_depth = Some(0);
                     } else if reports {
                         let log = step_log_with_name(
                             &step_backend_id,
@@ -3774,10 +3787,11 @@ where
                                 .extend(native_post_log_prelude(&member.invocation, &state));
                             combined_lines.push("##[endgroup]".to_string());
                         }
-                        combined_lines.extend(rendered_output_lines(
+                        combined_lines.extend(rendered_output_lines_with_policy(
                             &result.stdout,
                             &result.stderr,
                             state.step_debug(),
+                            result.state.allow_unsecure_stop_command_tokens,
                         ));
                         if result.exit_code != 0
                             && !result.failure_ignored
@@ -3817,10 +3831,11 @@ where
                                 .extend(native_post_log_prelude(&member.invocation, &state));
                             combined_lines.push("##[endgroup]".to_string());
                         }
-                        combined_lines.extend(rendered_output_lines(
+                        combined_lines.extend(rendered_output_lines_with_policy(
                             &result.stdout,
                             &result.stderr,
                             state.step_debug(),
+                            result.state.allow_unsecure_stop_command_tokens,
                         ));
                         if !result.failure_ignored && combined.exit_code == 0 {
                             combined.exit_code = result.exit_code;
@@ -4986,19 +5001,12 @@ where
             }
         }
         // The summed holder entitlements size the daemon for the jobs
-        // sharing it now. The static operator policy fills each dimension
-        // the derived budget could not observe: total absence keeps the
-        // verbatim static spelling, while a partially observed budget
-        // inherits only its unknown dimensions — dropping the static
-        // ceiling for an unobserved dimension would silently uncap it.
+        // sharing it now. Each known dimension wins independently: an
+        // unobservable CPU must not discard an explicit memory ceiling,
+        // and an unobservable memory budget must not discard an explicit
+        // CPU ceiling. Total absence keeps the verbatim static spelling.
         let buildkit_size = container.buildkit_size_summed(&entitlements);
-        let mut driver_opts = buildkit_size.driver_opts();
-        if driver_opts.is_empty() {
-            driver_opts = buildx_driver_resource_options(&container.resource_options)?;
-        } else if buildkit_size.cpu_milli.is_none() || buildkit_size.memory_bytes.is_none() {
-            let static_opts = buildx_driver_resource_options(&container.resource_options)?;
-            driver_opts = merge_buildkit_driver_opts(&buildkit_size, &static_opts);
-        }
+        let driver_opts = buildx_driver_options(&buildkit_size, &container.resource_options)?;
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
@@ -11925,41 +11933,64 @@ fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<Str
     Ok(options)
 }
 
-/// Merge a partially observed derived daemon size with the static
-/// `resource_options` spelling: derived wins per dimension, static fills
-/// only dimensions the budget could not observe. Total absence never
-/// reaches here — the caller uses the static spelling verbatim then, flag
-/// order included — so this only ever appends static entries for unknown
-/// dimensions. Entries outside the `cpu-*`/`memory=` vocabulary the strict
-/// parser emits pass through untouched rather than vanishing.
-fn merge_buildkit_driver_opts(
-    derived: &crate::container::host_budget::BuildkitSize,
-    static_opts: &[String],
-) -> Vec<String> {
-    let mut opts = derived.driver_opts();
-    if derived.cpu_milli.is_none_or(|milli| milli == 0) {
-        opts.extend(
-            static_opts
+/// Merge a derived daemon size with the static `resource_options`
+/// spelling: each known dimension wins independently, and only unknown
+/// dimensions inherit the static value. Total absence returns the static
+/// spelling verbatim, flag order included. Entries outside the
+/// `cpu-*`/`memory=` vocabulary pass through untouched rather than
+/// vanishing.
+fn buildx_driver_options(
+    buildkit_size: &crate::container::host_budget::BuildkitSize,
+    resource_options: &[String],
+) -> Result<Vec<String>> {
+    let fallback = buildx_driver_resource_options(resource_options)?;
+    if buildkit_size.is_empty() {
+        return Ok(fallback);
+    }
+
+    let derived = buildkit_size.driver_opts();
+    let has_derived_cpu = buildkit_size.cpu_milli.is_some_and(|milli| milli > 0);
+    let has_derived_memory = buildkit_size.memory_bytes.is_some_and(|bytes| bytes > 0);
+    let mut options = Vec::new();
+
+    if has_derived_cpu {
+        options.extend(
+            derived
                 .iter()
-                .filter(|opt| opt.starts_with("cpu-"))
+                .filter(|option| option.starts_with("cpu-"))
+                .cloned(),
+        );
+    } else {
+        options.extend(
+            fallback
+                .iter()
+                .filter(|option| option.starts_with("cpu-"))
                 .cloned(),
         );
     }
-    if derived.memory_bytes.is_none_or(|bytes| bytes == 0) {
-        opts.extend(
-            static_opts
+    if has_derived_memory {
+        options.extend(
+            derived
                 .iter()
-                .filter(|opt| opt.starts_with("memory="))
+                .filter(|option| option.starts_with("memory="))
+                .cloned(),
+        );
+    } else {
+        options.extend(
+            fallback
+                .iter()
+                .filter(|option| option.starts_with("memory="))
                 .cloned(),
         );
     }
-    opts.extend(
-        static_opts
+    options.extend(
+        derived
             .iter()
-            .filter(|opt| !opt.starts_with("cpu-") && !opt.starts_with("memory="))
+            .chain(fallback.iter())
+            .filter(|option| !option.starts_with("cpu-") && !option.starts_with("memory="))
             .cloned(),
     );
-    opts
+    Ok(options)
 }
 
 fn job_scope_from_temp(temp: Option<&Path>) -> String {
@@ -13748,6 +13779,7 @@ fn step_log_with_name(
         result.skipped,
         prelude,
         step_debug,
+        result.state.allow_unsecure_stop_command_tokens,
     );
     StepLog {
         step_id: step_id.to_string(),
@@ -13832,6 +13864,7 @@ fn step_log_lines(
     skipped: bool,
     prelude: &[String],
     step_debug: bool,
+    allow_unsecure_stop_command_tokens: bool,
 ) -> Vec<String> {
     if skipped {
         return skipped_step_log_lines();
@@ -13848,7 +13881,12 @@ fn step_log_lines(
     let mut lines = vec![format!("##[group]{step_name}")];
     lines.extend(prelude.iter().cloned());
     lines.push("##[endgroup]".to_string());
-    lines.extend(rendered_output_lines(stdout, stderr, step_debug));
+    lines.extend(rendered_output_lines_with_policy(
+        stdout,
+        stderr,
+        step_debug,
+        allow_unsecure_stop_command_tokens,
+    ));
     lines
 }
 
@@ -16736,18 +16774,39 @@ esac
             cpu_milli: Some(4000),
             memory_bytes: None,
         };
-        let static_opts = buildx_driver_resource_options(&[
-            "--cpus".into(),
-            "8".into(),
-            "--memory".into(),
-            "12g".into(),
-        ])
-        .unwrap();
+        let static_options = ["--cpus".into(), "8".into(), "--memory".into(), "12g".into()];
         // Derived CPU wins over static `--cpus 8`; unobserved memory keeps
         // the static `memory=12g` instead of silently uncapping.
         assert_eq!(
-            merge_buildkit_driver_opts(&derived, &static_opts),
+            buildx_driver_options(&derived, &static_options).unwrap(),
             ["cpu-period=100000", "cpu-quota=400000", "memory=12g",]
+        );
+    }
+
+    #[test]
+    fn buildkit_resource_fallbacks_fill_unknown_dimensions_independently() {
+        let static_options = [
+            "--cpus".into(),
+            "2.5".into(),
+            "--memory".into(),
+            "12g".into(),
+        ];
+        let cpu_only = crate::container::host_budget::BuildkitSize {
+            cpu_milli: Some(1500),
+            memory_bytes: None,
+        };
+        assert_eq!(
+            buildx_driver_options(&cpu_only, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=150000", "memory=12g"]
+        );
+
+        let memory_only = crate::container::host_budget::BuildkitSize {
+            cpu_milli: None,
+            memory_bytes: Some(1024),
+        };
+        assert_eq!(
+            buildx_driver_options(&memory_only, &static_options).unwrap(),
+            ["cpu-period=100000", "cpu-quota=250000", "memory=1024"]
         );
     }
 
@@ -19511,8 +19570,11 @@ type=sha,format=long,prefix=,enable=true"
         // pool of 16 GiB on one slot; the declared `--cpus 4` narrows CPU
         // to 4000 milli and the declared `--memory 12g` narrows memory to
         // exactly 12 GiB. No run root exists in tests, so the daemon is
-        // sized for this job alone: the exact derived ceiling, asserted
-        // literally instead of recomputed from the same helpers.
+        // sized for this job alone: the exact ceiling is asserted literally
+        // below, while the recomputed size only selects the fallback
+        // assertion branch after it.
+        let own = spec.own_buildkit_entitlement().unwrap();
+        let size = spec.buildkit_size_summed(&[own]);
         let create = calls
             .iter()
             .find(|c| c.contains(&format!("'buildx' 'create' '--name' '{builder}'")))
@@ -19525,10 +19587,17 @@ type=sha,format=long,prefix=,enable=true"
         assert!(create.contains(&format!(
             "'--config' '/__t/buildkitd-config-{builder}.toml'"
         )));
-        assert!(
-            !create.contains("memory=12g"),
-            "derived budget wins over the static spelling, got: {create}"
-        );
+        if size.memory_bytes.is_some_and(|bytes| bytes > 0) {
+            assert!(
+                !create.contains("memory=12g"),
+                "derived budget wins over the static spelling, got: {create}"
+            );
+        } else {
+            assert!(
+                create.contains("memory=12g"),
+                "static memory policy must survive an unobservable derived dimension, got: {create}"
+            );
+        }
         assert_eq!(
             fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
@@ -22475,6 +22544,85 @@ fi"#
             "the composite outputs still process after the break"
         );
         assert_eq!(summary.step_results[2].exit_code, 0);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A nested composite condition failure breaks the parent composite loop
+    /// too. Both handlers still process their own outputs before closing, and
+    /// the job resumes only after the outer umbrella — parent siblings must
+    /// not run between the nested End and the outer outputs.
+    #[test]
+    fn nested_condition_error_propagates_to_parent_composite_loop() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "outer".into(),
+                display_name: "Run outer".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            script_step("outer-before", "echo outer-before", None),
+            ExecutableStep::CompositeStart {
+                step_id: "inner".into(),
+                display_name: "Run inner".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            script_step("inner-bad-if", "echo never", Some("noSuchFunction('a')")),
+            script_step("inner-sibling", "echo inner-sibling", None),
+            ExecutableStep::CompositeOutputs {
+                step_id: "inner-outputs".into(),
+                outputs: [("inner-answer".to_string(), "42".to_string())].into(),
+                condition: Some("always()".to_string()),
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "inner".into(),
+            },
+            script_step("outer-sibling", "echo outer-sibling", None),
+            ExecutableStep::CompositeOutputs {
+                step_id: "outer-outputs".into(),
+                outputs: [("outer-answer".to_string(), "43".to_string())].into(),
+                condition: Some("always()".to_string()),
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "outer".into(),
+            },
+            script_step("follower", "echo follower", Some("always()")),
+        ];
+        let mut executor = DockerJobEngine::inert(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 0],
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert!(!temp.join("inner-sibling.sh").exists());
+        assert!(!temp.join("outer-sibling.sh").exists());
+        assert!(temp.join("follower.sh").exists());
+        assert!(summary
+            .step_results
+            .iter()
+            .any(|result| { result.state.outputs.get("inner-answer") == Some(&"42".to_string()) }));
+        assert!(summary
+            .step_results
+            .iter()
+            .any(|result| { result.state.outputs.get("outer-answer") == Some(&"43".to_string()) }));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -30265,7 +30413,7 @@ bitcoin-processor-app.push=true")
         let stdout =
             "::group::Build phase\nsome build output\n::endgroup::\n::set-output name=x::42\n";
         let stderr = "";
-        let lines = step_log_lines("Run tests", stdout, stderr, false, &[], false);
+        let lines = step_log_lines("Run tests", stdout, stderr, false, &[], false, false);
 
         let group_at = lines
             .iter()
@@ -30293,7 +30441,7 @@ bitcoin-processor-app.push=true")
     fn step_log_lines_passes_through_normal_output() {
         let stdout = "cargo test passed\nall 42 tests passed\n";
         let stderr = "warning: unused import\n";
-        let lines = step_log_lines("Run cargo test", stdout, stderr, false, &[], false);
+        let lines = step_log_lines("Run cargo test", stdout, stderr, false, &[], false, false);
         assert!(lines.iter().any(|l| l.contains("cargo test passed")));
         assert!(lines.iter().any(|l| l.contains("all 42 tests passed")));
         assert!(lines.iter().any(|l| l.contains("warning: unused import")));
@@ -30312,7 +30460,7 @@ bitcoin-processor-app.push=true")
             "env:".to_string(),
             "  RUN_TESTS: true".to_string(),
         ];
-        let lines = step_log_lines("Run action", "done\n", "", false, &prelude, false);
+        let lines = step_log_lines("Run action", "done\n", "", false, &prelude, false, false);
         let joined = lines.join("\n");
         assert!(joined.contains("with:\n  token: ***"));
         assert!(joined.contains("env:\n  RUN_TESTS: true"));
@@ -30424,7 +30572,7 @@ bitcoin-processor-app.push=true")
         // GITHUB_STEP_SUMMARY renders in the run Summary tab via its own
         // Results Service upload — GitHub never inlines it into the step log.
         let stdout = "output line\n";
-        let lines = step_log_lines("Summarize", stdout, "", false, &[], false);
+        let lines = step_log_lines("Summarize", stdout, "", false, &[], false, false);
         let joined = lines.join("\n");
         assert!(!joined.contains("Step summary:"));
         assert!(joined.contains("output line"));
@@ -30432,7 +30580,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn step_log_lines_keeps_silent_executed_steps_expandable() {
-        let lines = step_log_lines("Silent action", "", "", false, &[], false);
+        let lines = step_log_lines("Silent action", "", "", false, &[], false, false);
         assert_eq!(
             lines,
             vec![
@@ -30444,7 +30592,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn step_log_lines_marks_skipped_steps_visibly() {
-        let lines = step_log_lines("Skipped action", "", "", true, &[], false);
+        let lines = step_log_lines("Skipped action", "", "", true, &[], false, false);
         assert_eq!(lines, skipped_step_log_lines());
         assert!(
             lines.iter().any(|line| line.contains("Step skipped:")),

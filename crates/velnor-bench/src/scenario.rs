@@ -357,9 +357,9 @@ scenarios! {
     "lifecycle/stage-breakdown", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
         "Full ready -> admission -> capacity -> docker -> first command -> completion -> teardown breakdown; broker, acquisition and checkout need remote dispatch";
     "lifecycle/concurrent-slots", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
-        "Stage breakdown while every configured slot is busy";
+        "Stage-window breakdown with overlapping containers and serialized Docker control-plane phases";
     "lifecycle/trust-partition", Lifecycle, VelnorJob, None, VELNOR_JOB_LOCAL, &[],
-        "Trust-partition cost: same workload as trusted vs fork-pr jobs in separate trust-scoped partitions; stages carry the per-stage slower of the pair";
+        "Trust-partition cost: same workload as trusted vs fork-pr jobs in separate trust-scoped partitions; stages carry the per-stage slower of the pair, without claiming remote trust admission or cache isolation";
 
     // Rust cache behaviour. These rows require a real Velnor job: host Cargo
     // can measure compilation, but cannot establish Velnor acceleration.
