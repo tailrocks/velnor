@@ -680,6 +680,7 @@ pub(crate) struct StaticFile {
 
 fn default_workflow_files() -> Vec<String> {
     vec![
+        "ci-pull-request.yml".to_owned(),
         "ci-pr.yml".to_owned(),
         "ci-policy.yml".to_owned(),
         "ci-main.yml".to_owned(),
@@ -2728,7 +2729,7 @@ fn workflow_runtime_download(lane: RunnerMode) -> String {
 
 fn workflow_runtime_artifact_upload() -> String {
     format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          install -m 0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -2898,7 +2899,7 @@ fn generated_files_with_surface(
             .map(|template| render_static_template_for_config(config, workflow_file, template))
             .transpose()?
             .or_else(|| match workflow_file.as_str() {
-                "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
+                "ci-pull-request.yml" | "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
                 "ci-policy.yml" => Some(generated_ci_policy(config)),
                 "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
@@ -3362,7 +3363,9 @@ fn generated_file_purpose(path: &Path) -> &'static str {
         ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         ".github/workflows/AGENTS.md" => "workflow directory rule file",
-        value if value.ends_with("ci-pr.yml") => "parallel PR verification",
+        value if value.ends_with("ci-pull-request.yml") || value.ends_with("ci-pr.yml") => {
+            "parallel PR verification"
+        }
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-release-package-signer.yml") => {
             "release artifact provenance signer"
