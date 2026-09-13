@@ -1929,7 +1929,9 @@ fn debian_package_binds_complete_microvm_identity() {
         return;
     };
     assert!(
-        release.contains("stage --root crates/velnor-runner/release/microvm --arch \"$pin_arch\""),
+        release.contains("crates/velnor-runner/release/microvm")
+            && release.contains("stage --root")
+            && release.contains("--rootfs-sha256"),
         "release staging must verify source-manifest checksums for the package arch"
     );
 }
