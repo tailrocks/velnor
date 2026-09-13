@@ -1913,6 +1913,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
             }
             UnitKind::Swift | UnitKind::Docs => {}
         }
+        // Declared tools provision through mise whatever the kind: the scan
+        // cannot see tools a test invokes at runtime, so the repository
+        // declares them and the job installs them. Versions always resolve
+        // from the repository's mise manifest, never ad hoc.
+        if mise_present && !unit.mise_tools.is_empty() {
+            tools.insert(ToolRequirement::Mise);
+        }
         tools
     }
 
