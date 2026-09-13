@@ -5,7 +5,7 @@
 //! recorded — there are no counters at call sites. A minimal job is expected to
 //! spawn on the order of a dozen host `docker` processes and a representative
 //! one 50-70; this counter is how the Engine-API client migration is shown to
-//! have removed them: a query served by the `engine` module records
+//! have removed them: a call served by the `engine` module records
 //! [`observe_api`] and spawns no process, so `invocations` falls while
 //! `api_calls` rises for the same workload.
 //!
@@ -63,11 +63,22 @@ pub fn observe(op: DockerOp, elapsed: Duration, exit_code: i32, timed_out: bool)
     );
 }
 
-/// Record one call served by the Engine API: no process was spawned, so
+/// Record one Engine API call that produced its outcome with no
+/// subprocess: a served result or a step-deadline expiry, both of which
+/// land here — only fallbacks (which run the historical CLI call) do not.
 /// `invocations` is untouched and this is the counter that rises instead.
 /// The per-class API latency is the migrated-calls comparison against the
-/// CLI histogram above; only successful servings land here, so the number
-/// is the fast-path cost, not a mix with degraded attempts.
+/// CLI histogram above; the number is the fast-path cost, not a mix with
+/// degraded attempts.
+///
+/// Served nonzero step exits and expiries deliberately leave `failures`
+/// and `timeouts` alone: those count host `docker` invocations (the CLI
+/// leg bumps them per invocation in [`observe`]), and no invocation
+/// existed here. The step outcome itself lives in the step telemetry on
+/// both legs; `api_calls`/`api_fallbacks` carry the migration signal, and
+/// the job summary's `docker_timeouts`/`docker_failures` count CLI-leg
+/// invocations only. Nothing in-repo reads those summary fields back —
+/// they are log telemetry, not alert inputs.
 pub fn observe_api(op: DockerOp, elapsed: Duration) {
     let sequence = API_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
     let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
@@ -79,7 +90,7 @@ pub fn observe_api(op: DockerOp, elapsed: Duration) {
         docker_transport = "api",
         docker_latency_ms = micros / 1_000,
         docker_api_call = sequence,
-        "engine api query served"
+        "engine api call served"
     );
 }
 
@@ -207,7 +218,7 @@ impl JobDockerScope {
         join_class_fields(&CLASS_MICROS, 1_000)
     }
 
-    /// Queries served by the Engine API so far in this job.
+    /// Calls served by the Engine API so far in this job.
     #[must_use]
     pub fn api_calls(&self) -> u64 {
         API_CALLS.load(Ordering::Relaxed)
