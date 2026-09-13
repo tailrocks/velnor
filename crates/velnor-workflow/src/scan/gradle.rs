@@ -407,7 +407,11 @@ include("app")
         .unwrap();
         fs::write(root.join("gradlew"), "#!/bin/sh\n").unwrap();
         fs::write(root.join("build.gradle.kts"), "tasks {}\n").unwrap();
-        fs::write(root.join("lib/build.gradle.kts"), "plugins { `java-library` }\n").unwrap();
+        fs::write(
+            root.join("lib/build.gradle.kts"),
+            "plugins { `java-library` }\n",
+        )
+        .unwrap();
         fs::write(
             root.join("app/build.gradle.kts"),
             "dependencies { implementation(projects.lib) }\n",
@@ -424,14 +428,19 @@ include("app")
             .iter()
             .find(|unit| unit.id == "gradle-lib")
             .unwrap();
-        let workspace = shape
-            .units
+        let workspace = shape.units.iter().find(|unit| unit.id == "gradle").unwrap();
+        assert!(workspace
+            .pr_commands
             .iter()
-            .find(|unit| unit.id == "gradle")
-            .unwrap();
-        assert!(workspace.pr_commands.iter().any(|command| command.contains("./gradlew check")));
-        assert!(lib.pr_commands.iter().any(|command| command.contains("./gradlew :lib:check")));
-        assert!(app.pr_commands.iter().any(|command| command.contains("./gradlew :app:check")));
+            .any(|command| command.contains("./gradlew check")));
+        assert!(lib
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("./gradlew :lib:check")));
+        assert!(app
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("./gradlew :app:check")));
         assert!(app.depends_on.contains(&"gradle-lib".to_owned()));
         let _ = fs::remove_dir_all(root);
     }

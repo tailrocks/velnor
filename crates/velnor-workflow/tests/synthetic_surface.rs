@@ -107,9 +107,7 @@ fn kind_file(unit_id: &str) -> String {
     ];
     let kind = prefixes
         .iter()
-        .find(|prefix| {
-            unit_id == **prefix || unit_id.starts_with(&format!("{prefix}-"))
-        })
+        .find(|prefix| unit_id == **prefix || unit_id.starts_with(&format!("{prefix}-")))
         .copied()
         .unwrap_or_else(|| unit_id.split('-').next().unwrap_or(unit_id));
     format!("ci-unit-{kind}.yml")
@@ -159,8 +157,13 @@ fn every_unit_kind_renders_exactly_one_reusable_workflow() {
     // triggers (ci-policy.yml, maintenance.yml) and the three aggregates
     // (ci-pr.yml, ci-main.yml, nightly.yml).
     assert_eq!(generated.workflow_files().len(), kinds.len() + 3 + 2);
-    assert!(generated.workflow("ci-pr.yml").contains("on:\n  pull_request:"));
-    assert!(!generated.workflow_files().iter().any(|file| file == "ci-pull-request.yml"));
+    assert!(generated
+        .workflow("ci-pr.yml")
+        .contains("on:\n  pull_request:"));
+    assert!(!generated
+        .workflow_files()
+        .iter()
+        .any(|file| file == "ci-pull-request.yml"));
 }
 
 #[test]

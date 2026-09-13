@@ -609,9 +609,8 @@ fn write_kind_matrices(
                 serde_json::json!({ "unit": unit.id, "label": label })
             })
             .collect::<Vec<_>>();
-        let json = serde_json::to_string(&entries).map_err(|error| {
-            GeneratorError::usage(format!("serialize {kind} matrix: {error}"))
-        })?;
+        let json = serde_json::to_string(&entries)
+            .map_err(|error| GeneratorError::usage(format!("serialize {kind} matrix: {error}")))?;
         writeln!(file, "{kind}_matrix={json}")
             .map_err(|error| GeneratorError::io("write GitHub output", output_path, &error))?;
     }
@@ -829,8 +828,7 @@ pub(crate) fn run_units_with_selection_file(
     selection_file: &Path,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
-    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule"))
-        && scope != Scope::Full
+    if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
             "trusted events require full CI scope",
@@ -2103,7 +2101,9 @@ fn has_untrusted_pull_request_gate(value: &str) -> bool {
         return true;
     }
     if value
-        .strip_prefix("github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(")
+        .strip_prefix(
+            "github.event_name=='pull_request'||github.event_name=='workflow_dispatch'||(",
+        )
         .and_then(|rest| rest.strip_suffix(')'))
         .is_some_and(is_automatic_push_schedule_gate)
     {

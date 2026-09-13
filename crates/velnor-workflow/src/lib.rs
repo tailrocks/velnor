@@ -7098,13 +7098,6 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 1,
                 "required check must use one bulk needs expression"
             );
-            assert_eq!(
-                workflow
-                    .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
-                    .count(),
-                1,
-                "required check must preserve the plan selection output"
-            );
             assert!(!workflow.contains("needs['"));
             assert!(workflow.contains(
                 "result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty'"
@@ -7112,8 +7105,31 @@ const INCLUDED: &str = include_str!("fixture.txt");
             assert!(workflow.contains("result=\"$(result_for_job plan)\""));
             assert!(workflow.contains("result=\"$(result_for_job policy)\""));
             assert!(workflow.contains("result=\"$(result_for_job "));
-            assert!(workflow.contains("selected=\",$SELECTED_UNITS,\""));
             assert!(workflow.contains("success|skipped"));
+        }
+
+        // Legacy per-unit aggregate still matches selected units via SELECTED_UNITS.
+        assert_eq!(
+            workflows[0]
+                .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
+                .count(),
+            1,
+            "legacy required check must preserve the plan selection output"
+        );
+        assert!(workflows[0].contains("selected=\",$SELECTED_UNITS,\""));
+
+        // Kind-group aggregate reads selection from plan matrix outputs in
+        // NEEDS_JSON. An unused selected= assignment trips actionlint SC2034.
+        for workflow in &workflows[1..] {
+            assert!(
+                !workflow.contains("SELECTED_UNITS:"),
+                "kind-group required check must not emit unused SELECTED_UNITS"
+            );
+            assert!(
+                !workflow.contains("selected=\",$SELECTED_UNITS,\""),
+                "kind-group required check must not assign unused selected"
+            );
+            assert!(workflow.contains("matrix=\"$(jq -r --arg key '"));
         }
 
         assert!(workflows[2].contains("SIMULATE_FAILURE: ${{ inputs.simulate_failure }}"));
@@ -7145,8 +7161,8 @@ const INCLUDED: &str = include_str!("fixture.txt");
             "large required-check script",
         );
         assert!(
-            required_script.len() > GITHUB_EXPRESSION_LIMIT,
-            "fixture must exercise the 21k ceiling: {} bytes",
+            required_script.len() < GITHUB_EXPRESSION_LIMIT,
+            "kind groups must keep the required script under GitHub's 21k ceiling: {} bytes",
             required_script.len()
         );
         let expression_payload_length = required_script
@@ -7162,15 +7178,14 @@ const INCLUDED: &str = include_str!("fixture.txt");
                 .count(),
             1
         );
-        assert_eq!(
-            required_block
-                .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
-                .count(),
-            1
+        assert!(
+            !required_block.contains("SELECTED_UNITS:"),
+            "kind-group required check must not emit unused SELECTED_UNITS"
         );
+        assert!(!required_script.contains("selected=\",$SELECTED_UNITS,\""));
         assert!(required_block.contains("result=\"$(result_for_job plan)\""));
         assert!(required_block.contains("result=\"$(result_for_job policy)\""));
-        assert!(required_block.contains("selected=\",$SELECTED_UNITS,\""));
+        assert!(required_script.contains("matrix=\"$(jq -r --arg key '"));
     }
 
     #[test]

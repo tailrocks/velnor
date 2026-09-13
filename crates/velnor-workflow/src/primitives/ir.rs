@@ -1465,7 +1465,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         }
         for kind in kinds {
             let name = kind_matrix_output(kind);
-            outputs.push(format!("      {name}: ${{{{ steps.plan.outputs.{name} }}}}"));
+            outputs.push(format!(
+                "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
+            ));
         }
         let _ = writeln!(
             output,

@@ -249,24 +249,31 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Validate generated stack results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
         shell: bash
         run: |
-          if [[ "${{ inputs.simulate_failure }}" == true ]]; then
+          set -euo pipefail
+          if [[ "$SIMULATE_FAILURE" == true ]]; then
             echo "nightly red-to-signal simulation requested" >&2
             exit 1
           fi
-          result="${{ needs['plan'].result }}"
+          result_for_job() {
+            jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"
+          }
+          result="$(result_for_job plan)"
           if [[ "$result" != success ]]; then
             echo "required CI prerequisite plan did not pass: $result" >&2
             exit 1
           fi
-          result="${{ needs['policy'].result }}"
+          result="$(result_for_job policy)"
           if [[ "$result" != success ]]; then
             echo "required CI prerequisite policy did not pass: $result" >&2
             exit 1
           fi
-          matrix="${{ needs.plan.outputs.bun_matrix }}"
-          result="${{ needs['group-bun'].result }}"
+          matrix="$(jq -r --arg key 'bun_matrix' '.plan.outputs[$key] // "[]"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-bun)"
           if [[ "$matrix" != '[]' ]]; then
             if [[ "$result" != success ]]; then
               echo "selected CI group group-bun did not pass: $result" >&2
@@ -278,8 +285,8 @@ jobs:
               *) echo "unselected CI group group-bun failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          matrix="${{ needs.plan.outputs.docker_matrix }}"
-          result="${{ needs['group-docker'].result }}"
+          matrix="$(jq -r --arg key 'docker_matrix' '.plan.outputs[$key] // "[]"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-docker)"
           if [[ "$matrix" != '[]' ]]; then
             if [[ "$result" != success ]]; then
               echo "selected CI group group-docker did not pass: $result" >&2
@@ -291,8 +298,8 @@ jobs:
               *) echo "unselected CI group group-docker failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          matrix="${{ needs.plan.outputs.docs_matrix }}"
-          result="${{ needs['group-docs'].result }}"
+          matrix="$(jq -r --arg key 'docs_matrix' '.plan.outputs[$key] // "[]"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-docs)"
           if [[ "$matrix" != '[]' ]]; then
             if [[ "$result" != success ]]; then
               echo "selected CI group group-docs did not pass: $result" >&2
@@ -304,8 +311,8 @@ jobs:
               *) echo "unselected CI group group-docs failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          matrix="${{ needs.plan.outputs.opentofu_matrix }}"
-          result="${{ needs['group-opentofu'].result }}"
+          matrix="$(jq -r --arg key 'opentofu_matrix' '.plan.outputs[$key] // "[]"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-opentofu)"
           if [[ "$matrix" != '[]' ]]; then
             if [[ "$result" != success ]]; then
               echo "selected CI group group-opentofu did not pass: $result" >&2
@@ -317,8 +324,8 @@ jobs:
               *) echo "unselected CI group group-opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
-          matrix="${{ needs.plan.outputs.rust_matrix }}"
-          result="${{ needs['group-rust'].result }}"
+          matrix="$(jq -r --arg key 'rust_matrix' '.plan.outputs[$key] // "[]"' <<<"$NEEDS_JSON")"
+          result="$(result_for_job group-rust)"
           if [[ "$matrix" != '[]' ]]; then
             if [[ "$result" != success ]]; then
               echo "selected CI group group-rust did not pass: $result" >&2

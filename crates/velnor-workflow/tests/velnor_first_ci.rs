@@ -169,9 +169,15 @@ fn dispatch_exposes_runner_and_scope_without_committed_flips() {
         assert!(workflow.contains("default: velnor"), "{name}");
         assert!(workflow.contains("- github"), "{name}");
         assert!(workflow.contains("- both"), "{name}");
-        assert!(workflow.contains("options:\n          - affected"), "{name}");
+        assert!(
+            workflow.contains("options:\n          - affected"),
+            "{name}"
+        );
         assert!(workflow.contains("- full"), "{name}");
-        assert!(workflow.contains("CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}"), "{name}");
+        assert!(
+            workflow.contains("CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}"),
+            "{name}"
+        );
     }
     let pr = generated.workflow("ci-pr.yml");
     assert!(pr.contains("default: affected"));
