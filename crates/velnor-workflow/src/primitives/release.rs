@@ -881,7 +881,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                     unit.id
                 );
             }
-            render_cargo_source_preparation(&mut output, unit);
+            render_cargo_source_preparation(&mut output, &[unit]);
             let cargo_offline = checks_env(unit);
             let _ = writeln!(
                 output,

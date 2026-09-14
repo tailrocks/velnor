@@ -1870,7 +1870,7 @@ fn identifier_suffix(value: &str) -> String {
         .to_owned()
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -2930,7 +2930,7 @@ fn workflow_runtime_download(lane: RunnerMode) -> String {
 
 fn workflow_runtime_artifact_upload() -> String {
     format!(
-        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          install -m 0755 \"$HOME/.cargo/bin/velnor-workflow\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
+        "      - name: Prepare Velnor workflow runtime\n        shell: bash\n        env:\n          EXPECTED_REVISION: {VELNOR_WORKFLOW_SOURCE_REV}\n        run: |\n          set -euo pipefail\n          stage=\"$RUNNER_TEMP/velnor-workflow-runtime\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          src=\"$(command -v velnor-workflow)\"\n          install -m 0755 \"$src\" \"$stage/velnor-workflow\"\n          digest=\"$(sha256sum \"$stage/velnor-workflow\" | awk '{{print $1}}')\"\n          jq -n --arg repository \"$GITHUB_REPOSITORY\" --arg revision \"$EXPECTED_REVISION\" --arg head_branch \"${{{{ github.ref_name }}}}\" --arg platform \"${{{{ runner.os }}}}-${{{{ runner.arch }}}}\" --arg run_id \"$GITHUB_RUN_ID\" --arg job_id \"${{{{ github.job }}}}\" --arg binary_sha256 \"$digest\" '{{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}}' > \"$stage/manifest.json\"\n      - name: Publish Velnor workflow runtime\n        uses: {}\n        with:\n          name: velnor-workflow-runtime-{VELNOR_WORKFLOW_SOURCE_REV}-${{{{ runner.os }}}}-${{{{ runner.arch }}}}\n          path: ${{{{ runner.temp }}}}/velnor-workflow-runtime\n          if-no-files-found: error\n          retention-days: 7\n",
         ActionPin::UploadArtifact.reference()
     )
 }
@@ -3097,7 +3097,7 @@ fn generated_files_with_surface(
             .map(|template| render_static_template_for_config(config, workflow_file, template))
             .transpose()?
             .or_else(|| match workflow_file.as_str() {
-                "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
+                "ci-pull-request.yml" | "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
                 "ci-policy.yml" => Some(generated_ci_policy(config)),
                 "ci-release-package-signer.yml" => Some(generated_release_package_signer()),
                 "ci-main.yml" => Some(generated_ci_main(&workflow)),
@@ -3574,7 +3574,9 @@ fn generated_file_purpose(path: &Path) -> &'static str {
         ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         ".github/workflows/AGENTS.md" => "workflow directory rule file",
-        value if value.ends_with("ci-pr.yml") => "parallel PR verification",
+        value if value.ends_with("ci-pull-request.yml") || value.ends_with("ci-pr.yml") => {
+            "parallel PR verification"
+        }
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-release-package-signer.yml") => {
             "release artifact provenance signer"
@@ -8196,13 +8198,6 @@ channel = "stable"
                 1,
                 "required check must use one bulk needs expression"
             );
-            assert_eq!(
-                workflow
-                    .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
-                    .count(),
-                1,
-                "required check must preserve the plan selection output"
-            );
             assert!(!workflow.contains("needs['"));
             assert!(workflow.contains(
                 "result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty'"
@@ -8210,8 +8205,31 @@ channel = "stable"
             assert!(workflow.contains("result=\"$(result_for_job plan)\""));
             assert!(workflow.contains("result=\"$(result_for_job policy)\""));
             assert!(workflow.contains("result=\"$(result_for_job "));
-            assert!(workflow.contains("selected=\",$SELECTED_UNITS,\""));
             assert!(workflow.contains("success|skipped"));
+        }
+
+        // Legacy per-unit aggregate still matches selected units via SELECTED_UNITS.
+        assert_eq!(
+            workflows[0]
+                .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
+                .count(),
+            1,
+            "legacy required check must preserve the plan selection output"
+        );
+        assert!(workflows[0].contains("selected=\",$SELECTED_UNITS,\""));
+
+        // Kind-group aggregate reads selection from plan matrix outputs in
+        // NEEDS_JSON. An unused selected= assignment trips actionlint SC2034.
+        for workflow in &workflows[1..] {
+            assert!(
+                !workflow.contains("SELECTED_UNITS:"),
+                "kind-group required check must not emit unused SELECTED_UNITS"
+            );
+            assert!(
+                !workflow.contains("selected=\",$SELECTED_UNITS,\""),
+                "kind-group required check must not assign unused selected"
+            );
+            assert!(workflow.contains("matrix=\"$(jq -r --arg key '"));
         }
 
         assert!(workflows[2].contains("SIMULATE_FAILURE: ${{ inputs.simulate_failure }}"));
@@ -8246,8 +8264,8 @@ channel = "stable"
             "large required-check script",
         );
         assert!(
-            required_script.len() > GITHUB_EXPRESSION_LIMIT,
-            "fixture must exercise the 21k ceiling: {} bytes",
+            required_script.len() < GITHUB_EXPRESSION_LIMIT,
+            "kind groups must keep the required script under GitHub's 21k ceiling: {} bytes",
             required_script.len()
         );
         let expression_payload_length = required_script
@@ -8263,15 +8281,14 @@ channel = "stable"
                 .count(),
             1
         );
-        assert_eq!(
-            required_block
-                .matches("SELECTED_UNITS: ${{ needs.plan.outputs.units }}")
-                .count(),
-            1
+        assert!(
+            !required_block.contains("SELECTED_UNITS:"),
+            "kind-group required check must not emit unused SELECTED_UNITS"
         );
+        assert!(!required_script.contains("selected=\",$SELECTED_UNITS,\""));
         assert!(required_block.contains("result=\"$(result_for_job plan)\""));
         assert!(required_block.contains("result=\"$(result_for_job policy)\""));
-        assert!(required_block.contains("selected=\",$SELECTED_UNITS,\""));
+        assert!(required_script.contains("matrix=\"$(jq -r --arg key '"));
     }
 
     #[test]
@@ -10129,6 +10146,57 @@ channel = "stable"
         assert!(legacy.contains("      - name: Prepare Cargo sources"));
         assert!(legacy.contains("          cargo fetch --locked"));
         assert!(legacy.contains("CARGO_NET_OFFLINE: \"true\""));
+    }
+
+    #[test]
+    fn kind_reusable_unions_member_tools_and_covers_every_fetch_unit() {
+        let mut config = scanned_fixture(RunnerMode::Github);
+        let rust_index = must_some(
+            config
+                .units
+                .iter()
+                .position(|unit| unit.kind == UnitKind::Rust),
+            "scanned Rust unit",
+        );
+        config.units[rust_index].pinned_lockfile = true;
+        let toolchain = config.units[rust_index].toolchain.clone();
+        config.units.push(Unit {
+            id: "rust-dependency-policy".to_owned(),
+            label: "Rust dependency policy".to_owned(),
+            kind: UnitKind::Rust,
+            root: ".".to_owned(),
+            pinned_lockfile: true,
+            watch: vec!["Cargo.toml".to_owned()],
+            pr_commands: vec!["cargo +nightly deny check".to_owned()],
+            full_commands: vec!["RUSTFLAGS='-D warnings' mbx deny check".to_owned()],
+            github_pr_commands: None,
+            github_full_commands: None,
+            velnor_pr_commands: None,
+            velnor_full_commands: None,
+            depends_on: Vec::new(),
+            cache: None,
+            tool_version: None,
+            toolchain,
+        });
+        let kind = WorkflowIr::from_config(&config).render_kind_units(UnitKind::Rust);
+        assert!(
+            kind.contains("            'rust-dependency-policy') exit 0 ;;"),
+            "kind fetch must skip deny/audit members, not fail closed: {kind}"
+        );
+        assert!(kind.contains("          cargo fetch --locked"));
+        assert!(kind.contains("unknown unit for cargo fetch"));
+        assert!(
+            kind.contains("tool: cargo-deny"),
+            "kind reusable must provision cargo-deny for the policy member"
+        );
+        assert!(
+            kind.contains("export CARGO_NET_OFFLINE=true"),
+            "restricted matrix units must opt into offline at run time"
+        );
+        assert!(
+            !kind.contains("CARGO_NET_OFFLINE: \"true\""),
+            "baked offline env would break deny members that share the kind body"
+        );
     }
 
     #[test]

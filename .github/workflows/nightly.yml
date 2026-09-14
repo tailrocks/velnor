@@ -50,6 +50,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       scope: ${{ steps.plan.outputs.scope }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
       units: ${{ steps.plan.outputs.units }}
       full_units: ${{ steps.plan.outputs.full_units }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
@@ -93,7 +95,8 @@ jobs:
           stage="$RUNNER_TEMP/velnor-workflow-runtime"
           rm -rf "$stage"
           mkdir -p "$stage"
-          install -m 0755 "$HOME/.cargo/bin/velnor-workflow" "$stage/velnor-workflow"
+          src="$(command -v velnor-workflow)"
+          install -m 0755 "$src" "$stage/velnor-workflow"
           digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
           jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" '{repository: $repository, revision: $revision, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256}' > "$stage/manifest.json"
       - name: Publish Velnor workflow runtime
@@ -229,7 +232,6 @@ jobs:
       - name: Validate generated stack results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          SELECTED_UNITS: ${{ needs.plan.outputs.units }}
           SIMULATE_FAILURE: ${{ inputs.simulate_failure }}
         shell: bash
         run: |
@@ -262,7 +264,7 @@ jobs:
             result="$(result_for_job group-bun)"
             case "$result" in
               success|skipped) ;;
-              *) echo "unselected CI unit bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;
+              *) echo "unselected CI group group-bun failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",docker,"* ]]; then
@@ -275,7 +277,7 @@ jobs:
             result="$(result_for_job group-docker)"
             case "$result" in
               success|skipped) ;;
-              *) echo "unselected CI unit docker failed unexpectedly: $result" >&2; exit 1 ;;
+              *) echo "unselected CI group group-docker failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",docs,"* ]]; then
@@ -288,7 +290,7 @@ jobs:
             result="$(result_for_job group-docs)"
             case "$result" in
               success|skipped) ;;
-              *) echo "unselected CI unit docs failed unexpectedly: $result" >&2; exit 1 ;;
+              *) echo "unselected CI group group-docs failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",opentofu,"* ]]; then
@@ -301,7 +303,7 @@ jobs:
             result="$(result_for_job group-opentofu)"
             case "$result" in
               success|skipped) ;;
-              *) echo "unselected CI unit opentofu failed unexpectedly: $result" >&2; exit 1 ;;
+              *) echo "unselected CI group group-opentofu failed unexpectedly: $result" >&2; exit 1 ;;
             esac
           fi
           if [[ "$selected" == *",rust-policy,"* ]]; then

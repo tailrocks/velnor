@@ -6,7 +6,7 @@
 //! workflow body is rendered once by the generator.
 
 use super::{
-    Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, UnitContract, BUN_PACKAGE,
+    Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, BUN_PACKAGE,
     DEFAULT_UNIT_TIMEOUT_MINUTES, DOCKER_IMAGE, DOCS_LINT, GRADLE_PROJECT, HOMEBREW_TAP,
     NODE_PACKAGE, OPENTOFU, RUST_CRATE, SWIFT_PACKAGE,
 };

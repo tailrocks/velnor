@@ -620,6 +620,10 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::io("open GitHub output", &output_path, &error))?;
         writeln!(file, "scope={}", scope_name(scope))
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "base_sha={base}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
+        writeln!(file, "head_sha={head}")
+            .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "units={units}")
             .map_err(|error| GeneratorError::io("write GitHub output", &output_path, &error))?;
         writeln!(file, "full_units={full_units}")
@@ -1174,7 +1178,12 @@ fn parse_selection_ids(value: &str) -> Result<BTreeSet<String>, GeneratorError> 
 fn validate_selection_sha(selection: &PlannedSelection) -> Result<(), GeneratorError> {
     let job_base = env::var("BASE_SHA").unwrap_or_default();
     let job_head = env::var("HEAD_SHA").unwrap_or_else(|_| "HEAD".to_owned());
-    if selection.base_sha != job_base || selection.head_sha != job_head {
+    // workflow_dispatch leaves BASE_SHA empty; plan already wrote the resolved
+    // base into the artifact. Unit jobs consume that plan and must not re-diff.
+    // A non-empty job BASE_SHA still has to match. HEAD always has to match.
+    let head_mismatch = selection.head_sha != job_head;
+    let base_mismatch = !job_base.is_empty() && selection.base_sha != job_base;
+    if head_mismatch || base_mismatch {
         println!(
             "::warning::CI selection artifact SHA mismatch: plan base SHA `{}` vs job base SHA `{}`; plan head SHA `{}` vs job head SHA `{}`",
             selection.base_sha, job_base, selection.head_sha, job_head

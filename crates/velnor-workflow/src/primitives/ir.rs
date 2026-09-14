@@ -483,6 +483,10 @@ pub(crate) fn preparation_env() -> String {
     env
 }
 
+fn mise_auto_install_env() -> &'static str {
+    "\n          MISE_AUTO_INSTALL: \"false\"\n          MISE_EXEC_AUTO_INSTALL: \"false\"\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\""
+}
+
 /// Env for the steps that run Cargo and repository commands, on both lanes:
 /// the `CARGO_NET_OFFLINE` restriction for lockfile-pinned units, and the
 /// suppression of every mise auto-install path. Verification must consume only
@@ -491,14 +495,43 @@ pub(crate) fn preparation_env() -> String {
 /// the whole-configured-toolset materialisation a minimal provision list
 /// exists to prevent.
 pub(crate) fn checks_env(unit: &Unit) -> String {
+    checks_env_for_members(unit, &[unit])
+}
+
+fn checks_env_for_members(unit: &Unit, members: &[&Unit]) -> String {
     let mut env = String::new();
-    if cargo_network_is_restricted(unit) {
+    let restricted = members
+        .iter()
+        .copied()
+        .filter(|member| cargo_network_is_restricted(member))
+        .count();
+    // Mixed kind groups cannot bake CARGO_NET_OFFLINE: deny/audit members
+    // resolve advisory databases on the network. Restricted members export
+    // it from the run script instead.
+    if restricted == members.len() && cargo_network_is_restricted(unit) {
         env.push_str("\n          CARGO_NET_OFFLINE: \"true\"");
     }
-    env.push_str("\n          MISE_AUTO_INSTALL: \"false\"");
-    env.push_str("\n          MISE_EXEC_AUTO_INSTALL: \"false\"");
-    env.push_str("\n          MISE_NOT_FOUND_AUTO_INSTALL: \"false\"");
+    env.push_str(mise_auto_install_env());
     env
+}
+
+fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
+    let restricted = members
+        .iter()
+        .copied()
+        .filter(|member| cargo_network_is_restricted(member))
+        .collect::<Vec<_>>();
+    if restricted.is_empty() || restricted.len() == members.len() {
+        return String::new();
+    }
+    let pattern = restricted
+        .iter()
+        .map(|member| crate::shell_quote(&member.id))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "          case \"$CI_UNIT_ID\" in\n            {pattern}) export CARGO_NET_OFFLINE=true ;;\n          esac\n"
+    )
 }
 
 /// Every command the unit runs, on either lane: the scan-derived base
@@ -675,17 +708,34 @@ pub(crate) fn commands_invoke_mise(unit: &Unit) -> bool {
 /// the fetch is visible and measurable on its own. The fetch itself runs
 /// online (`preparation_env`, never `checks_env`) — it is the recovery path
 /// the offline restriction presumes already happened.
-pub(crate) fn render_cargo_source_preparation(output: &mut String, unit: &Unit) {
-    if !cargo_network_is_restricted(unit) {
+///
+/// Kind reusables share one YAML body across many units. Fetch the matrix
+/// unit's sources (`inputs.unit`), not the first scanned member's directory.
+pub(crate) fn render_cargo_source_preparation(output: &mut String, members: &[&Unit]) {
+    if !members.iter().any(|unit| cargo_network_is_restricted(unit)) {
         return;
     }
-    let change_dir = crate::shell_change_dir(&unit.root);
+    let mut cases = String::new();
+    for member in members {
+        if cargo_network_is_restricted(member) {
+            let _ = writeln!(
+                cases,
+                "            {}) root={} ;;",
+                crate::shell_quote(&member.id),
+                crate::shell_quote(&member.root)
+            );
+        } else {
+            // deny/audit/publish resolve their own inputs; skip fetch.
+            let _ = writeln!(
+                cases,
+                "            {}) exit 0 ;;",
+                crate::shell_quote(&member.id)
+            );
+        }
+    }
     let _ = writeln!(
         output,
-        "      - name: Prepare Cargo sources\n        env:{}
-        run: |
-          set -euo pipefail
-          {change_dir}cargo fetch --locked",
+        "      - name: Prepare Cargo sources\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}{}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for cargo fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          if [[ \"$root\" != \".\" ]]; then\n            cd -- \"$root\"\n          fi\n          cargo fetch --locked",
         preparation_env()
     );
 }
@@ -1378,7 +1428,6 @@ impl WorkflowIr {
             "always()".to_owned()
         };
         let needs_json = github_expression("toJSON(needs)");
-        let selected_units = github_expression("needs.plan.outputs.units");
         let _ = writeln!(
             output,
             "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {if_condition} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}",
@@ -1407,9 +1456,16 @@ impl WorkflowIr {
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
             );
         }
-        output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
-        for (unit_id, job_id, _, _) in nodes.iter().filter_map(GraphNode::as_unit) {
-            let job = job_id;
+        let mut seen = BTreeSet::new();
+        for (job_id, file) in nodes
+            .iter()
+            .filter_map(GraphNode::as_unit)
+            .map(|(_, job_id, _, file)| (job_id, file))
+        {
+            if !seen.insert(job_id) {
+                continue;
+            }
+            let matrix = kind_matrix_output_from_file(file);
             let _ = writeln!(
                 output,
                 "          if [[ \"$selected\" == *\",{unit_id},\"* ]]; then\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success) ;;\n              *) echo \"selected CI unit {unit_id} did not pass: $result\" >&2; exit 1 ;;\n            esac\n          else\n            result=\"$(result_for_job {job})\"\n            case \"$result\" in\n              success|skipped) ;;\n              *) echo \"unselected CI unit {unit_id} failed unexpectedly: $result\" >&2; exit 1 ;;\n            esac\n          fi",
@@ -1506,6 +1562,15 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
     /// default contract the output is the surface the generator has always
     /// emitted for a unit.
     pub(crate) fn render_unit_surface(&self, unit: &Unit, contract: &UnitContract) -> String {
+        self.render_unit_surface_for_members(unit, contract, &[unit])
+    }
+
+    fn render_unit_surface_for_members(
+        &self,
+        unit: &Unit,
+        contract: &UnitContract,
+        members: &[&Unit],
+    ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let _ = writeln!(
             output,
@@ -1516,7 +1581,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str("\njobs:\n");
         for job in &contract.lanes {
             if lane_supports_unit(job.lane, unit) {
-                self.render_lane_job(&mut output, *job, unit, contract);
+                self.render_lane_job(&mut output, *job, unit, contract, members);
             }
         }
         output
@@ -1606,6 +1671,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         job: LaneJob,
         unit: &Unit,
         contract: &UnitContract,
+        members: &[&Unit],
     ) {
         let id = job.lane.as_str();
         self.render_lane_job_for_input(output, job, unit, contract, id, None);
@@ -1651,7 +1717,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
-        self.render_tool_provisioning(output, lane, unit, cache_save);
+        self.render_tool_provisioning_for_members(output, lane, unit, members, cache_save);
         let seed = contract.mutable_mount_seed;
         if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_restore(output, self, unit);
@@ -1882,6 +1948,23 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         } else {
             String::new()
         };
+        let mut outputs = vec![
+            "      scope: ${{ steps.plan.outputs.scope }}".to_owned(),
+            "      base_sha: ${{ steps.plan.outputs.base_sha }}".to_owned(),
+            "      head_sha: ${{ steps.plan.outputs.head_sha }}".to_owned(),
+            "      units: ${{ steps.plan.outputs.units }}".to_owned(),
+            "      full_units: ${{ steps.plan.outputs.full_units }}".to_owned(),
+        ];
+        let mut kinds = BTreeSet::new();
+        for unit in &self.units {
+            kinds.insert(unit.kind);
+        }
+        for kind in kinds {
+            let name = kind_matrix_output(kind);
+            outputs.push(format!(
+                "      {name}: ${{{{ steps.plan.outputs.{name} }}}}"
+            ));
+        }
         let _ = writeln!(
             output,
             "  plan:\n    name: Planning\n{gate}    runs-on: {}\n    outputs:\n{}\n    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Select affected units\n        id: plan\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          CI_SCOPE_OVERRIDE: ${{{{ github.event.inputs.scope || '' }}}}\n          BASE_SHA: ${{{{ {base_sha} }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: ${{{{ runner.temp }}}}/velnor-ci-selection\n{lanes_env}        run: |\n          set -euo pipefail\n          if [[ -z \"${{CI_SCOPE_OVERRIDE:-}}\" ]]; then unset CI_SCOPE_OVERRIDE; fi\n          velnor-workflow plan --config .github/ci/project.toml\n",
@@ -2368,6 +2451,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output: &mut String,
         lane: RunnerMode,
         unit: &Unit,
+        cache_save: bool,
+    ) {
+        self.render_tool_provisioning_for_members(output, lane, unit, &[unit], cache_save);
+    }
+
+    fn render_tool_provisioning_for_members(
+        &self,
+        output: &mut String,
+        lane: RunnerMode,
+        unit: &Unit,
+        members: &[&Unit],
         cache_save: bool,
     ) {
         // The Velnor job image is the toolchain boundary for self-hosted jobs.

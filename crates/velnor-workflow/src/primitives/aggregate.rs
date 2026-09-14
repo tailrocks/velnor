@@ -13,7 +13,7 @@ use crate::GeneratorError;
 /// The aggregate files the surface can own, mapped to their workflow kind.
 fn kind_for_file(file: &str) -> Option<WorkflowKind> {
     match file {
-        "ci-pr.yml" => Some(WorkflowKind::PullRequest),
+        "ci-pull-request.yml" | "ci-pr.yml" => Some(WorkflowKind::PullRequest),
         "ci-main.yml" => Some(WorkflowKind::Main),
         "nightly.yml" => Some(WorkflowKind::Nightly),
         _ => None,
@@ -36,7 +36,7 @@ impl Primitive for UnitAggregation {
         let file = ctx.file.unwrap_or_default();
         let kind = kind_for_file(file).ok_or_else(|| {
             GeneratorError::usage(format!(
-                "`{UNIT_AGGREGATION}` renders `ci-pr.yml`, `ci-main.yml`, or `nightly.yml`, not `{file}`"
+                "`{UNIT_AGGREGATION}` renders `ci-pull-request.yml`, `ci-pr.yml`, `ci-main.yml`, or `nightly.yml`, not `{file}`"
             ))
         })?;
         // The plan job is a contributed node, not something the aggregate
