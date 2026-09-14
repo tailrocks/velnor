@@ -90,6 +90,7 @@ fn cli_migrated_legacy_names_are_first_class_subcommands() {
         "cache",
         "capabilities",
         "configure",
+        "docker",
         "doctor",
         "preflight",
         "remove",
@@ -123,6 +124,16 @@ fn cli_run_worker_is_not_a_public_command() {
     assert_eq!(code(&output), 0);
     assert!(text(&output.stderr).is_empty());
     assert!(text(&output.stdout).contains("Usage: velnorctl"));
+}
+
+#[test]
+fn cli_macos_docker_diagnostics_have_actionable_help() {
+    let output = run(&["docker", "report", "--help"]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let help = text(&output.stdout);
+    assert!(help.contains("--check-bind-mount"), "{help}");
+    assert!(help.contains("--docker-host-work-dir"), "{help}");
+    assert!(help.contains("--work-dir"), "{help}");
 }
 
 #[test]

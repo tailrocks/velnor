@@ -238,6 +238,7 @@ fn cli_c005_schema_document_is_derived_from_the_live_clap_tree() {
         "cache gc",
         "capabilities check",
         "capabilities export",
+        "docker",
         "storage paths",
         "storage status",
     ] {
@@ -319,6 +320,54 @@ fn nested_operator_commands_parse_as_typed_values() {
             velnorctl::runtime::StorageCommand::Paths
         )),
         other => panic!("expected storage paths, got {other:?}"),
+    }
+}
+
+#[test]
+fn docker_diagnostics_parse_as_typed_values_and_keep_path_mapping_explicit() {
+    match parse(&[
+        "docker",
+        "report",
+        "--check-bind-mount",
+        "--image",
+        "alpine:3.20",
+        "--work-dir",
+        "/runner/work",
+        "--docker-host-work-dir",
+        "/daemon/work",
+    ])
+    .expect("docker report")
+    {
+        Cli {
+            command: Command::Docker(args),
+            ..
+        } => {
+            assert!(matches!(
+                args.action,
+                velnorctl::commands::DockerAction::Report
+            ));
+            assert!(args.check_bind_mount);
+            assert_eq!(args.image, "alpine:3.20");
+            assert_eq!(
+                args.work_dir.as_deref(),
+                Some(std::path::Path::new("/runner/work"))
+            );
+            assert_eq!(
+                args.docker_host_work_dir.as_deref(),
+                Some(std::path::Path::new("/daemon/work"))
+            );
+        }
+        other => panic!("expected Docker, got {other:?}"),
+    }
+    match parse(&["docker", "status"]).expect("docker status") {
+        Cli {
+            command: Command::Docker(args),
+            ..
+        } => assert!(matches!(
+            args.action,
+            velnorctl::commands::DockerAction::Status
+        )),
+        other => panic!("expected Docker, got {other:?}"),
     }
 }
 

@@ -430,3 +430,36 @@ pub struct DiagnosticsBundleArgs {
     #[arg(long)]
     pub archive: PathBuf,
 }
+
+/// Local Docker endpoint and Velnor capability report.
+#[derive(Debug, Args)]
+pub struct DockerArgs {
+    /// Report action. The default keeps `velnorctl docker` convenient while
+    /// making the documented `velnorctl docker report` spelling explicit.
+    #[arg(value_enum, default_value = "report")]
+    pub action: DockerAction,
+
+    /// Container image used only when `--check-bind-mount` is requested.
+    #[arg(long, default_value = "alpine:3.20")]
+    pub image: String,
+
+    /// Run a bounded host-to-container bind-mount visibility probe.
+    #[arg(long)]
+    pub check_bind_mount: bool,
+
+    /// Local work directory used by the bind-mount probe.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+
+    /// Path to the work directory as seen by the Docker daemon.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+}
+
+/// Docker report actions. `status` is intentionally the same read-only
+/// report, so operators can use the noun that matches their incident.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DockerAction {
+    Report,
+    Status,
+}
