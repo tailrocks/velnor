@@ -991,6 +991,23 @@ fn check_container_docker_client(
     }
 }
 
+/// Bind-mount spec and in-container check for the bind-mount probe, built
+/// together so the tested path cannot drift from the mount destination.
+///
+/// The probe mounts the probe *directory*: the runner bind-mounts workspace
+/// directories, never single files, and mounting the marker file itself at
+/// `/__velnorctl` would place the file at exactly that path, making
+/// `test -f /__velnorctl/<marker>` fail on every daemon.
+fn bind_mount_probe_spec(source: &Path, marker_name: &str) -> (String, String) {
+    (
+        format!(
+            "type=bind,src={},dst=/__velnorctl,readonly",
+            source.display()
+        ),
+        format!("test -f /__velnorctl/{marker_name}"),
+    )
+}
+
 fn check_bind_mount_probe(
     target: &DockerTarget,
     image: &str,
@@ -1018,7 +1035,7 @@ fn check_bind_mount_probe(
             )),
         );
     }
-    let source = match docker_visible_path(&marker, work_dir, docker_host_work_dir) {
+    let source = match docker_visible_path(&probe_dir, work_dir, docker_host_work_dir) {
         Ok(path) => path,
         Err(error) => {
             let _ = fs::remove_file(&marker);
@@ -1032,11 +1049,7 @@ fn check_bind_mount_probe(
             );
         }
     };
-    let mount = format!(
-        "type=bind,src={},dst=/__velnorctl,readonly",
-        source.display()
-    );
-    let command = format!("test -f /__velnorctl/{marker_name}");
+    let (mount, command) = bind_mount_probe_spec(&source, &marker_name);
     let result = run_docker_process(
         target,
         &[
@@ -1999,6 +2012,17 @@ mod tests {
     fn daemon_shared_artifacts_lift_slot_work_root() {
         let root = PathBuf::from("/tmp/velnor/work/slot-3");
         assert_eq!(daemon_shared_root(root), PathBuf::from("/tmp/velnor/work"));
+    }
+
+    #[test]
+    fn bind_mount_probe_tests_marker_inside_mounted_directory() {
+        let (mount, command) = bind_mount_probe_spec(
+            Path::new("/work/preflight/mount"),
+            ".velnorctl-mount-check-1",
+        );
+        assert!(mount.contains("src=/work/preflight/mount"), "{mount}");
+        assert!(mount.contains("dst=/__velnorctl"), "{mount}");
+        assert_eq!(command, "test -f /__velnorctl/.velnorctl-mount-check-1");
     }
 
     #[test]

@@ -22,6 +22,7 @@ use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod commands;
 pub mod completion;
+pub mod host;
 pub mod http;
 #[cfg(target_os = "macos")]
 pub mod local_diagnostics;
@@ -251,6 +252,8 @@ pub enum Command {
     Preflight(Box<runtime::PreflightArgs>),
     /// Report the local Docker endpoint and Velnor-relevant capabilities.
     Docker(commands::DockerArgs),
+    /// Start, inspect, drain, or stop on-demand host capacity.
+    Host(commands::HostArgs),
     /// Remove local runner configuration.
     Remove(Box<runtime::RemoveArgs>),
     /// Print local runner configuration status.
@@ -539,6 +542,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
                 ))
             }
         }
+        Command::Host(args) => host::run(&globals, args.command).await,
         Command::Remove(args) => {
             validate_remove_target_selectors(&globals)?;
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
@@ -1527,8 +1531,8 @@ mod tests {
 
     #[test]
     fn explicit_instance_rejects_a_different_context_endpoint() {
-        let endpoint = velnor_client::UnixEndpoint::from_instance("primary")
-            .expect("valid context endpoint");
+        let endpoint =
+            velnor_client::UnixEndpoint::from_instance("primary").expect("valid context endpoint");
 
         let error = validate_context_instance(&endpoint, Some("secondary"))
             .expect_err("different explicit instance must fail closed");

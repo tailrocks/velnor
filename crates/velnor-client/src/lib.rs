@@ -17,7 +17,7 @@ pub use http::{
     ClientError, Info, LogItem, MutationResponse, ResourcePage, ResourceQuery, UnixControlClient,
     WatchItem,
 };
-pub use socket_root::{is_package_socket_mode, socket_root};
+pub use socket_root::{ensure_socket_root, is_package_socket_mode, socket_root};
 pub use unix::{EndpointError, SocketKind, UnixEndpoint, API_VERSION};
 
 #[cfg(test)]

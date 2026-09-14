@@ -1,9 +1,11 @@
 //! Resolve the local control-plane socket directory.
 //!
 //! Package units set `VELNOR_STORAGE_ROOT=/var` and own `/run/velnor`. Dev and
-//! user-mode hosts use the XDG runtime directory, falling back to a temp dir on
-//! macOS and other platforms without `/run/velnor`.
+//! user-mode hosts use `XDG_RUNTIME_DIR` when set, otherwise a user-owned state
+//! directory. World-writable temp paths are not used: socket-parent inspection
+//! rejects them, and they would make macOS daemon startup fail closed.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Whether the process is using the packaged Linux socket layout.
@@ -26,6 +28,23 @@ pub fn socket_root() -> PathBuf {
     }
 }
 
+/// Create the user-mode socket root with owner-only-writable parents.
+///
+/// Package mode never creates `/run/velnor`; systemd tmpfiles owns that path.
+pub fn ensure_socket_root() -> io::Result<PathBuf> {
+    let root = socket_root();
+    if is_package_socket_mode() {
+        return Ok(root);
+    }
+    std::fs::create_dir_all(&root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(root)
+}
+
 fn storage_root_prefix() -> Option<PathBuf> {
     std::env::var_os("VELNOR_STORAGE_ROOT")
         .filter(|value| !value.is_empty())
@@ -33,8 +52,15 @@ fn storage_root_prefix() -> Option<PathBuf> {
 }
 
 fn user_runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("velnor-run"))
+    if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        return PathBuf::from(xdg);
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        let home = PathBuf::from(home);
+        if cfg!(target_os = "macos") {
+            return home.join("Library/Application Support");
+        }
+        return home.join(".local").join("state");
+    }
+    std::env::temp_dir().join("velnor-run")
 }
