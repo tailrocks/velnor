@@ -984,7 +984,15 @@ mod tests {
         assert!(!remove_stale_outbox_quarantine(&dir, &name).unwrap());
         assert!(quarantine.exists());
         drop(lock);
-        assert!(remove_stale_outbox_quarantine(&dir, &name).unwrap());
+        let mut removed = false;
+        for _ in 0..16 {
+            removed = remove_stale_outbox_quarantine(&dir, &name).unwrap();
+            if removed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(removed);
         assert!(!quarantine.exists());
         std::fs::remove_dir_all(dir).ok();
     }

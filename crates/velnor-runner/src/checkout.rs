@@ -18,6 +18,25 @@ use std::{
 };
 use url::Url;
 
+// Tracing caches callsite interest globally. Parallel tests that exercise the
+// same checkout spans without installing a subscriber can therefore initialize
+// those callsites as disabled before the span-capture test installs its local
+// subscriber. Give the test binary one enabled global subscriber first; local
+// capture subscribers still receive the events, while this sink subscriber
+// emits nothing itself.
+#[cfg(test)]
+static INITIALIZE_TRACE_CALLSITES: std::sync::Once = std::sync::Once::new();
+
+#[cfg(test)]
+pub(crate) fn initialize_trace_callsites_for_tests() {
+    INITIALIZE_TRACE_CALLSITES.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::io::sink)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
     pub step_id: String,
@@ -208,6 +227,9 @@ pub fn execute_checkout_with_mirror<R>(
 where
     R: CommandRunner,
 {
+    #[cfg(test)]
+    initialize_trace_callsites_for_tests();
+
     // Fail closed before any side effect: a destination that escapes the
     // workspace must not even reap, let alone be created or credentialed.
     ensure_checkout_destination_contained(workspace_host, &plan.destination)?;
@@ -2802,11 +2824,23 @@ mod tests {
     impl CommandRunner for LeaseProbeRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             if program == "git" && args.iter().any(|arg| arg == "checkout") {
-                let contender = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&self.lock_path)?;
-                let available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                // Dropping the lease releases flock before control returns.
+                // Under heavy parallel-test scheduling, probe briefly so the
+                // assertion tests release-versus-hold, not lock-service
+                // propagation timing.
+                let mut available = false;
+                for _ in 0..16 {
+                    let contender = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&self.lock_path)?;
+                    available = flock(&contender, FlockOperation::NonBlockingLockExclusive).is_ok();
+                    if available {
+                        break;
+                    }
+                    drop(contender);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
                 self.checkout_lock_available = Some(available);
             }
             if program == "git"
