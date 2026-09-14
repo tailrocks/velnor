@@ -700,7 +700,7 @@ fn release_matrix_runner(config: &ProjectConfig, targets: &[String]) -> String {
         runners
             .into_iter()
             .next()
-            .expect("one release matrix runner must be present")
+            .unwrap_or_else(|| github_expression("matrix.runner"))
     } else {
         github_expression("matrix.runner")
     }
@@ -1082,7 +1082,7 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         ActionPin::Attest.reference(),
         ActionPin::UploadArtifact.reference(),
         ActionPin::DownloadArtifact.reference(),
-        matrix_runner = &matrix_runner,
+        matrix_runner = matrix_runner,
     );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(

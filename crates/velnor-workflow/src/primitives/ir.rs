@@ -1630,13 +1630,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
                 .unwrap_or_else(|| self.default_unit_contract(unit, true));
             for job in &contract.lanes {
                 if lane_supports_unit(job.lane, unit) {
-                    let job_id = unit_job_id(job.lane, &unit.id);
                     self.render_lane_job_for_input(
                         &mut output,
                         *job,
                         unit,
                         &contract,
-                        &job_id,
                         Some(&unit.id),
                         &members,
                     );
@@ -1679,8 +1677,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         contract: &UnitContract,
         members: &[&Unit],
     ) {
-        let id = job.lane.as_str();
-        self.render_lane_job_for_input(output, job, unit, contract, id, None, members);
+        self.render_lane_job_for_input(output, job, unit, contract, None, members);
     }
 
     fn render_lane_job_for_input(
@@ -1689,11 +1686,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         job: LaneJob,
         unit: &Unit,
         contract: &UnitContract,
-        id: &str,
         input_unit: Option<&str>,
         members: &[&Unit],
     ) {
         let lane = job.lane;
+        let id = input_unit.map_or_else(
+            || lane.as_str().to_owned(),
+            |unit_id| unit_job_id(lane, unit_id),
+        );
         let cache_save = job.cache_save && contract.cache_save;
         let name = input_unit.map_or_else(
             || lane.display_name().to_owned(),
@@ -1724,7 +1724,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         output.push_str(&workflow_selection_artifact_download(Some(
             "${{ inputs.selection-artifact }}",
         )));
-        self.render_tool_provisioning_for_members(output, lane, unit, members, cache_save);
+        self.render_tool_provisioning_for_unit(output, lane, unit, cache_save);
         let seed = contract.mutable_mount_seed;
         if seed && lane == RunnerMode::Github {
             render_mutable_mount_seed_restore(output, self, unit);
@@ -2462,15 +2462,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#;
         unit: &Unit,
         cache_save: bool,
     ) {
-        self.render_tool_provisioning_for_members(output, lane, unit, &[unit], cache_save);
+        self.render_tool_provisioning_for_unit(output, lane, unit, cache_save);
     }
 
-    fn render_tool_provisioning_for_members(
+    fn render_tool_provisioning_for_unit(
         &self,
         output: &mut String,
         lane: RunnerMode,
         unit: &Unit,
-        members: &[&Unit],
         cache_save: bool,
     ) {
         // The Velnor job image is the toolchain boundary for self-hosted jobs.
